@@ -189,6 +189,22 @@ def test_each_changed_record_gets_monotonic_revision_under_store_lock(
     [
         '{"version":"mindroom-sync-continuity-v1","checkpoint":"bad","pending_join_decrypt_fences":[]}',
         "not json",
+        (
+            '{"version":"mindroom-sync-continuity-v2","revision":true,'
+            '"checkpoint":null,"pending_join_decrypt_fences":[]}'
+        ),
+        (
+            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '"checkpoint":{"token":"s1"},"pending_join_decrypt_fences":[]}'
+        ),
+        (
+            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '"checkpoint":null,"pending_join_decrypt_fences":["!room:localhost","!room:localhost"]}'
+        ),
+        (
+            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '"checkpoint":null,"pending_join_decrypt_fences":[],"extra":true}'
+        ),
     ],
 )
 def test_obsolete_or_corrupt_continuity_record_fails_closed(
@@ -202,6 +218,18 @@ def test_obsolete_or_corrupt_continuity_record_fails_closed(
 
     with pytest.raises(RuntimeError, match="continuity"):
         SyncContinuityStore(tmp_path, "code").load()
+
+
+def test_mutation_rejects_invalid_continuity_without_repair(tmp_path: Path) -> None:
+    """Only explicit checkpoint clearing may repair an invalid record."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version":"future"}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="continuity"):
+        SyncContinuityStore(tmp_path, "code").replace_checkpoint(_checkpoint("s_after"))
+
+    assert path.read_text(encoding="utf-8") == '{"version":"future"}'
 
 
 def test_checkpoint_clear_repairs_invalid_continuity_record(tmp_path: Path) -> None:

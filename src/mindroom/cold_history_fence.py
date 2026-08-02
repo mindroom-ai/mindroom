@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 import nio
@@ -25,20 +26,16 @@ class _PendingDispatchObligations(Protocol):
         ...
 
 
-class _DecryptNoticeFence(Protocol):
-    """Room-scoped join fence queried during callback admission."""
+type _DecryptNoticeFence = Callable[[str], bool]
 
-    def __call__(self, room_id: str, /) -> bool:
-        """Return whether decrypt notices remain fenced for one room."""
-        ...
+_EVENT_PROVENANCE: ContextVar[tuple[str, nio.TimelineEventProvenance] | None] = ContextVar(
+    "mindroom_timeline_event_provenance",
+    default=None,
+)
 
 
 def _decrypt_not_fenced(_room_id: str) -> bool:
     return False
-
-
-def _event_provenance_context() -> ContextVar[tuple[str, nio.TimelineEventProvenance] | None]:
-    return ContextVar("mindroom_timeline_event_provenance", default=None)
 
 
 @dataclass(slots=True)
@@ -47,11 +44,6 @@ class ColdHistoryFence:
 
     obligations: _PendingDispatchObligations
     decrypt_notice_is_fenced: _DecryptNoticeFence = _decrypt_not_fenced
-    _event_provenance: ContextVar[tuple[str, nio.TimelineEventProvenance] | None] = field(
-        default_factory=_event_provenance_context,
-        init=False,
-        repr=False,
-    )
 
     def observe_event_provenance(
         self,
@@ -59,11 +51,11 @@ class ColdHistoryFence:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         """Expose one nio delivery's provenance to later callback fanout."""
-        self._event_provenance.set((source_event_id, provenance))
+        _EVENT_PROVENANCE.set((source_event_id, provenance))
 
     def event_is_live(self, source_event_id: str) -> bool:
         """Return whether the current nio fanout belongs to this live event."""
-        return self._event_provenance.get() == (
+        return _EVENT_PROVENANCE.get() == (
             source_event_id,
             nio.TimelineEventProvenance.LIVE,
         )

@@ -171,7 +171,6 @@ visibility = ["mindroom.bot"]
 path = "mindroom.dispatch_admission"
 depends_on = []
 visibility = [
-    "mindroom.bot",
     "mindroom.cold_history_fence",
     "mindroom.dispatch_obligations.runner",
 ]
@@ -964,7 +963,6 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.sync_continuity",
     "mindroom.runtime_protocols",
 ]
 
@@ -2111,7 +2109,6 @@ path = "mindroom.matrix.sync_cache_trust"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.matrix.sync_certification",
-    "mindroom.matrix.sync_continuity",
 ]
 visibility = ["mindroom.bot"]
 
@@ -2135,15 +2132,12 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
-    "mindroom.bot_room_lifecycle",
-    "mindroom.matrix.sync_cache_trust",
 ]
 
 [[modules]]
 path = "mindroom.matrix.sync_token_values"
 depends_on = []
 visibility = [
-    "mindroom.cold_history_fence",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_continuity",
 ]
@@ -2873,7 +2867,6 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
     "mindroom.dispatch_callback_outcome",
-    "mindroom.dispatch_admission",
     "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",

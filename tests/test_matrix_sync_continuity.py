@@ -1,4 +1,4 @@
-"""Tests for Matrix sync token persistence."""
+"""Tests for Matrix sync continuity and recovery."""
 
 from __future__ import annotations
 
@@ -418,7 +418,12 @@ async def test_classic_unrecovered_gap_rejects_checkpoint(
     with patch.object(
         bot._conversation_cache,
         "cache_sync_timeline_for_certification",
-        new=AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        new=AsyncMock(
+            return_value=SyncCacheWriteResult(
+                complete=True,
+                unrecovered_room_ids=("!gap:localhost",),
+            ),
+        ),
     ):
         await bot._on_sync_response(response)
 
@@ -926,6 +931,7 @@ def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
     clear_sync_token(tmp_path, "code")
 
     assert _load_sync_token_value(tmp_path, "code") is None
+    assert not _token_path(tmp_path).exists()
 
 
 @pytest.mark.asyncio
