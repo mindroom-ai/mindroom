@@ -87,6 +87,7 @@ Recovery intent travels with queued ingress so pre-existing lane and coalescing 
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` retains the pre-gap checkpoint until nio reports no unresolved room gaps.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
+The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.
 `ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
 The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 Checkpoint mutations serialize their epoch check, durable transform, and runtime publication, while continuity revisions prevent older completed tasks from overwriting newer join-fence state.

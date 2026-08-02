@@ -652,6 +652,35 @@ async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_response_clear_failure_disables_cache(tmp_path: Path) -> None:
+    """A failed uncertain-response clear must make stale cache rows unusable."""
+    trust, cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_preserved", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_preserved"
+    decision = trust.plan_response(
+        next_batch="s_uncertain",
+        cache_result=SyncCacheWriteResult(complete=False),
+        first_sync=True,
+    )
+
+    with patch.object(
+        trust.continuity_store,
+        "clear_checkpoint",
+        side_effect=OSError("checkpoint cannot be removed"),
+    ):
+        applied, record = await trust.apply_response(
+            decision,
+            cache_result=SyncCacheWriteResult(complete=False),
+        )
+
+    assert applied.state is SyncTrustState.UNCERTAIN
+    assert record is None
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") is not None
+    cache.disable.assert_called_once_with("sync_checkpoint_clear_failed")
+
+
+@pytest.mark.asyncio
 async def test_cold_start_purges_untrusted_principal_rows(tmp_path: Path) -> None:
     """Cold startup removes principal rows before cache use."""
     trust, cache, _runtime = _trust(tmp_path)

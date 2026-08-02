@@ -277,7 +277,9 @@ class SyncCacheTrust:
             self.state = decision.state
             self.checkpoint = None
             self._saved_checkpoint = None
-            record = await run_blocking_until_complete(self.continuity_store.clear_checkpoint)
+            if not await self._clear_saved_locked():
+                self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
+            record = None
         else:
             record = None
         self.state = decision.state

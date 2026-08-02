@@ -2500,13 +2500,17 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
             ("stateStorage.syncContinuity.mountPath=/app/agent_data/encryption_keys",),
             "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncContinuity.mountPath",
         ),
+        (
+            ("stateStorage.syncContinuity.subPath=encryption_keys",),
+            "stateStorage.encryptionKeys.subPath must differ from stateStorage.syncContinuity.subPath",
+        ),
     ],
 )
-def test_runtime_chart_state_storage_rejects_mount_path_conflicts(
+def test_runtime_chart_state_storage_rejects_path_conflicts(
     conflict_args: tuple[str, ...],
     expected_error: str,
 ) -> None:
-    """Generated runtime volumeMount paths must stay unique."""
+    """Generated runtime volume mount paths and PVC subpaths must stay unique."""
     completed = _run_helm_template(
         Path("cluster/k8s/runtime"),
         "eventCache.postgres.auth.password=test-password",

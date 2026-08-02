@@ -438,7 +438,7 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
     assert bot._dispatch_obligation_store.pending() == ()
-    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!forbidden:localhost")
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!invalid-state:localhost")
 
 
 @pytest.mark.asyncio

@@ -101,7 +101,7 @@ config:
 
 ## Runtime State Storage
 
-MindRoom stores Matrix encryption keys and sync-token checkpoints under `MINDROOM_STORAGE_PATH`.
+MindRoom stores Matrix encryption keys and crash-atomic sync continuity records under `MINDROOM_STORAGE_PATH`.
 Hosted installs can keep those restart-critical directories on a dedicated PVC while normal workspace data stays on `storage`.
 The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
