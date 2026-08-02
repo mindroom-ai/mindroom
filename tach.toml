@@ -116,6 +116,7 @@ depends_on = [
 visibility = [
     "mindroom.bot",
     "mindroom.reaction_dispatch",
+    "mindroom.turn_settlement_retry",
 ]
 
 [[modules]]
@@ -154,6 +155,8 @@ visibility = ["mindroom.dispatch_obligations"]
 [[modules]]
 path = "mindroom.reaction_dispatch"
 depends_on = [
+    "mindroom.approval_inbound",
+    "mindroom.authorization",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.dispatch_obligations",
@@ -474,7 +477,10 @@ depends_on = [
     "mindroom.matrix.visible_body",
     "mindroom.tool_approval",
 ]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.reaction_dispatch",
+]
 
 [[modules]]
 path = "mindroom.tool_approval"
@@ -2872,6 +2878,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
+    "mindroom.turn_settlement_retry",
     "mindroom.turn_store",
     "mindroom.user_stop_reconciliation",
     "mindroom.visible_response_reconciliation",
@@ -3463,6 +3470,15 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.thread_utils",
 ]
+
+[[modules]]
+path = "mindroom.turn_settlement_retry"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.dispatch_obligations",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.prompt_ingress_reservation"

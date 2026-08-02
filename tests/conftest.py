@@ -1474,6 +1474,9 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             conversation_cache=rebuilt.deps.conversation_cache,
             user_stop_reconciler=bot._user_stop_reconciler,
             ingress=rebuilt.deps.ingress,
+            stop_manager=bot.stop_manager,
+            reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
+            handle_interactive_selection=rebuilt.handle_interactive_selection,
             config_confirmation=replace(
                 reaction_dispatcher.deps.config_confirmation,
                 runtime=rebuilt.deps.runtime,
@@ -1738,5 +1741,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
         ):
             yield

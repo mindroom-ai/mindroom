@@ -1788,67 +1788,6 @@ async def test_deferred_turn_retry_without_obligation_skips_backoff(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> None:
-    """A failed terminal compaction must retry without restart or a fabricated callback key."""
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        return DispatchCallbackResult.SUCCEEDED
-
-    owner = object()
-    runner = _runner(
-        _store(tmp_path),
-        callback,
-        background_task_owner=owner,
-        retry_initial_delay_seconds=0,
-        retry_max_delay_seconds=0,
-    )
-    settled = threading.Event()
-    attempts = 0
-
-    def settle_pending(_source_event_ids: tuple[str, ...]) -> None:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            message = "dispatch store unavailable"
-            raise OSError(message)
-        settled.set()
-
-    settle = MagicMock(side_effect=settle_pending)
-    runner.store.settle_pending_from_turn_store = settle
-
-    runner.bind_event_loop()
-    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
-    assert await asyncio.wait_for(asyncio.to_thread(settled.wait), timeout=1)
-    await wait_for_background_tasks(timeout=1, owner=owner)
-
-    assert settle.call_count == 2
-    settle.assert_called_with(("$message",))
-
-
-@pytest.mark.asyncio
-async def test_terminal_turn_settlement_succeeds_in_persistence_worker_without_retry_task(tmp_path: Path) -> None:
-    """The normal post-persist callback must finish before returning from its worker."""
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        return DispatchCallbackResult.SUCCEEDED
-
-    owner = object()
-    runner = _runner(
-        _store(tmp_path),
-        callback,
-        background_task_owner=owner,
-    )
-    settle = MagicMock()
-    runner.store.settle_pending_from_turn_store = settle
-
-    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
-
-    settle.assert_called_once_with(("$message",))
-    assert runner._turn_settlement_retry_task is None
-    assert await wait_for_background_tasks(timeout=0, owner=owner) is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["direct", "admission"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,

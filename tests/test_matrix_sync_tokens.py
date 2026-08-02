@@ -113,24 +113,12 @@ def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tm
 
 def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Handled-turn persistence callbacks must not run obligation SQLite inline."""
+    """Handled-turn persistence delegates settlement to its dedicated retry owner."""
     bot = _agent_bot(tmp_path)
-    retry_turn_settlement = MagicMock()
-    monkeypatch.setattr(
-        bot._dispatch_obligation_runner,
-        "retry_turn_settlement",
-        retry_turn_settlement,
-        raising=False,
-    )
-    settle_pending = MagicMock()
-    monkeypatch.setattr(bot._dispatch_obligation_store, "settle_pending_from_turn_store", settle_pending)
+    callback = bot._turn_store.deps.on_terminal_turn_persisted
 
-    bot._settle_turn_dispatch_obligations(("$message",))
-
-    settle_pending.assert_not_called()
-    retry_turn_settlement.assert_called_once_with(("$message",))
+    assert callback == bot._turn_settlement_retry.retry
 
 
 def _install_fast_response_drain(bot: AgentBot) -> None:

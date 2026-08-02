@@ -62,7 +62,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 ```text
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
-  -> dispatch_obligations.py                                (durable exact callback acceptance and restart recovery)
+  -> dispatch_obligations/                                 (durable exact callback acceptance and restart recovery)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
@@ -96,7 +96,12 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
-| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
+| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
+| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `command_turn_executor.py` | Command execution and durable command/config mutation journals |
+| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
+| `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
