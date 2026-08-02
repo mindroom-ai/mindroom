@@ -226,6 +226,30 @@ def test_turn_record_normalizes_ids_and_prompt_map() -> None:
     assert handled_turn.is_coalesced
 
 
+def test_turn_record_has_no_post_init_normalization_hook() -> None:
+    """Canonical records should be constructed explicitly without hidden mutation."""
+    assert "__post_init__" not in TurnRecord.__dict__
+
+
+def test_turn_record_create_normalizes_coupled_source_state() -> None:
+    """The explicit factory should canonicalize interdependent source facts."""
+    record = TurnRecord.create(
+        ["source", "source", ""],
+        discovery_event_ids=["source", "edit", "edit"],
+        redacted_source_event_ids=["missing", "edit"],
+        pending_redaction_cleanup_event_ids=["source", "edit"],
+        source_event_prompts={"source": "prompt"},
+        source_event_revisions={"edit": [4, "edit-event"]},
+    )
+
+    assert record.source_event_ids == ("source",)
+    assert record.discovery_event_ids == ("edit",)
+    assert record.redacted_source_event_ids == ("edit",)
+    assert record.pending_redaction_cleanup_event_ids == ("edit",)
+    assert record.source_event_prompts == {"source": "prompt"}
+    assert record.source_event_revisions is None
+
+
 def test_turn_record_preserves_response_context() -> None:
     """The handled-turn carrier should keep response owner, history scope, and target intact."""
     conversation_target = MessageTarget.resolve(
