@@ -386,7 +386,7 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     sync_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await sync_task
-    assert bot._dispatch_obligation_store._has_pending(
+    assert bot._dispatch_obligation_store.has_pending(
         "$state-retry",
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
@@ -395,7 +395,7 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     await bot._dispatch_obligation_runner.recover_pending()
 
     assert attempts == 2
-    assert not bot._dispatch_obligation_store._has_pending(
+    assert not bot._dispatch_obligation_store.has_pending(
         "$state-retry",
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
@@ -483,7 +483,7 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
 
     persist_failure = MagicMock(wraps=bot._rewind_sync_after_pre_certification_failure)
     bot._dispatch_obligation_runner.on_persist_failure = persist_failure
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_create)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
 
     with pytest.raises(OSError, match="dispatch database unavailable"):
         await bot._on_sync_response(

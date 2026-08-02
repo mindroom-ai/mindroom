@@ -92,7 +92,7 @@ path = "mindroom.dispatch_callback_outcome"
 depends_on = []
 visibility = [
     "mindroom.bot",
-    "mindroom.dispatch_obligations",
+    "mindroom.dispatch_obligations.events",
     "mindroom.turn_controller",
 ]
 
@@ -101,7 +101,7 @@ path = "mindroom.dispatch_recovery_context"
 depends_on = []
 visibility = [
     "mindroom.coalescing",
-    "mindroom.dispatch_obligations",
+    "mindroom.dispatch_obligations.runner",
     "mindroom.turn_controller",
     "mindroom.visible_voice_echo",
 ]
@@ -109,16 +109,47 @@ visibility = [
 [[modules]]
 path = "mindroom.dispatch_obligations"
 depends_on = [
-    "mindroom.background_tasks",
-    "mindroom.dispatch_callback_outcome",
-    "mindroom.dispatch_recovery_context",
-    "mindroom.logging_config",
-    "mindroom.matrix.media",
+    "mindroom.dispatch_obligations.events",
+    "mindroom.dispatch_obligations.runner",
+    "mindroom.dispatch_obligations.storage",
 ]
 visibility = [
     "mindroom.bot",
     "mindroom.reaction_dispatch",
 ]
+
+[[modules]]
+path = "mindroom.dispatch_obligations.storage"
+depends_on = ["mindroom.logging_config"]
+visibility = [
+    "mindroom.dispatch_obligations",
+    "mindroom.dispatch_obligations.events",
+    "mindroom.dispatch_obligations.runner",
+]
+
+[[modules]]
+path = "mindroom.dispatch_obligations.events"
+depends_on = [
+    "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_obligations.storage",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.media",
+]
+visibility = [
+    "mindroom.dispatch_obligations",
+    "mindroom.dispatch_obligations.runner",
+]
+
+[[modules]]
+path = "mindroom.dispatch_obligations.runner"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.dispatch_obligations.events",
+    "mindroom.dispatch_obligations.storage",
+    "mindroom.dispatch_recovery_context",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.dispatch_obligations"]
 
 [[modules]]
 path = "mindroom.reaction_dispatch"
@@ -127,6 +158,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_obligations",
     "mindroom.entity_resolution",
+    "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
 
@@ -2115,6 +2147,7 @@ path = "mindroom.runtime_protocols"
 depends_on = []
 visibility = [
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
@@ -2521,7 +2554,7 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
-    "mindroom.turn_controller",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 
@@ -2794,6 +2827,7 @@ depends_on = [
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
+    "mindroom.command_turn_executor",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",
@@ -2839,6 +2873,8 @@ depends_on = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",
+    "mindroom.user_stop_reconciliation",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 
@@ -3073,6 +3109,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
     "mindroom.matrix.client_thread_history",
+    "mindroom.runtime_protocols",
 ]
 
 [[modules]]
@@ -3452,6 +3489,7 @@ path = "mindroom.text_ingress_dispatch"
 depends_on = [
     "mindroom.response_admission",
     "mindroom.attachments",
+    "mindroom.command_turn_executor",
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.dispatch_handoff",
@@ -3463,8 +3501,63 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.timing",
+    "mindroom.visible_response_reconciliation",
 ]
 visibility = ["mindroom.turn_controller"]
+
+[[modules]]
+path = "mindroom.command_turn_executor"
+depends_on = [
+    "mindroom.commands.handler",
+    "mindroom.commands.parsing",
+    "mindroom.constants",
+    "mindroom.handled_turns",
+    "mindroom.hooks",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.cache",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.identity",
+    "mindroom.message_target",
+    "mindroom.turn_policy",
+    "mindroom.turn_store",
+    "mindroom.visible_response_reconciliation",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.user_stop_reconciliation"
+depends_on = [
+    "mindroom.delivery_gateway",
+    "mindroom.handled_turns",
+    "mindroom.message_target",
+    "mindroom.response_runner",
+    "mindroom.turn_store",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.reaction_dispatch",
+]
+
+[[modules]]
+path = "mindroom.visible_response_reconciliation"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.handled_turns",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.message_target",
+    "mindroom.turn_store",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.command_turn_executor",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
+]
 
 [[modules]]
 path = "mindroom.visible_voice_echo"
@@ -3488,7 +3581,7 @@ visibility = [
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.response_admission",
-    "mindroom.commands.handler",
+    "mindroom.command_turn_executor",
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -3502,7 +3595,6 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
@@ -3518,6 +3610,7 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 

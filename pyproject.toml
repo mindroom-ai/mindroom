@@ -59,6 +59,7 @@ dependencies = [
   "typer>=0.24",
   "uvicorn>=0.35",
   "watchfiles>=1",
+  "websockets>=14",
 ]
 [[project.authors]]
 name = "mindroom team"

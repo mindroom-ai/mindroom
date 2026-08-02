@@ -169,7 +169,7 @@ async def _enqueue_for_dispatch(
     trust_internal_payload_metadata: bool | None = None,
 ) -> _IngressAdmissionOutcome:
     """Test helper for the reserved Matrix-ingress enqueue path."""
-    reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
     try:
         return await bot._turn_controller._enqueue_for_dispatch(
             event,
@@ -523,7 +523,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_not_awaited()
     assert not bot._turn_store.is_durably_handled(event.event_id)
     await _wait_for(
-        lambda: not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
         deadline_seconds=1,
     )
 
@@ -1826,7 +1826,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
     try:
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
             await bot._turn_controller.handle_text_event(room, command_event)
@@ -5931,14 +5931,14 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     )
     dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
 
-    handle_cmd_mock = AsyncMock()
+    handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
 
@@ -5983,7 +5983,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
             new=prepare_dispatch_mock,
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
-        patch.object(bot._turn_controller, "_execute_command", new=execute_command_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=execute_command_mock),
         patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, voice_command_event, "@user:localhost")
@@ -6025,14 +6025,14 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     )
     _set_context_histories(dispatch, [newer_msg])
 
-    handle_cmd_mock = AsyncMock()
+    handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, cmd_event, "@user:localhost")
 
@@ -6936,7 +6936,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=record_payload_request),
         ),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
@@ -7113,7 +7113,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, sidecar.sender)
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),

@@ -106,6 +106,13 @@ class TurnStore:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
         self._record_terminal_turn(turn_record, wait_for_persist=False)
 
+    def record_responded_turn(self, turn_record: TurnRecord) -> None:
+        """Persist a terminal turn that owns a visible Matrix response."""
+        if turn_record.response_event_id is None:
+            msg = "A responded turn requires a visible Matrix response event ID"
+            raise RuntimeError(msg)
+        self.record_turn(turn_record)
+
     def record_turn_durably(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn and wait until its exact ledger write lands."""
         self._record_terminal_turn(turn_record, wait_for_persist=True)

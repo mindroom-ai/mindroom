@@ -44,6 +44,7 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingDrainResult
+from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -80,6 +81,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
+from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -92,6 +94,8 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
+from mindroom.user_stop_reconciliation import UserStopReconciler
+from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from tests.identity_helpers import persist_entity_accounts
 
@@ -1347,6 +1351,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
+        "command_executor": "_command_turn_executor",
         "turn_policy": "_turn_policy",
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
@@ -1354,6 +1359,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",
+        "visible_responses": "_visible_responses",
     }
     for field_name, attr_name in default_collaborators.items():
         if field_name in rebuilt_changes:
@@ -1389,8 +1395,94 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
     rebuilt_changes["visible_voice_echo"] = bot._visible_voice_echo
+    visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
+    visible_response_changes = {
+        name: value
+        for name, value in changes.items()
+        if name in visible_responses.deps.__dataclass_fields__
+        and name not in {"runtime", "logger", "turn_store", "delivery_gateway"}
+    }
+    bot._visible_responses = VisibleResponseReconciler(
+        replace(
+            visible_responses.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            turn_store=rebuilt_changes["turn_store"],
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+            **visible_response_changes,
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_visible_responses")
+    rebuilt_changes["visible_responses"] = bot._visible_responses
+    command_executor = unwrap_extracted_collaborator(bot._command_turn_executor)
+    command_changes = {
+        name: value
+        for name, value in changes.items()
+        if name in command_executor.deps.__dataclass_fields__
+        and name
+        not in {
+            "runtime",
+            "logger",
+            "runtime_paths",
+            "agent_name",
+            "normalizer",
+            "conversation_cache",
+            "turn_policy",
+            "turn_store",
+            "visible_responses",
+        }
+    }
+    bot._command_turn_executor = CommandTurnExecutor(
+        replace(
+            command_executor.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
+            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            normalizer=rebuilt_changes["normalizer"],
+            conversation_cache=rebuilt_changes["conversation_cache"],
+            turn_policy=rebuilt_changes["turn_policy"],
+            turn_store=rebuilt_changes["turn_store"],
+            visible_responses=rebuilt_changes["visible_responses"],
+            **command_changes,
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_command_turn_executor")
+    rebuilt_changes["command_executor"] = bot._command_turn_executor
+    user_stop_reconciler = unwrap_extracted_collaborator(bot._user_stop_reconciler)
+    bot._user_stop_reconciler = UserStopReconciler(
+        replace(
+            user_stop_reconciler.deps,
+            turn_store=rebuilt_changes["turn_store"],
+            response_runner=rebuilt_changes["response_runner"],
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_user_stop_reconciler")
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
+    reaction_dispatcher = bot._reaction_dispatcher
+    bot._reaction_dispatcher = ReactionDispatcher(
+        replace(
+            reaction_dispatcher.deps,
+            runtime=rebuilt.deps.runtime,
+            logger=rebuilt.deps.logger,
+            runtime_paths=rebuilt.deps.runtime_paths,
+            agent_name=rebuilt.deps.agent_name,
+            turn_policy=rebuilt.deps.turn_policy,
+            turn_store=rebuilt.deps.turn_store,
+            conversation_cache=rebuilt.deps.conversation_cache,
+            user_stop_reconciler=bot._user_stop_reconciler,
+            ingress=rebuilt.deps.ingress,
+            config_confirmation=replace(
+                reaction_dispatcher.deps.config_confirmation,
+                runtime=rebuilt.deps.runtime,
+                runtime_paths=rebuilt.deps.runtime_paths,
+                build_message_target=rebuilt.deps.resolver.build_message_target,
+                delivery_gateway=rebuilt.deps.delivery_gateway,
+            ),
+        ),
+    )
     edit_changes = {
         name: value
         for name, value in changes.items()

@@ -16,19 +16,19 @@ import pytest
 
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_background_tasks
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_obligations import (
-    DispatchCallbackKind,
-    DispatchObligationRunner,
-    DispatchObligationStore,
-    DispatchSemanticConsumer,
-    _DispatchCreateResult,
-    _DispatchObligation,
-    _DispatchTerminalOutcome,
+from mindroom.dispatch_obligations import DispatchObligationRunner
+from mindroom.dispatch_obligations.events import (
+    DispatchCallbackResult,
     _RoomIdEvent,
     callback_kind_for_source_kind,
 )
-from mindroom.dispatch_obligations import (
-    _DispatchCallbackResult as DispatchCallbackResult,
+from mindroom.dispatch_obligations.storage import (
+    DispatchCallbackKind,
+    DispatchCreateResult,
+    DispatchObligation,
+    DispatchObligationStore,
+    DispatchSemanticConsumer,
+    DispatchTerminalOutcome,
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
@@ -67,8 +67,8 @@ def _message_obligation(
     principal_id: str = _PRINCIPAL_ID,
     entity_name: str = _ENTITY_NAME,
     room_id: str = _ROOM_ID,
-) -> _DispatchObligation:
-    return _DispatchObligation(
+) -> DispatchObligation:
+    return DispatchObligation(
         principal_id=principal_id,
         entity_name=entity_name,
         source_event_id=event_id,
@@ -90,7 +90,7 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     return event
 
 
-def _reaction_obligation(event_id: str) -> _DispatchObligation:
+def _reaction_obligation(event_id: str) -> DispatchObligation:
     """Build one replayable reaction obligation."""
     return replace(
         _message_obligation(event_id),
@@ -135,28 +135,28 @@ def test_receipt_order_is_durable_across_callback_kinds_and_settlement(tmp_path:
     edit = _message_obligation("$z-edit")
     stop = _reaction_obligation("$a-stop")
 
-    store._create_pending(edit)
-    store._create_pending(stop)
-    edit_order = store._receipt_order(edit.key)
-    stop_order = store._receipt_order(stop.key)
-    store.settle(edit.key, _DispatchTerminalOutcome.SUCCEEDED)
+    store.create_pending(edit)
+    store.create_pending(stop)
+    edit_order = store.receipt_order(edit.key)
+    stop_order = store.receipt_order(stop.key)
+    store.settle(edit.key, DispatchTerminalOutcome.SUCCEEDED)
     restarted = _store(tmp_path)
 
     assert edit_order < stop_order
-    assert restarted._receipt_order(edit.key) == edit_order
-    assert restarted._receipt_order(stop.key) == stop_order
+    assert restarted.receipt_order(edit.key) == edit_order
+    assert restarted.receipt_order(stop.key) == stop_order
 
 
 def test_only_invites_can_discard_receipt_order_rows(tmp_path: Path) -> None:
     """Deleting ordered callbacks would allow SQLite to reuse their receipt order."""
     store = _store(tmp_path)
     message = _message_obligation("$message")
-    store._create_pending(message)
+    store.create_pending(message)
 
     with pytest.raises(ValueError, match="Only successful invite obligations"):
-        store._discard_pending(message.key)
+        store.discard_pending(message.key)
 
-    assert store._receipt_order(message.key) > 0
+    assert store.receipt_order(message.key) > 0
 
 
 @pytest.mark.asyncio
@@ -273,12 +273,12 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
     first = _store(tmp_path)
     obligation = _message_obligation("$message")
 
-    assert first._create_pending(obligation) is _DispatchCreateResult.CREATED
+    assert first.create_pending(obligation) is DispatchCreateResult.CREATED
 
     restarted = _store(tmp_path)
 
     assert restarted.pending() == (obligation,)
-    assert restarted._has_pending("$message", DispatchCallbackKind.MESSAGE)
+    assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -296,7 +296,7 @@ async def test_aged_interrupted_command_journal_survives_pending_obligation_reco
     )
     ledger.flush()
     store = _store(tmp_path)
-    store._create_pending(_message_obligation(event_id))
+    store.create_pending(_message_obligation(event_id))
 
     restarted_ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tmp_path / "tracking")
     restarted_ledger.cleanup()
@@ -312,7 +312,7 @@ async def test_aged_interrupted_command_journal_survives_pending_obligation_reco
     recovered_record = recovered_records[0]
     assert recovered_record is not None
     assert recovered_record.command_execution_started
-    assert store._has_pending(event_id, DispatchCallbackKind.MESSAGE)
+    assert store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -331,8 +331,8 @@ async def test_startup_recovers_aged_completed_turn_before_cleanup(tmp_path: Pat
     ledger.flush()
     store = _store(tmp_path)
     obligation = _message_obligation(event_id)
-    store._create_pending(obligation)
-    store._mark_callback_deferred(obligation.key)
+    store.create_pending(obligation)
+    store.mark_callback_deferred(obligation.key)
     _reset_handled_turn_ledger_runtime()
 
     restarted_ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tracking_path)
@@ -345,7 +345,7 @@ async def test_startup_recovers_aged_completed_turn_before_cleanup(tmp_path: Pat
     restarted_ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     callback.assert_not_awaited()
-    assert not store._has_pending(event_id, DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
     assert event_id not in unsettled_source_event_ids
     assert restarted_ledger.get_turn_record(event_id) is None
 
@@ -387,7 +387,7 @@ def test_entity_admission_store_is_not_blocked_by_another_entity(
 
     monkeypatch.setattr(second, "_connect", connect_without_waiting)
     try:
-        result = second._create_pending(
+        result = second.create_pending(
             _message_obligation(
                 "$other-entity",
                 principal_id=second_principal,
@@ -398,7 +398,7 @@ def test_entity_admission_store_is_not_blocked_by_another_entity(
         lock_connection.rollback()
         lock_connection.close()
 
-    assert result is _DispatchCreateResult.CREATED
+    assert result is DispatchCreateResult.CREATED
 
 
 def test_pending_recovery_query_uses_pending_order_index(tmp_path: Path) -> None:
@@ -430,40 +430,40 @@ def test_exact_callback_kind_keeps_distinct_obligations_for_one_event(tmp_path: 
     message = _message_obligation("$same")
     approval = replace(message, callback_kind=DispatchCallbackKind.APPROVAL)
 
-    assert store._create_pending(message) is _DispatchCreateResult.CREATED
-    assert store._create_pending(approval) is _DispatchCreateResult.CREATED
+    assert store.create_pending(message) is DispatchCreateResult.CREATED
+    assert store.create_pending(approval) is DispatchCreateResult.CREATED
 
-    assert store._has_pending("$same", DispatchCallbackKind.MESSAGE)
-    assert store._has_pending("$same", DispatchCallbackKind.APPROVAL)
+    assert store.has_pending("$same", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$same", DispatchCallbackKind.APPROVAL)
 
 
 @pytest.mark.parametrize(
     "outcome",
-    [_DispatchTerminalOutcome.SUCCEEDED, _DispatchTerminalOutcome.INTENTIONALLY_IGNORED],
+    [DispatchTerminalOutcome.SUCCEEDED, DispatchTerminalOutcome.INTENTIONALLY_IGNORED],
 )
 def test_terminal_settlement_survives_restart_and_blocks_recreation(
     tmp_path: Path,
-    outcome: _DispatchTerminalOutcome,
+    outcome: DispatchTerminalOutcome,
 ) -> None:
     """A cold replay must not recreate work explicitly settled before restart."""
     store = _store(tmp_path)
     obligation = _message_obligation("$terminal")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
 
     store.settle(obligation.key, outcome)
 
     restarted = _store(tmp_path)
     assert restarted.pending() == ()
-    assert restarted._create_pending(obligation) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert restarted.create_pending(obligation) is DispatchCreateResult.ALREADY_TERMINAL
 
 
 def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_path: Path) -> None:
     """Terminal exact keys need no replay payload and must bypass later payload validation."""
     store = _store(tmp_path)
     obligation = _message_obligation("$compact")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
 
-    store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
+    store.settle(obligation.key, DispatchTerminalOutcome.SUCCEEDED)
 
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
@@ -479,14 +479,14 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
         room_id="!different:example.org",
         event_source={"event_id": obligation.source_event_id, "not_json_safe": object()},
     )
-    assert store._create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(invalid_replay) is DispatchCreateResult.ALREADY_TERMINAL
 
 
 def test_semantic_consumer_claim_is_durable_and_single_owner(tmp_path: Path) -> None:
     """One accepted callback may choose exactly one application consumer."""
     store = _store(tmp_path)
     obligation = _message_obligation("$consumer")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
 
     assert (
         store.claim_semantic_consumer(obligation.key, DispatchSemanticConsumer.APPROVAL_REPLY)
@@ -499,7 +499,7 @@ def test_semantic_consumer_claim_is_durable_and_single_owner(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="cannot consume"):
         store.claim_semantic_consumer(obligation.key, DispatchSemanticConsumer.STOP_REACTION)
     reaction = _reaction_obligation("$reaction-consumer")
-    store._create_pending(reaction)
+    store.create_pending(reaction)
     assert (
         store.claim_semantic_consumer(reaction.key, DispatchSemanticConsumer.STOP_REACTION)
         is DispatchSemanticConsumer.STOP_REACTION
@@ -527,12 +527,12 @@ def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) ->
     """Transport-variant replays must keep the first durable source without failing."""
     store = _store(tmp_path)
     obligation = _message_obligation("$fixed")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
     replay_source = dict(obligation.event_source)
     replay_source["unsigned"] = {"age": 123}
     conflicting = replace(obligation, event_source=replay_source)
 
-    assert store._create_pending(conflicting) is _DispatchCreateResult.ALREADY_PENDING
+    assert store.create_pending(conflicting) is DispatchCreateResult.ALREADY_PENDING
 
     assert store.pending() == (obligation,)
 
@@ -540,15 +540,15 @@ def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) ->
 def test_principal_and_entity_are_part_of_the_exact_identity(tmp_path: Path) -> None:
     """One account/entity must never observe another account/entity's pending callback."""
     code = _store(tmp_path)
-    code._create_pending(_message_obligation("$isolated"))
+    code.create_pending(_message_obligation("$isolated"))
 
     other_principal = _store(tmp_path, principal_id="@other:example.org")
     other_entity = _store(tmp_path, entity_name="other")
 
     assert other_principal.pending() == ()
     assert other_entity.pending() == ()
-    assert not other_principal._has_pending("$isolated", DispatchCallbackKind.MESSAGE)
-    assert not other_entity._has_pending("$isolated", DispatchCallbackKind.MESSAGE)
+    assert not other_principal.has_pending("$isolated", DispatchCallbackKind.MESSAGE)
+    assert not other_entity.has_pending("$isolated", DispatchCallbackKind.MESSAGE)
 
 
 def test_turn_store_terminal_truth_tombstones_only_message_and_media_rows(tmp_path: Path) -> None:
@@ -558,46 +558,46 @@ def test_turn_store_terminal_truth_tombstones_only_message_and_media_rows(tmp_pa
     media = replace(message, callback_kind=DispatchCallbackKind.MEDIA)
     reaction = replace(message, callback_kind=DispatchCallbackKind.REACTION)
     for obligation in (message, media, reaction):
-        store._create_pending(obligation)
+        store.create_pending(obligation)
 
-    store._settle_from_turn_store("$turn", DispatchCallbackKind.MESSAGE)
-    store._settle_from_turn_store("$turn", DispatchCallbackKind.MEDIA)
+    store.settle_from_turn_store("$turn", DispatchCallbackKind.MESSAGE)
+    store.settle_from_turn_store("$turn", DispatchCallbackKind.MEDIA)
 
-    assert not store._has_pending("$turn", DispatchCallbackKind.MESSAGE)
-    assert not store._has_pending("$turn", DispatchCallbackKind.MEDIA)
-    assert store._has_pending("$turn", DispatchCallbackKind.REACTION)
-    assert store._create_pending(message) is _DispatchCreateResult.ALREADY_TERMINAL
-    assert store._create_pending(media) is _DispatchCreateResult.ALREADY_TERMINAL
-    assert store._create_pending(reaction) is _DispatchCreateResult.ALREADY_PENDING
+    assert not store.has_pending("$turn", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$turn", DispatchCallbackKind.MEDIA)
+    assert store.has_pending("$turn", DispatchCallbackKind.REACTION)
+    assert store.create_pending(message) is DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(media) is DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(reaction) is DispatchCreateResult.ALREADY_PENDING
     with pytest.raises(ValueError, match="message or media"):
-        store._settle_from_turn_store("$turn", DispatchCallbackKind.REACTION)
+        store.settle_from_turn_store("$turn", DispatchCallbackKind.REACTION)
 
 
 def test_turn_store_terminal_truth_creates_missing_compact_tombstone(tmp_path: Path) -> None:
     """TurnStore truth must permanently block exact replay even without a transient row."""
     store = _store(tmp_path)
 
-    store._settle_from_turn_store("$turn-only", DispatchCallbackKind.MESSAGE)
+    store.settle_from_turn_store("$turn-only", DispatchCallbackKind.MESSAGE)
 
     invalid_replay = replace(
         _message_obligation("$turn-only"),
         event_source={"event_id": "$turn-only", "not_json_safe": object()},
     )
-    assert store._create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(invalid_replay) is DispatchCreateResult.ALREADY_TERMINAL
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             "SELECT room_id, event_source_json, state FROM dispatch_obligations WHERE source_event_id = ?",
             ("$turn-only",),
         ).fetchone()
-    assert row == ("", "", _DispatchTerminalOutcome.SUCCEEDED.value)
+    assert row == ("", "", DispatchTerminalOutcome.SUCCEEDED.value)
 
 
 def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
     """Settling new work must never evict an older exact terminal identity."""
     store = _store(tmp_path)
     trigger = _message_obligation("$trigger")
-    store._create_pending(trigger)
+    store.create_pending(trigger)
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.executemany(
@@ -620,7 +620,7 @@ def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
                     _ENTITY_NAME,
                     f"$terminal-{index}",
                     DispatchCallbackKind.MESSAGE.value,
-                    _DispatchTerminalOutcome.SUCCEEDED.value,
+                    DispatchTerminalOutcome.SUCCEEDED.value,
                     index,
                     index,
                 )
@@ -628,9 +628,9 @@ def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
             ),
         )
 
-    store.settle(trigger.key, _DispatchTerminalOutcome.SUCCEEDED)
+    store.settle(trigger.key, DispatchTerminalOutcome.SUCCEEDED)
 
-    assert store._create_pending(_message_obligation("$terminal-0")) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(_message_obligation("$terminal-0")) is DispatchCreateResult.ALREADY_TERMINAL
 
 
 def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path) -> None:
@@ -638,8 +638,8 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
     store = _store(tmp_path)
     broken = _message_obligation("$broken")
     valid = _message_obligation("$valid")
-    store._create_pending(broken)
-    store._create_pending(valid)
+    store.create_pending(broken)
+    store.create_pending(valid)
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -648,7 +648,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
         )
 
     restarted = _store(tmp_path)
-    with patch("mindroom.dispatch_obligations.logger") as logger:
+    with patch("mindroom.dispatch_obligations.storage.logger") as logger:
         assert restarted.pending() == (valid,)
 
     logger.error.assert_called_once_with(
@@ -656,7 +656,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
         source_event_id="$broken",
         callback_kind=DispatchCallbackKind.MESSAGE.value,
     )
-    assert restarted._has_pending("$broken", DispatchCallbackKind.MESSAGE)
+    assert restarted.has_pending("$broken", DispatchCallbackKind.MESSAGE)
     assert restarted.unsettled_source_event_ids() == frozenset({"$broken", "$valid"})
 
 
@@ -666,8 +666,8 @@ async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> N
     store = _store(tmp_path)
     broken = _message_obligation("$broken-event")
     valid = _message_obligation("$valid-event")
-    store._create_pending(broken)
-    store._create_pending(valid)
+    store.create_pending(broken)
+    store.create_pending(valid)
     with sqlite3.connect(_database_path(store)) as connection:
         connection.execute(
             "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
@@ -683,7 +683,7 @@ async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> N
         recovered.append(event.event_id)
         return DispatchCallbackResult.SUCCEEDED
 
-    with patch("mindroom.dispatch_obligations.logger") as logger:
+    with patch("mindroom.dispatch_obligations.runner.logger") as logger:
         await _runner(store, callback).recover_pending()
 
     assert recovered == ["$valid-event"]
@@ -693,7 +693,7 @@ async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> N
         callback_kind=DispatchCallbackKind.MESSAGE.value,
         room_id=_ROOM_ID,
     )
-    assert store._has_pending("$broken-event", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$broken-event", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -721,7 +721,7 @@ async def test_cancellation_leaves_callback_obligation_pending(tmp_path: Path) -
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert _store(tmp_path)._has_pending("$cancelled", DispatchCallbackKind.MESSAGE)
+    assert _store(tmp_path).has_pending("$cancelled", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -769,7 +769,7 @@ async def test_cancelled_store_operation_preserves_caller_cancellation_when_work
         worker_started.set()
         assert release_worker.wait(timeout=5)
 
-    monkeypatch.setattr("mindroom.dispatch_obligations.asyncio.create_task", capture_worker_task)
+    monkeypatch.setattr("mindroom.background_tasks.asyncio.create_task", capture_worker_task)
     caller_task = original_create_task(run_blocking_until_complete(blocking_store_operation))
     assert await asyncio.to_thread(worker_started.wait, 5)
 
@@ -809,7 +809,7 @@ async def test_callback_settlement_drains_repeated_cancellation_before_releasing
 
     def blocking_first_settle(
         key: object,
-        outcome: _DispatchTerminalOutcome,
+        outcome: DispatchTerminalOutcome,
     ) -> None:
         nonlocal settle_calls
         settle_calls += 1
@@ -840,7 +840,7 @@ async def test_callback_settlement_drains_repeated_cancellation_before_releasing
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert store._create_pending(_message_obligation(event.event_id)) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(_message_obligation(event.event_id)) is DispatchCreateResult.ALREADY_TERMINAL
 
 
 @pytest.mark.asyncio
@@ -855,7 +855,7 @@ async def test_turn_store_settlement_drains_repeated_cancellation(
 
     store = _store(tmp_path)
     runner = _runner(store, callback, turn_is_terminal=lambda _event_id: True)
-    original_settle = store._settle_from_turn_store
+    original_settle = store.settle_from_turn_store
     settle_started = threading.Event()
     release_settle = threading.Event()
     settle_finished = threading.Event()
@@ -866,7 +866,7 @@ async def test_turn_store_settlement_drains_repeated_cancellation(
         original_settle(source_event_id, callback_kind)
         settle_finished.set()
 
-    monkeypatch.setattr(store, "_settle_from_turn_store", blocking_settle)
+    monkeypatch.setattr(store, "settle_from_turn_store", blocking_settle)
     task = asyncio.create_task(
         runner.persist(
             nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
@@ -887,7 +887,7 @@ async def test_turn_store_settlement_drains_repeated_cancellation(
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert store._create_pending(_message_obligation("$turn-store-cancelled")) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(_message_obligation("$turn-store-cancelled")) is DispatchCreateResult.ALREADY_TERMINAL
 
 
 @pytest.mark.asyncio
@@ -908,13 +908,13 @@ async def test_persisted_work_can_be_scheduled_after_durable_acceptance(tmp_path
     obligation = await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
 
     assert obligation is not None
-    assert store._has_pending("$scheduled", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$scheduled", DispatchCallbackKind.MESSAGE)
     assert attempts == 0
 
     await runner._run_persisted(obligation, room=room, event=event)
 
     assert attempts == 1
-    assert not store._has_pending("$scheduled", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$scheduled", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -972,7 +972,7 @@ async def test_failed_callback_retries_directly_without_later_sync_response(tmp_
     await restarted.recover_pending()
 
     assert attempts == 2
-    assert not _store(tmp_path)._has_pending("$retry", DispatchCallbackKind.MESSAGE)
+    assert not _store(tmp_path).has_pending("$retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -992,9 +992,9 @@ async def test_recovery_failure_retries_autonomously_without_blocking_later_work
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
-    store._create_pending(_message_obligation("$first"))
-    store._create_pending(_message_obligation("$second"))
-    store._create_pending(_message_obligation("$later"))
+    store.create_pending(_message_obligation("$first"))
+    store.create_pending(_message_obligation("$second"))
+    store.create_pending(_message_obligation("$later"))
     retry_owner = object()
     runner = _runner(
         store,
@@ -1010,9 +1010,9 @@ async def test_recovery_failure_retries_autonomously_without_blocking_later_work
     await asyncio.wait_for(retries_finished.wait(), timeout=1)
     await wait_for_background_tasks(timeout=1, owner=retry_owner)
     assert attempts == ["$first", "$second", "$later", "$first", "$second"]
-    assert not store._has_pending("$first", DispatchCallbackKind.MESSAGE)
-    assert not store._has_pending("$second", DispatchCallbackKind.MESSAGE)
-    assert not store._has_pending("$later", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$first", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$second", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$later", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1050,7 +1050,7 @@ async def test_autonomous_retry_continues_until_transient_failure_recovers(tmp_p
     await wait_for_background_tasks(timeout=1, owner=retry_owner)
 
     assert attempts == 7
-    assert not store._has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1061,7 @@ async def test_retry_worker_survives_transient_pending_discovery_failure(
     """A failed liveness read must leave the exact retry owned by the same worker."""
     store = _store(tmp_path)
     obligation = _message_obligation("$retry-read")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
     owner = object()
     callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
     runner = _runner(
@@ -1071,7 +1071,7 @@ async def test_retry_worker_survives_transient_pending_discovery_failure(
         retry_initial_delay_seconds=0,
         retry_max_delay_seconds=0,
     )
-    real_has_pending = store._has_pending
+    real_has_pending = store.has_pending
     reads = 0
 
     def flaky_has_pending(source_event_id: str, callback_kind: DispatchCallbackKind) -> bool:
@@ -1082,7 +1082,7 @@ async def test_retry_worker_survives_transient_pending_discovery_failure(
             raise OSError(message)
         return real_has_pending(source_event_id, callback_kind)
 
-    monkeypatch.setattr(store, "_has_pending", flaky_has_pending)
+    monkeypatch.setattr(store, "has_pending", flaky_has_pending)
 
     runner._schedule_retry(obligation.key)
     await wait_for_background_tasks(timeout=1, owner=owner)
@@ -1097,7 +1097,7 @@ async def test_replay_observes_consumer_claimed_before_interrupted_side_effect(t
     """A crash after a side effect must not let replay rediscover another consumer."""
     store = _store(tmp_path)
     obligation = _message_obligation("$claimed-before-crash")
-    store._create_pending(obligation)
+    store.create_pending(obligation)
     first_runner: DispatchObligationRunner
 
     async def interrupted_callback(
@@ -1135,7 +1135,7 @@ async def test_replay_observes_consumer_claimed_before_interrupted_side_effect(t
     await restarted_runner.recover_pending()
 
     assert replayed_consumers == [DispatchSemanticConsumer.APPROVAL_REPLY]
-    assert not restarted_store._has_pending(obligation.source_event_id, obligation.callback_kind)
+    assert not restarted_store.has_pending(obligation.source_event_id, obligation.callback_kind)
 
 
 @pytest.mark.asyncio
@@ -1148,7 +1148,7 @@ async def test_encrypted_media_recovery_uses_media_source_parser(tmp_path: Path)
         callback_kind=DispatchCallbackKind.MEDIA,
         event_source=_encrypted_image_source(event_id),
     )
-    store._create_pending(obligation)
+    store.create_pending(obligation)
     recovered: list[nio.Event] = []
 
     async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
@@ -1166,7 +1166,7 @@ async def test_encrypted_media_recovery_uses_media_source_parser(tmp_path: Path)
 
     assert len(recovered) == 1
     assert isinstance(recovered[0], nio.RoomEncryptedImage)
-    assert not store._has_pending(event_id, DispatchCallbackKind.MEDIA)
+    assert not store.has_pending(event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio
@@ -1210,7 +1210,7 @@ async def test_megolm_recovery_restores_room_id_before_key_request(tmp_path: Pat
     """Recovered undecryptable events need their durable room for key requests."""
     event_id = "$undecryptable"
     store = _store(tmp_path)
-    store._create_pending(
+    store.create_pending(
         replace(
             _message_obligation(event_id),
             callback_kind=DispatchCallbackKind.DECRYPTION_FAILURE,
@@ -1275,7 +1275,7 @@ async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) 
     release.set()
     await first
 
-    assert not _store(tmp_path)._has_pending("$duplicate", DispatchCallbackKind.MESSAGE)
+    assert not _store(tmp_path).has_pending("$duplicate", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1323,7 +1323,7 @@ async def test_intentional_ignore_is_explicit_terminal_outcome(tmp_path: Path) -
         DispatchCallbackKind.MESSAGE,
     )
 
-    assert not _store(tmp_path)._has_pending("$ignored", DispatchCallbackKind.MESSAGE)
+    assert not _store(tmp_path).has_pending("$ignored", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1346,7 +1346,7 @@ async def test_turn_store_terminal_truth_replaces_message_obligation(tmp_path: P
     await runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
 
     assert attempts == 1
-    assert not _store(tmp_path)._has_pending("$handled", DispatchCallbackKind.MESSAGE)
+    assert not _store(tmp_path).has_pending("$handled", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1366,12 +1366,12 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
     event = _message_event("$deferred")
 
     await runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
-    assert _store(tmp_path)._has_pending("$deferred", DispatchCallbackKind.MESSAGE)
+    assert _store(tmp_path).has_pending("$deferred", DispatchCallbackKind.MESSAGE)
 
     handled.add("$deferred")
     await runner.recover_pending()
 
-    assert not _store(tmp_path)._has_pending("$deferred", DispatchCallbackKind.MESSAGE)
+    assert not _store(tmp_path).has_pending("$deferred", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1402,7 +1402,7 @@ async def test_terminal_turn_does_not_skip_failed_callback_tail(tmp_path: Path) 
     await runner.recover_pending()
 
     assert attempts == 2
-    assert not store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1413,8 +1413,8 @@ async def test_recovery_readiness_retains_only_blocked_obligations(tmp_path: Pat
     store = _store(tmp_path)
     ready = _message_obligation("$ready", room_id=ready_room_id)
     blocked = _message_obligation("$blocked", room_id=blocked_room_id)
-    store._create_pending(ready)
-    store._create_pending(blocked)
+    store.create_pending(ready)
+    store.create_pending(blocked)
     recovered: list[str] = []
 
     async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
@@ -1427,8 +1427,8 @@ async def test_recovery_readiness_retains_only_blocked_obligations(tmp_path: Pat
     await runner.recover_pending(turn_backed=True)
 
     assert recovered == ["$ready"]
-    assert not store._has_pending("$ready", DispatchCallbackKind.MESSAGE)
-    assert store._has_pending("$blocked", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$ready", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$blocked", DispatchCallbackKind.MESSAGE)
     assert not runner._retry_keys
 
 
@@ -1513,7 +1513,7 @@ async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_pa
     await runner.dispatch(room, event, DispatchCallbackKind.MEDIA)
 
     assert [queued.event_id for queued in queued_media_events] == [event_id]
-    assert store._has_pending(event_id, DispatchCallbackKind.MEDIA)
+    assert store.has_pending(event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio
@@ -1525,7 +1525,7 @@ async def test_retry_survives_contention_with_callback_marking_deferred(
     event_id = "$retry-while-active"
     obligation = _message_obligation(event_id)
     store = _store(tmp_path)
-    assert store._create_pending(obligation) is _DispatchCreateResult.CREATED
+    assert store.create_pending(obligation) is DispatchCreateResult.CREATED
     attempts = 0
     retry_contended = asyncio.Event()
 
@@ -1559,7 +1559,7 @@ async def test_retry_survives_contention_with_callback_marking_deferred(
     await asyncio.wait_for(wait_for_background_tasks(), timeout=1)
 
     assert attempts == 2
-    assert not store._has_pending(event_id, DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1579,8 +1579,8 @@ async def test_admission_persists_once_before_event_callback_execution(
 
     store = _store(tmp_path)
     runner = _runner(store, callback)
-    create_pending = MagicMock(wraps=store._create_pending)
-    monkeypatch.setattr(store, "_create_pending", create_pending)
+    create_pending = MagicMock(wraps=store.create_pending)
+    monkeypatch.setattr(store, "create_pending", create_pending)
     admission = runner._admit_source_event
     wrapper = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)
     event = _message_event("$durable")
@@ -1588,14 +1588,14 @@ async def test_admission_persists_once_before_event_callback_execution(
 
     await admission(room, event)
 
-    assert store._has_pending("$durable", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
     assert not entered.is_set()
     await wrapper(room, event)
     await entered.wait()
     release.set()
     await wait_for_background_tasks(timeout=1.0, owner=owner)
     create_pending.assert_called_once()
-    assert not store._has_pending("$durable", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1653,7 +1653,7 @@ async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None
     await wait_for_background_tasks(timeout=1, owner=owner)
 
     assert attempts == 2
-    assert not store._has_pending("$task-retry", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$task-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1688,7 +1688,7 @@ async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> N
     await wait_for_background_tasks(timeout=1, owner=owner)
 
     assert attempts == 2
-    assert not store._has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1723,7 +1723,7 @@ async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -
     await wait_for_background_tasks(timeout=1, owner=owner)
 
     assert attempts == 2
-    assert store._has_pending("$recovery-scope", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$recovery-scope", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1736,7 +1736,7 @@ async def test_repeated_pending_turn_admission_has_recovery_context(tmp_path: Pa
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
-    store._create_pending(_message_obligation("$repeated-message"))
+    store.create_pending(_message_obligation("$repeated-message"))
     runner = _runner(store, callback)
 
     await runner.dispatch(
@@ -1746,7 +1746,7 @@ async def test_repeated_pending_turn_admission_has_recovery_context(tmp_path: Pa
     )
 
     assert observed_context == [True]
-    assert not store._has_pending("$repeated-message", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$repeated-message", DispatchCallbackKind.MESSAGE)
 
 
 def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:
@@ -1814,7 +1814,7 @@ async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> 
         settled.set()
 
     settle = MagicMock(side_effect=settle_pending)
-    runner.store._settle_pending_from_turn_store = settle
+    runner.store.settle_pending_from_turn_store = settle
 
     runner.bind_event_loop()
     await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
@@ -1839,7 +1839,7 @@ async def test_terminal_turn_settlement_succeeds_in_persistence_worker_without_r
         background_task_owner=owner,
     )
     settle = MagicMock()
-    runner.store._settle_pending_from_turn_store = settle
+    runner.store.settle_pending_from_turn_store = settle
 
     await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
 
@@ -1874,11 +1874,11 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
         on_persist_failure=notify_failure,
     )
 
-    def fail_create(_obligation: _DispatchObligation) -> _DispatchCreateResult:
+    def fail_create(_obligation: DispatchObligation) -> DispatchCreateResult:
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(store, "_create_pending", fail_create)
+    monkeypatch.setattr(store, "create_pending", fail_create)
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$persist-failure")
 
@@ -1967,4 +1967,4 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
     assert attempts == expected_attempts
-    assert not store._has_pending("$unknown", DispatchCallbackKind.APPROVAL)
+    assert not store.has_pending("$unknown", DispatchCallbackKind.APPROVAL)

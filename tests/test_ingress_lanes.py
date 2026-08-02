@@ -437,7 +437,7 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
     """Non-router agents explicitly ignore unresolvable commands without growing the turn ledger."""
     bot = _make_bot(tmp_path)
     settle_ignored = AsyncMock()
-    replace_turn_controller_deps(bot, settle_ignored_dispatch_sources=settle_ignored)
+    replace_turn_controller_deps(bot, settle_ignored_sources=settle_ignored)
     room = _make_room()
     command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
     send_text_mock = AsyncMock(return_value="$notice")

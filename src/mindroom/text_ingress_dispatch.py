@@ -45,11 +45,13 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.commands.parsing import Command
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
+    from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 
 
 class _TurnPlan(Protocol):
@@ -85,6 +87,8 @@ async def dispatch_text_message(
     raw_event: TextDispatchEvent,
     requester_user_id: str,
     *,
+    command_executor: CommandTurnExecutor,
+    visible_responses: VisibleResponseReconciler,
     media_events: list[MediaDispatchEvent] | None = None,
     handled_turn: TurnRecord | None = None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
@@ -122,7 +126,14 @@ async def dispatch_text_message(
         if prepared is None:
             return
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
-        if await _blocked_before_plan(controller, room, prepared, requester_user_id=requester_user_id):
+        if await _blocked_before_plan(
+            controller,
+            room,
+            prepared,
+            command_executor=command_executor,
+            visible_responses=visible_responses,
+            requester_user_id=requester_user_id,
+        ):
             return
 
         message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
@@ -151,6 +162,7 @@ async def dispatch_text_message(
             room,
             prepared,
             plan,
+            visible_responses=visible_responses,
             message_attachment_ids=message_attachment_ids,
             trusted_attachment_ids=trusted_attachment_ids,
             media_events=media_events,
@@ -312,10 +324,12 @@ async def _blocked_before_plan(
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
     *,
+    command_executor: CommandTurnExecutor,
+    visible_responses: VisibleResponseReconciler,
     requester_user_id: str,
 ) -> bool:
     if prepared.command is not None:
-        command_owned = await controller._execute_command_if_owned(
+        command_owned = await command_executor.execute_if_owned(
             room=room,
             event=prepared.event,
             requester_user_id=requester_user_id,
@@ -324,13 +338,13 @@ async def _blocked_before_plan(
             handled_turn=prepared.handled_turn,
         )
         if not command_owned:
-            await controller._settle_source_events_ignored(prepared.handled_turn)
+            await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,
         envelope=prepared.dispatch.envelope,
     ):
-        await controller._settle_source_events_ignored(prepared.handled_turn)
+        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
 
     may_be_superseded = (
@@ -361,7 +375,7 @@ async def _blocked_before_plan(
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
     if skips_turn:
-        await controller._settle_source_events_ignored(prepared.handled_turn)
+        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
     return skips_turn
 
 
@@ -404,6 +418,7 @@ async def _apply_turn_plan(
     prepared: _PreparedTextDispatch,
     plan: _TurnPlan,
     *,
+    visible_responses: VisibleResponseReconciler,
     message_attachment_ids: list[str],
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
@@ -415,11 +430,11 @@ async def _apply_turn_plan(
         if plan.ignore_reason == "router":
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
-                controller._mark_source_events_responded(router_outcome)
+                controller.deps.turn_store.record_responded_turn(router_outcome)
             else:
-                await controller._settle_source_events_ignored(prepared.handled_turn)
+                await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
-            await controller._settle_source_events_ignored(prepared.handled_turn)
+            await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return
     if plan.kind == "route":
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)
@@ -449,7 +464,7 @@ async def _apply_turn_plan(
     if pending_turn is None or pending_turn.completed:
         return
     if pending_turn.redacted_source_event_ids:
-        await controller._settle_source_events_ignored(pending_turn)
+        await visible_responses.settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
 

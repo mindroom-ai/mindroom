@@ -2703,7 +2703,7 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         assert queued_signal.pending_human_messages == 1
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         try:
             with (
                 patch.object(

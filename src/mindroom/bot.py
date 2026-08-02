@@ -83,6 +83,7 @@ from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -119,7 +120,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
-from .reaction_dispatch import dispatch_reaction
+from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -135,6 +136,8 @@ from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
+from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
@@ -622,6 +625,38 @@ class AgentBot:
                 ingress=self._ingress_validator,
             ),
         )
+        self._visible_responses = VisibleResponseReconciler(
+            VisibleResponseReconcilerDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                response_sender=runtime_matrix_id.full_id,
+                turn_store=self._turn_store,
+                delivery_gateway=self._delivery_gateway,
+                settle_ignored_sources=self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources,
+            ),
+        )
+        self._command_turn_executor = CommandTurnExecutor(
+            CommandTurnExecutorDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                normalizer=self._inbound_turn_normalizer,
+                conversation_cache=self._conversation_cache,
+                turn_policy=self._turn_policy,
+                turn_store=self._turn_store,
+                visible_responses=self._visible_responses,
+                event_cache=lambda: self.event_cache,
+                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
+            ),
+        )
+        self._user_stop_reconciler = UserStopReconciler(
+            UserStopReconcilerDeps(
+                turn_store=self._turn_store,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -632,6 +667,7 @@ class AgentBot:
                 conversation_cache=self._conversation_cache,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
+                command_executor=self._command_turn_executor,
                 turn_policy=self._turn_policy,
                 ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
@@ -643,11 +679,40 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
-                settle_ignored_dispatch_sources=(
-                    self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
-                ),
+                visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
-                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
+            ),
+        )
+        self._reaction_dispatcher = ReactionDispatcher(
+            ReactionDispatcherDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                obligation_runner=self._dispatch_obligation_runner,
+                turn_policy=self._turn_policy,
+                turn_store=self._turn_store,
+                stop_manager=self.stop_manager,
+                conversation_cache=self._conversation_cache,
+                user_stop_reconciler=self._user_stop_reconciler,
+                ingress=self._ingress_validator,
+                reserve_prompt_ingress_order=lambda *args, **kwargs: self._turn_controller.reserve_prompt_ingress_order(
+                    *args,
+                    **kwargs,
+                ),
+                handle_interactive_selection=lambda *args, **kwargs: self._turn_controller.handle_interactive_selection(
+                    *args,
+                    **kwargs,
+                ),
+                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                config_confirmation=config_confirmation.ConfigConfirmationContext(
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    build_message_target=self._conversation_resolver.build_message_target,
+                    delivery_gateway=self._delivery_gateway,
+                ),
+                handle_approval_action=lambda **kwargs: handle_tool_approval_action(**kwargs),
+                sender_is_authorized=lambda *args: is_authorized_sender(*args),
             ),
         )
 
@@ -2011,7 +2076,7 @@ class AgentBot:
                 sender=event.sender,
                 source=event.source,
             )
-            early_reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+            early_reservation_owner = self._turn_controller.reserve_prompt_ingress_order(
                 room,
                 requester_user_id,
                 receipt_time=receipt_time,
@@ -2047,13 +2112,7 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_thread_cache_scope():
-            await dispatch_reaction(
-                self,
-                room,
-                event,
-                handle_approval_action=handle_tool_approval_action,
-                sender_is_authorized=is_authorized_sender,
-            )
+            await self._reaction_dispatcher.dispatch(room, event)
 
     async def _on_room_member(
         self,
