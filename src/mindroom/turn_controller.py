@@ -2302,11 +2302,15 @@ class TurnController:
         )
         if isinstance(turn_claim, TurnDispatchOutcome):
             return turn_claim
-        reservation_owner = self.reserve_prompt_ingress_order(
-            room,
-            prechecked_event.requester_user_id,
-            receipt_time=receipt_time,
-        )
+        try:
+            reservation_owner = self.reserve_prompt_ingress_order(
+                room,
+                prechecked_event.requester_user_id,
+                receipt_time=receipt_time,
+            )
+        except BaseException:
+            self.deps.turn_store.release_pending_turn_claim(turn_claim)
+            raise
         reservation_owner.pending_turn_claim = turn_claim
         try:
             if is_audio_message_event(prechecked_event.event):

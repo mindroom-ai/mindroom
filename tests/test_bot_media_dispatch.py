@@ -386,6 +386,38 @@ class TestAgentBot(AgentBotTestBase):
         resolver.coalescing_thread_id.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_media_ingress_releases_claim_when_lane_reservation_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Claim-and-reserve must leave the source retryable when lane creation fails."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = SimpleNamespace(room_id="!test:localhost")
+        event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
+        competing_claim = TurnRecord.create([event.event_id], completed=False)
+
+        ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
+        ingress.deps = bot._ingress_validator.deps
+        ingress.precheck_event.return_value = "@user:localhost"
+        gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
+
+        def reject_lane_reservation(**_kwargs: object) -> None:
+            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            msg = "lane unavailable"
+            raise RuntimeError(msg)
+
+        gate.enter_lane.side_effect = reject_lane_reservation
+        controller = replace_turn_controller_deps(bot, ingress=ingress, coalescing_gate=gate)
+
+        with pytest.raises(RuntimeError, match="lane unavailable"):
+            await controller._handle_media_message_inner(room, event)
+
+        assert controller.deps.turn_store.try_claim_turn(competing_claim) is True
+        controller.deps.turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
     async def test_audio_dispatch_releases_receive_order_when_target_resolution_is_cancelled(
         self,
         mock_agent_user: AgentMatrixUser,
