@@ -1141,9 +1141,9 @@ class ManagedTuwunelStack:
         assert self._log_handle is not None
         self._mindroom_process = subprocess.Popen(
             [
-                "uv",
-                "run",
-                "mindroom",
+                sys.executable,
+                "-m",
+                "mindroom.cli.main",
                 "run",
                 "--api-port",
                 str(self.api_port),
