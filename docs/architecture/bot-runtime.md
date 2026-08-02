@@ -85,6 +85,7 @@ Deleting an unrecoverable pending row is a last resort that accepts losing that 
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+Nio persists limited-timeline recovery state without owning the sync token, so advancing a later MindRoom checkpoint cannot hide an unresolved room gap across restart.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.

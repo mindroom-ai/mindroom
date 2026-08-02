@@ -1329,7 +1329,14 @@ class AgentBot:
                 try:
                     cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
                 except asyncio.CancelledError as exc:
-                    cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
+                    limited_room_ids, validation_errors = self._conversation_cache.limited_sync_timeline_room_ids(
+                        _response,
+                    )
+                    cache_result = SyncCacheWriteResult(
+                        complete=False,
+                        limited_room_ids=limited_room_ids,
+                        errors=(*validation_errors, exc),
+                    )
                     self._certify_sync_response(
                         next_batch=_response.next_batch,
                         cache_result=cache_result,

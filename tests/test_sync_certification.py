@@ -136,6 +136,25 @@ def test_pending_first_sync_uncertainty_resets_client_token() -> None:
     assert decision.reset_client_token is True
 
 
+def test_limited_cache_failure_preserves_positioned_continuity() -> None:
+    """A cache error must not hide the limited window's continuity requirement."""
+    decision = certify_sync_response(
+        SyncTrustState.PENDING,
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+            errors=(RuntimeError("cache failed"),),
+        ),
+        first_sync=True,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "cache_write_failed"
+    assert decision.clear_saved_token is False
+    assert decision.reset_client_token is False
+
+
 def test_missing_next_batch_fails_closed() -> None:
     """A sync response without a next batch cannot become a checkpoint."""
     decision = certify_sync_response(

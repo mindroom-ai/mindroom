@@ -218,6 +218,7 @@ def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> ni
     custom_headers = dict(http_headers) if isinstance(http_headers, dict) else http_headers
     return nio.AsyncClientConfig(
         backfill_limited_timelines=True,
+        backfill_persist_recovery=True,
         custom_headers=cast("dict[str, str] | None", custom_headers),
         replace_rotated_device_keys=True,
     )

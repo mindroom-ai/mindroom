@@ -1167,13 +1167,12 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_limited_sync_keeps_live_cursor_and_last_checkpoint(tmp_path: Path) -> None:
-    """A cache gap must preserve the recoverable live cursor and restart checkpoint."""
+async def test_limited_cache_failure_keeps_live_cursor_and_last_checkpoint(tmp_path: Path) -> None:
+    """Limited status must preserve continuity even when cache persistence also fails."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_partial"
-    bot._first_sync_done = True
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -1186,6 +1185,7 @@ async def test_limited_sync_keeps_live_cursor_and_last_checkpoint(tmp_path: Path
     cache_result = SyncCacheWriteResult(
         complete=False,
         limited_room_ids=("!room:localhost",),
+        errors=(RuntimeError("cache failed"),),
     )
 
     with (
@@ -1273,6 +1273,45 @@ async def test_membership_cancellation_rewinds_uncertified_classic_cursor(tmp_pa
         await bot._on_sync_response(response)
 
     assert bot.client.next_batch == "s_before_membership"
+
+
+@pytest.mark.asyncio
+async def test_limited_cache_cancellation_preserves_positioned_continuity(tmp_path: Path) -> None:
+    """Cancellation must retain limited status when certifying the interrupted cache write."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_partial"
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_partial"
+    response.rooms = MagicMock(
+        join={
+            "!room:localhost": MagicMock(
+                timeline=MagicMock(events=[], limited=True),
+            ),
+        },
+    )
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=asyncio.CancelledError("watchdog restart")),
+        ),
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_partial"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
 
 
 @pytest.mark.asyncio

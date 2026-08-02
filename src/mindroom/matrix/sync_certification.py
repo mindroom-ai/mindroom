@@ -93,7 +93,7 @@ def certify_sync_response(
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
-        limited_timeline = reason == "limited_sync_timeline"
+        limited_timeline = bool(cache_result.limited_room_ids)
         return _uncertain_decision(
             reason=reason,
             clear_saved_token=not limited_timeline,

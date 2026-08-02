@@ -1197,6 +1197,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         await task
 
+    def limited_sync_timeline_room_ids(
+        self,
+        response: nio.SyncResponse,
+    ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
+        """Return limited joined-room IDs or validation errors for one sync response."""
+        return self._sync.limited_sync_timeline_room_ids(response)
+
     def cache_sync_timeline(
         self,
         response: nio.SyncResponse,
