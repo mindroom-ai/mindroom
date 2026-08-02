@@ -734,20 +734,16 @@ def _newly_joined_world_readable_response(
         "content": {"membership": "join"},
         "unsigned": {"prev_content": {"membership": "leave"}},
     }
-    state_events = (
-        [
-            {
-                "type": "m.room.history_visibility",
-                "event_id": "$world-readable",
-                "sender": "@user:localhost",
-                "state_key": "",
-                "origin_server_ts": 0,
-                "content": {"history_visibility": "world_readable"},
-            },
-        ]
-        if limited
-        else []
-    )
+    state_events = [
+        {
+            "type": "m.room.history_visibility",
+            "event_id": "$world-readable",
+            "sender": "@user:localhost",
+            "state_key": "",
+            "origin_server_ts": 0,
+            "content": {"history_visibility": "world_readable"},
+        },
+    ]
     response = nio.SyncResponse.from_dict(
         {
             "next_batch": next_batch,
@@ -2746,7 +2742,7 @@ async def test_new_world_readable_join_cache_failure_rewinds_and_keeps_fence(
         is_historical_write = any(event_id == history_text.event_id for event_id, _, _ in events)
         if is_historical_write:
             historical_cache_attempts += 1
-        if historical_cache_attempts == 1:
+        if is_historical_write and historical_cache_attempts == 1:
             msg = "joined history cache unavailable"
             raise EventCacheBackendUnavailableError(msg)
         await original_store_events_batch(
@@ -3192,7 +3188,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
-    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
+    with closing(sqlite3.connect(bot._dispatch_obligation_store._database_path)) as connection, connection:
         terminal_kinds = connection.execute(
             """
             SELECT callback_kind

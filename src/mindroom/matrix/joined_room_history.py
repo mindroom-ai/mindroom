@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Never
 
 import nio
@@ -27,7 +27,7 @@ def _joined_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom:
     return nio.MatrixRoom(room_id, client.user_id)
 
 
-def _history_visibility(room: nio.MatrixRoom, state_events: list[object]) -> str:
+def _history_visibility(room: nio.MatrixRoom, state_events: Sequence[nio.Event]) -> str:
     """Prefer the response's current state before nio has made the room current."""
     return next(
         (
