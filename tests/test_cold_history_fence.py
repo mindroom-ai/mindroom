@@ -10,13 +10,13 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cold_history_fence import ColdHistoryFence
+from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
-    DispatchSourceAdmission,
-    _DispatchCallbackResult,
 )
+from mindroom.dispatch_obligations.events import DispatchCallbackResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -35,7 +35,7 @@ class _PendingObligations:
     ) -> _PendingObligations:
         return cls(pending=set(keys))
 
-    def _has_pending(
+    def has_pending(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -97,7 +97,7 @@ def _runner(
     fence: ColdHistoryFence,
     callback: Callable[
         [nio.MatrixRoom, nio.Event],
-        Awaitable[_DispatchCallbackResult],
+        Awaitable[DispatchCallbackResult],
     ],
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
@@ -232,10 +232,10 @@ async def test_history_cannot_create_the_obligation_that_admits_itself(
     async def callback(
         _room: nio.MatrixRoom,
         _event: nio.Event,
-    ) -> _DispatchCallbackResult:
+    ) -> DispatchCallbackResult:
         nonlocal attempts
         attempts += 1
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
     runner = _runner(store, fence, callback)
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
@@ -248,7 +248,7 @@ async def test_history_cannot_create_the_obligation_that_admits_itself(
     )
 
     assert attempts == 0
-    assert not store._has_pending("$history", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -266,8 +266,8 @@ async def test_live_admission_persists_before_callback_fanout(
     async def callback(
         _room: nio.MatrixRoom,
         _event: nio.Event,
-    ) -> _DispatchCallbackResult:
-        return _DispatchCallbackResult.SUCCEEDED
+    ) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
 
     runner = _runner(store, fence, callback)
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
@@ -279,7 +279,7 @@ async def test_live_admission_persists_before_callback_fanout(
         nio.TimelineEventProvenance.LIVE,
     )
 
-    assert store._has_pending("$live", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$live", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -298,9 +298,9 @@ async def test_real_nio_initial_history_is_fenced_and_continuation_is_live(
     async def callback(
         _room: nio.MatrixRoom,
         event: nio.Event,
-    ) -> _DispatchCallbackResult:
+    ) -> DispatchCallbackResult:
         seen.append(event.event_id)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
     runner = _runner(store, fence, callback)
     client = nio.AsyncClient(
@@ -322,8 +322,8 @@ async def test_real_nio_initial_history_is_fenced_and_continuation_is_live(
         await client.close()
 
     assert seen == ["$live"]
-    assert not store._has_pending("$history", DispatchCallbackKind.MESSAGE)
-    assert not store._has_pending("$live", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$live", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -341,7 +341,7 @@ async def test_direct_recovery_bypasses_timeline_provenance(
     async def failing_callback(
         _room: nio.MatrixRoom,
         _event: nio.Event,
-    ) -> _DispatchCallbackResult:
+    ) -> DispatchCallbackResult:
         msg = "callback failed"
         raise RuntimeError(msg)
 
@@ -353,18 +353,18 @@ async def test_direct_recovery_bypasses_timeline_provenance(
             event,
             DispatchCallbackKind.MESSAGE,
         )
-    assert store._has_pending("$failed", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$failed", DispatchCallbackKind.MESSAGE)
 
     recovered: list[str] = []
 
     async def succeeding_callback(
         _room: nio.MatrixRoom,
         recovered_event: nio.Event,
-    ) -> _DispatchCallbackResult:
+    ) -> DispatchCallbackResult:
         recovered.append(recovered_event.event_id)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
     await _runner(store, fence, succeeding_callback).recover_pending()
 
     assert recovered == ["$failed"]
-    assert not store._has_pending("$failed", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$failed", DispatchCallbackKind.MESSAGE)

@@ -115,15 +115,13 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.cold_history_fence",
     "mindroom.reaction_dispatch",
 ]
 
 [[modules]]
 path = "mindroom.dispatch_obligations.storage"
-depends_on = [
-    "mindroom.dispatch_admission",
-    "mindroom.logging_config",
-]
+depends_on = ["mindroom.logging_config"]
 visibility = [
     "mindroom.dispatch_obligations",
     "mindroom.dispatch_obligations.events",
@@ -172,14 +170,15 @@ depends_on = []
 visibility = [
     "mindroom.bot",
     "mindroom.cold_history_fence",
-    "mindroom.dispatch_obligations",
     "mindroom.dispatch_obligations.runner",
-    "mindroom.dispatch_obligations.storage",
 ]
 
 [[modules]]
 path = "mindroom.cold_history_fence"
-depends_on = ["mindroom.dispatch_admission"]
+depends_on = [
+    "mindroom.dispatch_admission",
+    "mindroom.dispatch_obligations",
+]
 visibility = ["mindroom.bot"]
 
 [[modules]]

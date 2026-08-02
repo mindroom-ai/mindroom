@@ -2937,7 +2937,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
-    with closing(sqlite3.connect(bot._dispatch_obligation_store._database_path)) as connection, connection:
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
         terminal_kinds = connection.execute(
             """
             SELECT callback_kind

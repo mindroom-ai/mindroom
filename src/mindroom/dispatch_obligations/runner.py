@@ -56,13 +56,13 @@ _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
 
-SourceAdmission = Callable[
+_SourceAdmission = Callable[
     [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
     Awaitable[DispatchSourceAdmission],
 ]
-EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
-HistoricalEventCache = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
-SourceRejectionCallback = Callable[
+_EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
+_HistoricalEventCache = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
+_SourceRejectionCallback = Callable[
     [nio.MatrixRoom, DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
     Awaitable[None],
 ]
@@ -110,10 +110,10 @@ class DispatchObligationRunner:
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
-    source_admission: SourceAdmission = _admit_all_sources
-    observe_event_provenance: EventProvenanceObserver = _ignore_event_provenance
-    cache_historical_event: HistoricalEventCache = _ignore_historical_event_cache
-    on_source_rejected: SourceRejectionCallback | None = None
+    source_admission: _SourceAdmission = _admit_all_sources
+    observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
+    cache_historical_event: _HistoricalEventCache = _ignore_historical_event_cache
+    on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)

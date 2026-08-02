@@ -96,9 +96,9 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
-from .dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from .dispatch_callback_outcome import TurnDispatchOutcome
 from .dispatch_obligations import (
+    DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
     DispatchSemanticConsumer,
@@ -152,6 +152,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
+    from mindroom.dispatch_admission import DispatchSourceAdmission
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent

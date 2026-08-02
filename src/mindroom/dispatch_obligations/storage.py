@@ -13,7 +13,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_admission import DispatchCallbackKind
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -26,6 +25,19 @@ _PENDING_STATE = "pending"
 _DEFERRED_STATE = "deferred"
 _UNSETTLED_STATES = (_PENDING_STATE, _DEFERRED_STATE)
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5_000
+
+
+class DispatchCallbackKind(StrEnum):
+    """Exact correctness-critical callback purposes."""
+
+    MESSAGE = "message"
+    MEDIA = "media"
+    REACTION = "reaction"
+    APPROVAL = "approval"
+    INVITE = "invite"
+    ROOM_LIFECYCLE = "room_lifecycle"
+    REDACTION = "redaction"
+    DECRYPTION_FAILURE = "decryption_failure"
 
 
 class DispatchSemanticConsumer(StrEnum):

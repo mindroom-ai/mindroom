@@ -9,7 +9,8 @@ from typing import Protocol
 
 import nio
 
-from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
+from mindroom.dispatch_admission import DispatchSourceAdmission
+from mindroom.dispatch_obligations import DispatchCallbackKind
 
 
 class _PendingDispatchObligations(Protocol):
