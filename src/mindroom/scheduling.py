@@ -62,6 +62,10 @@ _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
 
 
+class _ScheduledTaskStateReadError(RuntimeError):
+    """A scheduled-task state read failed without proving the task absent."""
+
+
 class _AgentValidationResult(NamedTuple):
     """Result of agent mention validation."""
 
@@ -624,16 +628,22 @@ async def _read_scheduled_task_state(
     task_id: str,
 ) -> dict[str, typing.Any] | None:
     """Fetch and validate one scheduled-task state payload."""
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
+    try:
+        response = await client.room_get_state_event(
+            room_id=room_id,
+            event_type=_SCHEDULED_TASK_EVENT_TYPE,
+            state_key=task_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
     if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
-        raise RuntimeError(msg)  # noqa: TRY004
+        raise _ScheduledTaskStateReadError(msg)
     if not isinstance(response.content, dict):
         msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
         raise TypeError(msg)
@@ -669,6 +679,25 @@ async def _get_pending_task_record(
     if not task_record or task_record.status != "pending":
         return None
     return task_record
+
+
+async def _get_pending_task_record_retrying(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+) -> ScheduledTaskRecord | None:
+    """Read runner-owned task state until Matrix proves its current status."""
+    while True:
+        try:
+            return await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+        except _ScheduledTaskStateReadError as exc:
+            logger.warning(
+                "scheduled_task_state_read_failed_retrying",
+                room_id=room_id,
+                task_id=task_id,
+                error=str(exc),
+            )
+            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
 
 
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
@@ -958,10 +987,15 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         logger.error("No room_id provided for recurring task", task_id=task_id)
         return
 
+    task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     try:
         while True:
-            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            latest_task = await _get_pending_task_record_retrying(
+                client=client,
+                room_id=task_room_id,
+                task_id=task_id,
+            )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
                     logger.info("Recurring task is no longer pending, stopping", task_id=task_id)
@@ -986,9 +1020,9 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         break
                     await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-                    refreshed_task = await _get_pending_task_record(
+                    refreshed_task = await _get_pending_task_record_retrying(
                         client=client,
-                        room_id=workflow.room_id,
+                        room_id=task_room_id,
                         task_id=task_id,
                     )
                     if not refreshed_task:
@@ -1009,9 +1043,9 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if workflow_changed:
                     continue
 
-                latest_before_execute = await _get_pending_task_record(
+                latest_before_execute = await _get_pending_task_record_retrying(
                     client=client,
-                    room_id=workflow.room_id,
+                    room_id=task_room_id,
                     task_id=task_id,
                 )
                 if not latest_before_execute:
@@ -1074,11 +1108,16 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
         logger.error("No room_id provided for one-time task", task_id=task_id)
         return
 
+    task_room_id = workflow.room_id
     current_target = MessageTarget.for_scheduled_task(workflow)
     latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
-            latest_task = await _get_pending_task_record(client=client, room_id=workflow.room_id, task_id=task_id)
+            latest_task = await _get_pending_task_record_retrying(
+                client=client,
+                room_id=task_room_id,
+                task_id=task_id,
+            )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
                     logger.info("One-time task is no longer pending, stopping", task_id=task_id)
@@ -1098,9 +1137,9 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     break
                 await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-        latest_before_execute = await _get_pending_task_record(
+        latest_before_execute = await _get_pending_task_record_retrying(
             client=client,
-            room_id=workflow.room_id,
+            room_id=task_room_id,
             task_id=task_id,
         )
         if not latest_before_execute:

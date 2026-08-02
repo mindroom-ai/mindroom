@@ -345,12 +345,6 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
         return 0
 
 
-def _cleanup() -> None:
-    """Clean up when shutting down."""
-    _pending_changes.clear()
-    _pending_change_locks.clear()
-
-
 async def _add_confirmation_reactions(
     client: nio.AsyncClient,
     room_id: str,
@@ -474,8 +468,7 @@ async def ensure_pending_change(
             new_value=new_value,
             requester=requester,
         )
-        await _store_pending_change_in_matrix(client, event_id, pending_change)
-        _pending_changes[event_id] = pending_change
+        await _commit_checkpoint(client, event_id, pending_change)
         await _add_confirmation_reactions(client, room_id, event_id)
         logger.info(
             "Registered pending config change",

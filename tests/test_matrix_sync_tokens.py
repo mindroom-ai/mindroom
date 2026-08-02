@@ -340,9 +340,13 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp_path: Path) -> None:
-    """Router startup must leave turn-backed replay to orchestrator readiness."""
-    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+@pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "code"])
+async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
+    tmp_path: Path,
+    agent_name: str,
+) -> None:
+    """Orchestrated entity startup must leave turn-backed replay to fleet readiness."""
+    bot = _agent_bot(tmp_path, agent_name=agent_name)
     bot.orchestrator = MagicMock()
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     recover_pending = AsyncMock()
@@ -394,30 +398,6 @@ async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
         finally:
             release_recovery.set()
             await start_task
-
-
-@pytest.mark.asyncio
-async def test_orchestrated_agent_start_defers_turn_recovery_until_first_sync(
-    tmp_path: Path,
-) -> None:
-    """A regular agent must not replay turns against pre-sync room state."""
-    bot = _agent_bot(tmp_path)
-    bot.orchestrator = MagicMock()
-    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    recover_pending = AsyncMock()
-    bot._dispatch_obligation_runner.recover_pending = recover_pending
-
-    with (
-        patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
-        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
-    ):
-        await bot.start()
-        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-
-    recover_pending.assert_awaited_once_with(turn_backed=False)
 
 
 @pytest.mark.asyncio

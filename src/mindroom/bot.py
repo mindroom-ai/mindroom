@@ -1568,7 +1568,6 @@ class AgentBot:
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
-        self._dispatch_obligation_runner.bind_event_loop()
         self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
@@ -1579,6 +1578,7 @@ class AgentBot:
         )
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
+            self._dispatch_obligation_runner.bind_event_loop()
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()

@@ -1350,6 +1350,7 @@ async def find_response_event_ids_via_room_messages(
     remaining_sources = set(sources)
     response_event_ids: set[str] = set()
     from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
 
     while remaining_sources:
         response = await client.room_messages(
@@ -1380,6 +1381,10 @@ async def find_response_event_ids_via_room_messages(
                 response_event_ids.add(event.event_id)
         if not response.end:
             break
+        if response.end in seen_pagination_tokens:
+            msg = f"response recovery room scan repeated pagination token for {room_id}"
+            raise RuntimeError(msg)
+        seen_pagination_tokens.add(response.end)
         from_token = response.end
 
     return frozenset(response_event_ids)

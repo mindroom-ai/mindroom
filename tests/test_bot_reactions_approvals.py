@@ -129,6 +129,32 @@ def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
     return event
 
 
+def _install_reaction_recorder(bot: AgentBot) -> list[str]:
+    """Install a real reaction hook and return its observed event IDs."""
+    seen: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED)
+    async def record_reaction(ctx: ReactionReceivedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+    return seen
+
+
+def _install_text_dispatch_mock(
+    monkeypatch: pytest.MonkeyPatch,
+    bot: AgentBot,
+) -> AsyncMock:
+    """Replace the unwrapped text-dispatch collaborator through an auto-restored seam."""
+    handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+    monkeypatch.setattr(
+        unwrap_extracted_collaborator(bot._turn_controller),
+        "handle_text_event",
+        handle_text_event,
+    )
+    return handle_text_event
+
+
 async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
     """Exercise one message through its durable production entrypoint."""
     source = dict(event.source)
@@ -268,17 +294,21 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
-        bot._dispatch_obligation_runner.semantic_consumer = MagicMock(
-            return_value=DispatchSemanticConsumer.INTERACTIVE_REACTION,
-        )
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
 
-        with patch(
-            "mindroom.bot.interactive.handle_reaction",
-            new=AsyncMock(return_value=None),
-        ) as interactive_handler:
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
+                "semantic_consumer",
+                new=MagicMock(return_value=DispatchSemanticConsumer.INTERACTIVE_REACTION),
+            ),
+            patch(
+                "mindroom.bot.interactive.handle_reaction",
+                new=AsyncMock(return_value=None),
+            ) as interactive_handler,
+        ):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == []
@@ -307,17 +337,21 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
-        bot._dispatch_obligation_runner.semantic_consumer = MagicMock(
-            return_value=DispatchSemanticConsumer.CONFIG_CONFIRMATION,
-        )
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
 
-        with patch(
-            "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
-            new=AsyncMock(return_value=None),
-        ) as resolve_pending:
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
+                "semantic_consumer",
+                new=MagicMock(return_value=DispatchSemanticConsumer.CONFIG_CONFIRMATION),
+            ),
+            patch(
+                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=None),
+            ) as resolve_pending,
+        ):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == []
@@ -709,12 +743,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Non-approver approval replies should fall through to normal text handling."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         store, pending, task, editor = await _start_live_approval(
             runtime_paths,
@@ -737,9 +772,9 @@ class TestAgentBot(AgentBotTestBase):
         try:
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once()
-            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+            handle_text_event.assert_awaited_once()
+            assert handle_text_event.await_args.args == (room, event)
+            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
             editor.assert_not_awaited()
             assert task.done() is False
 
@@ -764,12 +799,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Ordinary rich replies should fall through when their target is not an approval card."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=None)
@@ -794,9 +830,9 @@ class TestAgentBot(AgentBotTestBase):
         try:
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once()
-            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+            handle_text_event.assert_awaited_once()
+            assert handle_text_event.await_args.args == (room, event)
+            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
             event_cache.get_event.assert_awaited_once_with("!test:localhost", "$ordinary-message")
             assert store is get_approval_store()
         finally:
@@ -807,12 +843,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Detached approval replies should expire their card instead of entering conversation input."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
@@ -839,7 +876,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_not_awaited()
+            handle_text_event.assert_not_awaited()
             assert editor.await_args.args[:2] == ("!test:localhost", "$approval")
             replacement = editor.await_args.args[2]
             assert replacement["status"] == "expired"
@@ -852,12 +889,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Thread fallback metadata must not turn ordinary text into an approval response."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
@@ -890,7 +928,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once()
+            handle_text_event.assert_awaited_once()
             event_cache.get_event.assert_not_awaited()
             editor.assert_not_awaited()
         finally:
@@ -901,12 +939,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Ordinary replies should not run approval authorization before matching an in-memory card."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.matrix_id)
         initialize_approval_store(runtime_paths)
         event = MagicMock(spec=nio.RoomMessageText)
@@ -926,9 +965,9 @@ class TestAgentBot(AgentBotTestBase):
         try:
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once()
-            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+            handle_text_event.assert_awaited_once()
+            assert handle_text_event.await_args.args == (room, event)
+            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
             await _shutdown_approval_store()
 
@@ -937,12 +976,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Duplicate approver replies should be consumed while the first resolution is in flight."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         edit_started = asyncio.Event()
         release_edit = asyncio.Event()
@@ -983,7 +1023,7 @@ class TestAgentBot(AgentBotTestBase):
             await asyncio.wait_for(edit_started.wait(), timeout=1)
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_not_awaited()
+            handle_text_event.assert_not_awaited()
             release_edit.set()
             first_result = await first_resolution
             decision = await task
@@ -1008,12 +1048,13 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Follow-up text on a terminal approval card should remain a normal message."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         store, pending, task, _editor = await _start_live_approval(runtime_paths)
 
@@ -1045,9 +1086,9 @@ class TestAgentBot(AgentBotTestBase):
 
             await _dispatch_message(bot, room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once()
-            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+            handle_text_event.assert_awaited_once()
+            assert handle_text_event.await_args.args == (room, event)
+            assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
             if not task.done():
                 task.cancel()
@@ -1060,6 +1101,7 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A reply claimed by approval handling must retain that owner after a crash."""
         config = self._config_for_storage(tmp_path)
@@ -1083,7 +1125,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.APPROVAL_REPLY
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        restarted._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        handle_text_event = _install_text_dispatch_mock(monkeypatch, restarted)
         with patch(
             "mindroom.bot.maybe_handle_tool_approval_reply",
             new=AsyncMock(return_value=False),
@@ -1093,7 +1135,7 @@ class TestAgentBot(AgentBotTestBase):
         approval_reply.assert_awaited_once()
         assert approval_reply.await_args.kwargs["before_consume"] is None
         assert approval_reply.await_args.kwargs["authorization_prevalidated"] is True
-        restarted._turn_controller.handle_text_event.assert_not_awaited()
+        handle_text_event.assert_not_awaited()
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1136,14 +1178,14 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=False, resolved=False)),
         ):
             await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1168,11 +1210,17 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot._turn_store.record_pending_turn(pending_turn)
         failure = RuntimeError("crash after stop reaction side effect")
-        bot._turn_controller.finalize_user_stop = AsyncMock(side_effect=failure)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
 
-        with pytest.raises(RuntimeError, match="crash after stop reaction side effect"):
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._turn_controller),
+                "finalize_user_stop",
+                new=AsyncMock(side_effect=failure),
+            ),
+            pytest.raises(RuntimeError, match="crash after stop reaction side effect"),
+        ):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
@@ -1181,7 +1229,7 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
 
         with patch(
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
@@ -1190,7 +1238,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         assert restarted._turn_store.is_durably_handled("$source") is True
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
@@ -1218,14 +1266,18 @@ class TestAgentBot(AgentBotTestBase):
                 conversation_target=target,
             ),
         )
-        bot.stop_manager.can_handle_stop_reaction = MagicMock(return_value=True)
-        bot._turn_controller.finalize_user_stop = AsyncMock(
-            side_effect=RuntimeError("crash after stop claim"),
-        )
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
 
-        with pytest.raises(RuntimeError, match="crash after stop claim"):
+        with (
+            patch.object(bot.stop_manager, "can_handle_stop_reaction", new=MagicMock(return_value=True)),
+            patch.object(
+                unwrap_extracted_collaborator(bot._turn_controller),
+                "finalize_user_stop",
+                new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
+            ),
+            pytest.raises(RuntimeError, match="crash after stop claim"),
+        ):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
@@ -1233,7 +1285,7 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
@@ -1244,7 +1296,7 @@ class TestAgentBot(AgentBotTestBase):
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_receipt_order == stop_receipt_order
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1268,11 +1320,17 @@ class TestAgentBot(AgentBotTestBase):
             conversation_target=target,
         )
         bot._turn_store.record_pending_turn(pending_turn)
-        bot._turn_controller.finalize_user_stop = AsyncMock(side_effect=RuntimeError("crash after stop claim"))
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
 
-        with pytest.raises(RuntimeError, match="crash after stop claim"):
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._turn_controller),
+                "finalize_user_stop",
+                new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
+            ),
+            pytest.raises(RuntimeError, match="crash after stop claim"),
+        ):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
@@ -1353,7 +1411,7 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
@@ -1361,7 +1419,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         finalized_record = restarted._turn_store.get_turn_record("$source")
         assert finalized_record is not None
         assert finalized_record.user_stop_settled_receipt_order == stop_receipt_order
@@ -1395,7 +1453,6 @@ class TestAgentBot(AgentBotTestBase):
             response_event_id="$response",
             edit_receipt_order=3,
         )
-        bot._dispatch_obligation_runner.receipt_order = AsyncMock(return_value=2)
         later_edit_task = asyncio.create_task(asyncio.Event().wait())
         bot.stop_manager.set_current(
             "$response",
@@ -1416,7 +1473,14 @@ class TestAgentBot(AgentBotTestBase):
 
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stale-stop-reaction")
-        with patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup:
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
+                "receipt_order",
+                new=AsyncMock(return_value=2),
+            ),
+            patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup,
+        ):
             replay_task = asyncio.create_task(
                 bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION),
             )
@@ -1553,7 +1617,7 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
             "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
             new=AsyncMock(return_value=None),
@@ -1561,7 +1625,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         resolve_pending.assert_awaited_once()
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1605,7 +1669,7 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted._emit_reaction_received_hooks = AsyncMock()
+        unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
             "mindroom.bot.interactive.handle_reaction",
             new=AsyncMock(return_value=None),
@@ -1613,7 +1677,7 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         interactive_handler.assert_awaited_once()
-        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert unexpected_hooks == []
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1631,27 +1695,28 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("👍", "$hook-reaction")
         emissions: list[str] = []
 
-        async def emit_then_crash(**_kwargs: object) -> None:
-            emissions.append(event.event_id)
-            message = "crash after reaction hook side effect"
-            raise RuntimeError(message)
+        @hook(EVENT_REACTION_RECEIVED)
+        async def emit_then_crash(ctx: ReactionReceivedContext) -> None:
+            emissions.append(ctx.event_id)
+            message = "cancel after reaction hook side effect"
+            raise asyncio.CancelledError(message)
 
-        bot._emit_reaction_received_hooks = emit_then_crash
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
         with (
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
-            pytest.raises(RuntimeError, match="crash after reaction hook side effect"),
+            pytest.raises(asyncio.CancelledError, match="cancel after reaction hook side effect"),
         ):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
-        await _cancel_dispatch_retry(bot)
         assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.REACTION_HOOKS
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
 
-        async def emit_replay(**_kwargs: object) -> None:
-            emissions.append(event.event_id)
+        @hook(EVENT_REACTION_RECEIVED)
+        async def emit_replay(ctx: ReactionReceivedContext) -> None:
+            emissions.append(ctx.event_id)
 
-        restarted._emit_reaction_received_hooks = AsyncMock(side_effect=emit_replay)
+        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
         with patch(
             "mindroom.bot.interactive.handle_reaction",
             new=AsyncMock(return_value=None),
@@ -1660,7 +1725,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert emissions == [event.event_id, event.event_id]
         interactive_handler.assert_not_awaited()
-        restarted._emit_reaction_received_hooks.assert_awaited_once()
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
@@ -1724,7 +1788,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+        get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
             ),
@@ -1761,7 +1825,14 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_cache),
+                "get_thread_id_for_event",
+                get_thread_id_for_event,
+            ),
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
+        ):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply", "$thread-root")]
@@ -1782,7 +1853,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort = AsyncMock(
+        resolve_related_event_thread_id = AsyncMock(
             return_value="$thread-root",
         )
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
@@ -1792,10 +1863,17 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.reacts_to = "$plain-reply"
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
+                resolve_related_event_thread_id,
+            ),
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
+        ):
             await _dispatch_reaction(bot, room, event)
 
-        bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort.assert_awaited_once_with(
+        resolve_related_event_thread_id.assert_awaited_once_with(
             room.room_id,
             "$plain-reply",
             caller_label="reaction_hook_context",
@@ -1819,7 +1897,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+        get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
             ),
@@ -1888,7 +1966,14 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_cache),
+                "get_thread_id_for_event",
+                get_thread_id_for_event,
+            ),
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
+        ):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply-2", "$thread-root")]

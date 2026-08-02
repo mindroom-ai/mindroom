@@ -224,13 +224,14 @@ async def test_failed_send_releases_claim_for_retry(tmp_path: Path) -> None:
     notice = AsyncMock(side_effect=[False, True])
 
     with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
-        await handle_decrypt_failure(
-            client,
-            _mock_room(),
-            _megolm_event(),
-            agent_name="assistant",
-            runtime_paths=runtime_paths,
-        )
+        with pytest.raises(RuntimeError, match="Failed to deliver decryption-failure notice"):
+            await handle_decrypt_failure(
+                client,
+                _mock_room(),
+                _megolm_event(),
+                agent_name="assistant",
+                runtime_paths=runtime_paths,
+            )
         await handle_decrypt_failure(
             client,
             _mock_room(),

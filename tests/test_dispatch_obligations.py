@@ -159,6 +159,44 @@ def test_only_invites_can_discard_receipt_order_rows(tmp_path: Path) -> None:
     assert store._receipt_order(message.key) > 0
 
 
+@pytest.mark.asyncio
+async def test_successful_invite_is_deleted_and_identical_reinvite_runs(tmp_path: Path) -> None:
+    """Successful synthetic invite keys must not suppress a later identical invite."""
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, event: nio.InviteEvent) -> DispatchCallbackResult:
+        nonlocal attempts
+        assert isinstance(event, nio.InviteMemberEvent)
+        attempts += 1
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.INVITE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:example.org",
+            "state_key": _PRINCIPAL_ID,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+
+    await runner.dispatch(room, event, DispatchCallbackKind.INVITE)
+    await runner.dispatch(room, event, DispatchCallbackKind.INVITE)
+
+    with store._connection() as connection:
+        row_count = connection.execute("SELECT COUNT(*) FROM dispatch_obligations").fetchone()[0]
+    assert attempts == 2
+    assert row_count == 0
+
+
 @pytest.mark.parametrize("source_kind", [IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND])
 def test_media_source_kinds_map_to_media_dispatch(source_kind: str) -> None:
     """Coalescing retries must use the callback kind owned by dispatch obligations."""

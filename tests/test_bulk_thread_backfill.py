@@ -224,6 +224,27 @@ async def test_response_recovery_scan_ignores_thread_fallback_relation() -> None
 
 
 @pytest.mark.asyncio
+async def test_response_recovery_scan_rejects_repeated_pagination_token() -> None:
+    """A stuck homeserver cursor must fail recovery instead of looping forever."""
+    client = AsyncMock()
+    page = _messages_response(
+        [_message_event("$unrelated:localhost", "unrelated", timestamp=2000)],
+        end="stuck-token",
+    )
+    client.room_messages = AsyncMock(return_value=page)
+
+    with pytest.raises(RuntimeError, match="repeated pagination token"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=("$missing-source:localhost",),
+        )
+
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
     """One backward walk should recover and store every requested thread's rows root-first."""
     client = AsyncMock()

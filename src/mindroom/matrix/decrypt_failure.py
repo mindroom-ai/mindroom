@@ -236,8 +236,10 @@ async def handle_decrypt_failure(
         )
     else:
         # A cleanly failed send left no notice in the room; release the claim
-        # so the next undecryptable event in this session can retry.
+        # so this durable event can retry.
         _forget_notice_sent(runtime_paths, room.room_id, session_id)
+        msg = f"Failed to deliver decryption-failure notice in room {room.room_id}"
+        raise RuntimeError(msg)
 
 
 __all__ = ["E2EEStats", "e2ee_stats", "handle_decrypt_failure", "raise_notice_floor"]

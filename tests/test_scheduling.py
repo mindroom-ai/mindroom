@@ -1078,6 +1078,66 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_task_retries_transient_state_read_failure() -> None:
+    """An unreadable checkpoint must keep the in-memory schedule retry-owned."""
+    client = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Run after retry",
+        description="Retry state read",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    state_response = nio.RoomGetStateEventResponse(
+        content={
+            "task_id": "task_once_retry",
+            "workflow": workflow.model_dump_json(),
+            "status": "pending",
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task_once_retry",
+        room_id="!test:server",
+    )
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
+        state_response,
+        state_response,
+    ]
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$completed"},
+        room_id="!test:server",
+    )
+
+    with (
+        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute,
+        patch(
+            "mindroom.scheduling_executor.send_scheduled_failure_notice",
+            new=AsyncMock(),
+        ) as failure_notice,
+    ):
+        await _run_once_task(
+            client,
+            "task_once_retry",
+            workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
+
+    sleep.assert_awaited_once()
+    assert client.room_get_state_event.await_count == 3
+    execute.assert_awaited_once()
+    failure_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_once_task_marks_completed_after_success() -> None:
     """One-time tasks should overwrite pending state with completed after firing."""
     client = AsyncMock()
@@ -1168,7 +1228,6 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
     assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_run_cron_task_executes_latest_state_workflow() -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
