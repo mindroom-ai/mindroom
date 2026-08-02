@@ -940,7 +940,7 @@ class ManagedTuwunelStack:
             msg = "MindRoom exited before the hard-restart boundary"
             raise RuntimeError(msg)
         old_pid = process.pid
-        process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=10)
         self._mindroom_process = None
         self._set_model_id(RECOVERED_MODEL_ID)
@@ -1155,6 +1155,7 @@ class ManagedTuwunelStack:
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         self._wait_for_url(f"http://127.0.0.1:{self.api_port}/api/health", timeout=60)
         state_path = self.storage_path / "matrix_state.yaml"
@@ -1180,12 +1181,12 @@ class ManagedTuwunelStack:
             return True
         stopped_gracefully = process.poll() is None
         if stopped_gracefully:
-            process.send_signal(signal.SIGINT)
+            os.killpg(process.pid, signal.SIGINT)
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 stopped_gracefully = False
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=10)
         self._mindroom_process = None
         return stopped_gracefully and process.returncode == 0

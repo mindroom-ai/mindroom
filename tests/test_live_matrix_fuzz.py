@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -708,14 +710,10 @@ def test_restart_recovery_hard_kills_and_boots_new_model_generation(
     class Process:
         def __init__(self, pid: int) -> None:
             self.pid = pid
-            self.killed = False
 
         @staticmethod
         def poll() -> None:
             return None
-
-        def kill(self) -> None:
-            self.killed = True
 
         @staticmethod
         def wait(*, timeout: float) -> int:
@@ -725,16 +723,18 @@ def test_restart_recovery_hard_kills_and_boots_new_model_generation(
     stack = ManagedTuwunelStack()
     old_process = Process(10)
     new_process = Process(11)
+    signals: list[tuple[int, int]] = []
     try:
         stack.config_path.write_text(
             "models:\n  default:\n    id: mindroom-live-fuzz-replacement\n",
             encoding="utf-8",
         )
         stack._mindroom_process = cast("Any", old_process)
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
         monkeypatch.setattr(stack, "_start_mindroom", lambda: setattr(stack, "_mindroom_process", new_process))
 
         assert stack.restart_mindroom_for_recovery() == (10, 11)
-        assert old_process.killed
+        assert signals == [(10, signal.SIGKILL)]
         assert "mindroom-live-fuzz-recovered" in stack.config_path.read_text(encoding="utf-8")
     finally:
         stack._mindroom_process = None
@@ -783,10 +783,11 @@ def test_restart_model_latch_blocks_only_pre_restart_fresh_request() -> None:
         stack.close()
 
 
-def test_restart_shutdown_rejects_nonzero_process_exit() -> None:
+def test_restart_shutdown_rejects_nonzero_process_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A bounded process exit is graceful only when shutdown succeeds."""
 
     class FailedProcess:
+        pid = 10
         returncode = 7
 
         @staticmethod
@@ -794,41 +795,37 @@ def test_restart_shutdown_rejects_nonzero_process_exit() -> None:
             return None
 
         @staticmethod
-        def send_signal(_signal: int) -> None:
-            return
-
-        @staticmethod
         def wait(*, timeout: float) -> int:
             del timeout
             return 7
 
     stack = ManagedTuwunelStack()
+    signals: list[tuple[int, int]] = []
     try:
-        stack._mindroom_process = cast("Any", FailedProcess())
+        process = FailedProcess()
+        stack._mindroom_process = cast("Any", process)
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
 
         assert not stack.stop_mindroom_for_observation(timeout=1)
+        assert signals == [(10, signal.SIGINT)]
         assert stack._mindroom_process is None
     finally:
         stack.close()
 
 
-def test_restart_shutdown_rejects_forced_process_kill() -> None:
+def test_restart_shutdown_rejects_forced_process_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     """An orderly-shutdown timeout must kill the process and remain non-graceful."""
 
     class TimedOutProcess:
         returncode: int | None = None
 
         def __init__(self) -> None:
-            self.killed = False
+            self.pid = 10
             self.wait_timeouts: list[float] = []
 
         @staticmethod
         def poll() -> None:
             return None
-
-        @staticmethod
-        def send_signal(_signal: int) -> None:
-            return
 
         def wait(self, *, timeout: float) -> int:
             self.wait_timeouts.append(timeout)
@@ -837,17 +834,15 @@ def test_restart_shutdown_rejects_forced_process_kill() -> None:
                 raise subprocess.TimeoutExpired(command, timeout)
             return -9
 
-        def kill(self) -> None:
-            self.killed = True
-            self.returncode = -9
-
     stack = ManagedTuwunelStack()
     process = TimedOutProcess()
+    signals: list[tuple[int, int]] = []
     try:
         stack._mindroom_process = cast("Any", process)
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
 
         assert not stack.stop_mindroom_for_observation(timeout=1)
-        assert process.killed
+        assert signals == [(10, signal.SIGINT), (10, signal.SIGKILL)]
         assert process.wait_timeouts == [1, 10]
         assert stack._mindroom_process is None
     finally:
