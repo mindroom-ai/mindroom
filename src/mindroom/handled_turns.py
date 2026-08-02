@@ -30,8 +30,8 @@ from mindroom.turn_record import (
     SourceEventMetadata,
     SourceEventRevision,
     TurnRecord,
-    _normalize_source_event_ids,
-    _normalize_string,
+    canonical_optional_string,
+    canonical_source_event_ids,
     canonicalize_turn_record,
     merge_edit_facts,
     same_turn_identity,
@@ -51,6 +51,7 @@ __all__ = [
     "TurnRecordCodec",
     "canonicalize_turn_record",
     "merge_edit_facts",
+    "with_user_stop",
 ]
 
 _TURN_RECORD_SCHEMA_VERSION = 1
@@ -61,8 +62,6 @@ _LEDGER_RECORDS_KEY = "records"
 _PERSIST_EXECUTOR_MAX_WORKERS = 8
 _PERSIST_RETRY_INITIAL_DELAY_SECONDS = 0.05
 _PERSIST_RETRY_MAX_DELAY_SECONDS = 5.0
-
-
 
 
 def with_user_stop(
@@ -182,20 +181,20 @@ class TurnRecordCodec:
             or (response_event_id is not None and not isinstance(response_event_id, str))
         ):
             return None
-        source_event_ids = _normalize_source_event_ids(raw_source_event_ids)
+        source_event_ids = canonical_source_event_ids(raw_source_event_ids)
         if not source_event_ids:
             return None
         turn_record = TurnRecord.create(
             source_event_ids,
-            discovery_event_ids=_normalize_source_event_ids(raw_discovery_event_ids),
-            redacted_source_event_ids=_normalize_source_event_ids(raw_redacted_source_event_ids),
-            pending_redaction_cleanup_event_ids=_normalize_source_event_ids(
+            discovery_event_ids=canonical_source_event_ids(raw_discovery_event_ids),
+            redacted_source_event_ids=canonical_source_event_ids(raw_redacted_source_event_ids),
+            pending_redaction_cleanup_event_ids=canonical_source_event_ids(
                 raw_pending_redaction_cleanup_event_ids,
             ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
-            visible_echo_event_id=_normalize_string(record.get("visible_echo_event_id")),
+            visible_echo_event_id=canonical_optional_string(record.get("visible_echo_event_id")),
             visible_echo_is_fallback=_bool_or_none(record.get("visible_echo_is_fallback")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
@@ -208,11 +207,11 @@ class TurnRecordCodec:
                 record.get("user_stop_settled_receipt_order"),
             ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
-            response_owner=_normalize_string(record.get("response_owner")),
-            requester_id=_normalize_string(record.get("requester_id")),
-            correlation_id=_normalize_string(record.get("correlation_id")),
+            response_owner=canonical_optional_string(record.get("response_owner")),
+            requester_id=canonical_optional_string(record.get("requester_id")),
+            correlation_id=canonical_optional_string(record.get("correlation_id")),
             command_execution_started=record.get("command_execution_started") is True,
-            command_result_text=_normalize_string(record.get("command_result_text")),
+            command_result_text=canonical_optional_string(record.get("command_result_text")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             timestamp=float(timestamp),
@@ -271,20 +270,18 @@ class TurnRecordCodec:
             constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY,
         )
         source_event_ids = (
-            _normalize_source_event_ids(raw_source_event_ids)
+            canonical_source_event_ids(raw_source_event_ids)
             if isinstance(raw_source_event_ids, list)
             else (anchor_event_id,)
         ) or (anchor_event_id,)
-        response_event_id = _normalize_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
+        response_event_id = canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY))
         return TurnRecord.create(
             source_event_ids,
             discovery_event_ids=(
-                _normalize_source_event_ids(raw_discovery_event_ids)
-                if isinstance(raw_discovery_event_ids, list)
-                else ()
+                canonical_source_event_ids(raw_discovery_event_ids) if isinstance(raw_discovery_event_ids, list) else ()
             ),
             redacted_source_event_ids=(
-                _normalize_source_event_ids(raw_redacted_source_event_ids)
+                canonical_source_event_ids(raw_redacted_source_event_ids)
                 if isinstance(raw_redacted_source_event_ids, list)
                 else ()
             ),
@@ -296,9 +293,9 @@ class TurnRecordCodec:
                 metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
             ),
             source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
-            response_owner=_normalize_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
-            requester_id=_normalize_string(metadata.get("requester_id")),
-            correlation_id=_normalize_string(metadata.get("correlation_id")),
+            response_owner=canonical_optional_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
+            requester_id=canonical_optional_string(metadata.get("requester_id")),
+            correlation_id=canonical_optional_string(metadata.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY)),
             conversation_target=MessageTarget.from_metadata(
                 metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
@@ -431,7 +428,7 @@ class HandledTurnLedger:
         on_persisted: Callable[[TurnRecord], None] | None = None,
     ) -> TurnRecord | None:
         """Atomically update one record, optionally waiting for its exact persist."""
-        normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
+        normalized_lookup_event_ids = canonical_source_event_ids(lookup_event_ids)
         if not normalized_lookup_event_ids:
             return None
         with self._state.lock:
@@ -447,7 +444,9 @@ class HandledTurnLedger:
             if not turn_record.source_event_ids:
                 return None
             candidate_record = (
-                turn_record if turn_record.timestamp != 0.0 else canonicalize_turn_record(turn_record, timestamp=time.time())
+                turn_record
+                if turn_record.timestamp != 0.0
+                else canonicalize_turn_record(turn_record, timestamp=time.time())
             )
             persisted_record = _resolve_turn_record(candidate_record, self._responses)
             if persisted_record is None:
@@ -503,7 +502,7 @@ class HandledTurnLedger:
         """Return every durable redaction cleanup intent still awaiting completion."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            return _normalize_source_event_ids(
+            return canonical_source_event_ids(
                 tuple(
                     event_id
                     for record in self._responses.values()

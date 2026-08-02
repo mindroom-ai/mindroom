@@ -46,7 +46,7 @@ class SourceEventMetadata:
         if not isinstance(sender, str) or not sender:
             return None
         timestamp_ms = normalize_timestamp_ms(metadata.get("timestamp_ms"))
-        return cls(sender, timestamp_ms, _normalize_string(metadata.get("discovery_event_id")))
+        return cls(sender, timestamp_ms, canonical_optional_string(metadata.get("discovery_event_id")))
 
 
 SourceEventRevision = tuple[int, str]
@@ -247,7 +247,7 @@ class TurnRecord:
         return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
 
 
-class TurnRecordChanges(typing.TypedDict, total=False):
+class _TurnRecordChanges(typing.TypedDict, total=False):
     """Typed fields accepted by the explicit canonical update boundary."""
 
     source_event_ids: Sequence[str]
@@ -278,7 +278,7 @@ class TurnRecordChanges(typing.TypedDict, total=False):
 
 def canonicalize_turn_record(
     record: TurnRecord,
-    **changes: typing.Unpack[TurnRecordChanges],
+    **changes: typing.Unpack[_TurnRecordChanges],
 ) -> TurnRecord:
     """Return a canonical record after applying an explicit set of changes."""
     candidate = replace(record, **changes)
@@ -323,24 +323,22 @@ def _canonical_source_state(
     source_event_metadata: Mapping[str, object] | None,
 ) -> _CanonicalSourceState:
     """Return canonical source identity and source-owned facts."""
-    canonical_sources = _normalize_source_event_ids(source_event_ids)
+    canonical_sources = canonical_source_event_ids(source_event_ids)
     source_ids = set(canonical_sources)
     canonical_discovery = tuple(
-        event_id for event_id in _normalize_source_event_ids(discovery_event_ids) if event_id not in source_ids
+        event_id for event_id in canonical_source_event_ids(discovery_event_ids) if event_id not in source_ids
     )
     indexed_ids = {*canonical_sources, *canonical_discovery}
     canonical_redactions = tuple(
-        event_id
-        for event_id in _normalize_source_event_ids(redacted_source_event_ids)
-        if event_id in indexed_ids
+        event_id for event_id in canonical_source_event_ids(redacted_source_event_ids) if event_id in indexed_ids
     )
     redacted_ids = set(canonical_redactions)
     canonical_pending_cleanup = tuple(
         event_id
-        for event_id in _normalize_source_event_ids(pending_redaction_cleanup_event_ids)
+        for event_id in canonical_source_event_ids(pending_redaction_cleanup_event_ids)
         if event_id in redacted_ids
     )
-    canonical_anchor = _normalize_string(anchor_event_id)
+    canonical_anchor = canonical_optional_string(anchor_event_id)
     if canonical_anchor is None and canonical_sources:
         canonical_anchor = canonical_sources[-1]
     canonical_metadata = _immutable_source_event_metadata(
@@ -349,8 +347,7 @@ def _canonical_source_state(
         excluded_event_ids=redacted_ids,
     )
     redacted_prompt_sources = {
-        _prompt_source_event_id(canonical_sources, canonical_metadata, event_id)
-        for event_id in canonical_redactions
+        _prompt_source_event_id(canonical_sources, canonical_metadata, event_id) for event_id in canonical_redactions
     }
     return _CanonicalSourceState(
         source_event_ids=canonical_sources,
@@ -383,9 +380,9 @@ def _canonical_delivery_state(
     visible_echo_is_fallback: object,
 ) -> _CanonicalDeliveryState:
     """Return canonical response and visible-echo linkage."""
-    canonical_echo_id = _normalize_string(visible_echo_event_id)
+    canonical_echo_id = canonical_optional_string(visible_echo_event_id)
     return _CanonicalDeliveryState(
-        response_event_id=_normalize_string(response_event_id),
+        response_event_id=canonical_optional_string(response_event_id),
         visible_echo_event_id=canonical_echo_id,
         visible_echo_is_fallback=(
             visible_echo_is_fallback
@@ -411,7 +408,7 @@ def _canonical_dispatch_state(
 
 def _canonical_command_state(started: object, result_text: object) -> _CanonicalCommandState:
     """Return a canonical command execution checkpoint."""
-    canonical_result = _normalize_string(result_text)
+    canonical_result = canonical_optional_string(result_text)
     return _CanonicalCommandState(started is True or canonical_result is not None, canonical_result)
 
 
@@ -424,9 +421,9 @@ def _canonical_context_state(
 ) -> _CanonicalContextState:
     """Return canonical requester and conversation context."""
     return _CanonicalContextState(
-        response_owner=_normalize_string(response_owner),
-        requester_id=_normalize_string(requester_id),
-        correlation_id=_normalize_string(correlation_id),
+        response_owner=canonical_optional_string(response_owner),
+        requester_id=canonical_optional_string(requester_id),
+        correlation_id=canonical_optional_string(correlation_id),
         history_scope=history_scope if isinstance(history_scope, HistoryScope) else None,
         conversation_target=conversation_target if isinstance(conversation_target, MessageTarget) else None,
     )
@@ -451,7 +448,7 @@ def _prompt_source_event_id(
     return event_id
 
 
-def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str, ...]:
+def canonical_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str, ...]:
     """Deduplicate non-empty source event IDs while preserving order."""
     normalized_event_ids: list[str] = []
     seen_event_ids: set[str] = set()
@@ -463,7 +460,7 @@ def _normalize_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str
     return tuple(normalized_event_ids)
 
 
-def _normalize_string(value: object) -> str | None:
+def canonical_optional_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
 

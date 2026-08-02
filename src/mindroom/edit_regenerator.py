@@ -362,7 +362,9 @@ class EditRegenerator:
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_responded_turn(canonicalize_turn_record(record, response_event_id=response_event_id))
+                    self.deps.turn_store.record_responded_turn(
+                        canonicalize_turn_record(record, response_event_id=response_event_id),
+                    )
                     if applied
                     else None
                 ),
