@@ -1350,8 +1350,7 @@ class AgentBot:
 
     def _handle_pre_certification_failure(self) -> None:
         """Rewind one failed response and consume any durable-acceptance rejection."""
-        if self._rewind_unseen_dispatch_persist_failure():
-            return
+        self._sync_cache_trust.consume_dispatch_persist_failure()
         self._ensure_pre_certification_rewind()
 
     def _handle_certification_apply_failure(self, error: Exception) -> None:
