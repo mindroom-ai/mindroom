@@ -781,6 +781,7 @@ _SourceAdmission = Callable[
     Awaitable[DispatchSourceAdmission],
 ]
 _EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
+_HistoricalEventCache = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
 _SourceRejectionCallback = Callable[
     [nio.MatrixRoom, _DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
     Awaitable[None],
@@ -801,6 +802,13 @@ async def _admit_all_sources(
 def _ignore_event_provenance(
     _source_event_id: str,
     _provenance: nio.TimelineEventProvenance,
+) -> None:
+    pass
+
+
+async def _ignore_historical_event_cache(
+    _room: nio.MatrixRoom,
+    _event: nio.Event,
 ) -> None:
     pass
 
@@ -1039,6 +1047,7 @@ class DispatchObligationRunner:
     on_persist_failure: Callable[[], None] | None = None
     source_admission: _SourceAdmission = _admit_all_sources
     observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
+    cache_historical_event: _HistoricalEventCache = _ignore_historical_event_cache
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
@@ -1262,6 +1271,13 @@ class DispatchObligationRunner:
     ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
         self.observe_event_provenance(event.event_id, provenance)
+        if provenance is nio.TimelineEventProvenance.HISTORY:
+            try:
+                await self.cache_historical_event(room, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise nio.CallbackNotAcceptedError(str(error)) from error
         callback_kind = self._admission_kind(event)
         if callback_kind is None:
             return

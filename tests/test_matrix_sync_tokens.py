@@ -681,6 +681,57 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
     )
 
 
+def _image_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageImage:
+    event = nio.RoomMessageImage.from_dict(
+        {
+            "content": {
+                "body": body,
+                "info": {"mimetype": "image/png", "size": 4},
+                "msgtype": "m.image",
+                "url": "mxc://localhost/history-image",
+            },
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    assert isinstance(event, nio.RoomMessageImage)
+    return event
+
+
+def _limited_empty_classic_response(room_id: str) -> nio.SyncResponse:
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_after_gap",
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    room_id: {
+                        "timeline": {
+                            "events": [],
+                            "limited": True,
+                            "prev_batch": "p_gap_start",
+                        },
+                        "state": {"events": []},
+                        "ephemeral": {"events": []},
+                        "account_data": {"events": []},
+                    },
+                },
+            },
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
 def _timeline_response(
     transport: str,
     room_id: str,
@@ -2347,6 +2398,133 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
+
+
+@pytest.mark.asyncio
+async def test_nio_limited_recovery_caches_history_before_cold_fence(tmp_path: Path) -> None:
+    """Recovered text and media must reach the cache without becoming turns."""
+    bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.next_batch = "s_before_gap"
+    room_id = "!room:localhost"
+    await bot._conversation_cache.mark_room_joined(room_id)
+    history_text = _text_event("$history-text", "old text", 1)
+    history_image = _image_event("$history-image", "old image", 2)
+    client._recovery_room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_text, history_image],
+            start="s_before_gap",
+            end="p_gap_start",
+        ),
+    )
+    turn_callback = AsyncMock(return_value=_DispatchCallbackResult.SUCCEEDED)
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks[DispatchCallbackKind.MESSAGE] = turn_callback
+    callbacks[DispatchCallbackKind.MEDIA] = turn_callback
+
+    try:
+        with patch.object(
+            client,
+            "add_event_admission_callback",
+            wraps=client.add_event_admission_callback,
+        ) as add_admission:
+            bot._dispatch_obligation_runner.register_source_callbacks(
+                client,
+                owner=bot._runtime_view,
+            )
+        response = _limited_empty_classic_response(room_id)
+        await client.receive_response(response)
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+        add_admission.assert_called_once()
+        assert response.recovered_room_ids == frozenset({room_id})
+        assert response.unrecovered_room_ids == frozenset()
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        assert bot._dispatch_obligation_store.pending() == ()
+        turn_callback.assert_not_awaited()
+    finally:
+        await client.close()
+        await cache_root.close()
+
+
+@pytest.mark.asyncio
+async def test_nio_retries_history_when_cache_admission_fails(tmp_path: Path) -> None:
+    """A failed history cache write must leave nio recovery work retryable."""
+    bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.next_batch = "s_before_gap"
+    room_id = "!room:localhost"
+    await bot._conversation_cache.mark_room_joined(room_id)
+    history_text = _text_event("$history-retry", "old text", 1)
+    client._recovery_room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_text],
+            start="s_before_gap",
+            end="p_gap_start",
+        ),
+    )
+    cache_attempts = 0
+    cache_historical_event = bot._dispatch_obligation_runner.cache_historical_event
+
+    async def fail_first_cache(room: nio.MatrixRoom, event: nio.Event) -> None:
+        nonlocal cache_attempts
+        cache_attempts += 1
+        if cache_attempts == 1:
+            msg = "historical cache unavailable"
+            raise OSError(msg)
+        await cache_historical_event(room, event)
+
+    bot._dispatch_obligation_runner.cache_historical_event = fail_first_cache
+    bot._dispatch_obligation_runner.register_source_callbacks(
+        client,
+        owner=bot._runtime_view,
+    )
+    response = _limited_empty_classic_response(room_id)
+
+    try:
+        with pytest.raises(
+            nio.CallbackNotAcceptedError,
+            match="historical cache unavailable",
+        ) as exc_info:
+            await client.receive_response(response)
+        recovery = cast("Any", client)._recovery
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert history_text.event_id not in recovery.completed.get(room_id, {})
+
+        await client.receive_response(response)
+
+        assert cache_attempts == 2
+        assert response.recovered_room_ids == frozenset({room_id})
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        assert bot._dispatch_obligation_store.pending() == ()
+    finally:
+        await client.close()
+        await cache_root.close()
 
 
 @pytest.mark.asyncio

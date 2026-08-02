@@ -546,6 +546,7 @@ class AgentBot:
             on_persist_failure=self._record_dispatch_persist_failure,
             source_admission=self._cold_history_fence.admit_source,
             observe_event_provenance=self._cold_history_fence.observe_event_provenance,
+            cache_historical_event=self._conversation_cache.cache_historical_event,
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
