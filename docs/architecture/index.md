@@ -60,7 +60,8 @@ MindRoom's architecture consists of several key components working together.
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
+| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
+| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
 | `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -69,6 +70,10 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `command_turn_executor.py` | Command execution and durable command/config mutation journals |
+| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
+| `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |

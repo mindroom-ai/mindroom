@@ -119,24 +119,12 @@ def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tm
 
 def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Handled-turn persistence callbacks must not run obligation SQLite inline."""
+    """Handled-turn persistence delegates settlement to its dedicated retry owner."""
     bot = _agent_bot(tmp_path)
-    retry_turn_settlement = MagicMock()
-    monkeypatch.setattr(
-        bot._dispatch_obligation_runner,
-        "retry_turn_settlement",
-        retry_turn_settlement,
-        raising=False,
-    )
-    settle_pending = MagicMock()
-    monkeypatch.setattr(bot._dispatch_obligation_store, "settle_pending_from_turn_store", settle_pending)
+    callback = bot._turn_store.deps.on_terminal_turn_persisted
 
-    bot._settle_turn_dispatch_obligations(("$message",))
-
-    settle_pending.assert_not_called()
-    retry_turn_settlement.assert_called_once_with(("$message",))
+    assert callback == bot._turn_settlement_retry.retry
 
 
 def _install_fast_response_drain(bot: AgentBot) -> None:
@@ -728,6 +716,79 @@ def _limited_empty_classic_response(room_id: str) -> nio.SyncResponse:
     )
     assert isinstance(response, nio.SyncResponse)
     return response
+
+
+def _newly_joined_world_readable_response(
+    room_id: str,
+    user_id: str,
+    *,
+    limited: bool,
+    next_batch: str,
+) -> nio.SyncResponse:
+    own_join = {
+        "type": "m.room.member",
+        "event_id": "$own-join",
+        "sender": user_id,
+        "state_key": user_id,
+        "origin_server_ts": 3,
+        "content": {"membership": "join"},
+        "unsigned": {"prev_content": {"membership": "leave"}},
+    }
+    state_events = (
+        [
+            {
+                "type": "m.room.history_visibility",
+                "event_id": "$world-readable",
+                "sender": "@user:localhost",
+                "state_key": "",
+                "origin_server_ts": 0,
+                "content": {"history_visibility": "world_readable"},
+            },
+        ]
+        if limited
+        else []
+    )
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": next_batch,
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    room_id: {
+                        "timeline": {
+                            "events": [own_join] if limited else [],
+                            "limited": limited,
+                            "prev_batch": "p_before_join" if limited else "p_after_join",
+                        },
+                        "state": {"events": state_events},
+                        "ephemeral": {"events": []},
+                        "account_data": {"events": []},
+                    },
+                },
+            },
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
+def _register_counted_source_callbacks(bot: AgentBot, client: nio.AsyncClient) -> MagicMock:
+    with patch.object(
+        client,
+        "add_event_admission_callback",
+        wraps=client.add_event_admission_callback,
+    ) as add_admission:
+        bot._dispatch_obligation_runner.register_source_callbacks(
+            client,
+            owner=bot._runtime_view,
+        )
+    return add_admission
 
 
 def _timeline_response(
@@ -2429,19 +2490,15 @@ async def test_nio_limited_recovery_caches_history_before_cold_fence(tmp_path: P
     )
     turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
     callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
-    callbacks[DispatchCallbackKind.MESSAGE] = turn_callback
-    callbacks[DispatchCallbackKind.MEDIA] = turn_callback
+    callbacks.update(
+        {
+            DispatchCallbackKind.MESSAGE: turn_callback,
+            DispatchCallbackKind.MEDIA: turn_callback,
+        },
+    )
 
     try:
-        with patch.object(
-            client,
-            "add_event_admission_callback",
-            wraps=client.add_event_admission_callback,
-        ) as add_admission:
-            bot._dispatch_obligation_runner.register_source_callbacks(
-                client,
-                owner=bot._runtime_view,
-            )
+        add_admission = _register_counted_source_callbacks(bot, client)
         response = _limited_empty_classic_response(room_id)
         await client.receive_response(response)
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -2530,6 +2587,204 @@ async def test_nio_retries_history_when_cache_admission_fails(
 
         assert cache_attempts == 2
         assert response.recovered_room_ids == frozenset({room_id})
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        assert bot._dispatch_obligation_store.pending() == ()
+    finally:
+        await client.close()
+        await cache_root.close()
+
+
+@pytest.mark.asyncio
+async def test_new_world_readable_join_caches_prejoin_history_before_fence_opens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An own-join boundary must cache readable history that nio intentionally skips."""
+    bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "joined-history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.user_id = bot.matrix_id.full_id
+    bot._first_sync_done = True
+    client.next_batch = "s_before_join"
+    room_id = "!room:localhost"
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(room_id,)),
+    )
+    history_text = _text_event("$prejoin-text", "old text", 1)
+    history_image = _image_event("$prejoin-image", "old image", 2)
+    client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_image, history_text],
+            start="p_before_join",
+            end=None,
+        ),
+    )
+    client._recovery_room_messages = AsyncMock()
+    cached_while_fenced: list[bool] = []
+    cache_historical_event = bot._conversation_cache.cache_historical_event
+
+    async def cache_and_observe_fence(room: nio.MatrixRoom, event: nio.Event) -> None:
+        cached_while_fenced.append(bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id))
+        await cache_historical_event(room, event)
+
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_historical_event",
+        cache_and_observe_fence,
+    )
+    turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks.update(
+        {
+            DispatchCallbackKind.MESSAGE: turn_callback,
+            DispatchCallbackKind.MEDIA: turn_callback,
+        },
+    )
+
+    try:
+        add_admission = _register_counted_source_callbacks(bot, client)
+        client.add_response_callback(bot._on_sync_response, nio.SyncResponse)
+        response = _newly_joined_world_readable_response(
+            room_id,
+            bot.matrix_id.full_id,
+            limited=True,
+            next_batch="s_after_join",
+        )
+        await client.receive_response(response)
+        await client.run_response_callbacks([response])
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+        add_admission.assert_called_once()
+        client._recovery_room_messages.assert_not_awaited()
+        client.room_messages.assert_awaited_once_with(
+            room_id,
+            start="p_before_join",
+            direction=nio.MessageDirection.back,
+            limit=50,
+        )
+        assert response.unrecovered_room_ids == frozenset()
+        assert cached_while_fenced == [True, True]
+        assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        assert bot._dispatch_obligation_store.pending() == ()
+        turn_callback.assert_not_awaited()
+
+        complete_response = _newly_joined_world_readable_response(
+            room_id,
+            bot.matrix_id.full_id,
+            limited=False,
+            next_batch="s_after_open",
+        )
+        await client.receive_response(complete_response)
+        await client.run_response_callbacks([complete_response])
+        assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+    finally:
+        await client.close()
+        await cache_root.close()
+
+
+@pytest.mark.asyncio
+async def test_new_world_readable_join_cache_failure_rewinds_and_keeps_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pre-join cache write must keep the join response retryable."""
+    bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "joined-history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.user_id = bot.matrix_id.full_id
+    bot._first_sync_done = True
+    client.next_batch = "s_before_join"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_join")
+    room_id = "!room:localhost"
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(room_id,)),
+    )
+    history_text = _text_event("$prejoin-retry", "old text", 1)
+    client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_text],
+            start="p_before_join",
+            end=None,
+        ),
+    )
+    client._recovery_room_messages = AsyncMock()
+
+    original_store_events_batch = bot.event_cache.store_events_batch
+    historical_cache_attempts = 0
+
+    async def fail_first_cache_write(
+        events: list[tuple[str, str, dict[str, Any]]],
+        *,
+        expected_membership_epoch: int | None = None,
+    ) -> None:
+        nonlocal historical_cache_attempts
+        is_historical_write = any(event_id == history_text.event_id for event_id, _, _ in events)
+        if is_historical_write:
+            historical_cache_attempts += 1
+        if historical_cache_attempts == 1:
+            msg = "joined history cache unavailable"
+            raise EventCacheBackendUnavailableError(msg)
+        await original_store_events_batch(
+            events,
+            expected_membership_epoch=expected_membership_epoch,
+        )
+
+    monkeypatch.setattr(bot.event_cache, "store_events_batch", fail_first_cache_write)
+    bot._dispatch_obligation_runner.register_source_callbacks(
+        client,
+        owner=bot._runtime_view,
+    )
+    client.add_response_callback(bot._on_sync_response, nio.SyncResponse)
+
+    try:
+        response = _newly_joined_world_readable_response(
+            room_id,
+            bot.matrix_id.full_id,
+            limited=True,
+            next_batch="s_after_join",
+        )
+        await client.receive_response(response)
+        with pytest.raises(
+            EventCacheBackendUnavailableError,
+            match="joined history cache unavailable",
+        ):
+            await client.run_response_callbacks([response])
+
+        client._recovery_room_messages.assert_not_awaited()
+        assert client.next_batch == "s_before_join"
+        assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is None
+        assert bot._dispatch_obligation_store.pending() == ()
+
+        await client.receive_response(response)
+        await client.run_response_callbacks([response])
+
+        assert historical_cache_attempts == 2
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert bot._dispatch_obligation_store.pending() == ()
     finally:

@@ -113,6 +113,7 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
+from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.room_member_joins import (
     RoomMemberJoin,
     emit_room_member_join_at_least_once,
@@ -137,6 +138,7 @@ from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
+from .turn_settlement_retry import TurnSettlementRetry
 from .turn_store import TurnStore, TurnStoreDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
@@ -441,6 +443,10 @@ class AgentBot:
             self._dispatch_obligation_store,
             decrypt_notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
+        self._turn_settlement_retry = TurnSettlementRetry(
+            store=self._dispatch_obligation_store,
+            background_task_owner=self._runtime_view,
+        )
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -529,7 +535,7 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
-                on_terminal_turn_persisted=self._settle_turn_dispatch_obligations,
+                on_terminal_turn_persisted=self._turn_settlement_retry.retry,
             ),
         )
         self._dispatch_obligation_runner = DispatchObligationRunner(
@@ -714,14 +720,8 @@ class AgentBot:
                 conversation_cache=self._conversation_cache,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
-                reserve_prompt_ingress_order=lambda *args, **kwargs: self._turn_controller.reserve_prompt_ingress_order(
-                    *args,
-                    **kwargs,
-                ),
-                handle_interactive_selection=lambda *args, **kwargs: self._turn_controller.handle_interactive_selection(
-                    *args,
-                    **kwargs,
-                ),
+                reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
+                handle_interactive_selection=self._turn_controller.handle_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
@@ -729,8 +729,6 @@ class AgentBot:
                     build_message_target=self._conversation_resolver.build_message_target,
                     delivery_gateway=self._delivery_gateway,
                 ),
-                handle_approval_action=lambda **kwargs: handle_tool_approval_action(**kwargs),
-                sender_is_authorized=lambda *args: is_authorized_sender(*args),
             ),
         )
 
@@ -1496,6 +1494,12 @@ class AgentBot:
         with track_matrix_sync_cache_write(self.agent_name):
             try:
                 await self._apply_own_room_membership_from_sync(response)
+                await cache_fenced_world_readable_join_history(
+                    cast("nio.AsyncClient", self.client),
+                    response,
+                    room_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
+                    cache_event=self._conversation_cache.cache_historical_event,
+                )
             except BaseException:
                 self._handle_pre_certification_failure()
                 raise
@@ -1816,7 +1820,7 @@ class AgentBot:
         )
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
-            self._dispatch_obligation_runner.bind_event_loop()
+            self._turn_settlement_retry.bind_event_loop()
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
@@ -2162,10 +2166,6 @@ class AgentBot:
             DispatchCallbackKind.INVITE,
             owner=self._runtime_view,
         )
-
-    def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
-        """Hand terminal obligation compaction to the event-loop retry owner."""
-        self._dispatch_obligation_runner.retry_turn_settlement(event_ids)
 
     def _room_for_dispatch_obligation(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""

@@ -123,9 +123,6 @@ class DispatchObligationRunner:
     _retry_keys: dict[DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
     _retry_corrupt: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _event_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _turn_settlement_retry_ids: set[str] = field(default_factory=set, init=False, repr=False)
-    _turn_settlement_retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
     def callbacks_for(
@@ -232,79 +229,6 @@ class DispatchObligationRunner:
             source_event_ids,
         )
 
-    def bind_event_loop(self) -> None:
-        """Bind the active runtime loop for callbacks arriving from persistence workers."""
-        self._event_loop = asyncio.get_running_loop()
-
-    def retry_turn_settlement(self, source_event_ids: tuple[str, ...]) -> None:
-        """Retry failed TurnStore compaction on the active runtime loop."""
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is None:
-            try:
-                self.store.settle_pending_from_turn_store(source_event_ids)
-            except Exception:
-                logger.exception(
-                    "turn_dispatch_obligation_initial_settlement_failed",
-                    source_event_ids=source_event_ids,
-                )
-            else:
-                return
-            event_loop = self._event_loop
-            if event_loop is None or event_loop.is_closed():
-                logger.error(
-                    "turn_dispatch_obligation_retry_loop_unavailable",
-                    source_event_ids=source_event_ids,
-                )
-                return
-            event_loop.call_soon_threadsafe(self._enqueue_turn_settlement_retry, source_event_ids)
-            return
-        self._event_loop = running_loop
-        self._enqueue_turn_settlement_retry(source_event_ids)
-
-    def _enqueue_turn_settlement_retry(self, source_event_ids: tuple[str, ...]) -> None:
-        """Add exact terminal sources to the loop-owned settlement retry set."""
-        self._turn_settlement_retry_ids.update(source_event_ids)
-        retry_task = self._turn_settlement_retry_task
-        if retry_task is not None and not retry_task.done():
-            return
-        self._turn_settlement_retry_task = create_background_task(
-            self._retry_failed_turn_settlements(),
-            name=f"retry_turn_dispatch_settlement_{self.store.entity_name}",
-            owner=self.background_task_owner,
-        )
-
-    async def _retry_failed_turn_settlements(self) -> None:
-        """Retry terminal TurnStore compaction with capped backoff until it lands."""
-        retry_delay_seconds = self._retry_initial_delay_seconds
-        try:
-            while self._turn_settlement_retry_ids:
-                source_event_ids = tuple(self._turn_settlement_retry_ids)
-                try:
-                    await run_blocking_until_complete(
-                        self.store.settle_pending_from_turn_store,
-                        source_event_ids,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "turn_dispatch_obligation_settlement_retry_failed",
-                        source_event_ids=source_event_ids,
-                    )
-                    await asyncio.sleep(retry_delay_seconds)
-                    retry_delay_seconds = min(
-                        retry_delay_seconds * 2,
-                        self._retry_max_delay_seconds,
-                    )
-                else:
-                    self._turn_settlement_retry_ids.difference_update(source_event_ids)
-                    retry_delay_seconds = self._retry_initial_delay_seconds
-        finally:
-            self._turn_settlement_retry_task = None
-
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
         client.add_event_admission_callback(self._admit_source_event)
@@ -407,7 +331,6 @@ class DispatchObligationRunner:
         provenance: nio.TimelineEventProvenance | None = None,
     ) -> DispatchObligation | None:
         """Persist exact work before its background task may be created."""
-        self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
             admission = await self.source_admission(
@@ -539,7 +462,6 @@ class DispatchObligationRunner:
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
-        self._event_loop = asyncio.get_running_loop()
         failed_keys: list[DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:

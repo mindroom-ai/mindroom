@@ -361,7 +361,7 @@ class EditRegenerator:
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))
+                    self.deps.turn_store.record_responded_turn(replace(record, response_event_id=response_event_id))
                     if applied
                     else None
                 ),
@@ -426,7 +426,7 @@ class EditRegenerator:
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                self.deps.turn_store.record_turn(
+                self.deps.turn_store.record_responded_turn(
                     replace(record, response_event_id=regenerated_event_id),
                 )
                 self._discard(mailbox, applied)
