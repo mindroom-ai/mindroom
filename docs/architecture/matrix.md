@@ -89,7 +89,14 @@ Each agent bot runs its own sync loop with a 30-second long-polling timeout.
 The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
 Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
 `matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
-Sliding positions are connection-scoped, so a restarted backend replays at most that window per room and older undelivered events are not recovered.
+Sliding positions remain connection-scoped, while callback admission uses mindroom-nio's persisted per-event provenance.
+Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
+Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
+This provenance remains attached across recovery, restart, and decryption independently of event-cache checkpoint persistence.
+Historical admission writes each event through the room-ordered sync cache mutation path before nio marks it recovered, and a cache failure leaves the event pending for retry.
+The cache remains advisory for live processing, but historical recovery is deliberately fail-closed because accepting recovered events without caching them would permanently lose thread context.
+For a limited newly joined world-readable room, MindRoom walks backward from the response cursor and caches the newest readable pre-join window within nio's configured page and event budgets because nio treats the bot's own join as a recovery boundary.
+Reaching either budget is successful bounded hydration, while transport and cache failures remain retryable and keep the durable join fence closed.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
@@ -218,7 +225,13 @@ Enabling encryption on a Matrix room is irreversible; MindRoom never disables it
 
 When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
 All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
-Notices are suppressed for events that predate a bot's room join or a start without sync continuity, since pre-join and already-replayed history is expected to be undecryptable.
+After a live room join, decryption-failure callbacks for that exact unfinished join stay fenced across restarts until a trusted sync response confirms joined membership.
+Incomplete cache certification keeps that join fence closed; after cache availability is repaired, the next trusted response atomically advances continuity and clears the fence.
+The room fence runs before durable dispatch persistence, but fenced failures still log diagnostics, update E2EE statistics, and request missing keys without claiming the visible-notice ledger.
+The cold-history fence rejects `HISTORY` callbacks before durable dispatch persistence unless the exact event and callback kind were already pending.
+`LIVE` callbacks remain admissible independently of response-level sync positions, recovery gaps, and cache-certification state.
+Each rejected callback emits concise `matrix_dispatch_source_fenced` telemetry with its room, event, callback kind, and fence reason.
+Neither fence compares federated event timestamps with the local wall clock.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 
 Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents.

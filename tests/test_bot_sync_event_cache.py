@@ -29,7 +29,6 @@ from mindroom.matrix.health import (
     reset_matrix_sync_health,
 )
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
@@ -39,6 +38,7 @@ from tests.conftest import (
     TEST_PASSWORD,
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+from tests.sync_continuity_helpers import load_sync_checkpoint
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _bind_owned_runtime_support,

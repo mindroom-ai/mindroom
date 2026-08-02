@@ -29,6 +29,7 @@ from mindroom.matrix.cache.thread_cache_gap import mark_thread_gap_fail_closed
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
+from mindroom.matrix.sync_continuity import SyncContinuityStore
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -921,7 +922,7 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Failed untrusted-row cleanup must keep one principal network-only until restart."""
+    """Missing continuity-v1 requires fail-closed cleanup for only that principal."""
     root = _shared_cache(event_cache_factory)
     await root.initialize()
     alice = root.for_principal("@alice:localhost")
@@ -946,8 +947,7 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
         monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
         runtime = MagicMock(event_cache=alice)
         trust = SyncCacheTrust(
-            storage_path=tmp_path,
-            agent_name="alice",
+            continuity_store=SyncContinuityStore(tmp_path, "alice"),
             runtime=runtime,
             logger=MagicMock(),
         )
@@ -963,6 +963,34 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
         assert await bob.get_event(room_id, "$bob") == bob_event
         await bob.store_event("$new", room_id, _event("$new", 4))
         assert await bob.get_event(room_id, "$new") == _event("$new", 4)
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_obsolete_sync_schema_at_legacy_path_starts_cold(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    tmp_path: Path,
+) -> None:
+    """An old checkpoint schema cannot collide with unified continuity state."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    continuity_store = SyncContinuityStore(tmp_path, "alice")
+    continuity_path = tmp_path / "sync_tokens" / "alice.token"
+    continuity_path.parent.mkdir(parents=True)
+    continuity_path.write_text(
+        '{"version":"mindroom-sync-token-v2","token":"s_old","cache_generation":"old"}',
+        encoding="utf-8",
+    )
+    trust = SyncCacheTrust(
+        continuity_store=continuity_store,
+        runtime=MagicMock(event_cache=cache, callback_failure_count=0),
+        logger=MagicMock(),
+    )
+    try:
+        assert await trust.prepare_startup() is None
+        assert continuity_path.exists()
     finally:
         await root.close()
 

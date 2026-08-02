@@ -66,6 +66,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_settlement_retry import TurnSettlementRetry
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
@@ -1111,9 +1112,10 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
         entity_name="general",
         room=room,
     )
+    turn_settlement_retry = TurnSettlementRetry(store=obligation_store)
     harness.turn_store.deps = replace(
         harness.turn_store.deps,
-        on_terminal_turn_persisted=obligation_runner.retry_turn_settlement,
+        on_terminal_turn_persisted=turn_settlement_retry.retry,
     )
     normalization_started = asyncio.Event()
     release_normalization = asyncio.Event()
@@ -1143,8 +1145,8 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
 
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
-    if obligation_runner._turn_settlement_retry_task is not None:
-        await obligation_runner._turn_settlement_retry_task
+    if turn_settlement_retry._task is not None:
+        await turn_settlement_retry._task
 
     assert not obligation_store.has_pending(first.event_id, DispatchCallbackKind.MESSAGE)
     assert not obligation_store.has_pending(second.event_id, DispatchCallbackKind.MESSAGE)

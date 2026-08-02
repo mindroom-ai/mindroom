@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
+from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.logging_config import get_logger
 
@@ -44,7 +46,7 @@ from .storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from .events import SourceCallbackPolicy
 
@@ -53,6 +55,40 @@ logger = get_logger(__name__)
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
+
+_SourceAdmission = Callable[
+    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
+    Awaitable[DispatchSourceAdmission],
+]
+_EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
+_HistoricalEventCache = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
+_SourceRejectionCallback = Callable[
+    [nio.MatrixRoom, DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
+    Awaitable[None],
+]
+
+
+async def _admit_all_sources(
+    _room_id: str,
+    _source_event_id: str,
+    _callback_kind: DispatchCallbackKind,
+    _provenance: nio.TimelineEventProvenance | None,
+) -> DispatchSourceAdmission:
+    return DispatchSourceAdmission.ACCEPTED
+
+
+def _ignore_event_provenance(
+    _source_event_id: str,
+    _provenance: nio.TimelineEventProvenance,
+) -> None:
+    pass
+
+
+async def _ignore_historical_event_cache(
+    _room: nio.MatrixRoom,
+    _event: nio.Event,
+) -> None:
+    pass
 
 
 _ADMITTED_OBLIGATION: ContextVar[DispatchObligation | None] = ContextVar(
@@ -74,6 +110,10 @@ class DispatchObligationRunner:
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
+    source_admission: _SourceAdmission = _admit_all_sources
+    observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
+    cache_historical_event: _HistoricalEventCache = _ignore_historical_event_cache
+    on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
@@ -83,9 +123,6 @@ class DispatchObligationRunner:
     _retry_keys: dict[DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
     _retry_corrupt: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _event_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _turn_settlement_retry_ids: set[str] = field(default_factory=set, init=False, repr=False)
-    _turn_settlement_retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
     def callbacks_for(
@@ -192,79 +229,6 @@ class DispatchObligationRunner:
             source_event_ids,
         )
 
-    def bind_event_loop(self) -> None:
-        """Bind the active runtime loop for callbacks arriving from persistence workers."""
-        self._event_loop = asyncio.get_running_loop()
-
-    def retry_turn_settlement(self, source_event_ids: tuple[str, ...]) -> None:
-        """Retry failed TurnStore compaction on the active runtime loop."""
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-        if running_loop is None:
-            try:
-                self.store.settle_pending_from_turn_store(source_event_ids)
-            except Exception:
-                logger.exception(
-                    "turn_dispatch_obligation_initial_settlement_failed",
-                    source_event_ids=source_event_ids,
-                )
-            else:
-                return
-            event_loop = self._event_loop
-            if event_loop is None or event_loop.is_closed():
-                logger.error(
-                    "turn_dispatch_obligation_retry_loop_unavailable",
-                    source_event_ids=source_event_ids,
-                )
-                return
-            event_loop.call_soon_threadsafe(self._enqueue_turn_settlement_retry, source_event_ids)
-            return
-        self._event_loop = running_loop
-        self._enqueue_turn_settlement_retry(source_event_ids)
-
-    def _enqueue_turn_settlement_retry(self, source_event_ids: tuple[str, ...]) -> None:
-        """Add exact terminal sources to the loop-owned settlement retry set."""
-        self._turn_settlement_retry_ids.update(source_event_ids)
-        retry_task = self._turn_settlement_retry_task
-        if retry_task is not None and not retry_task.done():
-            return
-        self._turn_settlement_retry_task = create_background_task(
-            self._retry_failed_turn_settlements(),
-            name=f"retry_turn_dispatch_settlement_{self.store.entity_name}",
-            owner=self.background_task_owner,
-        )
-
-    async def _retry_failed_turn_settlements(self) -> None:
-        """Retry terminal TurnStore compaction with capped backoff until it lands."""
-        retry_delay_seconds = self._retry_initial_delay_seconds
-        try:
-            while self._turn_settlement_retry_ids:
-                source_event_ids = tuple(self._turn_settlement_retry_ids)
-                try:
-                    await run_blocking_until_complete(
-                        self.store.settle_pending_from_turn_store,
-                        source_event_ids,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "turn_dispatch_obligation_settlement_retry_failed",
-                        source_event_ids=source_event_ids,
-                    )
-                    await asyncio.sleep(retry_delay_seconds)
-                    retry_delay_seconds = min(
-                        retry_delay_seconds * 2,
-                        self._retry_max_delay_seconds,
-                    )
-                else:
-                    self._turn_settlement_retry_ids.difference_update(source_event_ids)
-                    retry_delay_seconds = self._retry_initial_delay_seconds
-        finally:
-            self._turn_settlement_retry_task = None
-
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
         client.add_event_admission_callback(self._admit_source_event)
@@ -288,14 +252,27 @@ class DispatchObligationRunner:
             for event_type in policy.event_types:
                 client.add_event_callback(dispatch_matching, event_type)
 
-    async def _admit_source_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def _admit_source_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
+        self.observe_event_provenance(event.event_id, provenance)
+        if provenance is nio.TimelineEventProvenance.HISTORY:
+            try:
+                await self.cache_historical_event(room, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise nio.CallbackNotAcceptedError(str(error)) from error
         callback_kind = self._admission_kind(event)
         if callback_kind is None:
             return
         _ADMITTED_OBLIGATION.set(None)
         try:
-            obligation = await self.persist(room, event, callback_kind)
+            obligation = await self.persist(room, event, callback_kind, provenance)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -351,11 +328,28 @@ class DispatchObligationRunner:
         room: nio.MatrixRoom,
         event: DispatchEvent,
         callback_kind: DispatchCallbackKind,
+        provenance: nio.TimelineEventProvenance | None = None,
     ) -> DispatchObligation | None:
         """Persist exact work before its background task may be created."""
-        self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
+            admission = await self.source_admission(
+                room.room_id,
+                obligation.source_event_id,
+                callback_kind,
+                provenance,
+            )
+            if admission is not DispatchSourceAdmission.ACCEPTED:
+                if self.on_source_rejected is not None:
+                    await self.on_source_rejected(
+                        room,
+                        event,
+                        callback_kind,
+                        admission,
+                    )
+                return None
+            if await self._settle_from_turn_store_if_owned(obligation):
+                return None
             create_result = await run_blocking_until_complete(self.store.create_pending, obligation)
             if create_result is DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
@@ -468,7 +462,6 @@ class DispatchObligationRunner:
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
-        self._event_loop = asyncio.get_running_loop()
         failed_keys: list[DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:

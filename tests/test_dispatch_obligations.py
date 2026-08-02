@@ -1586,7 +1586,7 @@ async def test_admission_persists_once_before_event_callback_execution(
     event = _message_event("$durable")
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
 
-    await admission(room, event)
+    await admission(room, event, nio.TimelineEventProvenance.LIVE)
 
     assert store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
     assert not entered.is_set()
@@ -1616,7 +1616,7 @@ async def test_live_admission_and_callback_use_two_sqlite_connections(
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$two-connections")
 
-    await runner._admit_source_event(room, event)
+    await runner._admit_source_event(room, event, nio.TimelineEventProvenance.LIVE)
     await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
@@ -1648,7 +1648,7 @@ async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None
 
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$task-retry")
-    await runner._admit_source_event(room, event)
+    await runner._admit_source_event(room, event, nio.TimelineEventProvenance.LIVE)
     await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(room, event)
     await wait_for_background_tasks(timeout=1, owner=owner)
 
@@ -1788,67 +1788,6 @@ async def test_deferred_turn_retry_without_obligation_skips_backoff(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> None:
-    """A failed terminal compaction must retry without restart or a fabricated callback key."""
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        return DispatchCallbackResult.SUCCEEDED
-
-    owner = object()
-    runner = _runner(
-        _store(tmp_path),
-        callback,
-        background_task_owner=owner,
-        retry_initial_delay_seconds=0,
-        retry_max_delay_seconds=0,
-    )
-    settled = threading.Event()
-    attempts = 0
-
-    def settle_pending(_source_event_ids: tuple[str, ...]) -> None:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            message = "dispatch store unavailable"
-            raise OSError(message)
-        settled.set()
-
-    settle = MagicMock(side_effect=settle_pending)
-    runner.store.settle_pending_from_turn_store = settle
-
-    runner.bind_event_loop()
-    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
-    assert await asyncio.wait_for(asyncio.to_thread(settled.wait), timeout=1)
-    await wait_for_background_tasks(timeout=1, owner=owner)
-
-    assert settle.call_count == 2
-    settle.assert_called_with(("$message",))
-
-
-@pytest.mark.asyncio
-async def test_terminal_turn_settlement_succeeds_in_persistence_worker_without_retry_task(tmp_path: Path) -> None:
-    """The normal post-persist callback must finish before returning from its worker."""
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        return DispatchCallbackResult.SUCCEEDED
-
-    owner = object()
-    runner = _runner(
-        _store(tmp_path),
-        callback,
-        background_task_owner=owner,
-    )
-    settle = MagicMock()
-    runner.store.settle_pending_from_turn_store = settle
-
-    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
-
-    settle.assert_called_once_with(("$message",))
-    assert runner._turn_settlement_retry_task is None
-    assert await wait_for_background_tasks(timeout=0, owner=owner) is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["direct", "admission"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,
@@ -1885,7 +1824,7 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     if entrypoint == "direct":
         persist = runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
     else:
-        persist = runner._admit_source_event(room, event)
+        persist = runner._admit_source_event(room, event, nio.TimelineEventProvenance.LIVE)
     expected_error = OSError if entrypoint == "direct" else nio.CallbackNotAcceptedError
     with pytest.raises(expected_error, match="dispatch database unavailable") as exc_info:
         await persist
@@ -1937,6 +1876,7 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
 ) -> None:
     """Only the exact custom approval event type may reach the durable callback."""
     attempts = 0
+    observed_provenance: list[tuple[str, nio.TimelineEventProvenance]] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
         nonlocal attempts
@@ -1949,6 +1889,9 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
         callbacks={DispatchCallbackKind.APPROVAL: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
         turn_is_terminal=lambda _event_id: False,
+        observe_event_provenance=lambda event_id, provenance: observed_provenance.append(
+            (event_id, provenance),
+        ),
     )
     client = MagicMock()
     owner = object()
@@ -1962,9 +1905,12 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
 
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _unknown_event("$unknown", event_type)
-    await admission(room, event)
+    await admission(room, event, nio.TimelineEventProvenance.LIVE)
     await registered(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
     assert attempts == expected_attempts
+    assert observed_provenance == [
+        ("$unknown", nio.TimelineEventProvenance.LIVE),
+    ]
     assert not store.has_pending("$unknown", DispatchCallbackKind.APPROVAL)

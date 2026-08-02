@@ -205,6 +205,7 @@ async def test_router_joins_rooms_on_start(
         return RoomJoinOutcome.JOINED
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(

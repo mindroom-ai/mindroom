@@ -115,7 +115,9 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.cold_history_fence",
     "mindroom.reaction_dispatch",
+    "mindroom.turn_settlement_retry",
 ]
 
 [[modules]]
@@ -144,6 +146,7 @@ visibility = [
 path = "mindroom.dispatch_obligations.runner"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.dispatch_admission",
     "mindroom.dispatch_obligations.events",
     "mindroom.dispatch_obligations.storage",
     "mindroom.dispatch_recovery_context",
@@ -154,11 +157,29 @@ visibility = ["mindroom.dispatch_obligations"]
 [[modules]]
 path = "mindroom.reaction_dispatch"
 depends_on = [
+    "mindroom.approval_inbound",
+    "mindroom.authorization",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.dispatch_obligations",
     "mindroom.entity_resolution",
     "mindroom.user_stop_reconciliation",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.dispatch_admission"
+depends_on = []
+visibility = [
+    "mindroom.cold_history_fence",
+    "mindroom.dispatch_obligations.runner",
+]
+
+[[modules]]
+path = "mindroom.cold_history_fence"
+depends_on = [
+    "mindroom.dispatch_admission",
+    "mindroom.dispatch_obligations",
 ]
 visibility = ["mindroom.bot"]
 
@@ -474,7 +495,10 @@ depends_on = [
     "mindroom.matrix.visible_body",
     "mindroom.tool_approval",
 ]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.reaction_dispatch",
+]
 
 [[modules]]
 path = "mindroom.tool_approval"
@@ -937,7 +961,6 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
@@ -2084,8 +2107,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.sync_cache_trust"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.matrix.sync_certification",
-    "mindroom.matrix.sync_tokens",
 ]
 visibility = ["mindroom.bot"]
 
@@ -2096,23 +2119,27 @@ visibility = [
     "mindroom.bot",
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.sync_cache_trust",
-    "mindroom.matrix.sync_tokens",
+    "mindroom.matrix.sync_continuity",
 ]
 
 [[modules]]
-path = "mindroom.matrix.sync_tokens"
+path = "mindroom.matrix.sync_continuity"
 depends_on = [
+    "mindroom.durable_write",
+    "mindroom.file_locks",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_token_values",
 ]
-visibility = ["mindroom.matrix.sync_cache_trust"]
+visibility = [
+    "mindroom.bot",
+]
 
 [[modules]]
 path = "mindroom.matrix.sync_token_values"
 depends_on = []
 visibility = [
     "mindroom.matrix.sync_certification",
-    "mindroom.matrix.sync_tokens",
+    "mindroom.matrix.sync_continuity",
 ]
 
 [[modules]]
@@ -2260,7 +2287,6 @@ depends_on = [
 visibility = [
     "mindroom.api.main",
     "mindroom.bot",
-    "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
 ]
 
@@ -2292,6 +2318,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"
+depends_on = []
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.matrix.joined_room_history"
 depends_on = []
 visibility = ["mindroom.bot"]
 
@@ -2827,6 +2858,7 @@ depends_on = [
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
+    "mindroom.cold_history_fence",
     "mindroom.command_turn_executor",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
@@ -2846,11 +2878,13 @@ depends_on = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.joined_room_history",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.sync_cache_trust",
     "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_continuity",
     "mindroom.matrix.sync_loop",
     "mindroom.matrix.to_device",
     "mindroom.matrix.users",
@@ -2872,6 +2906,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
+    "mindroom.turn_settlement_retry",
     "mindroom.turn_store",
     "mindroom.user_stop_reconciliation",
     "mindroom.visible_response_reconciliation",
@@ -3463,6 +3498,15 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.thread_utils",
 ]
+
+[[modules]]
+path = "mindroom.turn_settlement_retry"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.dispatch_obligations",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.prompt_ingress_reservation"

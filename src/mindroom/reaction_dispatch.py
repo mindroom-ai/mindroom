@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import interactive
+from mindroom.approval_inbound import handle_tool_approval_action
+from mindroom.authorization import is_authorized_sender
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_obligations import DispatchSemanticConsumer
@@ -19,7 +21,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.dispatch_obligations import DispatchObligationRunner
     from mindroom.ingress_validation import IngressValidator
@@ -51,8 +52,6 @@ class ReactionDispatcherDeps:
     handle_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     config_confirmation: ConfigConfirmationContext
-    handle_approval_action: Callable[..., Awaitable[bool]]
-    sender_is_authorized: Callable[[str, Config, str, RuntimePaths], bool]
 
 
 @dataclass
@@ -86,7 +85,7 @@ class ReactionDispatcher:
             )
             approval_claimed = True
 
-        approval_handled = await self.deps.handle_approval_action(
+        approval_handled = await handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
             config=self.deps.runtime.config,
@@ -239,7 +238,7 @@ class ReactionDispatcher:
             )
             return
 
-        if semantic_consumer is None and not self.deps.sender_is_authorized(
+        if semantic_consumer is None and not is_authorized_sender(
             event.sender,
             self.deps.runtime.config,
             room.room_id,

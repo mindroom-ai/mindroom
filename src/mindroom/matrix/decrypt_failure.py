@@ -16,7 +16,6 @@ that fails on a session claims the notice, so multi-agent rooms never storm.
 from __future__ import annotations
 
 import json
-import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -79,30 +78,6 @@ _stats = E2EEStats()
 def e2ee_stats() -> E2EEStats:
     """Return the process-wide encrypted-event counters."""
     return _stats
-
-
-_notice_floors: dict[tuple[str, str | None], int] = {}
-
-
-def raise_notice_floor(user_id: str, room_id: str | None = None) -> None:
-    """Suppress visible decrypt-failure notices for events older than now.
-
-    Bots call this when they join a room mid-flight (pre-join encrypted
-    history is expected to be undecryptable) and when they start without sync
-    continuity (a tokenless initial sync replays events an earlier device may
-    already have handled). ``room_id=None`` applies to every room for the bot.
-    """
-    _notice_floors[(user_id, room_id)] = int(time.time() * 1000)
-
-
-def _below_notice_floor(user_id: str | None, room_id: str, server_timestamp: int) -> bool:
-    if user_id is None:
-        return False
-    floor = max(
-        _notice_floors.get((user_id, room_id), 0),
-        _notice_floors.get((user_id, None), 0),
-    )
-    return server_timestamp < floor
 
 
 def _notice_ledger_path(runtime_paths: RuntimePaths) -> Path:
@@ -177,8 +152,9 @@ async def handle_decrypt_failure(
     *,
     agent_name: str,
     runtime_paths: RuntimePaths,
+    suppress_notice: bool = False,
 ) -> None:
-    """Log one undecryptable Megolm event, request its key, and notify the room once."""
+    """Log one undecryptable event, request its key, and optionally notify."""
     session_id = event.session_id
     assert session_id is not None  # schema-required for parsed MegolmEvents
     already_requested = session_id in client.outgoing_key_requests
@@ -210,15 +186,9 @@ async def handle_decrypt_failure(
                 session_id=session_id,
             )
 
-    if _below_notice_floor(client.user_id, room.room_id, event.server_timestamp):
-        logger.debug(
-            "e2ee_decrypt_notice_suppressed_old_event",
-            room_id=room.room_id,
-            event_id=event.event_id,
-            session_id=session_id,
-            agent=agent_name,
-        )
+    if suppress_notice:
         return
+
     # The check and the record run with no await between them, so concurrent
     # callbacks from other bots in this process cannot claim the same session:
     # the first bot that fails on a session posts the only notice.
@@ -246,4 +216,4 @@ async def handle_decrypt_failure(
         raise RuntimeError(msg)
 
 
-__all__ = ["E2EEStats", "e2ee_stats", "handle_decrypt_failure", "raise_notice_floor"]
+__all__ = ["E2EEStats", "e2ee_stats", "handle_decrypt_failure"]

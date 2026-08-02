@@ -13,7 +13,8 @@ import pytest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
-from mindroom.matrix.sync_tokens import load_sync_checkpoint, save_sync_token
+from mindroom.matrix.sync_continuity import SyncContinuityStore
+from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,8 +48,7 @@ class _Runtime:
 def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCacheTrust:
     runtime = _Runtime(event_cache=_EventCache())
     return SyncCacheTrust(
-        storage_path=tmp_path,
-        agent_name="code",
+        continuity_store=SyncContinuityStore(tmp_path, "code"),
         runtime=cast("BotRuntimeView", runtime),
         logger=get_logger(),
         state=state,
@@ -156,7 +156,7 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
                     limited_room_ids=(_RECOVERED_ROOM,),
                     complete=True,
                 )
-                decision = trust.certify_response(
+                decision = await trust.certify_response(
                     next_batch=response.next_batch,
                     cache_result=result,
                     first_sync=index == 0,
@@ -180,17 +180,18 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
     assert checkpoint.token == "s_after"  # noqa: S105
 
 
-def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewinds(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewinds(tmp_path: Path) -> None:
     """Unknown-position replay may establish a baseline but may not advance an unrecovered gap."""
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
-    unknown = trust.reject_unknown_pos()
+    unknown = await trust.reject_unknown_pos()
     baseline_response = _sync_response(
         limited_room_ids=(_UNRECOVERED_ROOM,),
         recovered_room_ids=frozenset(),
         unrecovered_room_ids=frozenset(),
         next_batch="s_initial",
     )
-    baseline = trust.certify_response(
+    baseline = await trust.certify_response(
         next_batch=baseline_response.next_batch,
         cache_result=_cache_result(
             baseline_response,
@@ -204,7 +205,7 @@ def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewinds(tm
         recovered_room_ids=frozenset(),
         unrecovered_room_ids=frozenset({_UNRECOVERED_ROOM}),
     )
-    positioned = trust.certify_response(
+    positioned = await trust.certify_response(
         next_batch=positioned_response.next_batch,
         cache_result=_cache_result(
             positioned_response,
@@ -232,7 +233,7 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
         unrecovered_room_ids=frozenset(),
         next_batch="s_initial",
     )
-    first_baseline = trust.certify_response(
+    first_baseline = await trust.certify_response(
         next_batch=baseline_response.next_batch,
         cache_result=_cache_result(
             baseline_response,
@@ -245,7 +246,7 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
 
     trust.record_dispatch_persist_failure()
     trust.reject_response_before_certification()
-    retry_baseline = trust.certify_response(
+    retry_baseline = await trust.certify_response(
         next_batch="s_retry",
         cache_result=_cache_result(
             baseline_response,
@@ -260,7 +261,8 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
     assert retry_baseline.reset_client_token is False
 
 
-def test_restored_token_recovered_only_first_sync_certifies_after_callback_success(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_restored_token_recovered_only_first_sync_certifies_after_callback_success(tmp_path: Path) -> None:
     """Pinned nio recovered labels prove non-live callback acceptance."""
     response = _sync_response(
         limited_room_ids=(_RECOVERED_ROOM,),
@@ -280,7 +282,7 @@ def test_restored_token_recovered_only_first_sync_certifies_after_callback_succe
     )
     trust = _trust(tmp_path, state=SyncTrustState.PENDING)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=True,
@@ -291,7 +293,8 @@ def test_restored_token_recovered_only_first_sync_certifies_after_callback_succe
     assert load_sync_checkpoint(tmp_path, "code") is not None
 
 
-def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_path: Path) -> None:
     """A local durable failure rewinds even when the wire window is no longer limited."""
     response = _sync_response(
         limited_room_ids=(),
@@ -306,7 +309,7 @@ def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_pa
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
     save_sync_token(tmp_path, "code", "s_before", cache_generation=_CACHE_GENERATION)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,
@@ -318,7 +321,8 @@ def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_pa
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: Path) -> None:
     """Pinned nio preserves callback-success proof outside the current window."""
     response = _sync_response(
         limited_room_ids=(),
@@ -332,7 +336,7 @@ def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: Path) 
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,
@@ -352,7 +356,8 @@ def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: Path) 
     ],
     ids=["incomplete", "failed", "cancelled"],
 )
-def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complete(
+@pytest.mark.asyncio
+async def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complete(
     tmp_path: Path,
     complete: bool,
     errors: tuple[BaseException, ...],
@@ -371,7 +376,7 @@ def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complete(
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,
@@ -382,7 +387,8 @@ def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complete(
     assert decision.reset_client_token is True
 
 
-def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: Path) -> None:
     """One authoritative unrecovered room must outweigh another room's recovery."""
     limited_room_ids = (_RECOVERED_ROOM, _UNRECOVERED_ROOM)
     response = _sync_response(
@@ -397,7 +403,7 @@ def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: Path) 
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,
@@ -408,7 +414,8 @@ def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: Path) 
     assert decision.reset_client_token is True
 
 
-def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tmp_path: Path) -> None:
     """An abandoned earlier gap must fail closed even when this wire window is not limited."""
     response = _sync_response(
         limited_room_ids=(),
@@ -422,7 +429,7 @@ def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tmp_path
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,
@@ -433,7 +440,8 @@ def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tmp_path
     assert decision.reset_client_token is True
 
 
-def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
     """An enabled or disabled recovery path may never turn missing classification into success."""
     response = _sync_response(
         limited_room_ids=(_UNRECOVERED_ROOM,),
@@ -447,7 +455,7 @@ def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
-    decision = trust.certify_response(
+    decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
         first_sync=False,

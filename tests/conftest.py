@@ -729,6 +729,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
     return client
 
 
@@ -1341,6 +1342,13 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     return rebuilt
 
 
+def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> ReactionDispatcher:
+    """Rebuild reaction dispatch after swapping collaborators captured at construction."""
+    rebuilt = ReactionDispatcher(replace(bot._reaction_dispatcher.deps, **changes))
+    bot._reaction_dispatcher = rebuilt
+    return rebuilt
+
+
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
     """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
@@ -1462,25 +1470,26 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     reaction_dispatcher = bot._reaction_dispatcher
-    bot._reaction_dispatcher = ReactionDispatcher(
-        replace(
-            reaction_dispatcher.deps,
+    replace_reaction_dispatcher_deps(
+        bot,
+        runtime=rebuilt.deps.runtime,
+        logger=rebuilt.deps.logger,
+        runtime_paths=rebuilt.deps.runtime_paths,
+        agent_name=rebuilt.deps.agent_name,
+        turn_policy=rebuilt.deps.turn_policy,
+        turn_store=rebuilt.deps.turn_store,
+        conversation_cache=rebuilt.deps.conversation_cache,
+        user_stop_reconciler=bot._user_stop_reconciler,
+        ingress=rebuilt.deps.ingress,
+        stop_manager=bot.stop_manager,
+        reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
+        handle_interactive_selection=rebuilt.handle_interactive_selection,
+        config_confirmation=replace(
+            reaction_dispatcher.deps.config_confirmation,
             runtime=rebuilt.deps.runtime,
-            logger=rebuilt.deps.logger,
             runtime_paths=rebuilt.deps.runtime_paths,
-            agent_name=rebuilt.deps.agent_name,
-            turn_policy=rebuilt.deps.turn_policy,
-            turn_store=rebuilt.deps.turn_store,
-            conversation_cache=rebuilt.deps.conversation_cache,
-            user_stop_reconciler=bot._user_stop_reconciler,
-            ingress=rebuilt.deps.ingress,
-            config_confirmation=replace(
-                reaction_dispatcher.deps.config_confirmation,
-                runtime=rebuilt.deps.runtime,
-                runtime_paths=rebuilt.deps.runtime_paths,
-                build_message_target=rebuilt.deps.resolver.build_message_target,
-                delivery_gateway=rebuilt.deps.delivery_gateway,
-            ),
+            build_message_target=rebuilt.deps.resolver.build_message_target,
+            delivery_gateway=rebuilt.deps.delivery_gateway,
         ),
     )
     edit_changes = {
@@ -1738,5 +1747,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
         ):
             yield

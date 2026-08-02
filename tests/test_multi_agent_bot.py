@@ -1011,6 +1011,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=False),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=False),
+            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 

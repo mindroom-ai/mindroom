@@ -27,6 +27,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
@@ -1095,7 +1096,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
     allow_normalization = asyncio.Event()
     allow_placeholder_send = asyncio.Event()
-    both_normalizations_started = asyncio.Event()
+    normalization_started = asyncio.Event()
     placeholder_send_started = asyncio.Event()
     normalization_count = 0
     normalized_event = PreparedTextEvent(
@@ -1117,8 +1118,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedTextEvent, str]:
         nonlocal normalization_count
         normalization_count += 1
-        if normalization_count == 2:
-            both_normalizations_started.set()
+        normalization_started.set()
         await allow_normalization.wait()
         return normalized_event, event.event_id
 
@@ -1137,16 +1137,18 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     ):
         bot._delivery_gateway.send_text.side_effect = send_placeholder
         await bot._turn_controller.handle_media_event(room, event)
-        await bot._turn_controller.handle_media_event(room, event)
+        redelivery = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
         try:
-            await asyncio.wait_for(both_normalizations_started.wait(), timeout=1)
+            await asyncio.wait_for(normalization_started.wait(), timeout=1)
             await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
             await asyncio.sleep(0)
+            assert normalization_count == 1
             assert bot._delivery_gateway.send_text.await_count == 1
         finally:
             allow_normalization.set()
             allow_placeholder_send.set()
-            await drain_coalescing(bot)
+        assert await asyncio.wait_for(redelivery, timeout=1) is TurnDispatchOutcome.DEFERRED
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
     bot._delivery_gateway.edit_text.assert_awaited_once()

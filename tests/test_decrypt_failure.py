@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -13,7 +12,7 @@ from nio.exceptions import LocalProtocolError
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import decrypt_failure
-from mindroom.matrix.decrypt_failure import e2ee_stats, handle_decrypt_failure, raise_notice_floor
+from mindroom.matrix.decrypt_failure import e2ee_stats, handle_decrypt_failure
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,7 +23,6 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def _reset_notice_state() -> None:
     decrypt_failure._notice_ledgers.clear()
-    decrypt_failure._notice_floors.clear()
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -263,57 +261,23 @@ async def test_unsuccessful_send_releases_claim_for_retry(
 
 
 @pytest.mark.asyncio
-async def test_notice_suppressed_for_events_below_room_floor(tmp_path: Path) -> None:
-    """Events older than the room's notice floor (e.g. pre-join history) stay silent."""
+@pytest.mark.parametrize(
+    "server_timestamp",
+    [0, 9_000_000_000_000],
+)
+async def test_decrypt_notice_does_not_compare_federated_and_local_clocks(
+    tmp_path: Path,
+    server_timestamp: int,
+) -> None:
+    """Callback admission, not timestamp skew, decides decrypt-notice work."""
     client = _mock_client()
-    raise_notice_floor(client.user_id, "!room:localhost")
     notice = AsyncMock(return_value=True)
 
     with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
         await handle_decrypt_failure(
             client,
             _mock_room(),
-            _megolm_event(server_timestamp=1700000000000),
-            agent_name="assistant",
-            runtime_paths=_runtime_paths(tmp_path),
-        )
-
-    notice.assert_not_awaited()
-    client.request_room_key.assert_awaited_once()  # key request still goes out
-
-
-@pytest.mark.asyncio
-async def test_global_floor_suppresses_notices_in_every_room(tmp_path: Path) -> None:
-    """A tokenless start suppresses notices for replayed history in all rooms."""
-    client = _mock_client()
-    raise_notice_floor(client.user_id)
-    notice = AsyncMock(return_value=True)
-
-    with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
-        await handle_decrypt_failure(
-            client,
-            _mock_room(),
-            _megolm_event(server_timestamp=1700000000000),
-            agent_name="assistant",
-            runtime_paths=_runtime_paths(tmp_path),
-        )
-
-    notice.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_event_newer_than_floor_still_notifies(tmp_path: Path) -> None:
-    """Fresh messages arriving after a floor was raised must still notify."""
-    client = _mock_client()
-    raise_notice_floor(client.user_id, "!room:localhost")
-    notice = AsyncMock(return_value=True)
-    future_ts = int(time.time() * 1000) + 60_000
-
-    with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
-        await handle_decrypt_failure(
-            client,
-            _mock_room(),
-            _megolm_event(server_timestamp=future_ts),
+            _megolm_event(server_timestamp=server_timestamp),
             agent_name="assistant",
             runtime_paths=_runtime_paths(tmp_path),
         )
