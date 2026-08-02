@@ -437,6 +437,67 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert agent.learning.user_memory.mode is LearningMode.ALWAYS
 
 
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_role_describes_local_tool_execution_environment(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """The prompt should identify an entirely local effective tool surface."""
+    config = _test_config()
+    config.agents["calculator"].include_default_tools = False
+    runtime_paths = _runtime_paths(tmp_path)
+
+    agent = _create_agent_for_test("calculator", config=_bind_runtime_paths(config, runtime_paths))
+
+    assert "## Tool Execution Environment" in agent.role
+    assert "Local tools (primary MindRoom runtime): `calculator`." in agent.role
+    assert "Worker-routed tools: none." in agent.role
+    assert "Worker routing: disabled; backend: `static_runner`; scope: `unscoped`." in agent.role
+    assert "Sandboxing is applied per tool, not per agent." in agent.role
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_role_describes_mixed_dedicated_worker_routing(
+    _mock_storage: MagicMock,  # noqa: PT019
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """The prompt should identify mixed local and dedicated-worker tools."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = _test_config()
+    config.agents["general"].tools = ["shell", "calculator"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_tools = ["shell"]
+    config.agents["general"].worker_scope = "user_agent"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+    assert "Local tools (primary MindRoom runtime): `calculator`." in agent.role
+    assert "Worker-routed tools: `shell`." in agent.role
+    assert "Worker routing: enabled; backend: `kubernetes`; scope: `user_agent`." in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_restricted_agent_omits_tool_execution_environment(
+    _mock_storage: MagicMock,  # noqa: PT019
+) -> None:
+    """Restricted in-process agents should not advertise unavailable capabilities."""
+    config = _test_config()
+
+    agent = _create_agent_for_test("general", config=config, disable_runtime_capabilities=True)
+
+    assert "## Tool Execution Environment" not in agent.role
+
+
 def test_get_agent_runtime_state_dbs_accepts_backend_neutral_agno_storage() -> None:
     """Runtime DB discovery should not require SQLite-specific storage handles."""
     history_db = InMemoryDb()

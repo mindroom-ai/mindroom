@@ -543,6 +543,10 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 
 Credential leases are single-use: once consumed by an `/execute` call, the lease cannot be replayed.
 
+## Agent prompt visibility
+
+MindRoom automatically adds a concise **Tool Execution Environment** section to each agent system prompt. It is generated from the agent's effective runtime configuration and lists the tools that execute locally versus through a worker, the configured worker backend and scope, and whether routing is active. This is intentionally per tool: an agent can use both primary-runtime and worker-routed tools, so `worker_scope` does not imply that the whole agent is sandboxed.
+
 ## Per-agent configuration
 
 MindRoom owns the default local-versus-worker routing policy.

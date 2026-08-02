@@ -251,6 +251,7 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
@@ -4672,6 +4673,7 @@ expose = [
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
     "sandbox_proxy_config",
+    "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
     "to_json_compatible",
 ]

@@ -53,6 +53,7 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
@@ -61,6 +62,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_owned_path,
     shared_storage_root,
 )
+from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -145,6 +147,8 @@ class _AgentToolAssembly:
     # server-side tool-search path (Anthropic and OpenAI Responses); empty on
     # the homegrown dynamic-tools path.
     deferred_wire_tool_names: frozenset[str]
+    runtime_tool_names: tuple[str, ...]
+    worker_tools: list[str]
 
 
 @dataclass(frozen=True)
@@ -874,6 +878,38 @@ def resolve_runtime_worker_tools(
     return default_worker_routed_tools(runtime_tool_names)
 
 
+def _render_tool_execution_environment(
+    *,
+    runtime_paths: constants.RuntimePaths,
+    runtime_tool_names: tuple[str, ...],
+    worker_tools: list[str],
+    worker_scope: WorkerScope | None,
+) -> str:
+    """Describe effective per-tool execution routing to the model."""
+    worker_routed = tuple(
+        name
+        for name in runtime_tool_names
+        if sandbox_proxy_enabled_for_tool(name, runtime_paths=runtime_paths, worker_tools_override=worker_tools)
+    )
+    worker_routed_set = set(worker_routed)
+    local = tuple(name for name in runtime_tool_names if name not in worker_routed_set)
+
+    def tool_list(names: tuple[str, ...]) -> str:
+        return ", ".join(f"`{name}`" for name in names) if names else "none"
+
+    backend = primary_worker_backend_name(runtime_paths)
+    scope = worker_scope or "unscoped"
+    routing_state = "enabled" if worker_routed else "disabled"
+    return (
+        "## Tool Execution Environment\n"
+        f"- Local tools (primary MindRoom runtime): {tool_list(local)}.\n"
+        f"- Worker-routed tools: {tool_list(worker_routed)}.\n"
+        f"- Worker routing: {routing_state}; backend: `{backend}`; scope: `{scope}`.\n"
+        "- Sandboxing is applied per tool, not per agent. A single agent may use both local and "
+        "worker-routed tools."
+    )
+
+
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
     """Check if learning is enabled for an agent, falling back to defaults."""
     learning = agent_config.learning if agent_config.learning is not None else defaults.learning
@@ -1461,6 +1497,8 @@ def _assemble_agent_toolkits(
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
         deferred_tool_names=tuple(dict.fromkeys(deferred_tool_names)),
         deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
+        runtime_tool_names=tuple(resolved_tool_configs),
+        worker_tools=worker_tools,
     )
 
 
@@ -1495,6 +1533,8 @@ def _build_agent_role_context(
     active_model_name: str | None,
     include_openai_compat_guidance: bool,
     disable_runtime_capabilities: bool,
+    runtime_tool_names: tuple[str, ...],
+    worker_tools: list[str],
 ) -> _AgentRoleContext:
     """Resolve the model name and render identity, datetime, and preload context into the role."""
     # Get model config for identity context
@@ -1529,6 +1569,12 @@ def _build_agent_role_context(
     full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
+        full_context += "\n\n" + _render_tool_execution_environment(
+            runtime_paths=runtime_paths,
+            runtime_tool_names=runtime_tool_names,
+            worker_tools=worker_tools,
+            worker_scope=agent_runtime.execution.execution_scope,
+        )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,
@@ -1822,6 +1868,8 @@ def create_agent(
         active_model_name=active_model_name,
         include_openai_compat_guidance=include_openai_compat_guidance,
         disable_runtime_capabilities=disable_runtime_capabilities,
+        runtime_tool_names=tool_assembly.runtime_tool_names,
+        worker_tools=tool_assembly.worker_tools,
     )
 
     # Create agent with defaults applied

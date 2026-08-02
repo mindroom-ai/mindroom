@@ -756,6 +756,20 @@ def _sandbox_proxy_enabled_for_tool(
     )
 
 
+def sandbox_proxy_enabled_for_tool(
+    tool_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+    worker_tools_override: list[str] | None = None,
+) -> bool:
+    """Return whether one tool is effectively routed through a worker."""
+    return _sandbox_proxy_enabled_for_tool(
+        tool_name,
+        runtime_paths=runtime_paths,
+        worker_tools_override=worker_tools_override,
+    )
+
+
 def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
