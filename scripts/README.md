@@ -62,7 +62,8 @@ The disposable room is world-readable so replacement bots can actually receive a
 The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
 It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its unsettled durable obligation, and a deterministic model request held in flight.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new PID, and waits for both recovered bots to complete setup.
-The run passes only when the pending obligation becomes succeeded, the exact fresh callback runs once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+The run passes only when the pending obligation becomes succeeded, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+Transport callback entry may repeat while Matrix sync and durable recovery race, so the oracle counts the `Received message` boundary after durable dedup instead of the lower-level callback-entry log.
 Neither historical event may start a callback, reach the fresh prompt, or produce output.
 An orderly final shutdown must complete without the production durable-recovery drain-failure marker.
 

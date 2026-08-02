@@ -260,7 +260,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
         fresh_response_complete=True,
-        fresh_callback_count=2,
+        fresh_semantic_ingress_count=2,
         recovered_generation_response_observed=True,
         fresh_obligation_recovered=True,
         fresh_prompt_observed=True,
@@ -279,7 +279,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_response_complete=False,
-            fresh_callback_count=1,
+            fresh_semantic_ingress_count=1,
             recovered_generation_response_observed=False,
             fresh_obligation_recovered=False,
             historical_in_fresh_prompt=True,
@@ -293,7 +293,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
-    assert any("invariant=fresh_callback_replayed_after_restart" in failure for failure in failures)
+    assert any("invariant=fresh_semantic_ingress_replayed_after_restart" in failure for failure in failures)
     assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
     assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
@@ -394,8 +394,8 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
 
         def wait_for_log(markers: tuple[str, ...], *_args: object, **_kwargs: object) -> bool:
             if markers == (
-                "matrix_event_callback_started",
-                "agent_name=general",
+                "Received message",
+                "agent=general",
                 "!restart:example",
                 "$restart-fresh",
             ):
@@ -439,7 +439,7 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
                 fresh_agent_output_count=1,
                 fresh_router_output_count=0,
                 fresh_response_complete=True,
-                fresh_callback_count=2,
+                fresh_semantic_ingress_count=2,
                 recovered_generation_response_observed=True,
                 fresh_obligation_recovered=True,
                 fresh_prompt_observed=True,
@@ -872,8 +872,8 @@ async def test_restart_observation_rejects_incomplete_runtime_drain_from_replace
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n"
             f'{{"event": "{marker}"}}\n',
             encoding="utf-8",
@@ -916,8 +916,8 @@ async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
             "matrix_event_callback_started !restart:example $old-media\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
@@ -964,8 +964,8 @@ async def test_restart_observation_rejects_router_only_fresh_response(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
@@ -1012,8 +1012,8 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
@@ -1068,6 +1068,9 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
         stack.log_path.write_text(
             "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
             "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
@@ -1095,7 +1098,7 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
         assert observation.cached_event_pair_count == 4
         assert observation.fresh_agent_output_count == 1
         assert observation.fresh_response_complete
-        assert observation.fresh_callback_count == 2
+        assert observation.fresh_semantic_ingress_count == 2
         assert observation.recovered_generation_response_observed
         assert observation.fresh_obligation_recovered
         assert observation.fresh_prompt_observed
@@ -1112,8 +1115,8 @@ async def test_restart_observation_reports_incomplete_fresh_response(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
@@ -1242,8 +1245,8 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )

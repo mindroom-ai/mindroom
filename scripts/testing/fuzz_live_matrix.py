@@ -117,7 +117,7 @@ class RestartRegressionObservation:
     fresh_agent_output_count: int
     fresh_router_output_count: int
     fresh_response_complete: bool
-    fresh_callback_count: int
+    fresh_semantic_ingress_count: int
     recovered_generation_response_observed: bool
     fresh_obligation_recovered: bool
     fresh_prompt_observed: bool
@@ -133,7 +133,7 @@ class _RestartEvidence:
     historical_callback_counts: tuple[int, int]
     fresh_agent_output_count: int
     fresh_router_output_count: int
-    fresh_callback_count: int
+    fresh_semantic_ingress_count: int
     recovered_generation_response_observed: bool
     fresh_obligation_recovered: bool
     cached_event_pair_count: int
@@ -226,8 +226,8 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             4,
         ),
         (
-            "fresh_callback_replayed_after_restart",
-            observation.fresh_callback_count,
+            "fresh_semantic_ingress_replayed_after_restart",
+            observation.fresh_semantic_ingress_count,
             2,
             "fresh_user",
             "recovery_startup",
@@ -1642,8 +1642,8 @@ class LiveFuzzRunner:
             self._message_content(FRESH_RESTART_REQUEST),
         )
         callback_markers = (
-            "matrix_event_callback_started",
-            f"agent_name={AGENT_NAME}",
+            "Received message",
+            f"agent={AGENT_NAME}",
             dormant.room_id,
             fresh,
         )
@@ -1778,10 +1778,10 @@ class LiveFuzzRunner:
             historical_callback_counts=(historical_callback_counts[0], historical_callback_counts[1]),
             fresh_agent_output_count=len(fresh_agent_response_ids),
             fresh_router_output_count=len(fresh_router_response_ids),
-            fresh_callback_count=_log_count(
+            fresh_semantic_ingress_count=_log_count(
                 log,
-                "matrix_event_callback_started",
-                f"agent_name={AGENT_NAME}",
+                "Received message",
+                f"agent={AGENT_NAME}",
                 dormant.room_id,
                 fresh_event_id,
             ),
@@ -1819,7 +1819,7 @@ class LiveFuzzRunner:
                 and evidence.historical_callback_counts == (0, 0)
                 and evidence.fresh_agent_output_count == 1
                 and evidence.fresh_router_output_count == 0
-                and evidence.fresh_callback_count == 2
+                and evidence.fresh_semantic_ingress_count == 2
                 and evidence.recovered_generation_response_observed
                 and evidence.fresh_obligation_recovered
                 and evidence.fresh_prompt_observed
@@ -1864,7 +1864,7 @@ class LiveFuzzRunner:
             fresh_agent_output_count=evidence.fresh_agent_output_count,
             fresh_router_output_count=evidence.fresh_router_output_count,
             fresh_response_complete=evidence.fresh_response_complete,
-            fresh_callback_count=evidence.fresh_callback_count,
+            fresh_semantic_ingress_count=evidence.fresh_semantic_ingress_count,
             recovered_generation_response_observed=evidence.recovered_generation_response_observed,
             fresh_obligation_recovered=evidence.fresh_obligation_recovered,
             fresh_prompt_observed=evidence.fresh_prompt_observed,
