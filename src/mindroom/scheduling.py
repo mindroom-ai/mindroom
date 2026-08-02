@@ -618,12 +618,12 @@ async def get_pending_schedule_thread_ids_for_room(
     )
 
 
-async def get_scheduled_task(
+async def _read_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
-) -> ScheduledTaskRecord | None:
-    """Fetch and parse a single scheduled task from Matrix state."""
+) -> dict[str, typing.Any] | None:
+    """Fetch and validate one scheduled-task state payload."""
     response = await client.room_get_state_event(
         room_id=room_id,
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
@@ -637,7 +637,19 @@ async def get_scheduled_task(
     if not isinstance(response.content, dict):
         msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
         raise TypeError(msg)
-    task = _parse_scheduled_task_record(room_id, task_id, response.content)
+    return response.content
+
+
+async def get_scheduled_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+) -> ScheduledTaskRecord | None:
+    """Fetch and parse a single scheduled task from Matrix state."""
+    content = await _read_scheduled_task_state(client, room_id, task_id)
+    if content is None:
+        return None
+    task = _parse_scheduled_task_record(room_id, task_id, content)
     if task is None:
         msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state"
         raise RuntimeError(msg)
@@ -1590,24 +1602,11 @@ async def cancel_scheduled_task(
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> str:
     """Cancel a scheduled task."""
-    # First check if task exists
-    response = await client.room_get_state_event(
-        room_id=room_id,
-        event_type=_SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
-    )
-
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    existing_content = await _read_scheduled_task_state(client, room_id, task_id)
+    if existing_content is None:
         return f"❌ Task `{task_id}` not found."
-    if not isinstance(response, nio.RoomGetStateEventResponse):
-        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
-        raise RuntimeError(msg)  # noqa: TRY004
-    if not isinstance(response.content, dict):
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
-        raise TypeError(msg)
 
     # Update to cancelled
-    existing_content = response.content
     try:
         await _put_scheduled_task_state_content(
             client=client,

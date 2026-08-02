@@ -1661,7 +1661,7 @@ class AgentBot:
         """Release fleet-dependent turn replay after the responder startup pass."""
         await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
         unsettled_source_event_ids = await asyncio.to_thread(
-            self._dispatch_obligation_runner.unsettled_source_event_ids,
+            self._dispatch_obligation_store.unsettled_source_event_ids,
         )
         await asyncio.to_thread(
             self._turn_store.cleanup,
@@ -1954,11 +1954,10 @@ class AgentBot:
             callback_kind_for_source_kind(source_kind),
         )
 
-    async def _settle_ignored_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
+    async def _settle_ignored_dispatch_source(self, source_event_id: str, _source_kind: str) -> None:
         """Settle one asynchronously normalized source that produced no dispatch payload."""
-        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_source(
-            source_event_id,
-            callback_kind_for_source_kind(source_kind),
+        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources(
+            (source_event_id,),
         )
 
     def _log_matrix_event_callback_started(

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.background_tasks import run_blocking_until_complete, wait_for_background_tasks
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
@@ -25,7 +25,6 @@ from mindroom.dispatch_obligations import (
     _DispatchObligation,
     _DispatchTerminalOutcome,
     _RoomIdEvent,
-    _run_owned_store_operation,
     callback_kind_for_source_kind,
 )
 from mindroom.dispatch_obligations import (
@@ -244,74 +243,6 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
     assert restarted._has_pending("$message", DispatchCallbackKind.MESSAGE)
 
 
-def test_v1_store_migrates_pending_rows_without_inventing_a_consumer(tmp_path: Path) -> None:
-    """Schema migration must keep accepted work unclassified until its callback routes it."""
-    store = _store(tmp_path)
-    obligation = _message_obligation("$v1-pending")
-    store._create_pending(obligation)
-    database_path = _database_path(store)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 1")
-        connection.execute("ALTER TABLE dispatch_obligations DROP COLUMN semantic_consumer")
-
-    migrated = _store(tmp_path)
-
-    with sqlite3.connect(database_path) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
-        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert "semantic_consumer" in columns
-    assert schema_version == 2
-    assert migrated.pending() == (replace(obligation, requires_pending_check=True),)
-
-
-def test_v1_store_recovers_migration_interrupted_after_column_add(tmp_path: Path) -> None:
-    """A physical schema change without its version bump must remain restartable."""
-    store = _store(tmp_path)
-    obligation = _message_obligation("$interrupted-v1-migration")
-    store._create_pending(obligation)
-    database_path = _database_path(store)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 1")
-
-    migrated = _store(tmp_path)
-
-    with sqlite3.connect(database_path) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
-        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert "semantic_consumer" in columns
-    assert schema_version == 2
-    assert migrated.pending() == (replace(obligation, requires_pending_check=True),)
-
-
-def test_schema_change_rolls_back_when_migration_does_not_finish(tmp_path: Path) -> None:
-    """The physical schema and version marker must commit as one migration."""
-    store = _store(tmp_path)
-    obligation = _message_obligation("$rolled-back-v1-migration")
-    store._create_pending(obligation)
-    database_path = _database_path(store)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 1")
-        connection.execute("ALTER TABLE dispatch_obligations DROP COLUMN semantic_consumer")
-
-    def interrupt_after_schema_change(connection: sqlite3.Connection) -> None:
-        connection.execute("ALTER TABLE dispatch_obligations ADD COLUMN semantic_consumer TEXT")
-        message = "simulated migration interruption"
-        raise RuntimeError(message)
-
-    with (
-        patch.object(DispatchObligationStore, "_initialize_schema", side_effect=interrupt_after_schema_change),
-        pytest.raises(RuntimeError, match="simulated migration interruption"),
-    ):
-        _store(tmp_path)
-
-    with sqlite3.connect(database_path) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
-        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert "semantic_consumer" not in columns
-    assert schema_version == 1
-    assert _store(tmp_path).pending() == (replace(obligation, requires_pending_check=True),)
-
-
 @pytest.mark.asyncio
 async def test_aged_interrupted_command_journal_survives_pending_obligation_recovery(tmp_path: Path) -> None:
     """Pending callback recovery must keep the command checkpoint it depends on."""
@@ -330,7 +261,7 @@ async def test_aged_interrupted_command_journal_survives_pending_obligation_reco
     store._create_pending(_message_obligation(event_id))
 
     restarted_ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tmp_path / "tracking")
-    restarted_ledger.warm()
+    restarted_ledger.cleanup()
     recovered_records: list[TurnRecord | None] = []
 
     async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
@@ -372,7 +303,7 @@ async def test_startup_recovers_aged_completed_turn_before_cleanup(tmp_path: Pat
     runner = _runner(store, callback, turn_is_terminal=restarted_ledger.has_durably_responded)
 
     await runner.recover_pending(turn_backed=True)
-    unsettled_source_event_ids = runner.unsettled_source_event_ids()
+    unsettled_source_event_ids = store.unsettled_source_event_ids()
     restarted_ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     callback.assert_not_awaited()
@@ -504,7 +435,7 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
         ).fetchone()
         schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row == ("", "", None)
-    assert schema_version == 2
+    assert schema_version == 1
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
@@ -543,6 +474,15 @@ def test_semantic_consumer_claim_is_durable_and_single_owner(tmp_path: Path) -> 
         replace(obligation, semantic_consumer=DispatchSemanticConsumer.APPROVAL_REPLY, requires_pending_check=True),
         replace(reaction, semantic_consumer=DispatchSemanticConsumer.STOP_REACTION, requires_pending_check=True),
     )
+
+
+@pytest.mark.asyncio
+async def test_semantic_consumer_claim_requires_durable_callback_context(tmp_path: Path) -> None:
+    """Application ownership cannot be claimed outside its persisted callback."""
+    runner = _runner(_store(tmp_path), AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED))
+
+    with pytest.raises(RuntimeError, match="only inside a durable callback"):
+        await runner.claim_semantic_consumer(DispatchSemanticConsumer.APPROVAL_REPLY)
 
 
 def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) -> None:
@@ -758,7 +698,7 @@ async def test_cancelled_store_operation_preserves_cancellation_when_worker_fail
         message = "store write failed"
         raise RuntimeError(message)
 
-    task = asyncio.create_task(_run_owned_store_operation(failing_store_operation))
+    task = asyncio.create_task(run_blocking_until_complete(failing_store_operation))
     assert await asyncio.to_thread(worker_started.wait, 5)
 
     task.cancel()
@@ -792,7 +732,7 @@ async def test_cancelled_store_operation_preserves_caller_cancellation_when_work
         assert release_worker.wait(timeout=5)
 
     monkeypatch.setattr("mindroom.dispatch_obligations.asyncio.create_task", capture_worker_task)
-    caller_task = original_create_task(_run_owned_store_operation(blocking_store_operation))
+    caller_task = original_create_task(run_blocking_until_complete(blocking_store_operation))
     assert await asyncio.to_thread(worker_started.wait, 5)
 
     caller_task.cancel("caller cancelled")
@@ -1603,7 +1543,7 @@ async def test_admission_persists_once_before_event_callback_execution(
     runner = _runner(store, callback)
     create_pending = MagicMock(wraps=store._create_pending)
     monkeypatch.setattr(store, "_create_pending", create_pending)
-    admission = runner._admission_callback(DispatchCallbackKind.MESSAGE)
+    admission = runner._admit_source_event
     wrapper = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)
     event = _message_event("$durable")
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
@@ -1638,7 +1578,7 @@ async def test_live_admission_and_callback_use_two_sqlite_connections(
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$two-connections")
 
-    await runner._admission_callback(DispatchCallbackKind.MESSAGE)(room, event)
+    await runner._admit_source_event(room, event)
     await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
@@ -1670,7 +1610,7 @@ async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None
 
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$task-retry")
-    await runner._admission_callback(DispatchCallbackKind.MESSAGE)(room, event)
+    await runner._admit_source_event(room, event)
     await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(room, event)
     await wait_for_background_tasks(timeout=1, owner=owner)
 
@@ -1907,7 +1847,7 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     if entrypoint == "direct":
         persist = runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
     else:
-        persist = runner._admission_callback(DispatchCallbackKind.MESSAGE)(room, event)
+        persist = runner._admit_source_event(room, event)
     expected_error = OSError if entrypoint == "direct" else nio.CallbackNotAcceptedError
     with pytest.raises(expected_error, match="dispatch database unavailable") as exc_info:
         await persist

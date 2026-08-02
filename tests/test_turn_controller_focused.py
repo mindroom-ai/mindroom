@@ -2057,7 +2057,26 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
     )
     handled_turn = TurnRecord.create([event.event_id])
 
-    with patch.object(harness.controller, "_mark_source_events_responded"):
+    with patch.object(
+        harness.controller,
+        "_record_pending_visible_response",
+        wraps=harness.controller._record_pending_visible_response,
+    ) as record_visible_response:
+        with patch.object(harness.controller, "_mark_source_events_responded"):
+            await harness.controller._execute_command(
+                room,
+                event,
+                _SENDER,
+                command,
+                target=target,
+                handled_turn=handled_turn,
+            )
+
+        pending_turn = harness.turn_store.get_turn_record(event.event_id)
+        assert pending_turn is not None
+        assert pending_turn.completed is False
+        assert pending_turn.response_event_id == "$sent-1:localhost"
+
         await harness.controller._execute_command(
             room,
             event,
@@ -2067,19 +2086,7 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
             handled_turn=handled_turn,
         )
 
-    pending_turn = harness.turn_store.get_turn_record(event.event_id)
-    assert pending_turn is not None
-    assert pending_turn.completed is False
-    assert pending_turn.response_event_id == "$sent-1:localhost"
-
-    await harness.controller._execute_command(
-        room,
-        event,
-        _SENDER,
-        command,
-        target=target,
-        handled_turn=handled_turn,
-    )
+    assert record_visible_response.await_count == 2
 
     assert len(harness.gateway.sent) == 1
     record = harness.turn_store.get_turn_record(event.event_id)
@@ -2183,7 +2190,14 @@ async def test_command_send_failure_keeps_turn_pending(config: Config, tmp_path:
         patch.object(harness.gateway, "send_text", new=fail_send),
         pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
     ):
-        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=TurnRecord.create([event.event_id]),
+        )
 
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
@@ -2214,14 +2228,28 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
             patch.object(harness.gateway, "send_text", new=fail_send),
             pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
         ):
-            await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+            await harness.controller._execute_command(
+                room,
+                event,
+                _SENDER,
+                command,
+                target=target,
+                handled_turn=TurnRecord.create([event.event_id]),
+            )
 
         pending_turn = harness.turn_store.get_turn_record(event.event_id)
         assert pending_turn is not None
         assert pending_turn.command_execution_started
         assert pending_turn.command_result_text == "✅ Model changed"
 
-        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=pending_turn,
+        )
 
     mutate.assert_called_once()
     assert harness.gateway.sent[0].response_text == "✅ Model changed"
@@ -2249,7 +2277,14 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
         ) as attempt,
         pytest.raises(RuntimeError, match="transient failure"),
     ):
-        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=TurnRecord.create([event.event_id]),
+        )
 
     pending_turn = harness.turn_store.get_turn_record(event.event_id)
     assert pending_turn is not None
@@ -2257,7 +2292,14 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
     assert pending_turn.command_result_text is None
 
     with patch("mindroom.commands.handler.handle_model_command") as replay:
-        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=pending_turn,
+        )
 
     attempt.assert_called_once()
     replay.assert_not_called()

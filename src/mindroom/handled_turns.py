@@ -649,10 +649,6 @@ class HandledTurnLedger:
     def _responses(self, responses: dict[str, TurnRecord]) -> None:
         self._state.responses = responses
 
-    def warm(self) -> None:
-        """Load and compact the persisted ledger; call from a worker thread, not the event loop."""
-        self._cleanup_old_events()
-
     def load(self) -> None:
         """Load persisted truth without pruning records needed by later recovery."""
         with self._state.lock:

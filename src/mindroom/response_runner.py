@@ -16,7 +16,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -127,24 +127,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_StateMutationResult = TypeVar("_StateMutationResult")
-
-
-async def _run_locked_source_preparation(
-    operation: Callable[[], _StateMutationResult],
-) -> _StateMutationResult:
-    """Run blocking source preparation off-loop without releasing its lock early."""
-    worker_task = asyncio.create_task(asyncio.to_thread(operation))
-    try:
-        return await asyncio.shield(worker_task)
-    except asyncio.CancelledError:
-        while not worker_task.done():
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-        worker_task.result()
-        raise
 
 
 def _merge_response_extra_content(
@@ -1265,7 +1247,7 @@ class ResponseRunner:
         if not stop_receipt_orders:
             return
         stop_receipt_order = max(stop_receipt_orders)
-        await _run_locked_source_preparation(
+        await run_blocking_until_complete(
             lambda: on_user_stop_handled(response_event_id, stop_receipt_order),
         )
 
@@ -1290,7 +1272,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await _run_locked_source_preparation(
+        if request.prepare_source_turn is not None and await run_blocking_until_complete(
             request.prepare_source_turn,
         ):
             self.deps.logger.info(

@@ -179,6 +179,17 @@ async def _store_pending_change_in_matrix(
     )
 
 
+async def _commit_checkpoint(
+    client: nio.AsyncClient,
+    preview_event_id: str,
+    checkpoint: _PendingConfigChange,
+) -> _PendingConfigChange:
+    """Persist one checkpoint before publishing its in-memory mirror."""
+    await _store_pending_change_in_matrix(client, preview_event_id, checkpoint)
+    _pending_changes[preview_event_id] = checkpoint
+    return checkpoint
+
+
 async def _remove_pending_change_from_matrix(
     client: nio.AsyncClient,
     room_id: str,
@@ -511,9 +522,7 @@ async def _ensure_decision_checkpoint(
         decision_key=event.key,
         decision_response_text=response_text,
     )
-    await _store_pending_change_in_matrix(bot.client, event.reacts_to, checkpoint)
-    _pending_changes[event.reacts_to] = checkpoint
-    return checkpoint
+    return await _commit_checkpoint(bot.client, event.reacts_to, checkpoint)
 
 
 async def _response_for_checkpointed_decision(
@@ -533,14 +542,18 @@ async def _response_for_checkpointed_decision(
             "⚠️ The configuration change was interrupted after application began, so its outcome is uncertain. "
             "Inspect the current configuration before making another change."
         )
-        checkpoint = replace(pending_change, decision_response_text=response_text)
-        await _store_pending_change_in_matrix(bot.client, preview_event_id, checkpoint)
-        _pending_changes[preview_event_id] = checkpoint
+        checkpoint = await _commit_checkpoint(
+            bot.client,
+            preview_event_id,
+            replace(pending_change, decision_response_text=response_text),
+        )
         return checkpoint, response_text
 
-    started_checkpoint = replace(pending_change, decision_execution_started=True)
-    await _store_pending_change_in_matrix(bot.client, preview_event_id, started_checkpoint)
-    _pending_changes[preview_event_id] = started_checkpoint
+    started_checkpoint = await _commit_checkpoint(
+        bot.client,
+        preview_event_id,
+        replace(pending_change, decision_execution_started=True),
+    )
     from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
     response_text = await apply_config_change(
@@ -548,9 +561,11 @@ async def _response_for_checkpointed_decision(
         pending_change.new_value,
         runtime_paths=bot.runtime_paths,
     )
-    completed_checkpoint = replace(started_checkpoint, decision_response_text=response_text)
-    await _store_pending_change_in_matrix(bot.client, preview_event_id, completed_checkpoint)
-    _pending_changes[preview_event_id] = completed_checkpoint
+    completed_checkpoint = await _commit_checkpoint(
+        bot.client,
+        preview_event_id,
+        replace(started_checkpoint, decision_response_text=response_text),
+    )
     return completed_checkpoint, response_text
 
 
@@ -559,13 +574,10 @@ async def resume_committed_confirmation(
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
-) -> bool:
+) -> None:
     """Resume only a decision already committed before current authorization changed."""
-    if pending_change.decision_event_id is None:
-        return False
     if pending_change.decision_event_id == event.event_id:
         await handle_confirmation_reaction(bot, room, event)
-    return True
 
 
 async def handle_confirmation_reaction(

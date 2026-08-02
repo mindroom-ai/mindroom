@@ -1543,7 +1543,7 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
         raise OSError(message)
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
-    admission = bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE)
+    admission = bot._dispatch_obligation_runner._admit_source_event
 
     with pytest.raises(
         nio.CallbackNotAcceptedError,
@@ -1594,10 +1594,7 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_first_create)
     monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", AsyncMock())
-    client.add_event_admission_callback(
-        bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE),
-        nio.RoomMessageText,
-    )
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
     client.add_event_callback(
         bot._dispatch_obligation_runner.task_wrapper(
             DispatchCallbackKind.MESSAGE,
@@ -1657,10 +1654,7 @@ async def test_nio_rejects_event_when_existing_dispatch_payload_is_corrupt(
             "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
             ("{", event.event_id),
         )
-    client.add_event_admission_callback(
-        bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE),
-        nio.RoomMessageText,
-    )
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
 
     with pytest.raises(nio.CallbackNotAcceptedError) as exc_info:
         await client.receive_response(response)
@@ -1710,10 +1704,7 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
     callbacks[DispatchCallbackKind.MESSAGE] = reject_too_late
     schedule_retry = MagicMock()
     monkeypatch.setattr(bot._dispatch_obligation_runner, "_schedule_retry", schedule_retry)
-    client.add_event_admission_callback(
-        bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE),
-        nio.RoomMessageText,
-    )
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
 
     async def run_admitted(
         room: nio.MatrixRoom,
@@ -1768,7 +1759,7 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
         raise OSError(message)
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
-    admission = bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE)
+    admission = bot._dispatch_obligation_runner._admit_source_event
     with pytest.raises(
         nio.CallbackNotAcceptedError,
         match="dispatch database unavailable",
@@ -1817,7 +1808,7 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", blocking_create)
     run_persisted = AsyncMock()
     monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", run_persisted)
-    admission = bot._dispatch_obligation_runner._admission_callback(DispatchCallbackKind.MESSAGE)
+    admission = bot._dispatch_obligation_runner._admit_source_event
     event = _text_event("$cancelled-create", "hello", 1)
     task = asyncio.create_task(
         admission(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),

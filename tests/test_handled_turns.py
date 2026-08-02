@@ -160,7 +160,7 @@ def test_has_responded_empty(temp_dir: Path) -> None:
 def test_durable_lookup_does_not_hold_state_lock_across_persist_barrier(temp_dir: Path) -> None:
     """Disk durability waits must not block loop-side in-memory lookups."""
     tracker = HandledTurnLedger("test_durable_lookup_lock", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     persist_started = threading.Event()
     release_persist = threading.Event()
@@ -701,7 +701,7 @@ def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
 def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) -> None:
     """A durability waiter should resolve when its own batch lands."""
     tracker = HandledTurnLedger("test_exact_persist_waiter", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     first_started = threading.Event()
     release_first = threading.Event()
@@ -746,7 +746,7 @@ def test_on_persisted_runs_on_worker_when_write_finishes_before_schedule_returns
 ) -> None:
     """A fast persist must never notify inline on the ledger caller thread."""
     tracker = HandledTurnLedger("test_persist_notification_thread", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     caller_thread_id = threading.get_ident()
     notification_thread_ids: list[int] = []
     real_schedule = tracker._schedule_persist_locked
@@ -774,7 +774,7 @@ def test_on_persisted_runs_on_worker_when_write_finishes_before_schedule_returns
 def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -> None:
     """A waiter must remain blocked until its successful retry persists."""
     tracker = HandledTurnLedger("test_transient_persist_waiter", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     retry_started = threading.Event()
     release_retry = threading.Event()
@@ -818,7 +818,7 @@ def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -
 def test_failed_batch_retries_autonomously_and_notifies_after_persist(temp_dir: Path) -> None:
     """A terminal write must remain retry-owned without later ledger traffic."""
     tracker = HandledTurnLedger("test_persist_retry", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     second_failure = threading.Event()
     persisted = threading.Event()
@@ -855,7 +855,7 @@ def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_di
     failure for a write that was never issued would be a false negative.
     """
     tracker = HandledTurnLedger("test_persist_retry_waiter", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     real_schedule = tracker._schedule_persist_locked
     second_attempt_started = threading.Event()
@@ -924,7 +924,7 @@ def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_di
 def test_exhausted_persist_retry_fails_only_the_attempted_waiter(temp_dir: Path) -> None:
     """The batch the worker actually wrote must still surface its durability failure."""
     tracker = HandledTurnLedger("test_persist_attempted_waiter", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     failure = "persist failure"
 
@@ -952,8 +952,8 @@ def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> 
     """The bounded executor should persist independent ledger files concurrently."""
     slow_tracker = HandledTurnLedger("test_slow_ledger", base_path=temp_dir)
     fast_tracker = HandledTurnLedger("test_fast_ledger", base_path=temp_dir)
-    slow_tracker.warm()
-    fast_tracker.warm()
+    slow_tracker.cleanup()
+    fast_tracker.cleanup()
     real_slow_persist = slow_tracker._persist_records
     slow_started = threading.Event()
     release_slow = threading.Event()
@@ -976,7 +976,7 @@ def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> 
 def test_concurrent_records_coalesce_into_one_follow_up_ledger_write(temp_dir: Path) -> None:
     """A burst arriving during one write should persist as one follow-up batch."""
     tracker = HandledTurnLedger("test_persist_batch", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
     real_persist = tracker._persist_records
     first_started = threading.Event()
     release_first = threading.Event()
@@ -1462,7 +1462,7 @@ def test_quarantines_malformed_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text("{not valid json", encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_json", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
 
     assert tracker._responses == {}
     assert _read_persisted_records(tracker) == {}
@@ -1476,7 +1476,7 @@ def test_quarantines_non_utf8_ledger_file(temp_dir: Path) -> None:
     responses_file.write_bytes(b"\xff\xfe\x00")
 
     tracker = HandledTurnLedger("bad_utf8", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
 
     assert tracker._responses == {}
     assert _read_persisted_records(tracker) == {}
@@ -1490,7 +1490,7 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text(json.dumps(["oops"]), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_shape", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
 
     assert tracker._responses == {}
     assert _read_persisted_records(tracker) == {}
@@ -1509,7 +1509,7 @@ def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> Non
     responses_file.write_text(json.dumps(invalid_payload), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_entry", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
 
     assert tracker._responses == {}
     assert _read_persisted_records(tracker) == {}
@@ -1546,7 +1546,7 @@ def test_partial_invalid_coalesced_ledger_rehydrates_and_persists_valid_group(te
     tracker.flush()
 
     reloaded = _reload_ledger("partial_bad_entry", temp_dir)
-    reloaded.warm()
+    reloaded.cleanup()
     assert reloaded.has_responded("$valid")
     assert reloaded.has_responded("$invalid")
     assert reloaded.has_responded("$new")
@@ -1618,11 +1618,11 @@ def test_construction_touches_no_filesystem(temp_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_warm_on_slow_filesystem_does_not_block_event_loop(
+async def test_cleanup_on_slow_filesystem_does_not_block_event_loop(
     temp_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """warm() must run its advisory-lock load off the loop so heartbeats keep ticking."""
+    """cleanup() must run its advisory-lock load off the loop so heartbeats keep ticking."""
     gate = threading.Event()
     real_lock = handled_turns_module.advisory_file_lock
 
@@ -1633,25 +1633,25 @@ async def test_warm_on_slow_filesystem_does_not_block_event_loop(
             yield
 
     monkeypatch.setattr(handled_turns_module, "advisory_file_lock", gated_lock)
-    tracker = HandledTurnLedger("test_slow_warm", base_path=temp_dir)
-    warm_task = asyncio.create_task(asyncio.to_thread(tracker.warm))
+    tracker = HandledTurnLedger("test_slow_cleanup", base_path=temp_dir)
+    cleanup_task = asyncio.create_task(asyncio.to_thread(tracker.cleanup))
 
-    # The warm thread is parked on the gated lock; the loop must stay live.
+    # The cleanup thread is parked on the gated lock; the loop must stay live.
     heartbeats = 0
     while heartbeats < 50:
         await asyncio.sleep(0)
         heartbeats += 1
-    assert not warm_task.done()
+    assert not cleanup_task.done()
 
     gate.set()
-    await warm_task
+    await cleanup_task
     assert tracker._responses == {}
 
 
 def test_record_returns_before_disk_persist_completes(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Recording must apply in memory and return while the disk merge is still blocked."""
     tracker = HandledTurnLedger("test_async_persist", base_path=temp_dir)
-    tracker.warm()
+    tracker.cleanup()
 
     gate = threading.Event()
     real_lock = handled_turns_module.advisory_file_lock

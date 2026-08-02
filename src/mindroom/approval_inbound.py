@@ -10,7 +10,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
     MatrixApprovalAction,
-    can_handle_matrix_approval_action,
     handle_matrix_approval_action,
     is_process_active_approval_card,
     is_process_approval_card,
@@ -105,11 +104,7 @@ async def handle_tool_approval_action(
         status=status,
         reason=reason,
     )
-    if before_consume is not None:
-        if not await can_handle_matrix_approval_action(action):
-            return False
-        await before_consume()
-    result = await handle_matrix_approval_action(action)
+    result = await handle_matrix_approval_action(action, before_consume=before_consume)
     notice_event_id = approval_event_id or result.card_event_id
     if notice_event_id is not None and result.error_reason is not None and orchestrator is not None:
         await orchestrator.send_approval_notice(

@@ -393,6 +393,7 @@ class _ApprovalManager:
         card_event_id: str,
         status: _ResolutionStatus,
         reason: str | None,
+        before_consume: Callable[[], Awaitable[None]] | None = None,
     ) -> ApprovalActionResult:
         """Resolve one approval action anchored to a Matrix approval-card event id."""
         live_waiter = self._live_waiter_for_card(card_event_id)
@@ -403,9 +404,12 @@ class _ApprovalManager:
                 sender_id=sender_id,
                 status=status,
                 reason=reason,
+                before_consume=before_consume,
             )
 
         if self.knows_in_memory_approval_card(card_event_id):
+            if before_consume is not None:
+                await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
         pending = await self._cached_trusted_pending_approval_for_card(
@@ -414,45 +418,13 @@ class _ApprovalManager:
         )
         if pending is None or pending.approver_user_id != sender_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+        if before_consume is not None:
+            await before_consume()
         return await self._discard_matrix_only_card(
             pending=pending,
             reason=_DETACHED_REQUEST_REASON,
             resolved_by=sender_id,
         )
-
-    async def can_handle_action(
-        self,
-        *,
-        room_id: str,
-        sender_id: str,
-        card_event_id: str | None,
-        approval_id: str | None,
-    ) -> bool:
-        """Validate whether one action has an approval consumer without mutating it."""
-        if approval_id is not None:
-            live_card_event_id = self._live_card_event_id_for_approval(approval_id)
-            if live_card_event_id is not None:
-                card_event_id = live_card_event_id
-            elif card_event_id is None:
-                return False
-        if card_event_id is None:
-            return False
-        live_waiter = self._live_waiter_for_card(card_event_id)
-        if live_waiter is not None:
-            if live_waiter.room_id != room_id:
-                return False
-            pending = await self._pending_approval_for_card(
-                room_id=live_waiter.room_id,
-                card_event_id=live_waiter.card_event_id,
-            )
-            return pending is not None and pending.approver_user_id == sender_id
-        if self.knows_in_memory_approval_card(card_event_id):
-            return True
-        pending = await self._cached_trusted_pending_approval_for_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
-        )
-        return pending is not None and pending.approver_user_id == sender_id
 
     async def handle_live_approval_id_response(
         self,
@@ -462,6 +434,7 @@ class _ApprovalManager:
         approval_id: str,
         status: _ResolutionStatus,
         reason: str | None,
+        before_consume: Callable[[], Awaitable[None]] | None = None,
     ) -> ApprovalActionResult:
         """Resolve one custom client action by in-memory approval id only."""
         live_card_event_id = self._live_card_event_id_for_approval(approval_id)
@@ -476,6 +449,7 @@ class _ApprovalManager:
             sender_id=sender_id,
             status=status,
             reason=reason,
+            before_consume=before_consume,
         )
 
     async def _handle_live_waiter_response(
@@ -486,6 +460,7 @@ class _ApprovalManager:
         sender_id: str,
         status: _ResolutionStatus,
         reason: str | None,
+        before_consume: Callable[[], Awaitable[None]] | None,
     ) -> ApprovalActionResult:
         if live_waiter.room_id != room_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
@@ -502,6 +477,8 @@ class _ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
+        if before_consume is not None:
+            await before_consume()
         return await self._resolve_live_response(
             pending=pending,
             status=status,

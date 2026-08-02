@@ -22,6 +22,7 @@ from mindroom.approval_manager import (
 )
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchSemanticConsumer
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
@@ -125,6 +126,30 @@ def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
     return event
 
 
+async def _dispatch_reaction(bot: AgentBot, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+    """Exercise one reaction through its durable production entrypoint."""
+    source = dict(event.source)
+    source.setdefault("event_id", event.event_id)
+    source.setdefault("sender", event.sender)
+    source.setdefault("origin_server_ts", 1)
+    source.setdefault("type", "m.reaction")
+    event.source = source
+    event.decrypted = False
+    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+
+
+async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    """Exercise one message through its durable production entrypoint."""
+    source = dict(event.source)
+    source.setdefault("event_id", event.event_id)
+    source.setdefault("sender", event.sender)
+    source.setdefault("origin_server_ts", 1)
+    source.setdefault("type", "m.room.message")
+    event.source = source
+    event.decrypted = False
+    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+
+
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
@@ -189,7 +214,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == [("👍", "$question", "$thread-root")]
 
@@ -231,7 +256,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
         ):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == []
 
@@ -263,7 +288,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.interactive.handle_reaction",
             new=AsyncMock(return_value=None),
         ) as interactive_handler:
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == []
         interactive_handler.assert_awaited_once()
@@ -302,7 +327,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
             new=AsyncMock(return_value=None),
         ) as resolve_pending:
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == []
         resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
@@ -337,7 +362,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 pytest.raises(OSError, match="pending write failed"),
             ):
-                await bot._on_reaction(room, event)
+                await _dispatch_reaction(bot, room, event)
 
             assert "$question" in interactive._active_questions
         finally:
@@ -376,7 +401,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
             patch.object(bot._turn_controller, "handle_interactive_selection", side_effect=handle_selection),
         ):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
         await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
@@ -419,7 +444,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
             patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
         ):
-            reaction_task = asyncio.create_task(bot._on_reaction(room, event))
+            reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await asyncio.wait_for(approval_started.wait(), timeout=0.5)
             try:
                 reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
@@ -460,7 +485,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.handle_tool_approval_action", approval_handler),
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock()) as interactive_handler,
         ):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         approval_handler.assert_awaited_once()
         interactive_handler.assert_not_awaited()
@@ -583,6 +608,7 @@ class TestAgentBot(AgentBotTestBase):
                 status="approved",
                 reason=None,
             ),
+            before_consume=None,
         )
 
     @pytest.mark.asyncio
@@ -697,7 +723,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         store, pending, task, editor = await _start_live_approval(
             runtime_paths,
@@ -718,7 +744,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         try:
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_awaited_once()
             assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
@@ -752,7 +778,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=None)
@@ -775,7 +801,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         try:
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_awaited_once()
             assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
@@ -795,7 +821,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
@@ -820,7 +846,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         try:
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_not_awaited()
             assert editor.await_args.args[:2] == ("!test:localhost", "$approval")
@@ -840,7 +866,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
         event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
@@ -871,7 +897,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         try:
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_awaited_once()
             event_cache.get_event.assert_not_awaited()
@@ -889,7 +915,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.matrix_id)
         initialize_approval_store(runtime_paths)
         event = MagicMock(spec=nio.RoomMessageText)
@@ -907,7 +933,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         try:
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_awaited_once()
             assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
@@ -925,7 +951,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         edit_started = asyncio.Event()
         release_edit = asyncio.Event()
@@ -964,7 +990,7 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             await asyncio.wait_for(edit_started.wait(), timeout=1)
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_not_awaited()
             release_edit.set()
@@ -996,7 +1022,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot._turn_controller.handle_text_event = AsyncMock()
+        bot._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         store, pending, task, _editor = await _start_live_approval(runtime_paths)
 
@@ -1026,7 +1052,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             }
 
-            await bot._on_message(room, event)
+            await _dispatch_message(bot, room, event)
 
             bot._turn_controller.handle_text_event.assert_awaited_once()
             assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
@@ -1066,7 +1092,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.APPROVAL_REPLY
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        restarted._turn_controller.handle_text_event = AsyncMock()
+        restarted._turn_controller.handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
         with patch(
             "mindroom.bot.maybe_handle_tool_approval_reply",
             new=AsyncMock(return_value=False),
@@ -1094,18 +1120,23 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("✅", "$approval-reaction")
         failure = RuntimeError("crash after approval reaction side effect")
 
+        async def fail_after_claim(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is not None
+            await before_consume()
+            raise failure
+
         with (
             patch(
-                "mindroom.approval_inbound.can_handle_matrix_approval_action",
-                new=AsyncMock(return_value=True),
-            ),
-            patch(
                 "mindroom.approval_inbound.handle_matrix_approval_action",
-                new=AsyncMock(side_effect=failure),
+                new=AsyncMock(side_effect=fail_after_claim),
             ),
             pytest.raises(RuntimeError, match="crash after approval reaction side effect"),
         ):
-            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+            await _dispatch_reaction(bot, room, event)
         await _cancel_dispatch_retry(bot)
         assert (
             bot._dispatch_obligation_store.pending()[0].semantic_consumer
@@ -1659,27 +1690,30 @@ class TestAgentBot(AgentBotTestBase):
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
         event.source = {"content": {}}
-        with (
-            patch(
-                "mindroom.approval_inbound.can_handle_matrix_approval_action",
-                new=AsyncMock(return_value=True),
-            ),
-            patch(
-                "mindroom.approval_inbound.handle_matrix_approval_action",
-                new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
-            ) as handle_matrix_approval_action,
-        ):
-            await bot._on_reaction(room, event)
 
-        handle_matrix_approval_action.assert_awaited_once_with(
-            MatrixApprovalAction(
-                room_id="!test:localhost",
-                sender_id="@user:localhost",
-                card_event_id="$approval",
-                approval_id=None,
-                status="approved",
-                reason=None,
-            ),
+        async def consume(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is not None
+            await before_consume()
+            return ApprovalActionResult(consumed=True, resolved=True)
+
+        with patch(
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(side_effect=consume),
+        ) as handle_matrix_approval_action:
+            await _dispatch_reaction(bot, room, event)
+
+        action = handle_matrix_approval_action.await_args.args[0]
+        assert action == MatrixApprovalAction(
+            room_id="!test:localhost",
+            sender_id="@user:localhost",
+            card_event_id="$approval",
+            approval_id=None,
+            status="approved",
+            reason=None,
         )
 
     @pytest.mark.asyncio
@@ -1737,7 +1771,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply", "$thread-root")]
 
@@ -1768,7 +1802,7 @@ class TestAgentBot(AgentBotTestBase):
         event.reacts_to = "$plain-reply"
 
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort.assert_awaited_once_with(
             room.room_id,
@@ -1864,6 +1898,6 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
-            await bot._on_reaction(room, event)
+            await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply-2", "$thread-root")]

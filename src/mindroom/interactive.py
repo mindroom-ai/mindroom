@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -268,14 +268,10 @@ def _remove_active_question_locked(event_id: str) -> bool:
 
 def _copy_question(question: _InteractiveQuestion) -> _InteractiveQuestion:
     """Return an isolated snapshot suitable for restoring one failed claim."""
-    return _InteractiveQuestion(
-        room_id=question.room_id,
-        thread_id=question.thread_id,
+    return replace(
+        question,
         options=dict(question.options),
-        creator_agent=question.creator_agent,
-        question_text=question.question_text,
         option_labels=dict(question.option_labels),
-        created_at=question.created_at,
     )
 
 
