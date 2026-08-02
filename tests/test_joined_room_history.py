@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import nio
 import pytest
@@ -77,7 +77,10 @@ async def test_fetch_room_history_returns_newest_event_budget_in_chronological_o
     )
 
     assert [event.event_id for event in events] == ["$older", "$newer", "$newest"]
-    assert room_messages.await_count == 2
+    assert room_messages.await_args_list == [
+        call(room_id, start="s0", direction=nio.MessageDirection.back, limit=2),
+        call(room_id, start="s1", direction=nio.MessageDirection.back, limit=2),
+    ]
 
 
 @pytest.mark.asyncio
@@ -107,4 +110,7 @@ async def test_fetch_room_history_returns_page_budget_without_restarting_sync() 
     )
 
     assert [event.event_id for event in events] == ["$oldest", "$older", "$newer", "$newest"]
-    assert room_messages.await_count == 2
+    assert room_messages.await_args_list == [
+        call(room_id, start="s0", direction=nio.MessageDirection.back, limit=2),
+        call(room_id, start="s1", direction=nio.MessageDirection.back, limit=2),
+    ]
