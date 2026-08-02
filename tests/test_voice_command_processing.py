@@ -222,7 +222,11 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     }
 
     with (
-        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
+        patch.object(
+            bot._command_turn_executor,
+            "execute_if_owned",
+            new=AsyncMock(return_value=True),
+        ) as mock_handle,
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
@@ -263,7 +267,11 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     event.source = {"content": {"body": "Regular message from router"}}
 
     with (
-        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
+        patch.object(
+            bot._command_turn_executor,
+            "execute_if_owned",
+            new=AsyncMock(return_value=True),
+        ) as mock_handle,
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):

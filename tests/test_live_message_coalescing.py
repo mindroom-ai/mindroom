@@ -5931,14 +5931,14 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     )
     dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
 
-    handle_cmd_mock = AsyncMock()
+    handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
 
@@ -5983,7 +5983,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
             new=prepare_dispatch_mock,
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
-        patch.object(bot._turn_controller, "_execute_command", new=execute_command_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=execute_command_mock),
         patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, voice_command_event, "@user:localhost")
@@ -6025,14 +6025,14 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     )
     _set_context_histories(dispatch, [newer_msg])
 
-    handle_cmd_mock = AsyncMock()
+    handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, cmd_event, "@user:localhost")
 

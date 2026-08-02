@@ -802,7 +802,11 @@ class TestAgentBot(AgentBotTestBase):
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -866,7 +870,11 @@ class TestAgentBot(AgentBotTestBase):
                 "get_dispatch_thread_snapshot",
                 new=AsyncMock(return_value=snapshot_history),
             ) as mock_snapshot,
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
