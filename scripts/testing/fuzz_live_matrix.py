@@ -1264,7 +1264,17 @@ class LiveMatrixClient:
         data = await self._request(
             "POST",
             "/_matrix/client/v3/createRoom",
-            json_body={"preset": "public_chat", "visibility": "public"},
+            json_body={
+                "preset": "public_chat",
+                "visibility": "public",
+                "initial_state": [
+                    {
+                        "type": "m.room.history_visibility",
+                        "state_key": "",
+                        "content": {"history_visibility": "world_readable"},
+                    },
+                ],
+            },
         )
         room_id = data.get("room_id")
         if not isinstance(room_id, str):

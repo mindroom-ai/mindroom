@@ -58,6 +58,7 @@ The saturation profile uses a 180-second per-reply deadline because its slow 12-
 
 The `restart-regression` profile is a manual opt-in oracle for config replacement, cold-history suppression, and durable callback recovery across a hard MindRoom restart.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then adds that room to the managed agent configuration.
+The disposable room is world-readable so replacement bots can actually receive and cache events authored before they joined.
 The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
 It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its pending durable obligation, and a deterministic model request held in flight.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new PID, and waits for both recovered bots to complete setup.

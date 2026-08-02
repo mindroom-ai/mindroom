@@ -66,6 +66,44 @@ class _StaticObservationClient:
         await asyncio.sleep(0.001)
 
 
+@pytest.mark.asyncio
+async def test_restart_room_exposes_prejoin_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The disposable room must expose old events to bots that join during replacement."""
+    client = LiveMatrixClient("http://matrix.invalid", "")
+    request: tuple[str, str, dict[str, Any]] | None = None
+
+    async def record_request(
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+    ) -> dict[str, str]:
+        nonlocal request
+        request = method, path, json_body
+        return {"room_id": "!restart:example"}
+
+    monkeypatch.setattr(client, "_request", record_request)
+    try:
+        assert await client.create_public_room() == "!restart:example"
+        assert request == (
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            {
+                "preset": "public_chat",
+                "visibility": "public",
+                "initial_state": [
+                    {
+                        "type": "m.room.history_visibility",
+                        "state_key": "",
+                        "content": {"history_visibility": "world_readable"},
+                    },
+                ],
+            },
+        )
+    finally:
+        await client.close()
+
+
 def _restart_response(
     event_id: str,
     sender: str,
