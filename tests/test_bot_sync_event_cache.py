@@ -13,7 +13,8 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
-from mindroom.dispatch_obligations import DispatchCallbackKind, _DispatchObligationTaskWrapper
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.runner import _DispatchObligationTaskWrapper
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError

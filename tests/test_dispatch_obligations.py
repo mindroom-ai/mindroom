@@ -16,19 +16,19 @@ import pytest
 
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_background_tasks
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_obligations import (
+from mindroom.dispatch_obligations import DispatchObligationRunner
+from mindroom.dispatch_obligations.events import (
+    _DispatchCallbackResult as DispatchCallbackResult,
+    _RoomIdEvent,
+    callback_kind_for_source_kind,
+)
+from mindroom.dispatch_obligations.storage import (
     DispatchCallbackKind,
-    DispatchObligationRunner,
     DispatchObligationStore,
     DispatchSemanticConsumer,
     _DispatchCreateResult,
     _DispatchObligation,
     _DispatchTerminalOutcome,
-    _RoomIdEvent,
-    callback_kind_for_source_kind,
-)
-from mindroom.dispatch_obligations import (
-    _DispatchCallbackResult as DispatchCallbackResult,
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
@@ -648,7 +648,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
         )
 
     restarted = _store(tmp_path)
-    with patch("mindroom.dispatch_obligations.logger") as logger:
+    with patch("mindroom.dispatch_obligations.storage.logger") as logger:
         assert restarted.pending() == (valid,)
 
     logger.error.assert_called_once_with(
@@ -683,7 +683,7 @@ async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> N
         recovered.append(event.event_id)
         return DispatchCallbackResult.SUCCEEDED
 
-    with patch("mindroom.dispatch_obligations.logger") as logger:
+    with patch("mindroom.dispatch_obligations.runner.logger") as logger:
         await _runner(store, callback).recover_pending()
 
     assert recovered == ["$valid-event"]
@@ -769,7 +769,7 @@ async def test_cancelled_store_operation_preserves_caller_cancellation_when_work
         worker_started.set()
         assert release_worker.wait(timeout=5)
 
-    monkeypatch.setattr("mindroom.dispatch_obligations.asyncio.create_task", capture_worker_task)
+    monkeypatch.setattr("mindroom.background_tasks.asyncio.create_task", capture_worker_task)
     caller_task = original_create_task(run_blocking_until_complete(blocking_store_operation))
     assert await asyncio.to_thread(worker_started.wait, 5)
 

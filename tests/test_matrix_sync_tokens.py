@@ -26,11 +26,9 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_obligations import (
-    DispatchCallbackKind,
-    _DispatchCallbackResult,
-    _DispatchObligationCorruptionError,
-)
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.events import _DispatchCallbackResult
+from mindroom.dispatch_obligations.storage import _DispatchObligationCorruptionError
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
