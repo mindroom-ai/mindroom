@@ -53,6 +53,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.pending_turn_claim import PendingTurnClaim
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
@@ -161,8 +162,12 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
-        assert controller.deps.turn_store.try_claim_turn(turn_claim)
+        turn_record = TurnRecord.create([voice_event.event_id], completed=False)
+        assert controller.deps.turn_store.try_claim_turn(turn_record)
+        turn_claim = PendingTurnClaim(
+            turn_record=turn_record,
+            release=controller.deps.turn_store.release_pending_turn_claim,
+        )
 
         with (
             patch.object(
@@ -200,8 +205,8 @@ class TestAgentBot(AgentBotTestBase):
         )
         fallback_cleanup.assert_called_once_with()
         assert fallback.ready.pending_event.dispatch_metadata == ()
-        assert controller.deps.turn_store.try_claim_turn(turn_claim)
-        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        assert controller.deps.turn_store.try_claim_turn(turn_record)
+        controller.deps.turn_store.release_pending_turn_claim(turn_record)
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -1729,8 +1734,12 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
-            assert bot._turn_store.try_claim_turn(turn_claim)
+            turn_record = TurnRecord.create([voice_event.event_id], completed=False)
+            assert bot._turn_store.try_claim_turn(turn_record)
+            turn_claim = PendingTurnClaim(
+                turn_record=turn_record,
+                release=bot._turn_store.release_pending_turn_claim,
+            )
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
@@ -1763,7 +1772,7 @@ class TestAgentBot(AgentBotTestBase):
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
         assert metadata.requires_solo_batch is False
         claim_metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "pending_turn_claim")
-        assert claim_metadata.payload == turn_claim
+        assert claim_metadata.payload == turn_record
         claim_metadata.close()
 
     @pytest.mark.asyncio
