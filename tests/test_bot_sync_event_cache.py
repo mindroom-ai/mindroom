@@ -490,7 +490,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Limited catch-up must replay from the last durable checkpoint."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
-        bot._sync_cache_trust.state = SyncTrustState.PENDING
+        assert await bot._sync_cache_trust.prepare_startup() == "s_before_limited"
         bot.client.next_batch = "s_after_limited"
         sync_response = self._sync_response(
             {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
@@ -499,7 +499,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch is None
+        assert bot.client.next_batch == "s_before_limited"
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_limited"
         bot.event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",

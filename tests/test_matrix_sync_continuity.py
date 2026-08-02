@@ -1324,7 +1324,6 @@ async def test_leave_fence_rejects_delayed_write_before_new_checkpoint(tmp_path:
         await bot._sync_cache_trust.certify_response(
             next_batch="s_after_leave",
             cache_result=SyncCacheWriteResult(complete=True),
-            first_sync=False,
         )
 
         assert await cache.get_event(room_id, "$late") is None
@@ -2022,7 +2021,6 @@ async def test_rejected_recovered_response_rearms_tokenless_baseline(tmp_path: P
     initial_baseline = await trust.certify_response(
         next_batch="s_initial",
         cache_result=tokenless_gap,
-        first_sync=True,
     )
     assert initial_baseline.reason == "limited_sync_timeline"
     assert initial_baseline.reset_client_token is False
@@ -2034,7 +2032,6 @@ async def test_rejected_recovered_response_rearms_tokenless_baseline(tmp_path: P
             limited_room_ids=(room_id,),
             recovered_room_ids=frozenset({room_id}),
         ),
-        first_sync=False,
     )
     assert recovered.state is SyncTrustState.CERTIFIED
 
@@ -2044,7 +2041,6 @@ async def test_rejected_recovered_response_rearms_tokenless_baseline(tmp_path: P
     retry_baseline = await trust.certify_response(
         next_batch="s_retry",
         cache_result=tokenless_gap,
-        first_sync=False,
     )
 
     assert retry_baseline.reason == "limited_sync_timeline"
@@ -2064,7 +2060,6 @@ async def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recov
     decision = bot._sync_cache_trust.plan_response(
         next_batch="s_stale_after_cleanup",
         cache_result=cache_result,
-        first_sync=False,
     )
 
     assert await bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
@@ -2122,18 +2117,81 @@ async def test_membership_cancellation_rewinds_uncertified_classic_cursor(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_classic_receive_loop_exit_rewinds_response_not_dispatched_to_callback(
+    tmp_path: Path,
+) -> None:
+    """Loop cancellation after nio applies a response must restore certified continuity."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    client.restore_login(
+        user_id=bot.matrix_id.full_id,
+        device_id="TESTDEVICE",
+        access_token="test-access-token",  # noqa: S106 - Test-only Matrix session.
+    )
+    bot.client = client
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_response")
+    client.next_batch = "s_before_response"
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_after_response",
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {"invite": {}, "leave": {}, "join": {}},
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    response_applied = asyncio.Event()
+    callback_started = asyncio.Event()
+    hold_before_callback = asyncio.Event()
+
+    async def receive_then_hold(*_args: object, **_kwargs: object) -> nio.SyncResponse:
+        await client.receive_response(response)
+        response_applied.set()
+        await hold_before_callback.wait()
+        return response
+
+    async def observe_callback(_response: nio.SyncResponse) -> None:
+        callback_started.set()
+
+    client.sync = receive_then_hold  # type: ignore[method-assign]
+    client.add_response_callback(observe_callback, nio.SyncResponse)
+    sync_task = asyncio.create_task(bot.sync_forever())
+    await response_applied.wait()
+    assert client.next_batch == "s_after_response"
+
+    sync_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sync_task
+
+    assert not callback_started.is_set()
+    assert client.next_batch == "s_before_response"
+
+
+@pytest.mark.asyncio
 async def test_limited_cache_cancellation_rewinds_live_cursor(tmp_path: Path) -> None:
     """Cancellation must replay the interrupted cache write from durable continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_partial"
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
     save_sync_token(
         tmp_path,
         bot.agent_name,
         "s_before_gap",
         cache_generation=_CACHE_GENERATION,
     )
+    assert await bot._sync_cache_trust.prepare_startup() == "s_before_gap"
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_partial"
     response.recovered_room_ids = frozenset()
@@ -2157,7 +2215,7 @@ async def test_limited_cache_cancellation_rewinds_live_cursor(tmp_path: Path) ->
     ):
         await bot._on_sync_response(response)
 
-    assert bot.client.next_batch is None
+    assert bot.client.next_batch == "s_before_gap"
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
 

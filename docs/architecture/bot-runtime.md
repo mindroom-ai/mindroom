@@ -87,8 +87,9 @@ Recovery intent travels with queued ingress so pre-existing lane and coalescing 
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
-Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` retains the pre-gap checkpoint until nio reports no unresolved room gaps.
-When no checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
+Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` rewinds every unresolved response to the retained pre-gap checkpoint until nio reports no unresolved room gaps.
+When no generation-safe checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
+Classic receive-loop exit also reconciles nio's live cursor with the last certified checkpoint, covering cancellation after nio applies a response but before its response callback starts.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.
 `ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.

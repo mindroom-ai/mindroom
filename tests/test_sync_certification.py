@@ -32,24 +32,11 @@ def test_normalize_sync_token_accepts_only_non_empty_strings(value: object, expe
     assert normalize_sync_token(value) == expected
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        SyncTrustState.COLD,
-        SyncTrustState.PENDING,
-        SyncTrustState.CERTIFIED,
-        SyncTrustState.UNCERTAIN,
-    ],
-)
-def test_successful_sync_certifies_checkpoint(
-    state: SyncTrustState,
-) -> None:
+def test_successful_sync_certifies_checkpoint() -> None:
     """Durable sync writes should save the next batch as certified."""
     decision = certify_sync_response(
-        state,
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=state is SyncTrustState.PENDING,
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -109,29 +96,25 @@ def test_uncertain_sync_fails_closed(
 ) -> None:
     """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
     decision = certify_sync_response(
-        SyncTrustState.CERTIFIED,
         next_batch="s_next",
         cache_result=cache_result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is clear_saved_token
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
     assert decision.reason == reason
 
 
 def test_earlier_unrecovered_room_reports_incomplete_recovery() -> None:
     """An earlier open recovery gap must not be diagnosed as a current limited timeline."""
     decision = certify_sync_response(
-        SyncTrustState.CERTIFIED,
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(
             complete=True,
             unrecovered_room_ids=frozenset({"!earlier:localhost"}),
         ),
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -175,13 +158,11 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
     }
 
 
-def test_pending_first_sync_uncertainty_resets_client_token() -> None:
-    """A failed restored-token catch-up should force nio off the ambiguous token."""
+def test_uncertainty_resets_client_token() -> None:
+    """An uncertified response should force nio off the ambiguous token."""
     decision = certify_sync_response(
-        SyncTrustState.PENDING,
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(complete=False),
-        first_sync=True,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -192,48 +173,42 @@ def test_pending_first_sync_uncertainty_resets_client_token() -> None:
 def test_limited_cache_failure_preserves_positioned_continuity() -> None:
     """A cache error must not hide the limited window's continuity requirement."""
     decision = certify_sync_response(
-        SyncTrustState.PENDING,
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(
             complete=False,
             limited_room_ids=("!room:localhost",),
             errors=(RuntimeError("cache failed"),),
         ),
-        first_sync=True,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "cache_write_failed"
     assert decision.clear_saved_token is False
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
 
 
 def test_unrecovered_gap_preserves_positioned_continuity() -> None:
     """A prior nio recovery gap must block a later response checkpoint."""
     decision = certify_sync_response(
-        SyncTrustState.CERTIFIED,
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(
             complete=True,
             unrecovered_room_ids=frozenset({"!room:localhost"}),
         ),
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "sync_recovery_incomplete"
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is False
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
 
 
 def test_missing_next_batch_fails_closed() -> None:
     """A sync response without a next batch cannot become a checkpoint."""
     decision = certify_sync_response(
-        SyncTrustState.COLD,
         next_batch=None,
         cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=True,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN

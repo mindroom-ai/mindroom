@@ -149,7 +149,7 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
 
     try:
         with patch.object(client, "_recovery_room_messages", AsyncMock(return_value=recovery_page)):
-            for index, response in enumerate(responses):
+            for response in responses:
                 await client.receive_response(response)
                 result = _cache_result(
                     response,
@@ -159,7 +159,6 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
                 decision = await trust.certify_response(
                     next_batch=response.next_batch,
                     cache_result=result,
-                    first_sync=index == 0,
                 )
                 if decision.reset_client_token:
                     client.next_batch = None
@@ -198,7 +197,6 @@ async def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewi
             limited_room_ids=(_UNRECOVERED_ROOM,),
             complete=True,
         ),
-        first_sync=False,
     )
     positioned_response = _sync_response(
         limited_room_ids=(_UNRECOVERED_ROOM,),
@@ -212,7 +210,6 @@ async def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewi
             limited_room_ids=(_UNRECOVERED_ROOM,),
             complete=True,
         ),
-        first_sync=False,
     )
 
     assert unknown.reset_client_token is True
@@ -240,7 +237,6 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
             limited_room_ids=(_RECOVERED_ROOM,),
             complete=True,
         ),
-        first_sync=True,
     )
     assert first_baseline.reset_client_token is False
 
@@ -253,7 +249,6 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
             limited_room_ids=(_RECOVERED_ROOM,),
             complete=True,
         ),
-        first_sync=False,
     )
 
     assert trust.checkpoint is None
@@ -285,7 +280,6 @@ async def test_restored_token_recovered_only_first_sync_certifies_after_callback
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=True,
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -312,7 +306,6 @@ async def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -339,7 +332,6 @@ async def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: 
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -379,7 +371,6 @@ async def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complet
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -406,7 +397,6 @@ async def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: 
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -432,7 +422,6 @@ async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tm
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
@@ -458,7 +447,6 @@ async def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
     decision = await trust.certify_response(
         next_batch=response.next_batch,
         cache_result=result,
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN

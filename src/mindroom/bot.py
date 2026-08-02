@@ -1225,13 +1225,11 @@ class AgentBot:
         *,
         next_batch: str | None,
         cache_result: SyncCacheWriteResult,
-        first_sync: bool,
     ) -> SyncCertificationDecision:
         """Apply cache certification and any requested Matrix client rewind."""
         decision = await self._sync_cache_trust.certify_response(
             next_batch=next_batch,
             cache_result=cache_result,
-            first_sync=first_sync,
         )
         self._apply_client_rewind_decision(decision)
         return decision
@@ -1262,7 +1260,22 @@ class AgentBot:
         if not decision.reset_client_token:
             return
         if self.client is not None:
-            cast("Any", self.client).next_batch = None
+            cast("Any", self.client).next_batch = self._sync_cache_trust.retry_token()
+
+    def _reconcile_classic_sync_cursor_after_loop_exit(self) -> None:
+        """Rewind a response nio applied but never delivered for certification."""
+        client = self.client
+        if client is None or self.config.matrix_sync.mode != "classic":
+            return
+        retry_token = self._sync_cache_trust.retry_token()
+        if cast("Any", client).next_batch == retry_token:
+            return
+        self._sync_cache_trust.reject_response_before_certification()
+        cast("Any", client).next_batch = retry_token
+        self.logger.warning(
+            "matrix_sync_receive_loop_exit_rewound_uncertified_cursor",
+            has_retry_token=retry_token is not None,
+        )
 
     def _rewind_sync_after_pre_certification_failure(self) -> None:
         """Replay a classic sync that failed before its position was certified."""
@@ -1487,13 +1500,11 @@ class AgentBot:
                 await self._certify_sync_response(
                     next_batch=response.next_batch,
                     cache_result=cache_result,
-                    first_sync=first_sync_response,
                 )
                 raise
             decision = self._sync_cache_trust.plan_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,
-                first_sync=first_sync_response,
             )
             room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
                 first_sync_response=first_sync_response,
@@ -2107,15 +2118,18 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await run_matrix_sync_forever(
-            self.client,
-            config=self.config,
-            agent_name=self.agent_name,
-            room_ids=self.rooms,
-            timeout_ms=_SYNC_TIMEOUT_MS,
-            sync_filter=_SYNC_FILTER,
-            first_sync_done=self._first_sync_done,
-        )
+        try:
+            await run_matrix_sync_forever(
+                self.client,
+                config=self.config,
+                agent_name=self.agent_name,
+                room_ids=self.rooms,
+                timeout_ms=_SYNC_TIMEOUT_MS,
+                sync_filter=_SYNC_FILTER,
+                first_sync_done=self._first_sync_done,
+            )
+        finally:
+            self._reconcile_classic_sync_cursor_after_loop_exit()
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)

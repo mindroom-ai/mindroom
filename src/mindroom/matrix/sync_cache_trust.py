@@ -147,8 +147,8 @@ class SyncCacheTrust:
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
         self._dispatch_persist_failure_epoch += 1
-        if self.checkpoint is None and self.state in {SyncTrustState.COLD, SyncTrustState.UNCERTAIN}:
-            self._tokenless_baseline_pending = True
+        if self.state in {SyncTrustState.COLD, SyncTrustState.UNCERTAIN}:
+            self._refresh_tokenless_baseline_pending()
 
     def consume_dispatch_persist_failure(self) -> bool:
         """Reject certification once for every newly observed failure epoch."""
@@ -165,8 +165,11 @@ class SyncCacheTrust:
     def reject_response_before_certification(self) -> None:
         """Consume any admission failure owned by an aborted sync response."""
         self.consume_dispatch_persist_failure()
-        if self.retry_token() is None:
-            self._tokenless_baseline_pending = True
+        self._refresh_tokenless_baseline_pending()
+
+    def _refresh_tokenless_baseline_pending(self) -> None:
+        """Permit a positioning baseline exactly when no safe retry cursor exists."""
+        self._tokenless_baseline_pending = self.retry_token() is None
 
     def acknowledge_dispatch_persist_failures(self) -> None:
         """Settle source failures irrelevant to non-checkpointed transports."""
@@ -177,13 +180,11 @@ class SyncCacheTrust:
         *,
         next_batch: str | None,
         cache_result: SyncCacheWriteResult,
-        first_sync: bool,
     ) -> SyncCertificationDecision:
         """Apply the certification decision for one completed sync response."""
         decision = self.plan_response(
             next_batch=next_batch,
             cache_result=cache_result,
-            first_sync=first_sync,
         )
         applied, _record = await self.apply_response(decision, cache_result=cache_result)
         return applied
@@ -193,27 +194,19 @@ class SyncCacheTrust:
         *,
         next_batch: str | None,
         cache_result: SyncCacheWriteResult,
-        first_sync: bool,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
-        decision = certify_sync_response(
-            self.state,
-            next_batch=next_batch,
-            cache_result=cache_result,
-            first_sync=first_sync,
-        )
         allow_tokenless_baseline = (
             self._tokenless_baseline_pending
-            and decision.reason == "limited_sync_timeline"
             and cache_result.complete
             and not cache_result.errors
             and not cache_result.unrecovered_room_ids
         )
-        # Rewind after any uncertified result so a later response cannot
-        # certify past an unrepaired local cache hole. One locally complete
-        # tokenless baseline may advance so nio can classify the positioned gap.
-        if not cache_result.certified and not allow_tokenless_baseline:
-            decision = replace(decision, reset_client_token=True)
+        decision = certify_sync_response(
+            next_batch=next_batch,
+            cache_result=cache_result,
+            allow_tokenless_baseline=allow_tokenless_baseline,
+        )
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
     async def apply_response(
@@ -242,7 +235,7 @@ class SyncCacheTrust:
                     joined_room_ids=joined_room_ids,
                 )
                 if decision.reset_client_token:
-                    self._tokenless_baseline_pending = True
+                    self._refresh_tokenless_baseline_pending()
                 elif decision.reason == "limited_sync_timeline" or self.state is SyncTrustState.CERTIFIED:
                     self._tokenless_baseline_pending = False
                 return decision, record
@@ -256,7 +249,7 @@ class SyncCacheTrust:
             async with self._mutation_lock:
                 decision = handle_unknown_pos()
                 await self._apply_decision_locked(decision)
-                self._tokenless_baseline_pending = True
+                self._refresh_tokenless_baseline_pending()
                 return decision
 
         return await run_coroutine_until_complete(reject())

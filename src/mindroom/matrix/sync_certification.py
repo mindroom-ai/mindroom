@@ -126,20 +126,20 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
 
 
 def certify_sync_response(
-    state: SyncTrustState,
     *,
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
-    first_sync: bool,
+    allow_tokenless_baseline: bool = False,
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
         timeline_gap = bool(cache_result.limited_room_ids or cache_result.unrecovered_room_ids)
+        keep_tokenless_baseline = allow_tokenless_baseline and reason == "limited_sync_timeline"
         return _uncertain_decision(
             reason=reason,
             clear_saved_token=not timeline_gap,
-            reset_client_token=not timeline_gap and state is SyncTrustState.PENDING and first_sync,
+            reset_client_token=not keep_tokenless_baseline,
         )
 
     token = normalize_sync_token(next_batch)
@@ -183,11 +183,12 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
 
 def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
     """Return recovery-specific diagnostics for one cache write."""
+    unclassified_limited_room_ids = cache_result._unclassified_limited_room_ids
     diagnostics: dict[str, Any] = {
         "cache_limited_room_count": len(cache_result.limited_room_ids),
         "cache_recovered_room_count": len(cache_result.recovered_room_ids),
         "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
-        "cache_unclassified_limited_room_count": len(cache_result._unclassified_limited_room_ids),
+        "cache_unclassified_limited_room_count": len(unclassified_limited_room_ids),
     }
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
@@ -195,6 +196,6 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         diagnostics["cache_recovered_room_ids"] = tuple(sorted(cache_result.recovered_room_ids))[:5]
     if cache_result.unrecovered_room_ids:
         diagnostics["cache_unrecovered_room_ids"] = tuple(sorted(cache_result.unrecovered_room_ids))[:5]
-    if cache_result._unclassified_limited_room_ids:
-        diagnostics["cache_unclassified_limited_room_ids"] = cache_result._unclassified_limited_room_ids[:5]
+    if unclassified_limited_room_ids:
+        diagnostics["cache_unclassified_limited_room_ids"] = unclassified_limited_room_ids[:5]
     return diagnostics
