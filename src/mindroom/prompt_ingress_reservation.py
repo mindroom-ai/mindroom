@@ -15,7 +15,7 @@ from mindroom.coalescing import (
 
 if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescingKey
-    from mindroom.pending_turn_claim import PendingTurnClaim
+    from mindroom.handled_turns import TurnRecord
 
 
 @dataclass
@@ -26,27 +26,7 @@ class PromptIngressReservationOwner:
     slot: LaneSlot
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
-    pending_turn_claim: PendingTurnClaim | None = None
-
-    def own_pending_turn_claim(self, turn_claim: PendingTurnClaim) -> None:
-        """Own one live-turn claim until dispatch handoff or release."""
-        if self.pending_turn_claim is not None:
-            msg = "Prompt ingress reservation already owns a turn claim"
-            raise RuntimeError(msg)
-        self.pending_turn_claim = turn_claim
-
-    def take_pending_turn_claim(self) -> PendingTurnClaim | None:
-        """Transfer the owned live-turn claim without releasing it."""
-        turn_claim = self.pending_turn_claim
-        self.pending_turn_claim = None
-        return turn_claim
-
-    def release_pending_turn_claim(self) -> None:
-        """Release and clear the owned live-turn claim once."""
-        turn_claim = self.pending_turn_claim
-        self.pending_turn_claim = None
-        if turn_claim is not None:
-            turn_claim.close()
+    pending_turn_claim: TurnRecord | None = None
 
     @staticmethod
     def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
@@ -108,13 +88,10 @@ class PromptIngressReservationOwner:
         close_ready_task_result_metadata(result[0])
 
     async def release(self) -> None:
-        """Release this lane slot and any claim not transferred to dispatch."""
+        """Release this lane slot if admission did not transfer ownership."""
         if self.admitted:
             return
         try:
             await self._cancel_ready_task()
         finally:
-            try:
-                self.release_pending_turn_claim()
-            finally:
-                self.gate.release_lane_slot(self.slot)
+            self.gate.release_lane_slot(self.slot)

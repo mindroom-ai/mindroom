@@ -91,8 +91,6 @@ Matrix sync callback
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `prompt_ingress_reservation.py` | Receipt-order lane ownership until live ingress transfers or releases its work |
-| `pending_turn_claim.py` | Single-release claim ownership shared across ingress handoffs and cleanup paths |
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `coalescing_batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |

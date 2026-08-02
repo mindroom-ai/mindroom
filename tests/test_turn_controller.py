@@ -19,10 +19,8 @@ from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.pending_turn_claim import PendingTurnClaim
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
@@ -222,30 +220,6 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
         if not ready_task.done():
             ready_task.cancel()
         await asyncio.gather(ready_task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_owner_and_handoff_cleanup_close_shared_turn_claim_once() -> None:
-    """Competing cleanup layers must release their shared store claim only once."""
-    gate = CoalescingGate(
-        dispatch_batch=AsyncMock(),
-        debounce_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
-    owner = PromptIngressReservationOwner(gate=gate, slot=slot)
-    turn_record = TurnRecord.create(["$source:localhost"], completed=False)
-    release_claim = MagicMock()
-    turn_claim = PendingTurnClaim(turn_record=turn_record, release=release_claim)
-    owner.own_pending_turn_claim(turn_claim)
-
-    turn_claim.close()
-    await owner.release()
-    await owner.release()
-
-    release_claim.assert_called_once_with(turn_record)
-    assert owner.pending_turn_claim is None
-    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
 
 
 @pytest.mark.asyncio
