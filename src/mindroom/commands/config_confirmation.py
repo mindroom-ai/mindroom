@@ -16,6 +16,7 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
-
 logger = get_logger(__name__)
 
 # Event type for pending config changes in Matrix state
@@ -38,11 +38,24 @@ _MAX_PENDING_AGE_HOURS = 24
 class ConfigConfirmationContext:
     """Narrow runtime boundary for one config-confirmation decision."""
 
-    client: nio.AsyncClient
-    authorization: AuthorizationConfig
+    runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
     build_message_target: Callable[..., MessageTarget]
     delivery_gateway: DeliveryGateway
+
+    @property
+    def client(self) -> nio.AsyncClient:
+        """Return the current Matrix client for this runtime."""
+        client = self.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for config confirmation"
+            raise RuntimeError(msg)
+        return client
+
+    @property
+    def authorization(self) -> AuthorizationConfig:
+        """Return authorization from the current runtime config."""
+        return self.runtime.config.authorization
 
 
 @dataclass

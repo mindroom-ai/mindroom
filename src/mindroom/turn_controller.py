@@ -462,7 +462,7 @@ class TurnController:
             raise RuntimeError(msg)
         return client
 
-    def _reserve_prompt_ingress_order(
+    def reserve_prompt_ingress_order(
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
@@ -491,13 +491,6 @@ class TurnController:
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
-
-    def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
-        """Mark one or more source events as handled by the same terminal outcome."""
-        if handled_turn.response_event_id is None:
-            msg = "A responded turn requires a visible Matrix response event ID"
-            raise RuntimeError(msg)
-        self.deps.turn_store.record_turn(handled_turn)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -772,21 +765,16 @@ class TurnController:
             return False
         if thread_history is None:
             return False
-        available_responders = await self._responder_candidates_for_room(room, requester_user_id)
+        available_responders = await self.deps.turn_policy.responder_candidates_for_room(
+            room,
+            requester_user_id,
+        )
         return thread_requires_explicit_agent_targeting(
             thread_history,
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             available_responders_in_room=available_responders,
-        )
-
-    async def _responder_candidates_for_room(self, room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
-        """Return live-filtered responder candidates with fresh availability state."""
-        return await self.deps.turn_policy.responder_candidates_for_room(
-            room,
-            sender_id,
-            self.deps.turn_policy.responder_availability(),
         )
 
     async def _coalescing_key_for_event(
@@ -979,7 +967,9 @@ class TurnController:
                 ),
                 recovered_response_event_id=response_event_id,
             )
-            self._mark_source_events_responded(replace(pending_turn, response_event_id=response_event_id))
+            self.deps.turn_store.record_responded_turn(
+                replace(pending_turn, response_event_id=response_event_id),
+            )
             return True
         await self.deps.visible_responses.settle_source_events_ignored(TurnRecord.create([event.event_id]))
         return True
@@ -1417,7 +1407,7 @@ class TurnController:
                 ),
             )
             if response_event_id is not None:
-                self._mark_source_events_responded(
+                self.deps.turn_store.record_responded_turn(
                     replace(selection_handled_turn, response_event_id=response_event_id),
                 )
                 await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
@@ -1472,7 +1462,7 @@ class TurnController:
             ),
         )
         if response_event_id is not None:
-            self._mark_source_events_responded(
+            self.deps.turn_store.record_responded_turn(
                 replace(selection_handled_turn, response_event_id=response_event_id),
             )
             await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
@@ -1609,7 +1599,10 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        responder_candidates = await self._responder_candidates_for_room(room, permission_sender_id)
+        responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(
+            room,
+            permission_sender_id,
+        )
         if not responder_candidates:
             self.deps.logger.debug(
                 "No responders to route to in this room for sender",
@@ -1706,7 +1699,7 @@ class TurnController:
         if tracked_handled_turn is None:
             return
         if recovered_response_event_id is not None:
-            self._mark_source_events_responded(
+            self.deps.turn_store.record_responded_turn(
                 replace(tracked_handled_turn, response_event_id=recovered_response_event_id),
             )
             return
@@ -1725,7 +1718,9 @@ class TurnController:
             if event_id:
                 self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
                 await self.deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
-                self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
+                self.deps.turn_store.record_responded_turn(
+                    replace(tracked_handled_turn, response_event_id=event_id),
+                )
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
                 msg = f"Failed to route to entity {suggested_entity!r}"
@@ -1791,7 +1786,9 @@ class TurnController:
             self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
-            self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
+            self.deps.turn_store.record_responded_turn(
+                replace(handled_turn, response_event_id=response_event_id),
+            )
 
         def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
             self.deps.turn_store.record_turn_durably(
@@ -1855,7 +1852,9 @@ class TurnController:
                     response_text=action.rejection_message,
                     recovered_response_event_id=response_event_id,
                 )
-                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
+                self.deps.turn_store.record_responded_turn(
+                    replace(handled_turn, response_event_id=response_event_id),
+                )
                 if dispatch_timing is not None and response_event_id is not None:
                     dispatch_timing.mark_first_visible_reply("final", substantive=True)
                     dispatch_timing.mark("response_complete")
@@ -1977,10 +1976,14 @@ class TurnController:
                     existing_event_id=error.placeholder_event_id,
                     on_visible_response=record_visible_response,
                 )
-                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
+                self.deps.turn_store.record_responded_turn(
+                    replace(handled_turn, response_event_id=response_event_id),
+                )
                 return
             if response_event_id is not None:
-                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
+                self.deps.turn_store.record_responded_turn(
+                    replace(handled_turn, response_event_id=response_event_id),
+                )
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
@@ -2116,7 +2119,7 @@ class TurnController:
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         owns_reservation = reservation_owner is None
         if reservation_owner is None:
-            reservation_owner = self._reserve_prompt_ingress_order(
+            reservation_owner = self.reserve_prompt_ingress_order(
                 room,
                 prechecked_event.requester_user_id,
                 receipt_time=receipt_time,
@@ -2234,6 +2237,8 @@ class TurnController:
             room,
             raw_event,
             requester_user_id,
+            command_executor=self.deps.command_executor,
+            visible_responses=self.deps.visible_responses,
             media_events=media_events,
             handled_turn=handled_turn,
             queued_notice_reservation=queued_notice_reservation,
@@ -2281,7 +2286,7 @@ class TurnController:
                 sender=prechecked_event.event.sender,
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        reservation_owner = self._reserve_prompt_ingress_order(
+        reservation_owner = self.reserve_prompt_ingress_order(
             room,
             prechecked_event.requester_user_id,
             receipt_time=receipt_time,

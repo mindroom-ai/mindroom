@@ -2147,6 +2147,7 @@ path = "mindroom.runtime_protocols"
 depends_on = []
 visibility = [
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
@@ -3108,6 +3109,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
     "mindroom.matrix.client_thread_history",
+    "mindroom.runtime_protocols",
 ]
 
 [[modules]]
@@ -3487,6 +3489,7 @@ path = "mindroom.text_ingress_dispatch"
 depends_on = [
     "mindroom.response_admission",
     "mindroom.attachments",
+    "mindroom.command_turn_executor",
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.dispatch_handoff",
@@ -3498,6 +3501,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.timing",
+    "mindroom.visible_response_reconciliation",
 ]
 visibility = ["mindroom.turn_controller"]
 
@@ -3520,6 +3524,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
 ]
 
@@ -3550,6 +3555,7 @@ depends_on = [
 visibility = [
     "mindroom.bot",
     "mindroom.command_turn_executor",
+    "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
 ]
 

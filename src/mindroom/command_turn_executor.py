@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.conversation_cache import MatrixConversationCache
-    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
@@ -72,12 +71,6 @@ class CommandTurnExecutor:
             msg = "Matrix client is not ready for command execution"
             raise RuntimeError(msg)
         return client
-
-    def _record_responded(self, handled_turn: TurnRecord) -> None:
-        if handled_turn.response_event_id is None:
-            msg = "A responded turn requires a visible Matrix response event ID"
-            raise RuntimeError(msg)
-        self.deps.turn_store.record_turn(handled_turn)
 
     async def execute(
         self,
@@ -139,7 +132,7 @@ class CommandTurnExecutor:
             )
 
         def record_command_turn(outcome: TurnRecord) -> None:
-            self._record_responded(
+            self.deps.turn_store.record_responded_turn(
                 replace(active_command_turn, response_event_id=outcome.response_event_id),
             )
 
@@ -160,7 +153,7 @@ class CommandTurnExecutor:
             record_command_result=record_command_result,
             send_response=send_response,
             reload_plugins=reload_plugins,
-            responder_candidates_for_room=self._responder_candidates_for_room,
+            responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
         )
         await handle_command(
             context=context,
@@ -182,13 +175,6 @@ class CommandTurnExecutor:
             config=self.deps.runtime.config,
         )
 
-    async def _responder_candidates_for_room(self, room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
-        return await self.deps.turn_policy.responder_candidates_for_room(
-            room,
-            sender_id,
-            self.deps.turn_policy.responder_availability(),
-        )
-
     async def _recover_visible_response(
         self,
         *,
@@ -204,7 +190,7 @@ class CommandTurnExecutor:
             response_event_id,
         ):
             return False
-        self._record_responded(
+        self.deps.turn_store.record_responded_turn(
             replace(command_turn, response_event_id=response_event_id),
         )
         return True
@@ -248,7 +234,7 @@ class CommandTurnExecutor:
             recovered_response_event_id=recovered_response_event_id,
             skip_mentions=True,
         )
-        self._record_responded(
+        self.deps.turn_store.record_responded_turn(
             replace(command_turn, response_event_id=response_event_id),
         )
 

@@ -169,7 +169,7 @@ async def _enqueue_for_dispatch(
     trust_internal_payload_metadata: bool | None = None,
 ) -> _IngressAdmissionOutcome:
     """Test helper for the reserved Matrix-ingress enqueue path."""
-    reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
     try:
         return await bot._turn_controller._enqueue_for_dispatch(
             event,
@@ -1826,7 +1826,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
     try:
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
             await bot._turn_controller.handle_text_event(room, command_event)
@@ -6936,7 +6936,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=record_payload_request),
         ),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
@@ -7113,7 +7113,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, sidecar.sender)
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),

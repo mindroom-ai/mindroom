@@ -230,7 +230,7 @@ class _SpyTurnPolicy:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        availability: ResponderAvailability,
+        availability: ResponderAvailability | None = None,
     ) -> list[object]:
         return list(await self.inner.responder_candidates_for_room(room, requester_user_id, availability))
 
@@ -2095,7 +2095,7 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
         "record_pending_visible_response",
         wraps=harness.controller.deps.visible_responses.record_pending_visible_response,
     ) as record_visible_response:
-        with patch.object(harness.controller.deps.command_executor, "_record_responded"):
+        with patch.object(harness.turn_store, "record_responded_turn"):
             await harness.controller.deps.command_executor.execute(
                 room,
                 event,
@@ -2182,7 +2182,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
 
     with (
         patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate,
-        patch.object(harness.controller, "_mark_source_events_responded"),
+        patch.object(harness.turn_store, "record_responded_turn"),
     ):
         await harness.controller.deps.command_executor.execute(
             room,
@@ -2380,7 +2380,7 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
     pending_turn = harness.turn_store.record_pending_turn(handled_turn)
     assert pending_turn is not None
 
-    with patch.object(harness.controller, "_mark_source_events_responded"):
+    with patch.object(harness.turn_store, "record_responded_turn"):
         await harness.controller._execute_response_action(
             room,
             event,
@@ -2424,7 +2424,7 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
     event = _text_event("route this", event_id="$router-replay:localhost")
     handled_turn = TurnRecord.create([event.event_id], completed=False)
 
-    with patch.object(harness.controller, "_mark_source_events_responded"):
+    with patch.object(harness.turn_store, "record_responded_turn"):
         await harness.controller._execute_router_relay(
             room,
             event,
@@ -2995,7 +2995,7 @@ async def test_interactive_selection_failure_persists_fallback_before_terminal_r
         "build_dispatch_payload_with_attachments",
         fail_attachment_resolution,
     )
-    monkeypatch.setattr(harness.controller, "_mark_source_events_responded", crash_before_terminal_record)
+    monkeypatch.setattr(harness.turn_store, "record_responded_turn", crash_before_terminal_record)
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",

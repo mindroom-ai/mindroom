@@ -683,6 +683,38 @@ class AgentBot:
                 retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
             ),
         )
+        self._reaction_dispatcher = ReactionDispatcher(
+            ReactionDispatcherDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                obligation_runner=self._dispatch_obligation_runner,
+                turn_policy=self._turn_policy,
+                turn_store=self._turn_store,
+                stop_manager=self.stop_manager,
+                conversation_cache=self._conversation_cache,
+                user_stop_reconciler=self._user_stop_reconciler,
+                ingress=self._ingress_validator,
+                reserve_prompt_ingress_order=lambda *args, **kwargs: self._turn_controller.reserve_prompt_ingress_order(
+                    *args,
+                    **kwargs,
+                ),
+                handle_interactive_selection=lambda *args, **kwargs: self._turn_controller.handle_interactive_selection(
+                    *args,
+                    **kwargs,
+                ),
+                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                config_confirmation=config_confirmation.ConfigConfirmationContext(
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    build_message_target=self._conversation_resolver.build_message_target,
+                    delivery_gateway=self._delivery_gateway,
+                ),
+                handle_approval_action=lambda **kwargs: handle_tool_approval_action(**kwargs),
+                sender_is_authorized=lambda *args: is_authorized_sender(*args),
+            ),
+        )
 
     async def _recover_config_confirmation_setup(self, room_id: str, preview_event_id: str) -> bool:
         """Recover Matrix-backed config setup without coupling turn control to commands."""
@@ -2044,7 +2076,7 @@ class AgentBot:
                 sender=event.sender,
                 source=event.source,
             )
-            early_reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+            early_reservation_owner = self._turn_controller.reserve_prompt_ingress_order(
                 room,
                 requester_user_id,
                 receipt_time=receipt_time,
@@ -2079,36 +2111,8 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
-        assert self.client is not None
-        dispatcher = ReactionDispatcher(
-            ReactionDispatcherDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                obligation_runner=self._dispatch_obligation_runner,
-                turn_policy=self._turn_policy,
-                turn_store=self._turn_store,
-                stop_manager=self.stop_manager,
-                conversation_cache=self._conversation_cache,
-                user_stop_reconciler=self._user_stop_reconciler,
-                ingress=self._ingress_validator,
-                reserve_prompt_ingress_order=self._turn_controller._reserve_prompt_ingress_order,
-                handle_interactive_selection=self._turn_controller.handle_interactive_selection,
-                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
-                config_confirmation=config_confirmation.ConfigConfirmationContext(
-                    client=self.client,
-                    authorization=self.config.authorization,
-                    runtime_paths=self.runtime_paths,
-                    build_message_target=self._conversation_resolver.build_message_target,
-                    delivery_gateway=self._delivery_gateway,
-                ),
-                handle_approval_action=handle_tool_approval_action,
-                sender_is_authorized=is_authorized_sender,
-            ),
-        )
         async with self._conversation_resolver.turn_thread_cache_scope():
-            await dispatcher.dispatch(room, event)
+            await self._reaction_dispatcher.dispatch(room, event)
 
     async def _on_room_member(
         self,

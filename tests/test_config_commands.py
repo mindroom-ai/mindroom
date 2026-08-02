@@ -82,8 +82,7 @@ def _pending_config_change(
 def _confirmation_context(bot: SimpleNamespace) -> ConfigConfirmationContext:
     """Build the narrow confirmation boundary used by production reaction dispatch."""
     return ConfigConfirmationContext(
-        client=bot.client,
-        authorization=bot.config.authorization,
+        runtime=bot,
         runtime_paths=bot.runtime_paths,
         build_message_target=bot._conversation_resolver.build_message_target,
         delivery_gateway=bot._delivery_gateway,
@@ -914,7 +913,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         config=SimpleNamespace(
             authorization=_handler_authorization(
                 config_command_enabled=True,
-                global_users=["@other-admin:example.org"],
+                global_users=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -926,6 +925,11 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
     pending_change = _pending_config_change()
+    confirmation_context = _confirmation_context(bot)
+    bot.config.authorization = _handler_authorization(
+        config_command_enabled=True,
+        global_users=["@other-admin:example.org"],
+    )
 
     with (
         patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
@@ -944,7 +948,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
     ):
-        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
+        await handle_confirmation_reaction(confirmation_context, room, event)
 
     mock_apply.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_awaited_once_with(

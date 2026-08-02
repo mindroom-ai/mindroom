@@ -81,6 +81,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
+from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -1457,8 +1458,31 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             delivery_gateway=rebuilt_changes["delivery_gateway"],
         ),
     )
+    wrap_extracted_collaborators(bot, "_user_stop_reconciler")
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
+    reaction_dispatcher = bot._reaction_dispatcher
+    bot._reaction_dispatcher = ReactionDispatcher(
+        replace(
+            reaction_dispatcher.deps,
+            runtime=rebuilt.deps.runtime,
+            logger=rebuilt.deps.logger,
+            runtime_paths=rebuilt.deps.runtime_paths,
+            agent_name=rebuilt.deps.agent_name,
+            turn_policy=rebuilt.deps.turn_policy,
+            turn_store=rebuilt.deps.turn_store,
+            conversation_cache=rebuilt.deps.conversation_cache,
+            user_stop_reconciler=bot._user_stop_reconciler,
+            ingress=rebuilt.deps.ingress,
+            config_confirmation=replace(
+                reaction_dispatcher.deps.config_confirmation,
+                runtime=rebuilt.deps.runtime,
+                runtime_paths=rebuilt.deps.runtime_paths,
+                build_message_target=rebuilt.deps.resolver.build_message_target,
+                delivery_gateway=rebuilt.deps.delivery_gateway,
+            ),
+        ),
+    )
     edit_changes = {
         name: value
         for name, value in changes.items()

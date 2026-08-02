@@ -1848,7 +1848,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             new=AsyncMock(return_value=None),
         ) as mock_handle_text_response:
             assert isinstance(sidecar_event, nio.RoomMessageFile)
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
                 room,
                 "@mindroom_router:localhost",
             )
@@ -1921,7 +1921,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         new=AsyncMock(return_value=None),
     ) as mock_handle_text_response:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
             room,
             "@mindroom_router:localhost",
         )

@@ -474,7 +474,7 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
                 assert reaction_slots
-                later_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+                later_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
                     assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:
