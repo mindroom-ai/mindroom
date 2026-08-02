@@ -342,9 +342,11 @@ class TurnPolicy:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        availability: _ResponderAvailability,
+        availability: _ResponderAvailability | None = None,
     ) -> list[MatrixID]:
         """Return sender-visible candidates filtered by live responder availability."""
+        if availability is None:
+            availability = self.responder_availability()
         available_responders = await responder_candidate_entities_for_room(
             self.deps.runtime.client,
             room,
@@ -611,11 +613,7 @@ class TurnPolicy:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            available_responders = await self.responder_candidates_for_room(
-                room,
-                requester_user_id,
-                self.responder_availability(),
-            )
+            available_responders = await self.responder_candidates_for_room(room, requester_user_id)
             if context.is_thread and thread_requires_explicit_agent_targeting(
                 planning_thread_history,
                 sender_id=requester_user_id,

@@ -802,7 +802,11 @@ class TestAgentBot(AgentBotTestBase):
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -866,7 +870,11 @@ class TestAgentBot(AgentBotTestBase):
                 "get_dispatch_thread_snapshot",
                 new=AsyncMock(return_value=snapshot_history),
             ) as mock_snapshot,
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -1050,7 +1058,7 @@ class TestAgentBot(AgentBotTestBase):
             assert media_events is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            bot._turn_controller._mark_source_events_responded(replace(handled_turn, response_event_id="$route"))
+            bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
@@ -1132,7 +1140,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
                 event,
                 room,
@@ -1714,7 +1722,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
@@ -1819,7 +1827,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
@@ -1929,7 +1937,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
