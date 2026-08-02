@@ -161,6 +161,9 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
+        turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
+        assert controller.deps.turn_store.try_claim_turn(turn_claim)
+
         with (
             patch.object(
                 controller,
@@ -186,6 +189,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 voice_target=target,
                 dispatch_timing=None,
+                turn_claim=turn_claim,
             )
 
         assert result is None
@@ -196,6 +200,8 @@ class TestAgentBot(AgentBotTestBase):
         )
         fallback_cleanup.assert_called_once_with()
         assert fallback.ready.pending_event.dispatch_metadata == ()
+        assert controller.deps.turn_store.try_claim_turn(turn_claim)
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -1723,12 +1729,15 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
+            assert bot._turn_store.try_claim_turn(turn_claim)
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
                 event_info=EventInfo.from_event(voice_event.source),
                 dispatch_timing=None,
                 reservation_owner=reservation_owner,
+                turn_claim=turn_claim,
             )
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
@@ -1748,11 +1757,14 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
+        assert len(pending_event.dispatch_metadata) == 2
+        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
         assert metadata.requires_solo_batch is False
+        claim_metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "pending_turn_claim")
+        assert claim_metadata.payload == turn_claim
+        claim_metadata.close()
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
