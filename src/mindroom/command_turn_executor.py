@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.commands.handler import (
@@ -16,6 +16,7 @@ from mindroom.commands.parsing import CommandType
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
+from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -133,7 +134,7 @@ class CommandTurnExecutor:
 
         def record_command_turn(outcome: TurnRecord) -> None:
             self.deps.turn_store.record_responded_turn(
-                replace(active_command_turn, response_event_id=outcome.response_event_id),
+                canonicalize_turn_record(active_command_turn, response_event_id=outcome.response_event_id),
             )
 
         orchestrator = self.deps.runtime.orchestrator
@@ -191,7 +192,7 @@ class CommandTurnExecutor:
         ):
             return False
         self.deps.turn_store.record_responded_turn(
-            replace(command_turn, response_event_id=response_event_id),
+            canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
         return True
 
@@ -204,7 +205,7 @@ class CommandTurnExecutor:
     ) -> TurnRecord:
         persisted_turn = await asyncio.to_thread(
             self.deps.turn_store.record_pending_turn,
-            replace(
+            canonicalize_turn_record(
                 command_turn,
                 command_execution_started=(
                     command_turn.command_execution_started
@@ -235,7 +236,7 @@ class CommandTurnExecutor:
             skip_mentions=True,
         )
         self.deps.turn_store.record_responded_turn(
-            replace(command_turn, response_event_id=response_event_id),
+            canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
 
     async def _resume_or_start(

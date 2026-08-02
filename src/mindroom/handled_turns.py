@@ -16,7 +16,7 @@ import time
 import typing
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
@@ -32,6 +32,7 @@ from mindroom.turn_record import (
     TurnRecord,
     _normalize_source_event_ids,
     _normalize_string,
+    canonicalize_turn_record,
     merge_edit_facts,
     same_turn_identity,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "SourceEventRevision",
     "TurnRecord",
     "TurnRecordCodec",
+    "canonicalize_turn_record",
     "merge_edit_facts",
 ]
 
@@ -74,7 +76,7 @@ def with_user_stop(
     if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
         msg = "User-stop receipt order must be positive"
         raise ValueError(msg)
-    return replace(
+    return canonicalize_turn_record(
         turn_record,
         response_event_id=response_event_id,
         completed=True,
@@ -445,7 +447,7 @@ class HandledTurnLedger:
             if not turn_record.source_event_ids:
                 return None
             candidate_record = (
-                turn_record if turn_record.timestamp != 0.0 else replace(turn_record, timestamp=time.time())
+                turn_record if turn_record.timestamp != 0.0 else canonicalize_turn_record(turn_record, timestamp=time.time())
             )
             persisted_record = _resolve_turn_record(candidate_record, self._responses)
             if persisted_record is None:
@@ -866,7 +868,7 @@ def _resolve_turn_record(
         or not existing_record.completed
         or same_turn_identity(existing_record, resolved_record)
     )
-    return replace(resolved_record, discovery_event_ids=discovery_event_ids)
+    return canonicalize_turn_record(resolved_record, discovery_event_ids=discovery_event_ids)
 
 
 def _project_redaction_alias(
@@ -891,7 +893,7 @@ def _project_redaction_alias(
         if turn_record.anchor_event_id in retained_source_event_ids
         else retained_source_event_ids[-1]
     )
-    return replace(
+    return canonicalize_turn_record(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
@@ -912,7 +914,7 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
         newer, older = (candidate, existing) if candidate.completed else (existing, candidate)
     else:
         newer, older = (candidate, existing) if candidate.timestamp > existing.timestamp else (existing, candidate)
-    return replace(
+    return canonicalize_turn_record(
         newer,
         discovery_event_ids=(*newer.discovery_event_ids, *older.discovery_event_ids),
         redacted_source_event_ids=(

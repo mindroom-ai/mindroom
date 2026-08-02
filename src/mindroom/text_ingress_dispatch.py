@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
@@ -38,7 +38,10 @@ from mindroom.timing import (
     event_timing_scope,
     get_dispatch_pipeline_timing,
 )
-from mindroom.timing import timing_scope as timing_scope_context
+from mindroom.timing import (
+    timing_scope as timing_scope_context,
+)
+from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -236,13 +239,13 @@ async def _prepare_text_dispatch(
     elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
-        handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
+        handled_turn = canonicalize_turn_record(handled_turn, source_event_prompts=refreshed_prompts)
     routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
     if routed_original_event_id is not None:
         # Keep the routed turn discoverable by the human message the router
         # relayed, so edits and redactions of that message reach this
         # responder's persisted runs.
-        handled_turn = replace(
+        handled_turn = canonicalize_turn_record(
             handled_turn,
             discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
         )
@@ -275,7 +278,7 @@ async def _prepare_text_dispatch(
     return _PreparedTextDispatch(
         event=event,
         payload_metadata=payload_metadata,
-        handled_turn=replace(
+        handled_turn=canonicalize_turn_record(
             handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
             correlation_id=prepared.dispatch.correlation_id,

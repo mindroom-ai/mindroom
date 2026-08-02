@@ -22,6 +22,7 @@ from mindroom.handled_turns import (
     TurnRecord,
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
+    canonicalize_turn_record,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -248,6 +249,34 @@ def test_turn_record_create_normalizes_coupled_source_state() -> None:
     assert record.pending_redaction_cleanup_event_ids == ("edit",)
     assert record.source_event_prompts == {"source": "prompt"}
     assert record.source_event_revisions is None
+
+
+def test_canonicalize_turn_record_prunes_new_redactions() -> None:
+    """Explicit updates should reapply source-state invariants."""
+    record = TurnRecord.create(
+        ["first", "second"],
+        source_event_prompts={"first": "one", "second": "two"},
+    )
+
+    updated = canonicalize_turn_record(
+        record,
+        redacted_source_event_ids=("first",),
+        pending_redaction_cleanup_event_ids=("first", "second"),
+    )
+
+    assert updated.redacted_source_event_ids == ("first",)
+    assert updated.pending_redaction_cleanup_event_ids == ("first",)
+    assert updated.source_event_prompts == {"second": "two"}
+
+
+def test_canonicalize_turn_record_links_command_result_to_started_checkpoint() -> None:
+    """A stored command result should explicitly imply execution started."""
+    record = TurnRecord.create(["source"], command_execution_started=False)
+
+    updated = canonicalize_turn_record(record, command_result_text="done")
+
+    assert updated.command_execution_started is True
+    assert updated.command_result_text == "done"
 
 
 def test_turn_record_preserves_response_context() -> None:
@@ -491,7 +520,7 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
         ),
         "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
     }
-    redacted = replace(turn_record, redacted_source_event_ids=("$human-first",))
+    redacted = canonicalize_turn_record(turn_record, redacted_source_event_ids=("$human-first",))
     assert redacted.replay_source_event_ids == ("$second",)
     assert redacted.source_event_prompts == {"$second": "second"}
     tracker2.record_handled_turn(redacted)

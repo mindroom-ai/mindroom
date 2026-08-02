@@ -2198,8 +2198,13 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     terminal_finished = threading.Event()
     create_turn_record = TurnRecord.create
 
-    def blocking_create(source_event_ids: list[str], *, completed: bool = True) -> TurnRecord:
-        turn_record = create_turn_record(source_event_ids, completed=completed)
+    def blocking_create(
+        source_event_ids: list[str],
+        *,
+        completed: bool = True,
+        **kwargs: object,
+    ) -> TurnRecord:
+        turn_record = create_turn_record(source_event_ids, completed=completed, **kwargs)
         if not completed:
             echo_record_built.set()
             assert release_echo_record.wait(timeout=2)

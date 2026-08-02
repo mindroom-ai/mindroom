@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
@@ -245,6 +245,69 @@ class TurnRecord:
         """Return source IDs whose content remains eligible for replay or regeneration."""
         redacted_event_ids = {self.prompt_source_event_id(event_id) for event_id in self.redacted_source_event_ids}
         return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
+
+
+class TurnRecordChanges(typing.TypedDict, total=False):
+    """Typed fields accepted by the explicit canonical update boundary."""
+
+    source_event_ids: Sequence[str]
+    discovery_event_ids: Sequence[str]
+    redacted_source_event_ids: Sequence[str]
+    pending_redaction_cleanup_event_ids: Sequence[str]
+    anchor_event_id: str | None
+    response_event_id: str | None
+    completed: bool
+    visible_echo_event_id: str | None
+    visible_echo_is_fallback: bool | None
+    source_event_prompts: Mapping[str, str] | None
+    source_event_revisions: Mapping[str, object] | None
+    suppressed_source_event_revisions: Mapping[str, object] | None
+    latest_edit_receipt_order: int | None
+    user_stop_receipt_order: int | None
+    user_stop_settled_receipt_order: int | None
+    source_event_metadata: Mapping[str, object] | None
+    response_owner: str | None
+    requester_id: str | None
+    correlation_id: str | None
+    command_execution_started: bool
+    command_result_text: str | None
+    history_scope: HistoryScope | None
+    conversation_target: MessageTarget | None
+    timestamp: float
+
+
+def canonicalize_turn_record(
+    record: TurnRecord,
+    **changes: typing.Unpack[TurnRecordChanges],
+) -> TurnRecord:
+    """Return a canonical record after applying an explicit set of changes."""
+    candidate = replace(record, **changes)
+    return TurnRecord.create(
+        candidate.source_event_ids,
+        discovery_event_ids=candidate.discovery_event_ids,
+        redacted_source_event_ids=candidate.redacted_source_event_ids,
+        pending_redaction_cleanup_event_ids=candidate.pending_redaction_cleanup_event_ids,
+        anchor_event_id=candidate.anchor_event_id,
+        response_event_id=candidate.response_event_id,
+        completed=candidate.completed,
+        visible_echo_event_id=candidate.visible_echo_event_id,
+        visible_echo_is_fallback=candidate.visible_echo_is_fallback,
+        source_event_prompts=candidate.source_event_prompts,
+        source_event_revisions=candidate.source_event_revisions,
+        suppressed_source_event_revisions=candidate.suppressed_source_event_revisions,
+        latest_edit_receipt_order=candidate.latest_edit_receipt_order,
+        user_stop_receipt_order=candidate.user_stop_receipt_order,
+        user_stop_settled_receipt_order=candidate.user_stop_settled_receipt_order,
+        source_event_metadata=candidate.source_event_metadata,
+        response_owner=candidate.response_owner,
+        requester_id=candidate.requester_id,
+        correlation_id=candidate.correlation_id,
+        command_execution_started=candidate.command_execution_started,
+        command_result_text=candidate.command_result_text,
+        history_scope=candidate.history_scope,
+        conversation_target=candidate.conversation_target,
+        timestamp=candidate.timestamp,
+    )
 
 
 def _canonical_source_state(
