@@ -1290,6 +1290,53 @@ async def test_cancelled_cache_write_rewinds_established_cursor(tmp_path: Path) 
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
 
 
+@pytest.mark.asyncio
+async def test_rejected_recovered_response_rearms_tokenless_baseline(tmp_path: Path) -> None:
+    """A pre-certification failure must permit a fresh tokenless recovery baseline."""
+    bot = _agent_bot(tmp_path)
+    trust = bot._sync_cache_trust
+    room_id = "!room:localhost"
+    assert await trust.prepare_startup() is None
+
+    tokenless_gap = SyncCacheWriteResult(
+        complete=True,
+        limited_room_ids=(room_id,),
+    )
+    initial_baseline = trust.certify_response(
+        next_batch="s_initial",
+        cache_result=tokenless_gap,
+        first_sync=True,
+    )
+    assert initial_baseline.reason == "limited_sync_timeline"
+    assert initial_baseline.reset_client_token is False
+
+    recovered = trust.plan_response(
+        next_batch="s_recovered",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=(room_id,),
+            recovered_room_ids=frozenset({room_id}),
+        ),
+        first_sync=False,
+    )
+    assert recovered.state is SyncTrustState.CERTIFIED
+
+    trust.reject_response_before_certification()
+
+    assert trust.retry_token() is None
+    retry_baseline = trust.certify_response(
+        next_batch="s_retry",
+        cache_result=tokenless_gap,
+        first_sync=False,
+    )
+
+    assert retry_baseline.reason == "limited_sync_timeline"
+    assert retry_baseline.reset_client_token is False
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+
+
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
     """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
     bot = _agent_bot(tmp_path)
