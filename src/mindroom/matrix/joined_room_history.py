@@ -79,16 +79,14 @@ async def _fetch_room_history(
                 continue
             seen_event_ids.add(event.event_id)
             events.append(event)
-            if len(events) > config.backfill_max_events:
-                msg = f"Matrix joined-room history exceeded the event limit for {room_id}"
-                raise RuntimeError(msg)
+            if len(events) >= config.backfill_max_events:
+                return tuple(reversed(events))
 
         if not response.chunk or response.end is None:
             return tuple(reversed(events))
         cursor = response.end
 
-    msg = f"Matrix joined-room history exceeded the page limit for {room_id}"
-    raise RuntimeError(msg)
+    return tuple(reversed(events))
 
 
 async def cache_fenced_world_readable_join_history(
