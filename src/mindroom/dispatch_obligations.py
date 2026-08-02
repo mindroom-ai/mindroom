@@ -781,7 +781,7 @@ _SourceAdmission = Callable[
     Awaitable[DispatchSourceAdmission],
 ]
 _EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
-_HistoricalEventAdmission = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
+_HistoricalEventCache = Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]
 _SourceRejectionCallback = Callable[
     [nio.MatrixRoom, _DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
     Awaitable[None],
@@ -806,7 +806,7 @@ def _ignore_event_provenance(
     pass
 
 
-async def _ignore_historical_event(
+async def _ignore_historical_event_cache(
     _room: nio.MatrixRoom,
     _event: nio.Event,
 ) -> None:
@@ -1047,7 +1047,7 @@ class DispatchObligationRunner:
     on_persist_failure: Callable[[], None] | None = None
     source_admission: _SourceAdmission = _admit_all_sources
     observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
-    historical_event_admission: _HistoricalEventAdmission = _ignore_historical_event
+    cache_historical_event: _HistoricalEventCache = _ignore_historical_event_cache
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
@@ -1271,13 +1271,18 @@ class DispatchObligationRunner:
     ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
         self.observe_event_provenance(event.event_id, provenance)
+        if provenance is nio.TimelineEventProvenance.HISTORY:
+            try:
+                await self.cache_historical_event(room, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise nio.CallbackNotAcceptedError(str(error)) from error
+        callback_kind = self._admission_kind(event)
+        if callback_kind is None:
+            return
+        _ADMITTED_OBLIGATION.set(None)
         try:
-            if provenance is nio.TimelineEventProvenance.HISTORY:
-                await self.historical_event_admission(room, event)
-            callback_kind = self._admission_kind(event)
-            if callback_kind is None:
-                return
-            _ADMITTED_OBLIGATION.set(None)
             obligation = await self.persist(room, event, callback_kind, provenance)
         except asyncio.CancelledError:
             raise
