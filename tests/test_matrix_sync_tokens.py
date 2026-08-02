@@ -1377,6 +1377,8 @@ async def test_limited_cache_cancellation_rewinds_live_cursor(tmp_path: Path) ->
     )
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_partial"
+    response.recovered_room_ids = frozenset()
+    response.unrecovered_room_ids = frozenset()
     response.rooms = MagicMock(
         join={
             "!room:localhost": MagicMock(
@@ -1399,7 +1401,6 @@ async def test_limited_cache_cancellation_rewinds_live_cursor(tmp_path: Path) ->
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
 
 
 @pytest.mark.asyncio

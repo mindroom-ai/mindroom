@@ -88,6 +88,7 @@ The registered `DispatchObligationRunner` source callback durably accepts each r
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` retains the pre-gap checkpoint until nio reports no unresolved room gaps.
+When no checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
