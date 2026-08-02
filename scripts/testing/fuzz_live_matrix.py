@@ -19,6 +19,7 @@ import itertools
 import json
 import os
 import random
+import re
 import secrets
 import signal
 import socket
@@ -58,6 +59,7 @@ AGENT_NAME = "general"
 ROUTER_NAME = "router"
 ROOM_KEY = "lobby"
 RESTART_SHUTDOWN_FAILURE_MARKER = "runtime_drain_incomplete_with_durable_dispatch_recovery"
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -322,7 +324,8 @@ def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tu
 
 def _log_count(log: str, *markers: str) -> int:
     """Count log lines containing every content-free marker."""
-    return sum(all(marker in line for marker in markers) for line in log.splitlines())
+    normalized_log = _ANSI_ESCAPE_PATTERN.sub("", log)
+    return sum(all(marker in line for marker in markers) for line in normalized_log.splitlines())
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float) -> bool:

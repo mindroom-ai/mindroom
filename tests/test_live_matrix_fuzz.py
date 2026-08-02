@@ -490,8 +490,22 @@ def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filt
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         assert not stack.wait_for_log_count(("missing",), 1, timeout=0)
-        stack.log_path.write_text("agent_setup_complete @agent:example\n", encoding="utf-8")
+        stack.log_path.write_text(
+            "agent_setup_complete @agent:example\n"
+            "\x1b[1mmatrix_agent_response_runtime_shutdown\x1b[0m "
+            "agent=\x1b[35mgeneral\x1b[0m restart_reason_category=\x1b[35mconfig_reload\x1b[0m\n",
+            encoding="utf-8",
+        )
         assert stack.wait_for_log_count(("agent_setup_complete", "@agent:example"), 1, timeout=0)
+        assert stack.wait_for_log_count(
+            (
+                "matrix_agent_response_runtime_shutdown",
+                "agent=general",
+                "restart_reason_category=config_reload",
+            ),
+            1,
+            timeout=0,
+        )
         stack.storage_path.mkdir()
         database_path = stack.storage_path / "event_cache.db"
         database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
