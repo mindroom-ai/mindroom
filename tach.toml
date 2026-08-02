@@ -2322,6 +2322,11 @@ depends_on = []
 visibility = ["mindroom.bot"]
 
 [[modules]]
+path = "mindroom.matrix.joined_room_history"
+depends_on = []
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.matrix.to_device"
 depends_on = []
 visibility = [
@@ -2874,6 +2879,7 @@ depends_on = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.joined_room_history",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
