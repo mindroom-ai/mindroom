@@ -411,7 +411,7 @@ async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_p
         },
     )
     assert isinstance(membership_event, nio.RoomMemberEvent)
-    bot._dispatch_obligation_store.create_pending(
+    bot._dispatch_obligation_store._create_pending(
         _DispatchObligation(
             principal_id=bot._dispatch_obligation_store.principal_id,
             entity_name=bot._dispatch_obligation_store.entity_name,

@@ -941,7 +941,7 @@ async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$pending-member"]
-    assert not bot._dispatch_obligation_store.has_pending(
+    assert not bot._dispatch_obligation_store._has_pending(
         "$pending-member",
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
