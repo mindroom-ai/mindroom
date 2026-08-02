@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from contextlib import closing
@@ -31,6 +32,7 @@ from scripts.testing.fuzz_live_matrix import (
     ManagedTuwunelStack,
     RestartRegressionObservation,
     _ModelHandler,
+    _require_python_313,
     _restart_prompt_observation,
     evaluate_restart_regression,
     live_scenario_from_seed,
@@ -66,6 +68,112 @@ class _StaticObservationClient:
     async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
         del timeout_ms, allow_limited
         await asyncio.sleep(0.001)
+
+
+class _RestartBoundaryStack(ManagedTuwunelStack):
+    """Deterministic stack seam for the hard-restart ordering contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.agent_id, self.router_id = "@agent:example", "@router:example"
+        self.order: list[str] = []
+        self.checkpoint_ready = True
+
+    def apply_replacement_config(self, room_id: str) -> None:
+        assert room_id == "!restart:example"
+
+    def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:
+        assert minimum >= 1
+        assert timeout == 1
+        if markers == (
+            "Received message",
+            "agent=general",
+            "!restart:example",
+            "$restart-fresh",
+        ):
+            self.order.append("durable-callback")
+        return True
+
+    def wait_for_cached_restart_event_pairs(
+        self,
+        room_id: str,
+        event_ids: tuple[str, str],
+        *,
+        minimum: int,
+        timeout: float,
+    ) -> bool:
+        assert room_id == "!restart:example"
+        assert event_ids == ("$restart-old-text", "$restart-old-media")
+        assert minimum == 4
+        assert timeout == 1
+        return True
+
+    def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+        assert room_id == "!restart:example"
+        assert event_ids == ("$restart-old-text", "$restart-old-media")
+        return 4
+
+    def wait_for_restart_dispatch_obligation_state(
+        self,
+        event_id: str,
+        *,
+        expected: str | frozenset[str],
+        timeout: float,
+    ) -> bool:
+        assert event_id == "$restart-fresh"
+        assert expected == frozenset({"pending", "deferred"})
+        assert timeout == 1
+        self.order.append("obligation-pending")
+        return True
+
+    def wait_for_blocked_restart_request(self, *, timeout: float) -> bool:
+        assert timeout == 1
+        self.order.append("model-in-flight")
+        return True
+
+    def wait_for_restart_event_checkpoint(self, room_id: str, event_id: str, *, timeout: float) -> bool:
+        assert (room_id, event_id, timeout) == ("!restart:example", "$restart-fresh", 1)
+        self.order.append("sync-checkpoint")
+        return self.checkpoint_ready
+
+    def restart_mindroom_for_recovery(self) -> None:
+        self.order.append("hard-restart")
+
+    def log_count(self, *markers: str) -> int:
+        assert markers
+        return 1
+
+
+class _RestartBoundaryRunner(LiveFuzzRunner):
+    """Return settled evidence after exercising the real pre-restart sequence."""
+
+    async def _wait_for_restart_observation(
+        self,
+        dormant: LiveMatrixClient,
+        *,
+        historical_event_ids: tuple[str, str],
+        fresh_event_id: str,
+        fresh_semantic_ingress_count_before_restart: int,
+    ) -> RestartRegressionObservation:
+        assert dormant.room_id == "!restart:example"
+        assert historical_event_ids == ("$restart-old-text", "$restart-old-media")
+        assert fresh_event_id == "$restart-fresh"
+        assert fresh_semantic_ingress_count_before_restart == 1
+        return RestartRegressionObservation(
+            historical_output_counts=(0, 0),
+            historical_callback_counts=(0, 0),
+            cached_event_pair_count=4,
+            fresh_agent_output_count=1,
+            fresh_router_output_count=0,
+            fresh_response_complete=True,
+            fresh_semantic_ingress_count_before_restart=1,
+            fresh_semantic_ingress_count=2,
+            recovered_generation_response_observed=True,
+            fresh_obligation_recovered=True,
+            fresh_prompt_observed=True,
+            historical_in_fresh_prompt=False,
+            orderly_drain_completed=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -237,6 +345,16 @@ def test_restart_regression_scenario_has_fixed_empty_shape() -> None:
     scenario.validate()
 
 
+def test_python_313_requirement_is_scoped_to_restart_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supported Python versions must retain ordinary fuzz and CLI access."""
+    monkeypatch.setattr(sys, "version_info", (3, 12))
+
+    _require_python_313("fuzz")
+    _require_python_313("saturation")
+    with pytest.raises(RuntimeError, match=r"restart-regression requires Python 3\.13"):
+        _require_python_313("restart-regression")
+
+
 def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
     """The fixed restart profile must reject operations its runner would ignore."""
     scenario = LiveFuzzScenario(
@@ -254,8 +372,6 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     passing = RestartRegressionObservation(
         historical_output_counts=(0, 0),
         historical_callback_counts=(0, 0),
-        replacement_boundary_reached=True,
-        recovery_boundary_reached=True,
         cached_event_pair_count=4,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
@@ -266,7 +382,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         fresh_obligation_recovered=True,
         fresh_prompt_observed=True,
         historical_in_fresh_prompt=False,
-        response_callbacks_quiescent=True,
+        orderly_drain_completed=True,
     )
 
     assert evaluate_restart_regression(passing) == ()
@@ -276,7 +392,6 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
-            recovery_boundary_reached=False,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_response_complete=False,
@@ -284,13 +399,12 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             recovered_generation_response_observed=False,
             fresh_obligation_recovered=False,
             historical_in_fresh_prompt=True,
-            response_callbacks_quiescent=False,
+            orderly_drain_completed=False,
         ),
     )
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
-    assert any("invariant=recovery_setup_boundary_reached" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
@@ -298,24 +412,12 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
     assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
-    assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
+    assert any("invariant=orderly_drain_completed" in failure for failure in failures)
 
     unmeasured = evaluate_restart_regression(
-        replace(passing, response_callbacks_quiescent=None),
+        replace(passing, orderly_drain_completed=None),
     )
-    assert not any("invariant=response_callbacks_quiescent" in failure for failure in unmeasured)
-
-    duplicate_before_restart = evaluate_restart_regression(
-        replace(
-            passing,
-            fresh_semantic_ingress_count_before_restart=2,
-            fresh_semantic_ingress_count=3,
-        ),
-    )
-    assert any(
-        "invariant=fresh_semantic_ingress_before_restart_exactly_once" in failure
-        for failure in duplicate_before_restart
-    )
+    assert not any("invariant=orderly_drain_completed" in failure for failure in unmeasured)
 
 
 @pytest.mark.asyncio
@@ -388,47 +490,12 @@ async def test_restart_regression_boundary_requires_old_runtime_shutdown(
 
 
 @pytest.mark.asyncio
-async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_restart_regression_crosses_fresh_obligation_over_hard_restart() -> None:
     """The fresh callback must be durable and in flight before the process is killed."""
-    stack = ManagedTuwunelStack()
-    order: list[str] = []
+    stack = _RestartBoundaryStack()
     try:
-        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-        monkeypatch.setattr(stack, "apply_replacement_config", lambda _room_id: None)
-
-        def wait_for_log(markers: tuple[str, ...], *_args: object, **_kwargs: object) -> bool:
-            if markers == (
-                "Received message",
-                "agent=general",
-                "!restart:example",
-                "$restart-fresh",
-            ):
-                order.append("durable-callback")
-            return True
-
-        monkeypatch.setattr(stack, "wait_for_log_count", wait_for_log)
-        monkeypatch.setattr(stack, "wait_for_cached_restart_event_pairs", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda *_args, **_kwargs: 4)
-        monkeypatch.setattr(
-            stack,
-            "wait_for_restart_dispatch_obligation_state",
-            lambda *_args, **_kwargs: order.append("obligation-pending") or True,
-        )
-        monkeypatch.setattr(
-            stack,
-            "wait_for_blocked_restart_request",
-            lambda *_args, **_kwargs: order.append("model-in-flight") or True,
-        )
-        monkeypatch.setattr(
-            stack,
-            "restart_mindroom_for_recovery",
-            lambda: order.append("hard-restart"),
-        )
-        monkeypatch.setattr(stack, "log_count", lambda *_markers: 1)
         dormant = _RecordingDormantClient()
-        runner = LiveFuzzRunner(
+        runner = _RestartBoundaryRunner(
             stack,
             (cast("LiveMatrixClient", dormant),),
             restart_regression_scenario(),
@@ -436,36 +503,39 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
             settle_seconds=0,
         )
 
-        async def observe(*_args: object, **kwargs: object) -> RestartRegressionObservation:
-            assert kwargs["fresh_semantic_ingress_count_before_restart"] == 1
-            return RestartRegressionObservation(
-                historical_output_counts=(0, 0),
-                historical_callback_counts=(0, 0),
-                replacement_boundary_reached=True,
-                recovery_boundary_reached=True,
-                cached_event_pair_count=4,
-                fresh_agent_output_count=1,
-                fresh_router_output_count=0,
-                fresh_response_complete=True,
-                fresh_semantic_ingress_count_before_restart=1,
-                fresh_semantic_ingress_count=2,
-                recovered_generation_response_observed=True,
-                fresh_obligation_recovered=True,
-                fresh_prompt_observed=True,
-                historical_in_fresh_prompt=False,
-                response_callbacks_quiescent=True,
-            )
-
-        monkeypatch.setattr(runner, "_wait_for_restart_observation", observe)
-
         await runner._run_restart_regression()
 
-        assert order == [
+        assert stack.order == [
             "durable-callback",
             "obligation-pending",
             "model-in-flight",
+            "sync-checkpoint",
             "hard-restart",
         ]
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_regression_refuses_hard_kill_before_fresh_checkpoint() -> None:
+    """A cached fresh event without later sync continuity cannot cross the kill boundary."""
+    stack = _RestartBoundaryStack()
+    stack.checkpoint_ready = False
+    try:
+        dormant = _RecordingDormantClient()
+        runner = _RestartBoundaryRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        with pytest.raises(AssertionError, match="fresh_sync_checkpoint_advanced_before_restart"):
+            await runner._run_restart_regression()
+
+        assert stack.order[-1] == "sync-checkpoint"
+        assert "hard-restart" not in stack.order
     finally:
         stack.close()
 
@@ -591,12 +661,25 @@ def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filt
         event_ids = ("$old-text", "$old-media")
         assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 4
         assert _restart_prompt_observation(
-            "Preparing agent and prompt $fresh $old-text",
+            "Preparing agent and prompt agent=general $fresh $old-text",
             "$fresh",
             event_ids,
         ) == (True, True)
-        assert _restart_prompt_observation("Preparing agent and prompt $fresh", "$fresh", event_ids) == (True, False)
-        assert _restart_prompt_observation("Preparing agent and prompt $old-text", "$fresh", event_ids) == (
+        assert _restart_prompt_observation(
+            "Preparing agent and prompt agent=general $fresh",
+            "$fresh",
+            event_ids,
+        ) == (True, False)
+        assert _restart_prompt_observation(
+            "Preparing agent and prompt agent=router $fresh",
+            "$fresh",
+            event_ids,
+        ) == (False, False)
+        assert _restart_prompt_observation(
+            "Preparing agent and prompt agent=general $old-text",
+            "$fresh",
+            event_ids,
+        ) == (
             False,
             False,
         )
@@ -621,6 +704,63 @@ def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> N
         assert stack.cached_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
         assert not database_path.exists()
     finally:
+        stack.close()
+
+
+def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> None:
+    """The hard-restart boundary must be beyond the fresh event's cached response."""
+    stack = ManagedTuwunelStack()
+    writer: threading.Thread | None = None
+    try:
+        stack.agent_id = "@agent:example"
+        stack.storage_path.mkdir()
+        database_path = stack.storage_path / "event_cache.db"
+        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
+        asyncio.run(database.close())
+        with closing(sqlite3.connect(database_path)) as fixture_database:
+            fixture_database.execute(
+                """
+                INSERT INTO events(
+                    principal_id,
+                    event_id,
+                    room_id,
+                    origin_server_ts,
+                    event_json,
+                    sender,
+                    cached_at,
+                    write_seq
+                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, 1)
+                """,
+                (stack.agent_id, "$fresh", "!target:example"),
+            )
+            fixture_database.commit()
+        continuity_path = stack.storage_path / "sync_continuity" / "general.json"
+        continuity_path.parent.mkdir()
+        continuity_path.write_text(
+            '{"checkpoint":{"cache_generation":"generation","token":"s_before"},'
+            '"pending_join_decrypt_fences":[],"revision":1,"version":"mindroom-sync-continuity-v2"}\n',
+            encoding="utf-8",
+        )
+
+        def advance_checkpoint() -> None:
+            time.sleep(0.1)
+            continuity_path.write_text(
+                '{"checkpoint":{"cache_generation":"generation","token":"s_after"},'
+                '"pending_join_decrypt_fences":[],"revision":2,"version":"mindroom-sync-continuity-v2"}\n',
+                encoding="utf-8",
+            )
+
+        writer = threading.Thread(target=advance_checkpoint)
+        writer.start()
+        assert stack.wait_for_restart_event_checkpoint(
+            "!target:example",
+            "$fresh",
+            timeout=1,
+        )
+        writer.join(timeout=1)
+    finally:
+        if writer is not None:
+            writer.join(timeout=1)
         stack.close()
 
 
@@ -960,7 +1100,7 @@ async def test_restart_observation_rejects_incomplete_runtime_drain_from_replace
         stack.log_path.write_text(
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n"
+            "Preparing agent and prompt agent=general $fresh\n"
             f'{{"event": "{marker}"}}\n',
             encoding="utf-8",
         )
@@ -982,12 +1122,10 @@ async def test_restart_observation_rejects_incomplete_runtime_drain_from_replace
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
-        assert not observation.response_callbacks_quiescent
+        assert not observation.orderly_drain_completed
     finally:
         stack.close()
 
@@ -1005,7 +1143,7 @@ async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
             "matrix_event_callback_started !restart:example $old-media\n"
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1032,13 +1170,11 @@ async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
         assert stop_calls == [0.05]
-        assert observation.response_callbacks_quiescent is True
+        assert observation.orderly_drain_completed is True
         assert any(
             "invariant=historical_callback_suppressed" in failure
             for failure in evaluate_restart_regression(observation)
@@ -1059,7 +1195,7 @@ async def test_restart_observation_rejects_router_only_fresh_response(
         stack.log_path.write_text(
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1086,13 +1222,11 @@ async def test_restart_observation_rejects_router_only_fresh_response(
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
         assert stop_calls == []
-        assert observation.response_callbacks_quiescent is None
+        assert observation.orderly_drain_completed is None
     finally:
         stack.close()
 
@@ -1109,7 +1243,7 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
         stack.log_path.write_text(
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1143,13 +1277,11 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
         assert stop_calls == []
-        assert observation.response_callbacks_quiescent is None
+        assert observation.orderly_drain_completed is None
     finally:
         stack.close()
 
@@ -1168,7 +1300,7 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
             "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1188,8 +1320,6 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
@@ -1215,7 +1345,7 @@ async def test_restart_observation_reports_incomplete_fresh_response(
         stack.log_path.write_text(
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1242,8 +1372,6 @@ async def test_restart_observation_reports_incomplete_fresh_response(
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
@@ -1346,7 +1474,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
         stack.log_path.write_text(
             "Received message agent=general !restart:example $fresh\n"
             "Received message agent=general !restart:example $fresh\n"
-            "Preparing agent and prompt $fresh\n",
+            "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
@@ -1380,19 +1508,17 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             cast("LiveMatrixClient", dormant),
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
-            replacement_boundary_reached=True,
-            recovery_boundary_reached=True,
             fresh_semantic_ingress_count_before_restart=1,
         )
 
         assert dormant.sync_count == 2
-        assert not observation.response_callbacks_quiescent
+        assert not observation.orderly_drain_completed
         assert observation.historical_output_counts == (1, 0)
         assert any(
             "invariant=historical_output_suppressed" in failure for failure in evaluate_restart_regression(observation)
         )
         assert any(
-            "invariant=response_callbacks_quiescent" in failure for failure in evaluate_restart_regression(observation)
+            "invariant=orderly_drain_completed" in failure for failure in evaluate_restart_regression(observation)
         )
     finally:
         stack.close()

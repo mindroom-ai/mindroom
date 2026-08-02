@@ -102,14 +102,34 @@ def restart_failure(
     return f"invariant={invariant} step={step} event_category={event_category} phase={phase} observed={observed}"
 
 
+def _require_restart_invariant(
+    passed: bool,
+    invariant: str,
+    *,
+    event_category: str,
+    phase: str,
+    observed: int | bool,
+    step: int,
+) -> None:
+    """Raise one consistently formatted restart-boundary failure."""
+    if passed:
+        return
+    failure = restart_failure(
+        invariant,
+        event_category=event_category,
+        phase=phase,
+        observed=observed,
+        step=step,
+    )
+    raise AssertionError("restart regression invariant failures:\n" + failure)
+
+
 @dataclass(frozen=True, slots=True)
 class RestartRegressionObservation:
     """Content-free evidence collected after replacement activity settles."""
 
     historical_output_counts: tuple[int, int]
     historical_callback_counts: tuple[int, int]
-    replacement_boundary_reached: bool
-    recovery_boundary_reached: bool
     cached_event_pair_count: int
     fresh_agent_output_count: int
     fresh_router_output_count: int
@@ -120,7 +140,7 @@ class RestartRegressionObservation:
     fresh_obligation_recovered: bool
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
-    response_callbacks_quiescent: bool | None
+    orderly_drain_completed: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,33 +183,6 @@ def _restart_invariant_checks(
             step=2,
         ),
         _RestartInvariantCheck(
-            invariant="replacement_setup_boundary_reached",
-            observed=observation.replacement_boundary_reached,
-            expected=True,
-            event_category="lifecycle",
-            phase="reload",
-            step=3,
-            wait_until_passes=True,
-        ),
-        _RestartInvariantCheck(
-            invariant="recovery_setup_boundary_reached",
-            observed=observation.recovery_boundary_reached,
-            expected=True,
-            event_category="lifecycle",
-            phase="hard_restart",
-            step=4,
-            wait_until_passes=True,
-        ),
-        _RestartInvariantCheck(
-            invariant="historical_event_pairs_cached",
-            observed=observation.cached_event_pair_count,
-            expected=4,
-            event_category="historical_events",
-            phase="replacement_sync",
-            step=3,
-            wait_until_passes=True,
-        ),
-        _RestartInvariantCheck(
             invariant="historical_callback_suppressed",
             observed=observation.historical_callback_counts[0],
             expected=0,
@@ -228,15 +221,6 @@ def _restart_invariant_checks(
             expected=True,
             event_category="fresh_user",
             phase="recovery_startup",
-            step=4,
-            wait_until_passes=True,
-        ),
-        _RestartInvariantCheck(
-            invariant="fresh_semantic_ingress_before_restart_exactly_once",
-            observed=observation.fresh_semantic_ingress_count_before_restart,
-            expected=1,
-            event_category="fresh_user",
-            phase="pre_restart",
             step=4,
             wait_until_passes=True,
         ),
@@ -287,8 +271,8 @@ def _restart_invariant_checks(
             step=4,
         ),
         _RestartInvariantCheck(
-            invariant="response_callbacks_quiescent",
-            observed=observation.response_callbacks_quiescent,
+            invariant="orderly_drain_completed",
+            observed=observation.orderly_drain_completed,
             expected=True,
             event_category="lifecycle",
             phase="observation",
@@ -351,7 +335,7 @@ def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tu
     fresh_lines = [
         line
         for line in _normalized_log(log).splitlines()
-        if "Preparing agent and prompt" in line and fresh_event_id in line
+        if "Preparing agent and prompt" in line and f"agent={AGENT_NAME}" in line and fresh_event_id in line
     ]
     return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in old_event_ids)
 
@@ -1082,6 +1066,46 @@ class ManagedTuwunelStack:
             row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def _restart_event_cached_for_agent(self, room_id: str, event_id: str) -> bool:
+        """Return whether the managed agent durably cached one exact event."""
+        database_path = self.storage_path / "event_cache.db"
+        if not database_path.is_file():
+            return False
+        with closing(sqlite3.connect(database_path)) as database:
+            row = database.execute(
+                "SELECT 1 FROM events WHERE principal_id = ? AND room_id = ? AND event_id = ?",
+                (self.agent_id, room_id, event_id),
+            ).fetchone()
+        return row is not None
+
+    def _restart_sync_checkpoint_token(self) -> str | None:
+        """Read the managed agent's exact durable Classic sync token."""
+        continuity_path = self.storage_path / "sync_continuity" / f"{AGENT_NAME}.json"
+        if not continuity_path.is_file():
+            return None
+        payload = json.loads(continuity_path.read_text(encoding="utf-8"))
+        checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
+        token = checkpoint.get("token") if isinstance(checkpoint, dict) else None
+        return token if isinstance(token, str) and token else None
+
+    def wait_for_restart_event_checkpoint(self, room_id: str, event_id: str, *, timeout: float) -> bool:
+        """Wait for a checkpoint strictly later than durable caching of one event."""
+        deadline = time.monotonic() + timeout
+        event_cached = _wait_until(
+            lambda: self._restart_event_cached_for_agent(room_id, event_id),
+            timeout=max(deadline - time.monotonic(), 0),
+        )
+        if not event_cached:
+            return False
+        checkpoint_at_cache_observation = self._restart_sync_checkpoint_token()
+        return _wait_until(
+            lambda: (
+                (current := self._restart_sync_checkpoint_token()) is not None
+                and current != checkpoint_at_cache_observation
+            ),
+            timeout=max(deadline - time.monotonic(), 0),
+        )
+
     def restart_dispatch_obligation_state(self, event_id: str) -> str | None:
         """Return the exact agent message obligation state without creating storage."""
         tracking_path = self.storage_path / "tracking"
@@ -1660,15 +1684,14 @@ class LiveFuzzRunner:
             ),
         )
         replacement_boundary_reached = all(lifecycle_results)
-        if not replacement_boundary_reached:
-            failure = restart_failure(
-                "replacement_setup_boundary_reached",
-                event_category="lifecycle",
-                phase="reload",
-                observed=False,
-                step=3,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            replacement_boundary_reached,
+            "replacement_setup_boundary_reached",
+            event_category="lifecycle",
+            phase="reload",
+            observed=replacement_boundary_reached,
+            step=3,
+        )
         historical_event_ids = (historical_text, historical_media)
         historical_cache_ready = await asyncio.to_thread(
             self.stack.wait_for_cached_restart_event_pairs,
@@ -1677,18 +1700,18 @@ class LiveFuzzRunner:
             minimum=4,
             timeout=self.reply_timeout,
         )
-        if not historical_cache_ready:
-            failure = restart_failure(
-                "historical_event_pairs_cached",
-                event_category="historical_events",
-                phase="replacement_sync",
-                observed=self.stack.cached_restart_event_pair_count(
-                    dormant.room_id,
-                    historical_event_ids,
-                ),
-                step=3,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        historical_event_pair_count = self.stack.cached_restart_event_pair_count(
+            dormant.room_id,
+            historical_event_ids,
+        )
+        _require_restart_invariant(
+            historical_cache_ready,
+            "historical_event_pairs_cached",
+            event_category="historical_events",
+            phase="replacement_sync",
+            observed=historical_event_pair_count,
+            step=3,
+        )
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
@@ -1706,53 +1729,63 @@ class LiveFuzzRunner:
             1,
             timeout=self.reply_timeout,
         )
-        if not callback_accepted:
-            failure = restart_failure(
-                "fresh_callback_accepted_before_restart",
-                event_category="fresh_user",
-                phase="pre_restart",
-                observed=False,
-                step=4,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            callback_accepted,
+            "fresh_callback_accepted_before_restart",
+            event_category="fresh_user",
+            phase="pre_restart",
+            observed=callback_accepted,
+            step=4,
+        )
         obligation_unsettled = await asyncio.to_thread(
             self.stack.wait_for_restart_dispatch_obligation_state,
             fresh,
             expected=frozenset({"pending", "deferred"}),
             timeout=self.reply_timeout,
         )
-        if not obligation_unsettled:
-            failure = restart_failure(
-                "fresh_dispatch_obligation_unsettled_before_restart",
-                event_category="fresh_user",
-                phase="pre_restart",
-                observed=False,
-                step=4,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            obligation_unsettled,
+            "fresh_dispatch_obligation_unsettled_before_restart",
+            event_category="fresh_user",
+            phase="pre_restart",
+            observed=obligation_unsettled,
+            step=4,
+        )
         request_in_flight = await asyncio.to_thread(
             self.stack.wait_for_blocked_restart_request,
             timeout=self.reply_timeout,
         )
-        if not request_in_flight:
-            failure = restart_failure(
-                "fresh_model_request_in_flight_before_restart",
-                event_category="fresh_user",
-                phase="pre_restart",
-                observed=False,
-                step=4,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            request_in_flight,
+            "fresh_model_request_in_flight_before_restart",
+            event_category="fresh_user",
+            phase="pre_restart",
+            observed=request_in_flight,
+            step=4,
+        )
         fresh_semantic_ingress_count_before_restart = self.stack.log_count(*callback_markers)
-        if fresh_semantic_ingress_count_before_restart != 1:
-            failure = restart_failure(
-                "fresh_semantic_ingress_before_restart_exactly_once",
-                event_category="fresh_user",
-                phase="pre_restart",
-                observed=fresh_semantic_ingress_count_before_restart,
-                step=4,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            fresh_semantic_ingress_count_before_restart == 1,
+            "fresh_semantic_ingress_before_restart_exactly_once",
+            event_category="fresh_user",
+            phase="pre_restart",
+            observed=fresh_semantic_ingress_count_before_restart,
+            step=4,
+        )
+        fresh_response_checkpointed = await asyncio.to_thread(
+            self.stack.wait_for_restart_event_checkpoint,
+            dormant.room_id,
+            fresh,
+            timeout=self.reply_timeout,
+        )
+        _require_restart_invariant(
+            fresh_response_checkpointed,
+            "fresh_sync_checkpoint_advanced_before_restart",
+            event_category="fresh_user",
+            phase="pre_restart",
+            observed=fresh_response_checkpointed,
+            step=4,
+        )
 
         recovery_markers = (
             ("agent_setup_complete", self.stack.agent_id),
@@ -1772,22 +1805,19 @@ class LiveFuzzRunner:
             ),
         )
         recovery_boundary_reached = all(recovery_results)
-        if not recovery_boundary_reached:
-            failure = restart_failure(
-                "recovery_setup_boundary_reached",
-                event_category="lifecycle",
-                phase="hard_restart",
-                observed=False,
-                step=4,
-            )
-            raise AssertionError("restart regression invariant failures:\n" + failure)
+        _require_restart_invariant(
+            recovery_boundary_reached,
+            "recovery_setup_boundary_reached",
+            event_category="lifecycle",
+            phase="hard_restart",
+            observed=recovery_boundary_reached,
+            step=4,
+        )
 
         observation = await self._wait_for_restart_observation(
             dormant,
             historical_event_ids=historical_event_ids,
             fresh_event_id=fresh,
-            replacement_boundary_reached=replacement_boundary_reached,
-            recovery_boundary_reached=recovery_boundary_reached,
             fresh_semantic_ingress_count_before_restart=fresh_semantic_ingress_count_before_restart,
         )
         failures = evaluate_restart_regression(observation)
@@ -1805,10 +1835,8 @@ class LiveFuzzRunner:
         *,
         historical_event_ids: tuple[str, str],
         fresh_event_id: str,
-        replacement_boundary_reached: bool,
-        recovery_boundary_reached: bool,
         fresh_semantic_ingress_count_before_restart: int,
-        response_callbacks_quiescent: bool | None,
+        orderly_drain_completed: bool | None,
     ) -> RestartRegressionObservation:
         """Collect one definitionally consistent restart evidence snapshot."""
         events = tuple(dormant.seen_events.values())
@@ -1843,8 +1871,6 @@ class LiveFuzzRunner:
         return RestartRegressionObservation(
             historical_output_counts=(historical_output_counts[0], historical_output_counts[1]),
             historical_callback_counts=(historical_callback_counts[0], historical_callback_counts[1]),
-            replacement_boundary_reached=replacement_boundary_reached,
-            recovery_boundary_reached=recovery_boundary_reached,
             fresh_agent_output_count=len(fresh_agent_response_ids),
             fresh_router_output_count=len(fresh_router_response_ids),
             fresh_response_complete=fresh_response_complete,
@@ -1861,7 +1887,7 @@ class LiveFuzzRunner:
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,
-            response_callbacks_quiescent=response_callbacks_quiescent,
+            orderly_drain_completed=orderly_drain_completed,
         )
 
     async def _wait_for_restart_observation(
@@ -1870,8 +1896,6 @@ class LiveFuzzRunner:
         *,
         historical_event_ids: tuple[str, str],
         fresh_event_id: str,
-        replacement_boundary_reached: bool,
-        recovery_boundary_reached: bool,
         fresh_semantic_ingress_count_before_restart: int,
     ) -> RestartRegressionObservation:
         """Observe replacement output until the fresh response and callback stream settle."""
@@ -1880,10 +1904,8 @@ class LiveFuzzRunner:
             dormant,
             historical_event_ids=historical_event_ids,
             fresh_event_id=fresh_event_id,
-            replacement_boundary_reached=replacement_boundary_reached,
-            recovery_boundary_reached=recovery_boundary_reached,
             fresh_semantic_ingress_count_before_restart=fresh_semantic_ingress_count_before_restart,
-            response_callbacks_quiescent=None,
+            orderly_drain_completed=None,
         )
 
         while not _positive_restart_evidence_ready(observation) and time.monotonic() < deadline:
@@ -1892,10 +1914,8 @@ class LiveFuzzRunner:
                 dormant,
                 historical_event_ids=historical_event_ids,
                 fresh_event_id=fresh_event_id,
-                replacement_boundary_reached=replacement_boundary_reached,
-                recovery_boundary_reached=recovery_boundary_reached,
                 fresh_semantic_ingress_count_before_restart=fresh_semantic_ingress_count_before_restart,
-                response_callbacks_quiescent=None,
+                orderly_drain_completed=None,
             )
 
         if _positive_restart_evidence_ready(observation):
@@ -1904,7 +1924,7 @@ class LiveFuzzRunner:
                 self.stack.stop_mindroom,
                 timeout=self.reply_timeout,
             )
-            response_callbacks_quiescent = (
+            orderly_drain_completed = (
                 stopped_gracefully
                 and shutdown_failure_count_before == 0
                 and self.stack.restart_shutdown_failure_count() == 0
@@ -1917,10 +1937,8 @@ class LiveFuzzRunner:
                 dormant,
                 historical_event_ids=historical_event_ids,
                 fresh_event_id=fresh_event_id,
-                replacement_boundary_reached=replacement_boundary_reached,
-                recovery_boundary_reached=recovery_boundary_reached,
                 fresh_semantic_ingress_count_before_restart=fresh_semantic_ingress_count_before_restart,
-                response_callbacks_quiescent=response_callbacks_quiescent,
+                orderly_drain_completed=orderly_drain_completed,
             )
 
         return observation
@@ -2382,18 +2400,18 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     )
 
 
-def _require_python_313() -> None:
-    """Keep the live runtime aligned with the production Python version."""
-    if sys.version_info[:2] != (3, 13):
-        msg = "live Matrix fuzz requires Python 3.13"
+def _require_python_313(profile: str) -> None:
+    """Keep the restart runtime aligned with the production Python version."""
+    if profile == "restart-regression" and sys.version_info[:2] != (3, 13):
+        msg = "restart-regression requires Python 3.13"
         raise RuntimeError(msg)
 
 
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
-    _require_python_313()
     args = _parse_args()
     scenario = _scenario_from_args(args)
+    _require_python_313(scenario.profile)
     if args.save_trace is not None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
     reply_timeout = args.reply_timeout
