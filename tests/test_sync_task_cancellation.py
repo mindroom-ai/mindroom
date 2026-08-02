@@ -22,8 +22,10 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_message_for_source,
 )
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
@@ -35,6 +37,7 @@ from mindroom.matrix.health import (
     track_matrix_sync_cache_write,
 )
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -65,9 +68,15 @@ from mindroom.runtime_shutdown import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    bind_runtime_paths,
+    install_call_manager_mock,
+    install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_matrix_client_mock,
     orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
     write_config_yaml,
 )
 
@@ -1385,19 +1394,18 @@ async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None
 
 
 @pytest.mark.asyncio
-async def test_sliding_sync_response_marks_sync_success() -> None:
+async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
     """A sliding sync response must feed the watchdog clock and first-sync lifecycle."""
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "test_agent"
-    bot.last_sync_time = None
+    bot = _sliding_response_bot(tmp_path)
     bot._first_sync_done = False
-    bot._sync_shutting_down = False
-    bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
-    bot.orchestrator = None
-    bot._mark_sync_progress = AgentBot._mark_sync_progress.__get__(bot)
 
-    await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
+    with patch.object(
+        bot,
+        "_run_sync_response_side_effects",
+        new=AsyncMock(),
+    ):
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
 
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
@@ -1454,72 +1462,57 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
     assert departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
 
 
-def _sliding_membership_progress_bot(
-    *,
-    purge_rooms: AsyncMock,
-    mark_room_joined: AsyncMock,
-) -> MagicMock:
-    """Build the typed bot seam used to observe Sliding membership cache writes."""
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "test_agent"
-    bot.last_sync_time = None
+def _sliding_response_bot(tmp_path: Path) -> AgentBot:
+    """Build one real bot for Sliding response lifecycle tests."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={
+                "default": ModelConfig(
+                    provider="test",
+                    id="test-model",
+                ),
+            },
+            matrix_sync=MatrixSyncConfig(mode="sliding"),
+        ),
+        runtime_paths,
+    )
+    bot = AgentBot(
+        agent_user=AgentMatrixUser(
+            agent_name="code",
+            password=TEST_PASSWORD,
+            display_name="Code",
+            user_id="@mindroom_code:localhost",
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!room:localhost"],
+    )
+    install_runtime_cache_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
-    bot._sync_shutting_down = False
-    bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = True
-    bot.orchestrator = None
-    bot._local_departures_awaiting_sync = set()
-    bot._sync_cache_trust = MagicMock()
-    bot.sync_cache_write_progress = AgentBot.sync_cache_write_progress.__get__(bot)
-    bot._room_lifecycle = MagicMock()
-    bot._conversation_cache = MagicMock(
-        purge_rooms=purge_rooms,
-        mark_room_joined=mark_room_joined,
-    )
-    bot._call_manager = MagicMock(on_sync_room_membership=AsyncMock())
-    bot._apply_own_room_membership_from_sliding_sync = AgentBot._apply_own_room_membership_from_sliding_sync.__get__(
-        bot,
-    )
-    bot._apply_own_room_membership = AgentBot._apply_own_room_membership.__get__(bot)
     return bot
 
 
-@pytest.mark.asyncio
-async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
-    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
-    purge_started = asyncio.Event()
-    allow_purge_finish = asyncio.Event()
-    mark_joined_started = asyncio.Event()
-    allow_mark_joined_finish = asyncio.Event()
-
-    async def delayed_purge(_room_ids: object) -> None:
-        purge_started.set()
-        await allow_purge_finish.wait()
-
-    async def delayed_mark_joined(_room_id: str) -> None:
-        mark_joined_started.set()
-        await allow_mark_joined_finish.wait()
-
-    bot = _sliding_membership_progress_bot(
-        purge_rooms=AsyncMock(side_effect=delayed_purge),
-        mark_room_joined=AsyncMock(side_effect=delayed_mark_joined),
-    )
-
-    response = nio.SlidingSyncResponse(
-        "pos",
-        rooms={
-            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
-            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
-        },
-    )
-
-    reset_matrix_sync_health()
-    mark_matrix_sync_loop_started(bot.agent_name)
-    mark_matrix_sync_success(
-        bot.agent_name,
-        datetime.now(UTC) - timedelta(seconds=400),
-    )
-    response_task = asyncio.create_task(AgentBot._on_sync_response(bot, response))
+async def _assert_sliding_cache_progress_stays_fresh(
+    bot: AgentBot,
+    response: nio.SlidingSyncResponse,
+    *,
+    purge_started: asyncio.Event,
+    allow_purge_finish: asyncio.Event,
+    mark_joined_started: asyncio.Event,
+    allow_mark_joined_finish: asyncio.Event,
+) -> None:
+    """Observe one response across both durable membership cache phases."""
+    response_task = asyncio.create_task(bot._on_sync_response(response))
     try:
         await asyncio.wait_for(purge_started.wait(), timeout=1.0)
         purge_progress = bot.sync_cache_write_progress()
@@ -1547,34 +1540,119 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
         await asyncio.gather(response_task, return_exceptions=True)
         reset_matrix_sync_health()
 
-    bot._sync_cache_trust.invalidate_for_cache_scope_cleanup.assert_called_once_with()
-    bot._room_lifecycle.forget_invited_room.assert_called_once_with("!kicked:localhost")
-    bot._conversation_cache.purge_rooms.assert_awaited_once_with({"!kicked:localhost"})
-    bot._conversation_cache.mark_room_joined.assert_awaited_once_with("!joined:localhost")
-    bot._call_manager.on_sync_room_membership.assert_awaited_once_with(
-        joined_room_ids={"!joined:localhost"},
-        left_room_ids={"!kicked:localhost"},
+
+@pytest.mark.asyncio
+async def test_sliding_sync_remote_departure_fences_and_purges(
+    tmp_path: Path,
+) -> None:
+    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
+    purge_started = asyncio.Event()
+    allow_purge_finish = asyncio.Event()
+    mark_joined_started = asyncio.Event()
+    allow_mark_joined_finish = asyncio.Event()
+    purged_room_ids: list[set[str]] = []
+    marked_joined_room_ids: list[str] = []
+    invalidation_count = 0
+    membership_updates: list[tuple[set[str], set[str]]] = []
+
+    async def delayed_purge(room_ids: set[str]) -> None:
+        purged_room_ids.append(room_ids)
+        purge_started.set()
+        await allow_purge_finish.wait()
+
+    async def delayed_mark_joined(room_id: str) -> None:
+        marked_joined_room_ids.append(room_id)
+        mark_joined_started.set()
+        await allow_mark_joined_finish.wait()
+
+    async def invalidate() -> bool:
+        nonlocal invalidation_count
+        invalidation_count += 1
+        return True
+
+    class CallManagerProbe:
+        async def on_sync_room_membership(
+            self,
+            *,
+            joined_room_ids: set[str],
+            left_room_ids: set[str],
+        ) -> None:
+            membership_updates.append((joined_room_ids, left_room_ids))
+
+    bot = _sliding_response_bot(tmp_path)
+    install_call_manager_mock(bot, CallManagerProbe())
+
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
+            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
+        },
     )
+
+    reset_matrix_sync_health()
+    mark_matrix_sync_loop_started(bot.agent_name)
+    mark_matrix_sync_success(
+        bot.agent_name,
+        datetime.now(UTC) - timedelta(seconds=400),
+    )
+    with (
+        patch.object(
+            bot._sync_cache_trust,
+            "invalidate_for_cache_scope_cleanup",
+            new=invalidate,
+        ),
+        patch.object(
+            bot._conversation_cache,
+            "purge_rooms",
+            new=delayed_purge,
+        ),
+        patch.object(
+            bot._conversation_cache,
+            "mark_room_joined",
+            new=delayed_mark_joined,
+        ),
+    ):
+        await _assert_sliding_cache_progress_stays_fresh(
+            bot,
+            response,
+            purge_started=purge_started,
+            allow_purge_finish=allow_purge_finish,
+            mark_joined_started=mark_joined_started,
+            allow_mark_joined_finish=allow_mark_joined_finish,
+        )
+
+    assert invalidation_count == 1
+    assert purged_room_ids == [{"!kicked:localhost"}]
+    assert marked_joined_room_ids == ["!joined:localhost"]
+    assert membership_updates == [
+        ({"!joined:localhost"}, {"!kicked:localhost"}),
+    ]
     assert bot.sync_cache_write_progress() is None
 
 
 @pytest.mark.asyncio
-async def test_sliding_sync_error_skips_classic_token_rejection() -> None:
+async def test_sliding_sync_error_skips_classic_token_rejection(
+    tmp_path: Path,
+) -> None:
     """Routine sliding connection expiry must not run classic sync-token rejection."""
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "test_agent"
-    bot._first_sync_done = True
-    bot._room_member_join_hooks_armed = True
-    bot._sync_cache_trust = MagicMock()
-    bot.logger = MagicMock()
+    bot = _sliding_response_bot(tmp_path)
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_classic")
+    bot._sync_continuity_store.replace_checkpoint(
+        SyncCheckpoint(
+            "s_classic",
+            cache_generation=bot.event_cache.cache_generation,
+        ),
+    )
     error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
 
-    await AgentBot._on_sync_error(bot, error)
+    with capture_logs() as logs:
+        await bot._on_sync_error(error)
 
-    bot._sync_cache_trust.reject_unknown_pos.assert_not_called()
+    assert bot._sync_continuity_store.load().checkpoint is not None
     assert bot._room_member_join_hooks_armed is True
-    bot.logger.warning.assert_not_called()
-    bot._warn_if_sliding_sync_never_succeeded.assert_called_once_with(error)
+    assert not any(entry["log_level"] == "warning" for entry in logs)
 
 
 def test_sliding_sync_startup_failure_warns_once_with_classic_hint() -> None:

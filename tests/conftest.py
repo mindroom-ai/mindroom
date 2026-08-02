@@ -725,6 +725,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
     return client
 
 

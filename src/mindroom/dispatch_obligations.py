@@ -20,6 +20,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
+from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
@@ -37,19 +38,6 @@ _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _RECOVERY_SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
-
-
-class DispatchCallbackKind(StrEnum):
-    """Exact correctness-critical callback purposes."""
-
-    MESSAGE = "message"
-    MEDIA = "media"
-    REACTION = "reaction"
-    APPROVAL = "approval"
-    INVITE = "invite"
-    ROOM_LIFECYCLE = "room_lifecycle"
-    REDACTION = "redaction"
-    DECRYPTION_FAILURE = "decryption_failure"
 
 
 class DispatchSemanticConsumer(StrEnum):
@@ -788,8 +776,33 @@ _InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+_SourceAdmission = Callable[
+    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
+    Awaitable[DispatchSourceAdmission],
+]
+_EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
+_SourceRejectionCallback = Callable[
+    [nio.MatrixRoom, _DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
+    Awaitable[None],
+]
 
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
+
+
+async def _admit_all_sources(
+    _room_id: str,
+    _source_event_id: str,
+    _callback_kind: DispatchCallbackKind,
+    _provenance: nio.TimelineEventProvenance | None,
+) -> DispatchSourceAdmission:
+    return DispatchSourceAdmission.ACCEPTED
+
+
+def _ignore_event_provenance(
+    _source_event_id: str,
+    _provenance: nio.TimelineEventProvenance,
+) -> None:
+    pass
 
 
 def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
@@ -1024,6 +1037,9 @@ class DispatchObligationRunner:
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
+    source_admission: _SourceAdmission = _admit_all_sources
+    observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
+    on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
@@ -1238,14 +1254,20 @@ class DispatchObligationRunner:
             for event_type in policy.event_types:
                 client.add_event_callback(dispatch_matching, event_type)
 
-    async def _admit_source_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def _admit_source_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
+        self.observe_event_provenance(event.event_id, provenance)
         callback_kind = self._admission_kind(event)
         if callback_kind is None:
             return
         _ADMITTED_OBLIGATION.set(None)
         try:
-            obligation = await self.persist(room, event, callback_kind)
+            obligation = await self.persist(room, event, callback_kind, provenance)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -1301,11 +1323,29 @@ class DispatchObligationRunner:
         room: nio.MatrixRoom,
         event: _DispatchEvent,
         callback_kind: DispatchCallbackKind,
+        provenance: nio.TimelineEventProvenance | None = None,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
+            admission = await self.source_admission(
+                room.room_id,
+                obligation.source_event_id,
+                callback_kind,
+                provenance,
+            )
+            if admission is not DispatchSourceAdmission.ACCEPTED:
+                if self.on_source_rejected is not None:
+                    await self.on_source_rejected(
+                        room,
+                        event,
+                        callback_kind,
+                        admission,
+                    )
+                return None
+            if await self._settle_from_turn_store_if_owned(obligation):
+                return None
             create_result = await run_blocking_until_complete(self.store._create_pending, obligation)
             if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
