@@ -59,15 +59,23 @@ def test_successful_sync_certifies_checkpoint(
 
 
 @pytest.mark.parametrize(
-    ("cache_result", "reason"),
+    ("cache_result", "reason", "clear_saved_token"),
     [
-        (SyncCacheWriteResult(complete=False), "cache_write_incomplete"),
-        (SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)), "limited_sync_timeline"),
-        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed"),
-        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed"),
+        (SyncCacheWriteResult(complete=False), "cache_write_incomplete", True),
+        (
+            SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+            "limited_sync_timeline",
+            False,
+        ),
+        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed", True),
+        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed", True),
     ],
 )
-def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason: str) -> None:
+def test_uncertain_sync_fails_closed(
+    cache_result: SyncCacheWriteResult,
+    reason: str,
+    clear_saved_token: bool,
+) -> None:
     """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
     decision = certify_sync_response(
         SyncTrustState.CERTIFIED,
@@ -78,7 +86,7 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.clear_saved_token is True
+    assert decision.clear_saved_token is clear_saved_token
     assert decision.reset_client_token is False
     assert decision.reason == reason
 

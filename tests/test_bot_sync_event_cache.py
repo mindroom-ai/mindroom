@@ -485,8 +485,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert checkpoint.token == "s_after_complete"  # noqa: S105
 
     @pytest.mark.asyncio
-    async def test_limited_restored_first_sync_clears_token(self, bot: AgentBot) -> None:
-        """Limited restored-token catch-up must fail closed and force a cold retry token."""
+    async def test_limited_restored_first_sync_preserves_continuity(self, bot: AgentBot) -> None:
+        """Limited catch-up must gap the cache without opening a since-less live window."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
         bot._sync_cache_trust.state = SyncTrustState.PENDING
@@ -498,8 +498,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch is None
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        assert bot.client.next_batch == "s_after_limited"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_limited"
         bot.event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="limited_sync_timeline",

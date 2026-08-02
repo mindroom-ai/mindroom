@@ -204,8 +204,8 @@ def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Pat
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
-    """A limited response after a position must force one since-less replay."""
+def test_positioned_limited_response_preserves_last_checkpoint(tmp_path: Path) -> None:
+    """A cache gap must not replace recoverable live continuity with a since-less window."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.save(SyncCheckpoint("s_before_gap"))
@@ -219,17 +219,21 @@ def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> N
         first_sync=False,
     )
 
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
     assert decision.reason == "limited_sync_timeline"
     assert trust.state is SyncTrustState.UNCERTAIN
     assert trust.checkpoint is None
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_before_gap",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
 
 
-def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(tmp_path: Path) -> None:
-    """Recovery must avoid reset loops and certify only after a complete delta."""
+def test_limited_windows_keep_cursor_monotonic_until_complete_delta_certifies(tmp_path: Path) -> None:
+    """Repeated cache gaps retain the last checkpoint until a complete delta supersedes it."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
+    trust.save(SyncCheckpoint("s_before_gap"))
 
     positioned = trust.certify_response(
         next_batch="s_partial",
@@ -239,8 +243,8 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
         ),
         first_sync=False,
     )
-    initial = trust.certify_response(
-        next_batch="s_initial",
+    second_limited = trust.certify_response(
+        next_batch="s_partial_2",
         cache_result=SyncCacheWriteResult(
             complete=False,
             limited_room_ids=("!room:localhost",),
@@ -253,9 +257,9 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
         first_sync=False,
     )
 
-    assert positioned.reset_client_token is True
-    assert initial.reset_client_token is False
-    assert initial.state is SyncTrustState.UNCERTAIN
+    assert positioned.reset_client_token is False
+    assert second_limited.reset_client_token is False
+    assert second_limited.state is SyncTrustState.UNCERTAIN
     assert complete.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         token="s_complete",  # noqa: S106
@@ -263,8 +267,8 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
     )
 
 
-def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path: Path) -> None:
-    """Back-to-back gaps must cost one replay, not one every other response."""
+def test_sustained_limited_responses_never_reset_live_cursor(tmp_path: Path) -> None:
+    """Back-to-back cache gaps must never open an unrecoverable since-less live window."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -280,12 +284,12 @@ def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path
         for index in range(4)
     ]
 
-    assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
+    assert not any(decision.reset_client_token for decision in decisions)
 
 
 @pytest.mark.asyncio
-async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
-    """A since-less startup window may be limited without replaying itself forever."""
+async def test_cold_limited_initial_window_does_not_reset(tmp_path: Path) -> None:
+    """A since-less startup window remains uncertain without starting another replay."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     assert await trust.prepare_startup() is None
@@ -302,8 +306,8 @@ async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) 
     assert trust.state is SyncTrustState.UNCERTAIN
 
 
-def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -> None:
-    """M_UNKNOWN_POS recovery consumes the next since-less limited window."""
+def test_unknown_position_is_the_only_cursor_reset_before_limited_window(tmp_path: Path) -> None:
+    """An invalid token resets once; cache gaps in the replacement stream do not."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     unknown = trust.reject_unknown_pos()

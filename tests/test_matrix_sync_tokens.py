@@ -1166,6 +1166,43 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     assert checkpoint.token == "s_latest"  # noqa: S105
 
 
+@pytest.mark.asyncio
+async def test_limited_sync_keeps_live_cursor_and_last_checkpoint(tmp_path: Path) -> None:
+    """A cache gap must preserve the recoverable live cursor and restart checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_partial"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_partial"
+    response.rooms = MagicMock(join={})
+    cache_result = SyncCacheWriteResult(
+        complete=False,
+        limited_room_ids=("!room:localhost",),
+    )
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=cache_result),
+        ),
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_partial"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
+
+
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
     """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
     bot = _agent_bot(tmp_path)

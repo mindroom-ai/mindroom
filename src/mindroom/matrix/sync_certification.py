@@ -58,12 +58,13 @@ class SyncCertificationDecision:
 def _uncertain_decision(
     *,
     reason: str,
+    clear_saved_token: bool = True,
     reset_client_token: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
         state=SyncTrustState.UNCERTAIN,
-        clear_saved_token=True,
+        clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
         reason=reason,
     )
@@ -92,9 +93,11 @@ def certify_sync_response(
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
+        limited_timeline = reason == "limited_sync_timeline"
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=state is SyncTrustState.PENDING and first_sync,
+            clear_saved_token=not limited_timeline,
+            reset_client_token=not limited_timeline and state is SyncTrustState.PENDING and first_sync,
         )
 
     token = normalize_sync_token(next_batch)
