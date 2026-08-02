@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -25,12 +26,7 @@ class _PendingDispatchObligations(Protocol):
         ...
 
 
-class _DecryptNoticeFence(Protocol):
-    """Room-scoped join fence queried during callback admission."""
-
-    def __call__(self, room_id: str, /) -> bool:
-        """Return whether decrypt notices remain fenced for one room."""
-        ...
+type _DecryptNoticeFence = Callable[[str], bool]
 
 
 def _decrypt_not_fenced(_room_id: str) -> bool:

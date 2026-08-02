@@ -1236,20 +1236,6 @@ class AgentBot:
         self._apply_classic_client_rewind_decision(decision)
         return decision
 
-    def _plan_sync_response(
-        self,
-        *,
-        next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
-        first_sync: bool,
-    ) -> SyncCertificationDecision:
-        """Plan sync certification without advancing the durable checkpoint."""
-        return self._sync_cache_trust.plan_response(
-            next_batch=next_batch,
-            cache_result=cache_result,
-            first_sync=first_sync,
-        )
-
     async def _apply_sync_response_decision(
         self,
         decision: SyncCertificationDecision,
@@ -1523,7 +1509,7 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
-            decision = self._plan_sync_response(
+            decision = self._sync_cache_trust.plan_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,
                 first_sync=first_sync_response,
