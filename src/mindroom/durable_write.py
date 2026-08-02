@@ -29,9 +29,6 @@ def write_json_file_durable(
 ) -> None:
     """Write JSON through an fsynced temp file, durable replacement, and directory fsync."""
     directory = temp_dir or path.parent
-    if strict_atomic_replace and directory != path.parent:
-        msg = "Strict atomic replacement requires a temporary file beside its target"
-        raise ValueError(msg)
     path.parent.mkdir(parents=True, exist_ok=True)
     if directory != path.parent:
         directory.mkdir(parents=True, exist_ok=True)

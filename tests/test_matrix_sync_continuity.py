@@ -1,4 +1,4 @@
-"""Tests for Matrix sync token persistence."""
+"""Tests for Matrix sync continuity and recovery."""
 
 from __future__ import annotations
 

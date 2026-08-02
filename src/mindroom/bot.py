@@ -1233,7 +1233,7 @@ class AgentBot:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        self._apply_classic_client_rewind_decision(decision)
+        self._apply_client_rewind_decision(decision)
         return decision
 
     async def _apply_sync_response_decision(
@@ -1251,14 +1251,14 @@ class AgentBot:
         )
         if record is not None:
             self._room_lifecycle.apply_continuity_record(record)
-        self._apply_classic_client_rewind_decision(applied)
+        self._apply_client_rewind_decision(applied)
         return applied
 
-    def _apply_classic_client_rewind_decision(
+    def _apply_client_rewind_decision(
         self,
         decision: SyncCertificationDecision,
     ) -> None:
-        """Apply one cache-certification rewind to the Classic client cursor."""
+        """Apply one cache-certification rewind to the Matrix client cursor."""
         if not decision.reset_client_token:
             return
         if self.client is not None:
@@ -1270,18 +1270,13 @@ class AgentBot:
         if client is None:
             return
         retry_token = self._sync_cache_trust.retry_token()
+        if cast("Any", client).next_batch == retry_token:
+            return
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "pre_certification_sync_side_effect_failed_replaying_sync",
             has_retry_token=retry_token is not None,
         )
-
-    def _ensure_pre_certification_rewind(self) -> None:
-        """Restore replay cursor and fail closed when no cursor exists."""
-        client = self.client
-        retry_token = self._sync_cache_trust.retry_token()
-        if client is not None and cast("Any", client).next_batch != retry_token:
-            self._rewind_sync_after_pre_certification_failure()
 
     async def _handle_rejected_dispatch_source(
         self,
@@ -1327,25 +1322,10 @@ class AgentBot:
         if self.config.matrix_sync.mode == "classic":
             self._rewind_sync_after_pre_certification_failure()
 
-    def _rewind_unseen_dispatch_persist_failure(self) -> bool:
-        """Rewind when trust reports an unseen durable-acceptance rejection."""
-        if not self._sync_cache_trust.consume_dispatch_persist_failure():
-            return False
-        self._ensure_pre_certification_rewind()
-        return True
-
     def _handle_pre_certification_failure(self) -> None:
         """Rewind one failed response and consume any durable-acceptance rejection."""
         self._sync_cache_trust.consume_dispatch_persist_failure()
-        self._ensure_pre_certification_rewind()
-
-    def _handle_certification_apply_failure(self, error: Exception) -> None:
-        """Report checkpoint-apply failure without undoing transport continuity."""
-        self.logger.warning(
-            "matrix_sync_certification_apply_failed",
-            error=str(error),
-            error_type=type(error).__name__,
-        )
+        self._rewind_sync_after_pre_certification_failure()
 
     async def _apply_sync_response_after_dispatch_acceptance(
         self,
@@ -1356,7 +1336,8 @@ class AgentBot:
         response: nio.SyncResponse,
     ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
         """Apply certification only when every source callback reached durable ownership."""
-        if self._rewind_unseen_dispatch_persist_failure():
+        if self._sync_cache_trust.consume_dispatch_persist_failure():
+            self._rewind_sync_after_pre_certification_failure()
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
         applied = await self._apply_sync_response_decision(
             decision,
@@ -1542,7 +1523,11 @@ class AgentBot:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                self._handle_certification_apply_failure(error)
+                self.logger.warning(
+                    "matrix_sync_certification_apply_failed",
+                    error=str(error),
+                    error_type=type(error).__name__,
+                )
                 raise
         self._mark_sync_progress()
         return room_member_join_hook_plan, rejected_response
@@ -1614,7 +1599,7 @@ class AgentBot:
             return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = await self._sync_cache_trust.reject_unknown_pos()
-            self._apply_classic_client_rewind_decision(decision)
+            self._apply_client_rewind_decision(decision)
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
