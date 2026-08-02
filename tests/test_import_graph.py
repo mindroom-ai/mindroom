@@ -2,16 +2,16 @@
 
 Two guards keep import-time regressions from creeping back:
 
-1. A provider-SDK ban: importing the tool registry, config layer, sandbox
-   runner, or the primary runtime must not import any provider SDK; those load
-   on first model or tool construction. Slim entry points additionally must
-   not import the nio matrix client or the mcp SDK, which the primary runtime
-   genuinely needs at boot.
+1. A heavy-optional-dependency ban: importing the primary runtime must not
+   import provider SDKs, storage engines, or ML/data stacks; those load on
+   first use.
+   Slim entry points additionally must not import the nio matrix client or the
+   mcp SDK, which the primary runtime genuinely needs at boot.
 2. A third-party allowlist: each slim entry point may only load the
    third-party packages it loads today. Any new package in the graph fails
    loudly — either defer the import (see the CLAUDE.md import rule) or extend
-   the allowlist as a conscious, reviewed decision. The orchestrator is
-   exempt: its dependency set is large and legitimately grows.
+   the allowlist as a conscious, reviewed decision. The orchestrator uses the
+   narrower heavy-optional-dependency ban because its core boot graph is large.
 
 Each probe runs in a subprocess so the assertion sees exactly what the import
 graph pulls in.
@@ -33,6 +33,25 @@ _PROVIDER_SDK_ROOTS = (
     "groq",
     "ollama",
     "openai",
+)
+_HEAVY_OPTIONAL_RUNTIME_ROOTS = (
+    # Provider-specific clients and authentication.
+    *_PROVIDER_SDK_ROOTS,
+    "agno.models.vertexai.claude",
+    "google.auth",
+    "google.oauth2",
+    # Storage engines.
+    "agno.vectordb.chroma",
+    "chromadb",
+    "mem0",
+    # ML and data stacks.
+    "numpy",
+    "pandas",
+    "scipy",
+    "sentence_transformers",
+    "sklearn",
+    "torch",
+    "transformers",
 )
 _SLIM_ONLY_ROOTS = ("mcp", "nio")
 
@@ -105,6 +124,9 @@ _CLI_ROOTS = frozenset(
 )
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.cli.main": _CLI_ROOTS,
+    # Doctor may use the CLI, config, and HTTP stacks at import time, but no
+    # provider, storage, or other feature-specific dependency.
+    "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
     "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
@@ -220,22 +242,9 @@ def test_slim_entry_point_import_contract(module: str) -> None:
     )
 
 
-def test_primary_runtime_does_not_import_provider_sdks() -> None:
-    """The orchestrator import (mindroom run) loads no provider SDK; only configured ones load later."""
-    _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
-
-
-def test_primary_runtime_defers_optional_storage_engines() -> None:
-    """MindRoom startup must defer storage engines until memory or knowledge uses them."""
-    _assert_probe_clean("mindroom.orchestrator", ("mem0", "chromadb", "agno.vectordb.chroma"))
-
-
-def test_doctor_import_does_not_import_optional_provider_sdks() -> None:
-    """Doctor must defer provider-specific diagnostics until that provider is configured."""
-    _assert_probe_clean(
-        "mindroom.cli.doctor",
-        (*_PROVIDER_SDK_ROOTS, "agno.models.vertexai.claude", "google.auth"),
-    )
+def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
+    """The orchestrator import must leave provider, storage, and ML/data engines unloaded."""
+    _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
 
 
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:
