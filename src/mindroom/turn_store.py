@@ -109,7 +109,7 @@ class TurnStore:
 
     def record_responded_turn(self, turn_record: TurnRecord) -> None:
         """Persist a terminal turn that owns a visible Matrix response."""
-        if turn_record.response_event_id is None:
+        if not turn_record.response_event_id:
             msg = "A responded turn requires a visible Matrix response event ID"
             raise RuntimeError(msg)
         self.record_turn(turn_record)

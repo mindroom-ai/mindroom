@@ -2241,6 +2241,15 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     assert record.visible_echo_event_id == "$echo"
 
 
+def test_record_responded_turn_rejects_empty_response_event_id(tmp_path: Path) -> None:
+    """The durable response boundary should reject a noncanonical empty event ID."""
+    store = _store(tmp_path)
+    noncanonical_record = TurnRecord(source_event_ids=("$source",), response_event_id="")
+
+    with pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"):
+        store.record_responded_turn(noncanonical_record)
+
+
 @pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])
 def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
     tmp_path: Path,

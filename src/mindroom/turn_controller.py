@@ -117,6 +117,7 @@ from mindroom.turn_origin import (
     original_sender_for_router_handoff,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_record import canonicalize_turn_record
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
@@ -968,7 +969,7 @@ class TurnController:
                 recovered_response_event_id=response_event_id,
             )
             self.deps.turn_store.record_responded_turn(
-                replace(pending_turn, response_event_id=response_event_id),
+                canonicalize_turn_record(pending_turn, response_event_id=response_event_id),
             )
             return True
         await self.deps.visible_responses.settle_source_events_ignored(TurnRecord.create([event.event_id]))
@@ -1381,7 +1382,7 @@ class TurnController:
                 source_event_id=selection.question_event_id,
             )
             raise self._interactive_selection_retry_error(source_event_id)
-        selection_handled_turn = replace(selection_handled_turn, response_event_id=ack_event_id)
+        selection_handled_turn = canonicalize_turn_record(selection_handled_turn, response_event_id=ack_event_id)
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1408,7 +1409,7 @@ class TurnController:
             )
             if response_event_id is not None:
                 self.deps.turn_store.record_responded_turn(
-                    replace(selection_handled_turn, response_event_id=response_event_id),
+                    canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
                 )
                 await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
                 return
@@ -1463,7 +1464,7 @@ class TurnController:
         )
         if response_event_id is not None:
             self.deps.turn_store.record_responded_turn(
-                replace(selection_handled_turn, response_event_id=response_event_id),
+                canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
             )
             await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
             return
@@ -1700,7 +1701,7 @@ class TurnController:
             return
         if recovered_response_event_id is not None:
             self.deps.turn_store.record_responded_turn(
-                replace(tracked_handled_turn, response_event_id=recovered_response_event_id),
+                canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
             )
             return
         relay_delivery = await _send_router_relay_after_readiness_recheck(
@@ -1719,7 +1720,7 @@ class TurnController:
                 self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
                 await self.deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
                 self.deps.turn_store.record_responded_turn(
-                    replace(tracked_handled_turn, response_event_id=event_id),
+                    canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
                 )
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
@@ -1738,7 +1739,7 @@ class TurnController:
             return None
         if all(self.deps.turn_store.is_handled(source_event_id) for source_event_id in handled_turn.source_event_ids):
             return None
-        return replace(handled_turn, response_event_id=visible_router_echo_event_id)
+        return canonicalize_turn_record(handled_turn, response_event_id=visible_router_echo_event_id)
 
     async def _finalize_dispatch_failure(
         self,
@@ -1787,7 +1788,7 @@ class TurnController:
 
         def record_deferred_outcome(response_event_id: str) -> None:
             self.deps.turn_store.record_responded_turn(
-                replace(handled_turn, response_event_id=response_event_id),
+                canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
             )
 
         def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
@@ -1853,7 +1854,7 @@ class TurnController:
                     recovered_response_event_id=response_event_id,
                 )
                 self.deps.turn_store.record_responded_turn(
-                    replace(handled_turn, response_event_id=response_event_id),
+                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
                 if dispatch_timing is not None and response_event_id is not None:
                     dispatch_timing.mark_first_visible_reply("final", substantive=True)
@@ -1977,12 +1978,12 @@ class TurnController:
                     on_visible_response=record_visible_response,
                 )
                 self.deps.turn_store.record_responded_turn(
-                    replace(handled_turn, response_event_id=response_event_id),
+                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
                 return
             if response_event_id is not None:
                 self.deps.turn_store.record_responded_turn(
-                    replace(handled_turn, response_event_id=response_event_id),
+                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
