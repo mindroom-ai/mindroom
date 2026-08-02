@@ -1060,12 +1060,13 @@ class ManagedTuwunelStack:
         self,
         event_id: str,
         *,
-        expected: str,
+        expected: str | frozenset[str],
         timeout: float,
     ) -> bool:
-        """Wait until the exact fresh callback reaches one durable state."""
+        """Wait until the exact fresh callback reaches one accepted durable state."""
+        expected_states = frozenset({expected}) if isinstance(expected, str) else expected
         return _wait_until(
-            lambda: self.restart_dispatch_obligation_state(event_id) == expected,
+            lambda: self.restart_dispatch_obligation_state(event_id) in expected_states,
             timeout=timeout,
         )
 
@@ -1660,15 +1661,15 @@ class LiveFuzzRunner:
                 step=4,
             )
             raise AssertionError("restart regression invariant failures:\n" + failure)
-        obligation_pending = await asyncio.to_thread(
+        obligation_unsettled = await asyncio.to_thread(
             self.stack.wait_for_restart_dispatch_obligation_state,
             fresh,
-            expected="pending",
+            expected=frozenset({"pending", "deferred"}),
             timeout=self.reply_timeout,
         )
-        if not obligation_pending:
+        if not obligation_unsettled:
             failure = restart_failure(
-                "fresh_dispatch_obligation_pending_before_restart",
+                "fresh_dispatch_obligation_unsettled_before_restart",
                 event_category="fresh_user",
                 phase="pre_restart",
                 observed=False,

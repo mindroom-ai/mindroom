@@ -60,7 +60,7 @@ The `restart-regression` profile is a manual opt-in oracle for config replacemen
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then adds that room to the managed agent configuration.
 The disposable room is world-readable so replacement bots can actually receive and cache events authored before they joined.
 The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
-It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its pending durable obligation, and a deterministic model request held in flight.
+It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its unsettled durable obligation, and a deterministic model request held in flight.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new PID, and waits for both recovered bots to complete setup.
 The run passes only when the pending obligation becomes succeeded, the exact fresh callback runs once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
 Neither historical event may start a callback, reach the fresh prompt, or produce output.

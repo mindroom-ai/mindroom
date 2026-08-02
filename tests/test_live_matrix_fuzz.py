@@ -645,6 +645,23 @@ def test_restart_regression_reads_exact_durable_obligation_state() -> None:
 
         assert stack.restart_dispatch_obligation_state("$fresh") == "pending"
         assert stack.restart_dispatch_obligation_state("$other") is None
+        assert stack.wait_for_restart_dispatch_obligation_state(
+            "$fresh",
+            expected=frozenset({"pending", "deferred"}),
+            timeout=0.01,
+        )
+
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "UPDATE dispatch_obligations SET state = 'deferred'",
+            )
+            database.commit()
+
+        assert stack.wait_for_restart_dispatch_obligation_state(
+            "$fresh",
+            expected=frozenset({"pending", "deferred"}),
+            timeout=0.01,
+        )
 
         with closing(sqlite3.connect(database_path)) as database:
             database.execute(
