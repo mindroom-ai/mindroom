@@ -1035,22 +1035,23 @@ class ManagedTuwunelStack:
 
     def restart_dispatch_obligation_state(self, event_id: str) -> str | None:
         """Return the exact agent message obligation state without creating storage."""
-        database_path = self.storage_path / "tracking" / "dispatch_obligations.sqlite3"
-        if not database_path.is_file():
-            return None
-        with closing(sqlite3.connect(database_path)) as database:
-            row = database.execute(
-                """
-                SELECT state
-                FROM dispatch_obligations
-                WHERE principal_id = ?
-                  AND entity_name = ?
-                  AND source_event_id = ?
-                  AND callback_kind = 'message'
-                """,
-                (self.agent_id, AGENT_NAME, event_id),
-            ).fetchone()
-        return str(row[0]) if row is not None else None
+        tracking_path = self.storage_path / "tracking"
+        for database_path in sorted(tracking_path.glob("dispatch_obligations-*.sqlite3")):
+            with closing(sqlite3.connect(database_path)) as database:
+                row = database.execute(
+                    """
+                    SELECT state
+                    FROM dispatch_obligations
+                    WHERE principal_id = ?
+                      AND entity_name = ?
+                      AND source_event_id = ?
+                      AND callback_kind = 'message'
+                    """,
+                    (self.agent_id, AGENT_NAME, event_id),
+                ).fetchone()
+            if row is not None:
+                return str(row[0])
+        return None
 
     def wait_for_restart_dispatch_obligation_state(
         self,

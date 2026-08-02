@@ -566,12 +566,12 @@ def test_restart_regression_reads_exact_durable_obligation_state() -> None:
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id = "@agent:example"
-        DispatchObligationStore(
+        store = DispatchObligationStore(
             tracking_path=stack.storage_path / "tracking",
             principal_id=stack.agent_id,
             entity_name="general",
         )
-        database_path = stack.storage_path / "tracking" / "dispatch_obligations.sqlite3"
+        database_path = store._database_path
         with closing(sqlite3.connect(database_path)) as database:
             database.execute(
                 """
