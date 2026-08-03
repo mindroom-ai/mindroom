@@ -64,6 +64,11 @@ def derive_coalescing_key(room_id: str, thread_id: str | None, owner: Coalescing
     return CoalescingKey(room_id, thread_id, owner)
 
 
+def requester_coalescing_key(room_id: str, thread_id: str | None, requester_user_id: str) -> CoalescingKey:
+    """Return the canonical coalescing key for one effective requester's own burst."""
+    return derive_coalescing_key(room_id, thread_id, RequesterCoalescingOwner(requester_user_id))
+
+
 def active_follow_up_coalescing_key(room_id: str, thread_id: str | None) -> CoalescingKey:
     """Return the target-scoped key for follow-ups queued behind an active response."""
     return derive_coalescing_key(room_id, thread_id, ActiveFollowUpCoalescingOwner())

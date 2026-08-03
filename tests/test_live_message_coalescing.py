@@ -64,6 +64,7 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
@@ -1743,7 +1744,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
     key = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
 
     await _admit_ready(gate, key, make_pending_event(text, room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=key,
@@ -1800,7 +1801,10 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
         source_event_id="$typed1",
         source_kind="message",
     )
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost", receipt_time=start + 0.005)
+    voice_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"),
+        receipt_time=start + 0.005,
+    )
     gate.submit_lane_slot(
         voice_slot,
         key=text_key,
@@ -1880,7 +1884,7 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     )
 
     await _admit_ready(gate, key, make_pending_event(first, room, source_kind="message"))
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         second_slot,
         key=key,
@@ -1942,7 +1946,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -1996,7 +2000,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -2050,7 +2054,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
     )
 
     await _admit_ready(gate, resolved_key, make_pending_event(typed, room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=resolved_key,
@@ -2101,7 +2105,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=root_key,
@@ -2154,7 +2158,7 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
     )
 
     await _admit_ready(gate, root_key, make_pending_event(typed, room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=root_key,
@@ -2215,7 +2219,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
 
     await _admit_ready(gate, text_key, make_pending_event(typed, room, source_kind="message"))
     await asyncio.sleep(0.005)
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@voice-sender:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@voice-sender:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=voice_root_key,
@@ -2254,7 +2258,7 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
     )
 
     await _admit_ready(gate, key, make_pending_event(first, room, source_kind="message"))
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=key,
@@ -2306,8 +2310,8 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         is_shutting_down=lambda: False,
     )
 
-    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         first_slot,
         key=first_key,
@@ -2369,7 +2373,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         is_shutting_down=lambda: False,
     )
 
-    voice_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         voice_slot,
         key=voice_key,
@@ -2467,8 +2471,8 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         is_shutting_down=lambda: False,
     )
 
-    first_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
-    second_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
+    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=room.room_id, physical_sender_id="@user:localhost"))
     gate.submit_lane_slot(
         first_slot,
         key=key,

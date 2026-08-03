@@ -64,7 +64,7 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
+from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -1448,8 +1448,8 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1537,8 +1537,8 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1605,8 +1605,8 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1687,8 +1687,8 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert observed_delivery_targets == [stable_target]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio

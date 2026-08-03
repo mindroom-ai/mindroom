@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -259,13 +260,12 @@ class TestAgentBot(AgentBotTestBase):
         original_enter_lane = bot._coalescing_gate.enter_lane
 
         def record_enter_lane(
+            lane_key: ReceiptLaneKey,
             *,
-            room_id: str,
-            sender_id: str,
             receipt_time: float | None = None,
         ) -> LaneSlot:
             call_order.append("reserve")
-            return original_enter_lane(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return original_enter_lane(lane_key, receipt_time=receipt_time)
 
         def record_submit(
             slot: LaneSlot,
@@ -404,7 +404,7 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = "@user:localhost"
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
-        def reject_lane_reservation(**_kwargs: object) -> None:
+        def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
             assert bot._turn_store.try_claim_turn(competing_claim) is False
             msg = "lane unavailable"
             raise RuntimeError(msg)

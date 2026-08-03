@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
@@ -171,7 +172,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
     owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
@@ -200,7 +201,7 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
     owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     ready_task = asyncio.create_task(never_ready())
     owner.ready_task = ready_task

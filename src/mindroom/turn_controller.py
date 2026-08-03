@@ -16,9 +16,8 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    RequesterCoalescingOwner,
     build_coalesced_batch,
-    derive_coalescing_key,
+    requester_coalescing_key,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
 from mindroom.commands.parsing import command_parser
@@ -74,6 +73,7 @@ from mindroom.inbound_turn_normalizer import (
     TextNormalizationRequest,
     VoiceNormalizationRequest,
 )
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -90,6 +90,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
+from mindroom.message_target import ResponseLifecycleKey
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -314,7 +315,7 @@ def _queued_notice_dispatch_metadata(
             kind=_QUEUED_NOTICE_METADATA_KIND,
             payload=reservation,
             close=reservation.cancel,
-            target_key=(target.room_id, target.resolved_thread_id),
+            target_key=target.lifecycle_key,
         ),
     )
 
@@ -322,7 +323,7 @@ def _queued_notice_dispatch_metadata(
 def _consume_queued_notice_reservations_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
     *,
-    target_key: tuple[str, str | None],
+    target_key: ResponseLifecycleKey,
 ) -> None:
     reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
     for item in reservation_items:
@@ -476,8 +477,7 @@ class TurnController:
         return _PromptIngressReservationOwner(
             gate=self.deps.coalescing_gate,
             slot=self.deps.coalescing_gate.enter_lane(
-                room_id=room.room_id,
-                sender_id=requester_user_id,
+                ReceiptLaneKey(room_id=room.room_id, physical_sender_id=requester_user_id),
                 receipt_time=receipt_time,
             ),
         )
@@ -570,7 +570,7 @@ class TurnController:
     @staticmethod
     def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
         """Return whether two targets share the same response lifecycle lock."""
-        return left.room_id == right.room_id and left.resolved_thread_id == right.resolved_thread_id
+        return left.lifecycle_key == right.lifecycle_key
 
     def _queued_notice_reservation_if_busy(
         self,
@@ -655,11 +655,7 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=derive_coalescing_key(
-                    room.room_id,
-                    coalescing_thread_id,
-                    RequesterCoalescingOwner(requester_user_id),
-                ),
+                coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -706,11 +702,7 @@ class TurnController:
                 source_kind=envelope.source_kind,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=derive_coalescing_key(
-                    room.room_id,
-                    coalescing_thread_id,
-                    RequesterCoalescingOwner(requester_user_id),
-                ),
+                coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
             )
@@ -795,11 +787,7 @@ class TurnController:
     ) -> CoalescingKey:
         """Return the canonical sender/thread scope for one event."""
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        return derive_coalescing_key(
-            room.room_id,
-            coalescing_thread_id,
-            RequesterCoalescingOwner(requester_user_id),
-        )
+        return requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id)
 
     async def _append_live_event_with_timing(
         self,
@@ -1005,7 +993,7 @@ class TurnController:
             room=room,
         )
         batch = build_coalesced_batch(
-            derive_coalescing_key(room.room_id, coalescing_thread_id, RequesterCoalescingOwner(requester_user_id)),
+            requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
         handoff = build_dispatch_handoff(batch)
@@ -2037,10 +2025,10 @@ class TurnController:
                 timing_scope=timing_scope,
             )
 
-    def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
+    def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> ResponseLifecycleKey:
         coalescing_key = handoff.ingress.coalescing_key
         if coalescing_key is None:
-            return (handoff.room.room_id, None)
+            return ResponseLifecycleKey(room_id=handoff.room.room_id, thread_id=None)
         context_event = _room_level_context_event(handoff.event) if coalescing_key.thread_id is None else handoff.event
         target = self.deps.resolver.build_message_target(
             room_id=handoff.room.room_id,
@@ -2048,7 +2036,7 @@ class TurnController:
             reply_to_event_id=handoff.event.event_id,
             event_source=context_event.source,
         )
-        return (target.room_id, target.resolved_thread_id)
+        return target.lifecycle_key
 
     async def _dispatch_handoff(
         self,
@@ -2455,11 +2443,7 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        return voice_target, derive_coalescing_key(
-            room.room_id,
-            coalescing_thread_id,
-            RequesterCoalescingOwner(requester_user_id),
-        )
+        return voice_target, requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id)
 
     async def _ready_voice_event(
         self,

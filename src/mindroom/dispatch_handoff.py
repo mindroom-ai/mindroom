@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
     from mindroom.handled_turns import SourceEventMetadata
+    from mindroom.message_target import ResponseLifecycleKey
 
 
 # Voice messages are normalized into PreparedIngress before coalescing, so
@@ -85,7 +86,7 @@ class PendingDispatchMetadata:
     payload: object
     close: Callable[[], None]
     requires_solo_batch: bool = False
-    target_key: tuple[str, str | None] | None = None
+    target_key: ResponseLifecycleKey | None = None
 
 
 @dataclass(frozen=True)

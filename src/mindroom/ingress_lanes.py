@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from itertools import chain
 from typing import TYPE_CHECKING
 
+from .coalescing_batch import RequesterCoalescingOwner
 from .coalescing_cleanup import ReadyPendingEvent, close_ready_task_result_metadata
 from .logging_config import get_logger
 from .timing import elapsed_ms_since
@@ -17,7 +18,7 @@ from .timing import elapsed_ms_since
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from .coalescing_batch import CoalescingKey
+    from .coalescing_batch import CoalescingKey, CoalescingOwner
 
 logger = get_logger(__name__)
 
@@ -28,6 +29,13 @@ class ReceiptLaneKey:
 
     room_id: str
     physical_sender_id: str
+
+    @classmethod
+    def for_coalescing_owner(cls, room_id: str, owner: CoalescingOwner) -> ReceiptLaneKey | None:
+        """Return the receipt lane for one coalescing owner; follow-up owners have no lane."""
+        if isinstance(owner, RequesterCoalescingOwner):
+            return cls(room_id=room_id, physical_sender_id=owner.requester_user_id)
+        return None
 
 
 class IngressAdmissionClosedError(RuntimeError):
@@ -107,11 +115,11 @@ class IngressLanes:
         self._settling_slots: dict[int, LaneSlot] = {}
 
     @staticmethod
-    def closed_slot(*, room_id: str, sender_id: str, receipt_time: float | None = None) -> LaneSlot:
+    def closed_slot(lane_key: ReceiptLaneKey, *, receipt_time: float | None = None) -> LaneSlot:
         """Return a pre-closed slot for ingress arriving during a bounded drain."""
         slot = LaneSlot(
-            room_id=room_id,
-            sender_id=sender_id,
+            room_id=lane_key.room_id,
+            sender_id=lane_key.physical_sender_id,
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
             closed=True,
             released=True,
@@ -120,14 +128,13 @@ class IngressLanes:
         slot.settled.set()
         return slot
 
-    def enter(self, *, room_id: str, sender_id: str, receipt_time: float | None = None) -> LaneSlot:
-        """Reserve the next receipt-order position in one (room, sender) lane."""
+    def enter(self, lane_key: ReceiptLaneKey, *, receipt_time: float | None = None) -> LaneSlot:
+        """Reserve the next receipt-order position in one receipt lane."""
         slot = LaneSlot(
-            room_id=room_id,
-            sender_id=sender_id,
+            room_id=lane_key.room_id,
+            sender_id=lane_key.physical_sender_id,
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
         )
-        lane_key = slot.lane_key
         self._lanes.setdefault(lane_key, deque()).append(slot)
         self._ensure_worker(lane_key)
         return slot
@@ -174,14 +181,13 @@ class IngressLanes:
 
     def undelivered_in_window(
         self,
-        room_id: str,
-        sender_id: str,
+        lane_key: ReceiptLaneKey,
         *,
         before_or_at_receipt_time: float,
         exclude_slot_ids: set[int] | None = None,
     ) -> list[LaneSlot]:
-        """Return undelivered slots for one sender received inside an open burst window."""
-        lane = self._lanes.get(ReceiptLaneKey(room_id=room_id, physical_sender_id=sender_id), ())
+        """Return undelivered slots for one lane received inside an open burst window."""
+        lane = self._lanes.get(lane_key, ())
         return [
             slot
             for slot in lane

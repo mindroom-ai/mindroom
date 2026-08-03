@@ -14,7 +14,6 @@ from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    RequesterCoalescingOwner,
     TimestampFormatter,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
@@ -36,7 +35,7 @@ from .coalescing_policy import (
 )
 from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
+from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .logging_config import get_logger
 from .runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
@@ -236,9 +235,8 @@ class CoalescingGate:
 
     def enter_lane(
         self,
+        lane_key: ReceiptLaneKey,
         *,
-        room_id: str,
-        sender_id: str,
         receipt_time: float | None = None,
     ) -> LaneSlot:
         """Reserve receipt order in one sender lane before resolution can finish."""
@@ -246,8 +244,8 @@ class CoalescingGate:
         if self._is_bounded_drain(drain_context):
             assert drain_context is not None
             drain_context.result.released_reservation_count += 1
-            return IngressLanes.closed_slot(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
-        return self._lanes.enter(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return IngressLanes.closed_slot(lane_key, receipt_time=receipt_time)
+        return self._lanes.enter(lane_key, receipt_time=receipt_time)
 
     def submit_lane_slot(
         self,
@@ -916,11 +914,13 @@ class CoalescingGate:
         gate: _GateEntry,
         debounce_result: _DebounceWaitResult,
     ) -> None:
-        if isinstance(key.owner, RequesterCoalescingOwner):
+        # Follow-up owners have no receipt lane; only requester-owned bursts
+        # wait for same-sender lane work still resolving inside the window.
+        lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
+        if lane_key is not None:
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
-                key.room_id,
-                key.owner.requester_user_id,
+                lane_key,
                 before_or_at_receipt_time=debounce_result.quiet_deadline,
                 exclude_slot_ids=admitted_lane_slot_ids,
             )

@@ -12,7 +12,8 @@ from __future__ import annotations
 import pytest
 
 from mindroom.message_target import MessageTarget
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, ResponseLifecycleCoordinator, _QueuedMessageState
+from mindroom.turn_controller import _queued_notice_dispatch_metadata
 
 _LOCK_TABLE_CAP = 100
 
@@ -40,7 +41,7 @@ async def test_eviction_never_evicts_a_target_holding_an_active_lock() -> None:
 
         assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
         assert coordinator._response_lifecycle_lock(targets[0]) is protected_lock
-        assert coordinator._thread_key(targets[1]) not in coordinator._response_lifecycle_locks
+        assert targets[1].lifecycle_key not in coordinator._response_lifecycle_locks
     finally:
         protected_lock.release()
 
@@ -59,11 +60,11 @@ async def test_eviction_never_evicts_a_target_with_a_live_queued_signal(liveness
 
     coordinator._response_lifecycle_lock(_target(_LOCK_TABLE_CAP))
 
-    protected_key = coordinator._thread_key(targets[0])
+    protected_key = targets[0].lifecycle_key
     assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
     assert protected_key in coordinator._response_lifecycle_locks
     assert coordinator._thread_queued_signals[protected_key] is protected_signal
-    assert coordinator._thread_key(targets[1]) not in coordinator._response_lifecycle_locks
+    assert targets[1].lifecycle_key not in coordinator._response_lifecycle_locks
 
 
 @pytest.mark.asyncio
@@ -79,5 +80,27 @@ async def test_eviction_drops_fully_idle_targets_to_keep_the_table_bounded() -> 
 
     assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
     assert coordinator._response_lifecycle_lock(new_target) is new_lock
-    assert coordinator._thread_key(targets[0]) not in coordinator._response_lifecycle_locks
+    assert targets[0].lifecycle_key not in coordinator._response_lifecycle_locks
     assert coordinator._response_lifecycle_lock(targets[0]) is not idle_lock
+
+
+def test_lifecycle_key_is_shared_by_locks_signals_and_notice_metadata() -> None:
+    """One target derives the lifecycle identity used by locks, signals, and queued notices."""
+    threaded = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    room_level = MessageTarget.resolve("!room:localhost", None, None, room_mode=True)
+    coordinator = ResponseLifecycleCoordinator()
+
+    for target in (threaded, room_level):
+        assert coordinator._response_lifecycle_lock(target) is coordinator._response_lifecycle_locks[
+            target.lifecycle_key
+        ]
+        assert coordinator._get_or_create_queued_signal(target) is coordinator._thread_queued_signals[
+            target.lifecycle_key
+        ]
+    assert threaded.lifecycle_key != room_level.lifecycle_key
+
+    metadata = _queued_notice_dispatch_metadata(
+        QueuedHumanNoticeReservation(_QueuedMessageState(), "$notice"),
+        threaded,
+    )
+    assert metadata[0].target_key == threaded.lifecycle_key
