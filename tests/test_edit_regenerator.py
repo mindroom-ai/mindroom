@@ -193,6 +193,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None, receipt_order: i
     turn_store.record_turn_durably.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store.prepare_edit_response_source.return_value = False
+    turn_store.event_is_redacted.return_value = False
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
     ingress_hook_runner.emit_message_received_hooks.return_value = False
@@ -244,6 +245,33 @@ async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info
 def _assert_no_regeneration(harness: _Harness) -> None:
     harness.generate_response.assert_not_awaited()
     harness.turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_redacted_before_processing_is_ignored(tmp_path: Path) -> None:
+    """A durable revision tombstone must prevent a delayed edit from becoming visible."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    harness.turn_store.event_is_redacted.return_value = True
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+    harness.resolver.extract_message_context.assert_not_awaited()
+    assert harness.regenerator.source_for_inflight_revision_event_id(event.event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_edit_redacted_before_mailbox_entry_is_ignored(tmp_path: Path) -> None:
+    """The mailbox boundary must close the race after earlier tombstone checks."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    harness.turn_store.event_is_redacted.side_effect = [False, False, True]
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+    assert harness.regenerator._mailboxes == {}
 
 
 @pytest.mark.asyncio

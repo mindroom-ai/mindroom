@@ -635,6 +635,7 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
+                source_for_inflight_revision_event_id=(self._edit_regenerator.source_for_inflight_revision_event_id),
                 regenerate_redacted_revision=self._edit_regenerator.handle_redacted_revision,
             ),
         )

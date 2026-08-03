@@ -239,6 +239,11 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def event_is_redacted(self, event_id: str) -> bool:
+        """Return whether one exact Matrix event has a durable redaction tombstone."""
+        record = self._ledger.get_turn_record(event_id)
+        return record is not None and event_id in record.redacted_source_event_ids
+
     def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)

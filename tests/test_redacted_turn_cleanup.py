@@ -23,6 +23,7 @@ def _cleanup(turn_store: MagicMock, conversation_cache: MagicMock, regenerate: A
         RedactedTurnCleanupDeps(
             conversation_cache=conversation_cache,
             turn_store=turn_store,
+            source_for_inflight_revision_event_id=lambda _event_id: None,
             regenerate_redacted_revision=regenerate,
         ),
     )
@@ -72,6 +73,67 @@ async def test_redacted_current_edit_regenerates_after_cache_reversion() -> None
     await cleanup.handle(room, event)
 
     assert ordering == [f"tombstone:{EVENT_ID}", "cache", "regenerate"]
+    regenerate.assert_awaited_once_with(room, event, "$original:example.org")
+
+
+@pytest.mark.asyncio
+async def test_redacted_inflight_edit_regenerates_after_cache_reversion() -> None:
+    """A redaction racing an uncommitted edit must resolve through in-flight ownership."""
+    ordering: list[str] = []
+    turn_store = MagicMock()
+    turn_store.source_for_revision_event_id.return_value = None
+    turn_store.mark_source_redacted.side_effect = lambda event_id: ordering.append(f"tombstone:{event_id}")
+    conversation_cache = MagicMock()
+    conversation_cache.apply_redaction = AsyncMock(side_effect=lambda _room_id, _event: ordering.append("cache"))
+    regenerate = AsyncMock(side_effect=lambda _room, _event, _source: ordering.append("regenerate"))
+    cleanup = RedactedTurnCleanup(
+        RedactedTurnCleanupDeps(
+            conversation_cache=conversation_cache,
+            turn_store=turn_store,
+            source_for_inflight_revision_event_id=lambda event_id: (
+                "$original:example.org" if event_id == EVENT_ID else None
+            ),
+            regenerate_redacted_revision=regenerate,
+        ),
+    )
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    event = _redaction_event()
+
+    await cleanup.handle(room, event)
+
+    assert ordering == [f"tombstone:{EVENT_ID}", "cache", "regenerate"]
+    regenerate.assert_awaited_once_with(room, event, "$original:example.org")
+
+
+@pytest.mark.asyncio
+async def test_inflight_edit_ownership_is_captured_before_durable_lookup() -> None:
+    """An edit cannot disappear between the in-flight and durable ownership views."""
+    ordering: list[str] = []
+    turn_store = MagicMock()
+
+    def durable_source(_event_id: str) -> None:
+        ordering.append("durable")
+
+    turn_store.source_for_revision_event_id.side_effect = durable_source
+    conversation_cache = MagicMock()
+    conversation_cache.apply_redaction = AsyncMock()
+    regenerate = AsyncMock()
+    cleanup = RedactedTurnCleanup(
+        RedactedTurnCleanupDeps(
+            conversation_cache=conversation_cache,
+            turn_store=turn_store,
+            source_for_inflight_revision_event_id=lambda _event_id: (
+                ordering.append("inflight") or "$original:example.org"
+            ),
+            regenerate_redacted_revision=regenerate,
+        ),
+    )
+    room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
+    event = _redaction_event()
+
+    await cleanup.handle(room, event)
+
+    assert ordering == ["inflight", "durable"]
     regenerate.assert_awaited_once_with(room, event, "$original:example.org")
 
 

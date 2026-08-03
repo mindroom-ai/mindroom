@@ -797,7 +797,11 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
 
 
 @pytest.mark.asyncio
-async def test_redacting_current_edit_regenerates_from_reverted_source_body(tmp_path: Path) -> None:
+@pytest.mark.parametrize("revision_state", ["committed", "inflight"])
+async def test_redacting_current_edit_regenerates_from_reverted_source_body(
+    tmp_path: Path,
+    revision_state: str,
+) -> None:
     """A redacted edit is a newer source revision whose body comes from current Matrix state."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -822,7 +826,9 @@ async def test_redacting_current_edit_regenerates_from_reverted_source_body(tmp_
         ["$original:example.com"],
         response_event_id="$response:example.com",
         source_event_prompts={"$original:example.com": "edited question"},
-        source_event_revisions={"$original:example.com": (1_000_001, "$edit:example.com")},
+        source_event_revisions=(
+            {"$original:example.com": (1_000_001, "$edit:example.com")} if revision_state == "committed" else None
+        ),
         response_owner="test_agent",
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=target,
@@ -855,6 +861,8 @@ async def test_redacting_current_edit_regenerates_from_reverted_source_body(tmp_
     redaction.event_id = "$redaction:example.com"
     redaction.redacts = "$edit:example.com"
     redaction.server_timestamp = 1_000_002
+    if revision_state == "inflight":
+        bot._edit_regenerator._inflight_revision_sources[redaction.redacts] = source_event.event_id
 
     with (
         patch.object(

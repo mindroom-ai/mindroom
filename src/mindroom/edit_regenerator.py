@@ -91,6 +91,7 @@ class EditRegenerator:
 
     deps: EditRegeneratorDeps
     _mailboxes: dict[tuple[str, str, str], _Mailbox] = field(default_factory=dict, init=False, repr=False)
+    _inflight_revision_sources: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -128,7 +129,7 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
-    async def handle_message_edit(  # noqa: C901, PLR0911
+    async def handle_message_edit(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -141,6 +142,39 @@ class EditRegenerator:
         original_event_id = event_info.original_event_id
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         if registry.current_entity_name_for_user_id(event.sender):
+            return
+
+        registered_source = self._inflight_revision_sources.setdefault(event.event_id, original_event_id)
+        if registered_source != original_event_id:
+            msg = f"Edit revision {event.event_id!r} targets multiple source events"
+            raise RuntimeError(msg)
+        try:
+            await self._handle_registered_message_edit(
+                room,
+                event,
+                event_info,
+                requester_user_id,
+                original_event_id=original_event_id,
+            )
+        finally:
+            if self._inflight_revision_sources.get(event.event_id) == original_event_id:
+                self._inflight_revision_sources.pop(event.event_id)
+
+    def source_for_inflight_revision_event_id(self, revision_event_id: str) -> str | None:
+        """Return the source currently owned by one in-flight edit revision."""
+        return self._inflight_revision_sources.get(revision_event_id)
+
+    async def _handle_registered_message_edit(  # noqa: C901, PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        event_info: EventInfo,
+        requester_user_id: str,
+        *,
+        original_event_id: str,
+    ) -> None:
+        """Regenerate one edit while its revision-to-source ownership is registered."""
+        if self.deps.turn_store.event_is_redacted(event.event_id):
             return
 
         context = await self.deps.resolver.extract_message_context(
@@ -186,6 +220,8 @@ class EditRegenerator:
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
         if committed is not None and revision < committed:
             return
+        if self.deps.turn_store.event_is_redacted(event.event_id):
+            return
 
         edited_content, _ = await extract_visible_edit_body(
             event.source,
@@ -230,7 +266,8 @@ class EditRegenerator:
         if turn_record is None:
             return
         committed = (turn_record.source_event_revisions or {}).get(source_event_id)
-        if committed is None or committed[1] != event.redacts:
+        revision_is_inflight = self._inflight_revision_sources.get(event.redacts) == source_event_id
+        if not revision_is_inflight and (committed is None or committed[1] != event.redacts):
             return
         if (
             turn_record.conversation_target is None
@@ -304,12 +341,14 @@ class EditRegenerator:
         assert turn_record.conversation_target is not None
         key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, edit.envelope.requester_id)
         mailbox = self._mailboxes.setdefault(key, _Mailbox())
-        reserved_revision = mailbox.reserved_revisions.get(edit.original_event_id)
-        if reserved_revision is not None and edit.revision <= reserved_revision:
-            return
-        mailbox.reserved_revisions[edit.original_event_id] = edit.revision
         mailbox.participants += 1
         try:
+            if emit_ingress_hook and self.deps.turn_store.event_is_redacted(edit.revision[1]):
+                return
+            reserved_revision = mailbox.reserved_revisions.get(edit.original_event_id)
+            if reserved_revision is not None and edit.revision <= reserved_revision:
+                return
+            mailbox.reserved_revisions[edit.original_event_id] = edit.revision
             suppressed = edit.revision == (turn_record.suppressed_source_event_revisions or {}).get(
                 edit.original_event_id,
             ) or (
