@@ -275,6 +275,7 @@ async def _run_cleanup(
     now_ms: int = NOW_MS,
     terminal_interrupted_only: bool = False,
     runtime_generation: str = RUNTIME_GENERATION,
+    unsettled_turn_source_event_ids: frozenset[str] = frozenset(),
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -287,6 +288,7 @@ async def _run_cleanup(
                     client,
                     None,
                     runtime_generation=runtime_generation,
+                    unsettled_turn_source_event_ids=unsettled_turn_source_event_ids,
                 ),
             },
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
@@ -1360,6 +1362,43 @@ async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) 
             original_sender_id=USER_ID,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_auto_resume_a_durably_owned_turn(tmp_path: Path) -> None:
+    """Exact callback replay owns recovery and must not race a second relay turn."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$source",
+            body="Start here",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$source", "$source"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ):
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            unsettled_turn_source_event_ids=frozenset({"$source"}),
+        )
+
+    assert cleaned == 1
+    assert interrupted == []
 
 
 @pytest.mark.asyncio
@@ -4728,6 +4767,7 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     router_bot._conversation_cache = MagicMock()
     router_bot.runtime_generation = "router-generation"
+    router_bot.unsettled_turn_dispatch_source_event_ids = AsyncMock(return_value=frozenset({"$router-source"}))
     agent_client = AsyncMock(spec=nio.AsyncClient)
     agent_bot = MagicMock()
     agent_bot.agent_name = "test_agent"
@@ -4735,6 +4775,7 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
     agent_bot.runtime_generation = "agent-generation"
+    agent_bot.unsettled_turn_dispatch_source_event_ids = AsyncMock(return_value=frozenset({"$agent-source"}))
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
@@ -4754,6 +4795,8 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     assert actors[BOT_USER_ID].client is agent_client
     assert actors["@mindroom_router:example.com"].runtime_generation == "router-generation"
     assert actors[BOT_USER_ID].runtime_generation == "agent-generation"
+    assert actors["@mindroom_router:example.com"].unsettled_turn_source_event_ids == frozenset({"$router-source"})
+    assert actors[BOT_USER_ID].unsettled_turn_source_event_ids == frozenset({"$agent-source"})
     assert mock_recover.await_args.kwargs["resume_client"] is router_client
     assert mock_recover.await_args.kwargs["resume_conversation_cache"] is router_bot._conversation_cache
     assert mock_recover.await_args.kwargs["config"] == config
@@ -4774,6 +4817,7 @@ async def test_orchestrator_recovery_still_cleans_when_router_is_unavailable(tmp
     agent_bot.client = agent_client
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
+    agent_bot.unsettled_turn_dispatch_source_event_ids = AsyncMock(return_value=frozenset())
     orchestrator.agent_bots = {"test_agent": agent_bot}
 
     with patch(
@@ -4800,6 +4844,7 @@ async def test_orchestrator_surfaces_incomplete_recovery_for_startup_retry(tmp_p
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
     agent_bot.runtime_generation = "agent-generation"
+    agent_bot.unsettled_turn_dispatch_source_event_ids = AsyncMock(return_value=frozenset())
     recovery_result = StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
     object.__setattr__(recovery_result, "retry_required", True)
 

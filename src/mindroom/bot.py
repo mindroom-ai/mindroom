@@ -1919,6 +1919,15 @@ class AgentBot:
             unsettled_source_event_ids=unsettled_source_event_ids,
         )
 
+    async def unsettled_turn_dispatch_source_event_ids(self) -> frozenset[str]:
+        """Return source IDs whose exact message or media callbacks remain owned."""
+        obligations = await asyncio.to_thread(self._dispatch_obligation_store.pending)
+        return frozenset(
+            obligation.source_event_id
+            for obligation in obligations
+            if obligation.callback_kind in {DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA}
+        )
+
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
 

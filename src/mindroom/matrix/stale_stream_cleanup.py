@@ -115,6 +115,10 @@ class StaleStreamCleanupActor:
     # latest content carries this stamp are live current-generation output and
     # must never be repaired, regardless of clocks or live-task snapshots.
     runtime_generation: str
+    # Source events whose exact turn callbacks remain durably owned. Cleanup
+    # may repair their stale visible messages, but must not create a second
+    # auto-resume turn while the original callback is being replayed.
+    unsettled_turn_source_event_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,7 @@ class _MessageState:
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
+    source_event_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
     bot_user_id: str | None = None
@@ -693,7 +698,39 @@ async def _process_stale_room_candidate(
     if proof_owned and not result[0]:
         msg = f"Stopped-owner certification incomplete for {room_id} {target_event_id}"
         raise RuntimeError(msg)
-    return result
+    return _without_auto_resume_for_unsettled_turn(
+        result,
+        actor=actor,
+        state=state,
+        room_id=room_id,
+        target_event_id=target_event_id,
+    )
+
+
+def _without_auto_resume_for_unsettled_turn(
+    result: tuple[bool, _InterruptedThread | None],
+    *,
+    actor: StaleStreamCleanupActor,
+    state: _MessageState,
+    room_id: str,
+    target_event_id: str,
+) -> tuple[bool, _InterruptedThread | None]:
+    """Drop a relay candidate while exact callback replay owns its source."""
+    edited, interrupted = result
+    if (
+        interrupted is not None
+        and state.source_event_id is not None
+        and state.source_event_id in actor.unsettled_turn_source_event_ids
+    ):
+        logger.info(
+            "Skipping auto-resume because exact turn recovery remains pending",
+            room_id=room_id,
+            thread_id=state.thread_id,
+            target_event_id=target_event_id,
+            source_event_id=state.source_event_id,
+        )
+        interrupted = None
+    return edited, interrupted
 
 
 async def _handle_interrupted_message(
@@ -1053,6 +1090,7 @@ def _merge_bot_resolved_message_states(
             bot_user_id=message.sender,
             requester_user_id=requester_user_id,
             fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
+            fallback_source_event_id=scanned_message.reply_to_event_id if scanned_message is not None else None,
         )
 
 
@@ -1064,6 +1102,7 @@ def _merge_resolved_message_state(
     bot_user_id: str,
     requester_user_id: str | None,
     fallback_thread_id: str | None = None,
+    fallback_source_event_id: str | None = None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -1078,6 +1117,7 @@ def _merge_resolved_message_state(
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id or fallback_thread_id
+    state.source_event_id = message.reply_to_event_id or fallback_source_event_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
     state.bot_user_id = bot_user_id

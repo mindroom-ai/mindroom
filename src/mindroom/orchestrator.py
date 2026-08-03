@@ -1166,10 +1166,12 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
                 continue
+            unsettled_turn_source_event_ids = await bot.unsettled_turn_dispatch_source_event_ids()
             actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
                 runtime_generation=bot.runtime_generation,
+                unsettled_turn_source_event_ids=unsettled_turn_source_event_ids,
             )
         if not actors:
             return
