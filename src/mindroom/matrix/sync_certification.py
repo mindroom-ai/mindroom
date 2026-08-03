@@ -73,14 +73,9 @@ class SyncCacheWriteResult:
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def _has_certification_blocker(self) -> bool:
-        """Return whether nio still reports an open or abandoned recovery gap."""
-        return bool(self.unrecovered_room_ids)
-
-    @property
     def certified(self) -> bool:
         """Return whether local cache work and recovery state permit a checkpoint."""
-        return self.complete and not self.errors and not self._has_certification_blocker
+        return self.complete and not self.errors and not self.unrecovered_room_ids
 
 
 @dataclass(frozen=True)
@@ -91,7 +86,9 @@ class SyncCertificationDecision:
     checkpoint_to_save: SyncCheckpoint | None = None
     clear_saved_token: bool = False
     reset_client_token: bool = False
-    advanced_tokenless_baseline: bool = False
+    # Runtime-only certification handoff; nio remains the recovery-gap owner.
+    unresolved_recovery_room_ids: frozenset[str] = frozenset()
+    replay_required_after_recovery: bool = False
     reason: str | None = None
     cache_scope_epoch: int | None = None
 
@@ -101,14 +98,16 @@ def _uncertain_decision(
     reason: str,
     clear_saved_token: bool = False,
     reset_client_token: bool = False,
-    advanced_tokenless_baseline: bool = False,
+    unresolved_recovery_room_ids: frozenset[str] = frozenset(),
+    replay_required_after_recovery: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
         state=SyncTrustState.UNCERTAIN,
         clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
-        advanced_tokenless_baseline=advanced_tokenless_baseline,
+        unresolved_recovery_room_ids=unresolved_recovery_room_ids,
+        replay_required_after_recovery=replay_required_after_recovery,
         reason=reason,
     )
 
@@ -140,14 +139,41 @@ def certify_sync_response(
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
     tokenless_baseline_pending: bool = False,
+    unresolved_recovery_room_ids: frozenset[str] = frozenset(),
+    replay_required_after_recovery: bool = False,
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     token = normalize_sync_token(next_batch)
+    unresolved_recovery_room_ids = (
+        unresolved_recovery_room_ids - cache_result.recovered_room_ids
+    ) | cache_result.unrecovered_room_ids
     reason = _uncertain_reason(
         cache_result,
         token=token,
         tokenless_baseline_pending=tokenless_baseline_pending,
     )
+    replay_required_after_recovery = replay_required_after_recovery or bool(
+        cache_result.errors or not cache_result.complete,
+    )
+    if cache_result.unrecovered_room_ids and token is not None:
+        return _uncertain_decision(
+            reason=reason or "sync_recovery_incomplete",
+            unresolved_recovery_room_ids=unresolved_recovery_room_ids,
+            replay_required_after_recovery=replay_required_after_recovery,
+        )
+
+    if unresolved_recovery_room_ids:
+        return _uncertain_decision(
+            reason="sync_recovery_unresolved",
+            reset_client_token=True,
+        )
+
+    if replay_required_after_recovery:
+        return _uncertain_decision(
+            reason=reason or "sync_cache_replay_required",
+            reset_client_token=True,
+        )
+
     if reason is not None:
         tokenless_limited_baseline = (
             tokenless_baseline_pending and cache_result.complete and reason == "limited_sync_timeline"
@@ -156,7 +182,6 @@ def certify_sync_response(
         return _uncertain_decision(
             reason=reason,
             reset_client_token=reset_client_token,
-            advanced_tokenless_baseline=tokenless_baseline_pending and not reset_client_token,
         )
 
     checkpoint = SyncCheckpoint(token=cast("str", token))

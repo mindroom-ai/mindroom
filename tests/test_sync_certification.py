@@ -55,7 +55,6 @@ def test_recovered_limited_room_certifies_after_nio_callback_success() -> None:
     )
 
     assert cache_result._unclassified_limited_room_ids == ()
-    assert cache_result._has_certification_blocker is False
     assert cache_result.certified is True
 
 
@@ -91,8 +90,8 @@ def test_leave_without_nio_gap_certifies_checkpoint() -> None:
     assert decision.checkpoint_to_save == SyncCheckpoint("s_after_leave")
 
 
-def test_unrecovered_boundary_rewinds_before_clean_retry_certifies() -> None:
-    """Nio's reset outcome rewinds once, then its clean replay can certify."""
+def test_unrecovered_boundary_waits_for_outcome_before_clean_retry_certifies() -> None:
+    """Nio may drain a pending gap before outcome disappearance forces replay."""
     room_id = "!joined:localhost"
     boundary = certify_sync_response(
         next_batch="s_join",
@@ -102,8 +101,16 @@ def test_unrecovered_boundary_rewinds_before_clean_retry_certifies() -> None:
             unrecovered_room_ids=frozenset({room_id}),
         ),
     )
-    clean = certify_sync_response(
+    unresolved = certify_sync_response(
         next_batch="s_clean",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=(room_id,),
+        ),
+        unresolved_recovery_room_ids=boundary.unresolved_recovery_room_ids,
+    )
+    clean = certify_sync_response(
+        next_batch="s_replayed_clean",
         cache_result=SyncCacheWriteResult(
             complete=True,
             limited_room_ids=(room_id,),
@@ -112,9 +119,12 @@ def test_unrecovered_boundary_rewinds_before_clean_retry_certifies() -> None:
 
     assert boundary.state is SyncTrustState.UNCERTAIN
     assert boundary.reason == "sync_recovery_incomplete"
-    assert boundary.reset_client_token is True
+    assert boundary.reset_client_token is False
+    assert boundary.unresolved_recovery_room_ids == frozenset({room_id})
+    assert unresolved.reason == "sync_recovery_unresolved"
+    assert unresolved.reset_client_token is True
     assert clean.state is SyncTrustState.CERTIFIED
-    assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
+    assert clean.checkpoint_to_save == SyncCheckpoint("s_replayed_clean")
 
 
 def test_unrecovered_room_outweighs_independent_limited_room() -> None:
@@ -144,14 +154,12 @@ def test_recovery_outcomes_fail_closed_only_for_nio_unrecovered_rooms() -> None:
     )
 
     assert cache_result._unclassified_limited_room_ids == (unclassified_room,)
-    assert cache_result._has_certification_blocker is True
     assert cache_result.certified is False
 
     no_gap_result = SyncCacheWriteResult(
         complete=True,
         limited_room_ids=(unclassified_room,),
     )
-    assert no_gap_result._has_certification_blocker is False
     assert no_gap_result.certified is True
 
 
@@ -260,8 +268,8 @@ def test_limited_cache_failure_preserves_positioned_continuity() -> None:
     assert decision.reset_client_token is True
 
 
-def test_unrecovered_gap_rewinds_to_retry_continuity() -> None:
-    """An authoritative nio recovery gap must retry from the safe checkpoint."""
+def test_unrecovered_gap_withholds_checkpoint_without_replanning() -> None:
+    """An open nio gap must retain safe continuity while its live recovery drains."""
     decision = certify_sync_response(
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(
@@ -274,7 +282,8 @@ def test_unrecovered_gap_rewinds_to_retry_continuity() -> None:
     assert decision.reason == "sync_recovery_incomplete"
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is False
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
+    assert decision.unresolved_recovery_room_ids == frozenset({"!room:localhost"})
 
 
 def test_tokenless_unclassified_limited_window_advances_without_certifying() -> None:
@@ -291,7 +300,6 @@ def test_tokenless_unclassified_limited_window_advances_without_certifying() -> 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "limited_sync_timeline"
     assert decision.reset_client_token is False
-    assert decision.advanced_tokenless_baseline is True
 
 
 def test_missing_next_batch_fails_closed() -> None:

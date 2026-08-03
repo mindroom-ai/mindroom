@@ -140,7 +140,7 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
 
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is True
-    assert config.store_sync_tokens is False
+    assert config.store_sync_tokens is True
 
 
 @pytest.mark.asyncio
@@ -201,6 +201,7 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
     restarted = load_client()
     try:
         recovery = cast("Any", restarted)._recovery
+        assert restarted.loaded_sync_token == "s_later"  # noqa: S105
         assert tuple(recovery.gaps) == (room_id,)
         assert recovery.gaps[room_id][0].cursor_token == "s_before_gap"  # noqa: S105
     finally:

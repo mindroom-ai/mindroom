@@ -39,12 +39,19 @@ class SyncCacheTrust:
     _tokenless_baseline_pending: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
+    # Ephemeral context for typed nio outcomes while the durable checkpoint is withheld.
+    _unresolved_recovery_room_ids: frozenset[str] = field(default=frozenset(), init=False, repr=False)
+    _replay_required_after_recovery: bool = field(default=False, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
-    async def prepare_startup(self) -> str | None:
-        """Initialize cache trust, then restore a valid checkpoint or start cold."""
+    async def prepare_startup(
+        self,
+        *,
+        transport_resume_token: str | None = None,
+    ) -> str | None:
+        """Initialize cache trust and choose the safe startup transport position."""
         cache = self.runtime.event_cache
         try:
             await cache.initialize()
@@ -68,10 +75,24 @@ class SyncCacheTrust:
                 cache.disable("untrusted_principal_cache_cleanup_failed")
                 self.logger.warning("matrix_untrusted_principal_cache_disabled", error=str(exc))
 
-        self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
-        self._tokenless_baseline_pending = loaded is None
-        return loaded.token if loaded is not None else None
+        self._clear_recovery_handoff()
+        safe_token = loaded.token if loaded is not None else None
+        nio_token = transport_resume_token or None
+        startup_token = safe_token
+        if nio_token is not None and nio_token != safe_token:
+            # NIO stores its transport position atomically with recovery gaps.
+            # Resume there so a restart drains the exact existing generation,
+            # then replay from MindRoom's cache-certified checkpoint.
+            startup_token = nio_token
+            self._replay_required_after_recovery = True
+            self.logger.info(
+                "matrix_sync_transport_recovery_resumed",
+                has_safe_retry_token=safe_token is not None,
+            )
+        self.state = SyncTrustState.PENDING if startup_token is not None else SyncTrustState.COLD
+        self._refresh_tokenless_baseline_pending()
+        return startup_token
 
     def _load_valid_checkpoint(self, checkpoint: SyncCheckpoint | None) -> SyncCheckpoint | None:
         """Accept a loaded checkpoint only when current cache generation proves it."""
@@ -136,6 +157,8 @@ class SyncCacheTrust:
                 self._cache_scope_epoch += 1
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
+                if self._unresolved_recovery_room_ids:
+                    self._replay_required_after_recovery = True
                 if await self._clear_saved_locked():
                     return True
                 self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
@@ -147,7 +170,7 @@ class SyncCacheTrust:
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
         self._dispatch_persist_failure_epoch += 1
-        self._refresh_tokenless_baseline_pending()
+        self.defer_replay_after_pre_certification_failure()
 
     def consume_dispatch_persist_failure(self) -> bool:
         """Reject certification once for every newly observed failure epoch."""
@@ -164,15 +187,31 @@ class SyncCacheTrust:
     def reject_response_before_certification(self) -> None:
         """Consume any admission failure owned by an aborted sync response."""
         self.consume_dispatch_persist_failure()
+        self._clear_recovery_handoff()
         self._refresh_tokenless_baseline_pending()
+
+    def _clear_recovery_handoff(self) -> None:
+        """Clear runtime-only certification context before replay or restart."""
+        self._unresolved_recovery_room_ids = frozenset()
+        self._replay_required_after_recovery = False
 
     def _refresh_tokenless_baseline_pending(self) -> None:
         """Permit a positioning baseline exactly when no safe retry cursor exists."""
         self._tokenless_baseline_pending = self.retry_token() is None
 
+    def defer_replay_after_pre_certification_failure(self) -> None:
+        """Preserve NIO's live cursor until its retained work gets another response."""
+        self._replay_required_after_recovery = True
+        self._tokenless_baseline_pending = False
+
+    def rewind_is_deferred_until_recovery(self) -> bool:
+        """Return whether NIO must advance retained work before a safe replay."""
+        return bool(self._unresolved_recovery_room_ids or self._replay_required_after_recovery)
+
     def acknowledge_dispatch_persist_failures(self) -> None:
         """Settle source failures irrelevant to non-checkpointed transports."""
         self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
+        self._clear_recovery_handoff()
 
     async def certify_response(
         self,
@@ -199,6 +238,8 @@ class SyncCacheTrust:
             next_batch=next_batch,
             cache_result=cache_result,
             tokenless_baseline_pending=self._tokenless_baseline_pending,
+            unresolved_recovery_room_ids=self._unresolved_recovery_room_ids,
+            replay_required_after_recovery=self._replay_required_after_recovery,
         )
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
@@ -215,10 +256,15 @@ class SyncCacheTrust:
             nonlocal decision
             async with self._mutation_lock:
                 if decision.cache_scope_epoch != self._cache_scope_epoch:
+                    unresolved_recovery_room_ids = (
+                        self._unresolved_recovery_room_ids | decision.unresolved_recovery_room_ids
+                    )
                     decision = SyncCertificationDecision(
                         state=SyncTrustState.UNCERTAIN,
                         clear_saved_token=True,
-                        reset_client_token=True,
+                        reset_client_token=not unresolved_recovery_room_ids,
+                        unresolved_recovery_room_ids=unresolved_recovery_room_ids,
+                        replay_required_after_recovery=True,
                         reason="cache_scope_invalidated",
                         cache_scope_epoch=self._cache_scope_epoch,
                     )
@@ -227,9 +273,11 @@ class SyncCacheTrust:
                     cache_result=cache_result,
                     joined_room_ids=joined_room_ids,
                 )
+                self._unresolved_recovery_room_ids = decision.unresolved_recovery_room_ids
+                self._replay_required_after_recovery = decision.replay_required_after_recovery
                 if decision.reset_client_token:
                     self._refresh_tokenless_baseline_pending()
-                elif decision.advanced_tokenless_baseline or decision.state is SyncTrustState.CERTIFIED:
+                else:
                     self._tokenless_baseline_pending = False
                 return decision, record
 
@@ -242,6 +290,7 @@ class SyncCacheTrust:
             async with self._mutation_lock:
                 decision = handle_unknown_pos()
                 await self._apply_decision_locked(decision)
+                self._clear_recovery_handoff()
                 self._refresh_tokenless_baseline_pending()
                 return decision
 
