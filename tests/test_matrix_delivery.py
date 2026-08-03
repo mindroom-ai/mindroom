@@ -88,6 +88,46 @@ async def test_send_message_result_revalidates_hydration_after_content_preparati
     client.room_send.assert_not_awaited()
 
 
+@pytest.mark.parametrize("cached_plaintext", [False, True])
+@pytest.mark.asyncio
+async def test_send_message_result_rechecks_plaintext_proof_authoritatively(
+    *,
+    cached_plaintext: bool,
+) -> None:
+    """A plaintext proof must detect server-side encryption before exact send."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    client.rooms = {room_id: nio.MatrixRoom(room_id, "@bot:localhost")} if cached_plaintext else {}
+    plaintext_response = nio.RoomGetStateEventError(
+        "No encryption state",
+        "M_NOT_FOUND",
+        room_id=room_id,
+    )
+    encrypted_response = nio.RoomGetStateEventResponse(
+        content={"algorithm": "m.megolm.v1.aes-sha2"},
+        event_type="m.room.encryption",
+        state_key="",
+        room_id=room_id,
+    )
+    client.room_get_state_event = AsyncMock(
+        side_effect=([encrypted_response] if cached_plaintext else [plaintext_response, encrypted_response]),
+    )
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id=room_id)
+    client._send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id=room_id)
+
+    delivered = await send_message_result(
+        client,
+        room_id,
+        {"body": "hello", "msgtype": "m.text"},
+        delivery_proof=RoomDeliveryHydrationProof(encrypted=False),
+    )
+
+    assert delivered is None
+    assert client.room_get_state_event.await_count == (1 if cached_plaintext else 2)
+    client.room_send.assert_not_awaited()
+    client._send.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_send_message_result_forwards_explicit_transaction_id() -> None:
     """A caller-owned transaction ID must reach nio unchanged."""

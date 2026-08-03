@@ -470,6 +470,19 @@ async def _cache_bypass_has_plaintext_room(
     return True
 
 
+async def _delivery_hydration_is_current_at_send(
+    client: nio.AsyncClient,
+    room_id: str,
+    proof: RoomDeliveryHydrationProof,
+) -> bool:
+    """Validate one proof against local state and authoritative plaintext state."""
+    if not delivery_hydration_is_current(client, room_id, proof):
+        return False
+    if proof.encrypted:
+        return True
+    return await _remote_room_encrypted(client, room_id) is False
+
+
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -498,7 +511,11 @@ async def send_message_result(
         message_type=message_type,
     )
     content_sent = await prepare_large_message(client, room_id, content)
-    if delivery_proof is not None and not delivery_hydration_is_current(client, room_id, delivery_proof):
+    if delivery_proof is not None and not await _delivery_hydration_is_current_at_send(
+        client,
+        room_id,
+        delivery_proof,
+    ):
         logger.warning(
             "matrix_room_delivery_hydration_stale",
             room_id=room_id,
