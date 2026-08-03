@@ -19,7 +19,7 @@ from agno.models.ollama import Ollama
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -614,7 +614,7 @@ class TestRoutingRegression:
         router_bot.admission_gate.close()
         router_bot._response_runner.refuse_pending_admissions()
         await coalescing_gate.admit(
-            CoalescingKey(room.room_id, None, "@user:localhost"),
+            CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             ready_result=ReadyPendingEvent(
                 pending_event=PendingEvent(
                     event=_router_readiness_event("$router-shutdown"),

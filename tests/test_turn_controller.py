@@ -13,7 +13,7 @@ import pytest
 from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
@@ -125,7 +125,7 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
 
     with pytest.raises(IngressAdmissionClosedError):
         await owner.admit(
-            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
             ready_task=ready_task,
             source_event_id="$late:localhost",
             source_kind=MESSAGE_SOURCE_KIND,

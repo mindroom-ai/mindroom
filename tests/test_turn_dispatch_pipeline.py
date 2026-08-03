@@ -13,7 +13,7 @@ import pytest
 
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -1162,7 +1162,7 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, None, "@user:localhost")
+        assert key == CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -1593,7 +1593,7 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is event
@@ -1742,7 +1742,7 @@ class TestAgentBot(AgentBotTestBase):
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+            assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -1855,7 +1855,7 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
@@ -1966,7 +1966,7 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event

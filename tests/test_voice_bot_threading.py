@@ -17,7 +17,7 @@ from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate
-from mindroom.coalescing_batch import CoalescingKey
+from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -1006,7 +1006,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
                 source_kind="message",
                 requester_user_id="@user:example.com",
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, "$thread_root", "@user:example.com"),
+                coalescing_key=CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:example.com")),
             )
             await asyncio.wait_for(streaming_started.wait(), timeout=wait_timeout)
 

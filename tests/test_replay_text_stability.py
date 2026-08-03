@@ -26,6 +26,7 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    RequesterCoalescingOwner,
     build_coalesced_batch,
     coalesced_prompt,
     tagged_coalesced_prompt,
@@ -149,7 +150,7 @@ def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(tmp_pa
     """A plain single text turn persists exactly the bytes the model was shown."""
     body = "Hello @general please reply with pong."
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ID, _REQUESTER),
+        CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
     )
@@ -170,7 +171,7 @@ def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(tmp_pat
         '`backticks`, & ampersands, "quotes", and a newline\nsecond line'
     )
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ID, _REQUESTER),
+        CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
     )
@@ -213,7 +214,7 @@ def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_prompt(t
         for event_id, body, timestamp_ms in zip(event_ids, bodies, timestamps, strict=True)
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ID, _REQUESTER),
+        CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=_timestamp_formatter,
     )
@@ -253,7 +254,7 @@ def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(tmp_pa
         for index, (event_id, body) in enumerate(zip(event_ids, bodies, strict=True))
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ID, _REQUESTER),
+        CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=None,
     )
@@ -287,7 +288,7 @@ def test_run_metadata_projection_preserves_replay_prompt_bytes() -> None:
         for event_id, body, timestamp_ms in zip(event_ids, bodies, timestamps, strict=True)
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ID, _REQUESTER),
+        CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=_timestamp_formatter,
     )

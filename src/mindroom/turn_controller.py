@@ -16,7 +16,9 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    RequesterCoalescingOwner,
     build_coalesced_batch,
+    derive_coalescing_key,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
 from mindroom.commands.parsing import command_parser
@@ -654,7 +656,11 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=derive_coalescing_key(
+                    room.room_id,
+                    coalescing_thread_id,
+                    RequesterCoalescingOwner(requester_user_id),
+                ),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -701,7 +707,11 @@ class TurnController:
                 source_kind=envelope.source_kind,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=derive_coalescing_key(
+                    room.room_id,
+                    coalescing_thread_id,
+                    RequesterCoalescingOwner(requester_user_id),
+                ),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
             )
@@ -786,10 +796,10 @@ class TurnController:
     ) -> CoalescingKey:
         """Return the canonical sender/thread scope for one event."""
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        return CoalescingKey(
+        return derive_coalescing_key(
             room.room_id,
             coalescing_thread_id,
-            requester_user_id,
+            RequesterCoalescingOwner(requester_user_id),
         )
 
     async def _append_live_event_with_timing(
@@ -996,7 +1006,7 @@ class TurnController:
             trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
         )
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+            derive_coalescing_key(room.room_id, coalescing_thread_id, RequesterCoalescingOwner(requester_user_id)),
             [pending_event],
         )
         handoff = build_dispatch_handoff(batch)
@@ -2447,7 +2457,11 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        return voice_target, CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
+        return voice_target, derive_coalescing_key(
+            room.room_id,
+            coalescing_thread_id,
+            RequesterCoalescingOwner(requester_user_id),
+        )
 
     async def _ready_voice_event(
         self,

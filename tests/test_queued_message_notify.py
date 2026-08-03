@@ -36,6 +36,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing_batch import (
     CoalescingKey,
     PendingEvent,
+    RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
@@ -2523,7 +2524,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
             [
                 PendingEvent(
                     event=event,
@@ -2593,7 +2594,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         assert pre_reservation is not None
         assert post_reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$post_stt_thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$post_stt_thread", RequesterCoalescingOwner("@user:localhost")),
             [
                 PendingEvent(
                     event=typed_event,
@@ -2664,7 +2665,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
         voice_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert voice_reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, None, "@user:localhost"),
+            CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             [
                 PendingEvent(
                     event=voice_event,
@@ -2859,7 +2860,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
         assert reservation is not None
         with pytest.raises(ValueError, match="solo batches"):
             build_coalesced_batch(
-                CoalescingKey(room.room_id, "$thread", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
                 [
                     PendingEvent(
                         event=_prepared_text_event(event_id="$reserved"),

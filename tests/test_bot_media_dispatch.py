@@ -14,7 +14,7 @@ from agno.media import Image
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
@@ -278,7 +278,7 @@ class TestAgentBot(AgentBotTestBase):
             assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
@@ -491,7 +491,7 @@ class TestAgentBot(AgentBotTestBase):
                     reply_to_event_id=voice_event.event_id,
                     event_source=voice_event.source,
                 ),
-                CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost")),
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(

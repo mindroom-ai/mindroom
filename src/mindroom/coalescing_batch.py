@@ -32,32 +32,52 @@ if TYPE_CHECKING:
     import nio
 
 
+@dataclass(frozen=True)
+class RequesterCoalescingOwner:
+    """Batching owner for one effective requester's own burst."""
+
+    requester_user_id: str
+
+
+@dataclass(frozen=True)
+class ActiveFollowUpCoalescingOwner:
+    """Batching owner for follow-ups queued behind an active response."""
+
+
+type CoalescingOwner = RequesterCoalescingOwner | ActiveFollowUpCoalescingOwner
+
+
 class CoalescingKey(NamedTuple):
-    """Physical coalescing scope for one requester in one room or thread."""
+    """Physical coalescing scope for one owner in one room or thread."""
 
     room_id: str
     thread_id: str | None
-    requester_user_id: str
+    owner: CoalescingOwner
 
 
 type TimestampFormatter = Callable[[float | None], str | None]
 
 
-_ACTIVE_FOLLOW_UP_OWNER_PREFIX = "__mindroom_active_follow_up__"
+def derive_coalescing_key(room_id: str, thread_id: str | None, owner: CoalescingOwner) -> CoalescingKey:
+    """Return the canonical coalescing key for one owner in one room or thread."""
+    return CoalescingKey(room_id, thread_id, owner)
 
 
 def active_follow_up_coalescing_key(room_id: str, thread_id: str | None) -> CoalescingKey:
     """Return the target-scoped key for follow-ups queued behind an active response."""
-    return CoalescingKey(
-        room_id,
-        thread_id,
-        f"{_ACTIVE_FOLLOW_UP_OWNER_PREFIX}:{thread_id or 'room'}",
-    )
+    return derive_coalescing_key(room_id, thread_id, ActiveFollowUpCoalescingOwner())
 
 
 def is_active_follow_up_coalescing_key(key: CoalescingKey) -> bool:
     """Return whether a coalescing key is target-scoped for an active response."""
-    return key.requester_user_id.startswith(f"{_ACTIVE_FOLLOW_UP_OWNER_PREFIX}:")
+    return isinstance(key.owner, ActiveFollowUpCoalescingOwner)
+
+
+def coalescing_owner_log_label(owner: CoalescingOwner) -> str:
+    """Return the stable log and task-name label for one coalescing owner."""
+    if isinstance(owner, RequesterCoalescingOwner):
+        return owner.requester_user_id
+    return "active_follow_up"
 
 
 @dataclass
@@ -296,6 +316,19 @@ def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent
     raise ValueError(msg)
 
 
+def _batch_requester_user_id(key: CoalescingKey, primary_pending_event: PendingEvent) -> str:
+    """Resolve the batch requester from the primary event, falling back to a requester owner.
+
+    A follow-up owner carries no requester, so a requester-less primary event
+    falls back to the event sender, matching the per-message sender fallback.
+    """
+    if primary_pending_event.requester_user_id:
+        return primary_pending_event.requester_user_id
+    if isinstance(key.owner, RequesterCoalescingOwner):
+        return key.owner.requester_user_id
+    return primary_pending_event.event.sender
+
+
 def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None:
     hook_sources = {
         pending_event.hook_source for pending_event in ordered_pending_events if pending_event.hook_source is not None
@@ -364,7 +397,7 @@ def build_coalesced_batch(
         coalescing_key=key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
-        requester_user_id=primary_pending_event.requester_user_id or key.requester_user_id,
+        requester_user_id=_batch_requester_user_id(key, primary_pending_event),
         pending_events=tuple(ordered_pending_events),
         prompt=prompt_rendering.prompt,
         source_kind=_batch_source_kind(ordered_pending_events),

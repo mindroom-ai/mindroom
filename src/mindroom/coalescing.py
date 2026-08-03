@@ -14,9 +14,11 @@ from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    RequesterCoalescingOwner,
     TimestampFormatter,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
+    coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
 )
 from .coalescing_cleanup import (
@@ -485,7 +487,7 @@ class CoalescingGate:
             "coalescing_gate_enqueue",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             path=path,
             source_kind=source_kind,
             pending_count=self._gate_work_count(gate),
@@ -504,7 +506,7 @@ class CoalescingGate:
             "coalescing_gate_message_enqueued",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
             source_kind=pending_event.source_kind,
@@ -526,7 +528,7 @@ class CoalescingGate:
             log_context={
                 "room_id": key.room_id,
                 "thread_id": key.thread_id,
-                "requester_user_id": key.requester_user_id,
+                "requester_user_id": coalescing_owner_log_label(key.owner),
                 "pending_count": pending_count,
                 "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
                 "source_event_ids": self._source_event_ids(pending_events),
@@ -557,7 +559,7 @@ class CoalescingGate:
             return
         gate.drain_task = asyncio.create_task(
             self._drain_gate(key, gate),
-            name=f"coalescing_drain:{key.room_id}:{key.thread_id or 'room'}:{key.requester_user_id}",
+            name=f"coalescing_drain:{key.room_id}:{key.thread_id or 'room'}:{coalescing_owner_log_label(key.owner)}",
         )
 
     def _schedule_drain(self, key: CoalescingKey, gate: _GateEntry) -> None:
@@ -781,7 +783,7 @@ class CoalescingGate:
             "Coalescing drain failed",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
             exception_type=error.__class__.__name__,
@@ -803,7 +805,7 @@ class CoalescingGate:
         log_context: dict[str, object] = {
             "room_id": key.room_id,
             "thread_id": key.thread_id,
-            "requester_user_id": key.requester_user_id,
+            "requester_user_id": coalescing_owner_log_label(key.owner),
             "pending_count": pending_count,
             "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
             "source_event_ids": self._source_event_ids(pending_events),
@@ -911,11 +913,11 @@ class CoalescingGate:
         gate: _GateEntry,
         debounce_result: _DebounceWaitResult,
     ) -> None:
-        if not is_active_follow_up_coalescing_key(key):
+        if isinstance(key.owner, RequesterCoalescingOwner):
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 key.room_id,
-                key.requester_user_id,
+                key.owner.requester_user_id,
                 before_or_at_receipt_time=debounce_result.quiet_deadline,
                 exclude_slot_ids=admitted_lane_slot_ids,
             )
@@ -1008,7 +1010,7 @@ class CoalescingGate:
             "coalescing_drain_finish",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             outcome=outcome,
             pending_count=self._gate_work_count(current_gate) if current_gate is not None else 0,
             oldest_pending_age_ms=self._oldest_pending_age_ms(current_gate) if current_gate is not None else None,
@@ -1023,7 +1025,7 @@ class CoalescingGate:
             "coalescing_drain_start",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
         )

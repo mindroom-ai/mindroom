@@ -28,7 +28,13 @@ from mindroom import constants, interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    PendingEvent,
+    RequesterCoalescingOwner,
+    build_coalesced_batch,
+)
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
@@ -900,7 +906,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
         )
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             PendingEvent(
                 event=event,
@@ -958,7 +964,7 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
         ),
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             PendingEvent(
                 event=event,
@@ -1004,7 +1010,7 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
         origin_server_ts=1_000_000,
     )
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
             PendingEvent(
                 event=relay,
