@@ -325,7 +325,6 @@ async def test_full_replay_guard_receives_every_current_turn_event_id() -> None:
             deps=SimpleNamespace(logger=MagicMock()),
             _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
             _has_newer_unresponded_in_thread=full_guard,
-            _mark_source_events_responded=MagicMock(),
         ),
     )
 
@@ -354,7 +353,6 @@ async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> N
             deps=SimpleNamespace(logger=MagicMock()),
             _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
             _has_newer_unresponded_cached_thread_event=cached_guard,
-            _mark_source_events_responded=MagicMock(),
         ),
     )
 
@@ -370,6 +368,38 @@ async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> N
         is False
     )
     assert cached_guard.await_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_replay_guard_persists_no_response_supersession(tmp_path: Path) -> None:
+    """A skipped older turn needs durable no-response proof for restart and live-fuzz attribution."""
+    store = _store(tmp_path)
+    prepared, _handled_turn = _prepared_replay_guard_dispatch(degraded=False)
+    visible_responses = SimpleNamespace(settle_source_events_ignored=AsyncMock())
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock(), turn_store=store),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_in_thread=MagicMock(return_value=True),
+        ),
+    )
+
+    assert await _blocked_before_plan(
+        controller,
+        MagicMock(room_id="!room:example.org"),
+        prepared,
+        command_executor=MagicMock(),
+        visible_responses=visible_responses,
+        requester_user_id="@user:example.org",
+    )
+
+    persisted = store.get_turn_record("$current")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
+    assert store.get_turn_record("$coalesced-sibling") == persisted
+    visible_responses.settle_source_events_ignored.assert_not_awaited()
 
 
 @pytest.mark.asyncio

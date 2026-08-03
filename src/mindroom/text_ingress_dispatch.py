@@ -387,7 +387,7 @@ async def _blocked_before_plan(
             current_turn_event_ids=current_turn_event_ids,
         )
     if skips_turn:
-        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
+        controller.deps.turn_store.record_turn(prepared.handled_turn)
     return skips_turn
 
 

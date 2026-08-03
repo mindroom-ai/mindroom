@@ -4300,7 +4300,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Path) -> None:
-    """Skip an older message during backlog replay when a newer unresponded message exists."""
+    """Record a skipped older replay as a durable no-response supersession."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     older_event = PreparedTextEvent(
@@ -4335,9 +4335,12 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
-    # Older message should be skipped — resolve_dispatch_action never called
+    # Older message should be skipped — resolve_dispatch_action never called.
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    persisted = bot._turn_store.get_turn_record("$m1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 _SourceOwnership = Literal["single", "mixed", "absent", "partial", "redacted"]
@@ -4479,8 +4482,15 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
     else:
         bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$alice")
-    assert not bot._turn_store.is_handled("$bob")
+    if superseded:
+        persisted = bot._turn_store.get_turn_record("$bob")
+        assert persisted is not None
+        assert persisted.completed is True
+        assert persisted.response_event_id is None
+        assert bot._turn_store.is_handled("$alice")
+    else:
+        assert not bot._turn_store.is_handled("$alice")
+        assert not bot._turn_store.is_handled("$bob")
 
 
 @pytest.mark.asyncio
@@ -4687,7 +4697,10 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
         since_ts_ms=1000,
     )
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    persisted = bot._turn_store.get_turn_record("$m1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -4807,7 +4820,10 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    persisted = bot._turn_store.get_turn_record("$m1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
@@ -5063,7 +5079,10 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         since_ts_ms=1000,
     )
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$voice")
+    persisted = bot._turn_store.get_turn_record("$voice")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -5125,7 +5144,10 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
     history_guard.assert_not_called()
     bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    persisted = bot._turn_store.get_turn_record("$m1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -5901,7 +5923,10 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    persisted = bot._turn_store.get_turn_record("$m1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -5949,7 +5974,10 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
 
     # Media-backed coalesced user batch MUST still be suppressed.
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$img1")
+    persisted = bot._turn_store.get_turn_record("$img1")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
 
 
 @pytest.mark.asyncio
