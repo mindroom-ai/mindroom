@@ -4266,7 +4266,10 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
                     "!room:example": {
                         "timeline": {
                             "limited": True,
-                            "events": [{"event_id": "$live-suffix"}],
+                            "events": [
+                                {"event_id": "$live-suffix"},
+                                {"event_id": "$shared", "view": "sync"},
+                            ],
                         },
                     },
                 },
@@ -4275,7 +4278,10 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
 
     async def paginate_room(room_id: str) -> list[dict[str, Any]]:
         assert room_id == "!room:example"
-        return [{"event_id": "$recovered"}]
+        return [
+            {"event_id": "$recovered"},
+            {"event_id": "$shared", "view": "backfill"},
+        ]
 
     client.sync = limited_sync  # type: ignore[method-assign]
     client.paginate_room = paginate_room  # type: ignore[method-assign]
@@ -4285,6 +4291,7 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
         assert client.seen_events == {
             "$recovered": {"event_id": "$recovered"},
             "$live-suffix": {"event_id": "$live-suffix"},
+            "$shared": {"event_id": "$shared", "view": "backfill"},
         }
     finally:
         await client.close()

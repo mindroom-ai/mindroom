@@ -2837,8 +2837,10 @@ class LiveMatrixClient:
             if timeline.get("limited") is True and not allow_limited:
                 # A canonical backfill closes the missing prefix, while the
                 # live sync suffix can contain events newer than the history
-                # snapshot.  Retain both before advancing past next_batch.
-                events = [*await self.paginate_room(room_id), *events]
+                # snapshot. Retain both before advancing past next_batch. The
+                # later backfill wins duplicate event IDs because its derived
+                # relation bundles were queried after the sync snapshot.
+                events = [*events, *await self.paginate_room(room_id)]
             for raw_event in events:
                 if not isinstance(raw_event, dict):
                     continue
