@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import closing, suppress
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -54,7 +55,7 @@ from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection
     from io import TextIOWrapper
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -3343,6 +3344,12 @@ class ExactReplyOracle:
         content = event.get("content")
         if isinstance(content, dict):
             self._ingest_agent_message(event_id, content)
+            for replacement in _bundled_replacement_events(event):
+                replacement_id = replacement["event_id"]
+                replacement_content = replacement["content"]
+                assert isinstance(replacement_id, str)
+                assert isinstance(replacement_content, Mapping)
+                self._ingest_agent_message(replacement_id, replacement_content)
 
     def _ingest_agent_message(self, event_id: str, content: Mapping[str, Any]) -> None:
         """Fold one agent `m.room.message` into reply bodies and thread attributions."""
@@ -3513,6 +3520,89 @@ def _canonical_message_body(content: Mapping[str, Any], *, is_edit: bool) -> str
         return None
     body = body_source.get("body")
     return body if isinstance(body, str) else None
+
+
+def _bundled_replacement_events(event: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return valid server-bundled replacements of one original event."""
+    original_event_id = event.get("event_id")
+    original_sender = event.get("sender")
+    if not isinstance(original_event_id, str) or not isinstance(original_sender, str):
+        return ()
+    candidates: list[dict[str, Any]] = []
+    unsigned = event.get("unsigned")
+    for container in (unsigned, event):
+        if not isinstance(container, Mapping):
+            continue
+        relations = container.get("m.relations")
+        if not isinstance(relations, Mapping):
+            continue
+        replacement = relations.get("m.replace")
+        if not isinstance(replacement, Mapping):
+            continue
+        for candidate in (replacement.get("event"), replacement.get("latest_event"), replacement):
+            if not isinstance(candidate, Mapping):
+                continue
+            normalized = {key: value for key, value in candidate.items() if isinstance(key, str)}
+            content = normalized.get("content")
+            relation = content.get("m.relates_to") if isinstance(content, Mapping) else None
+            if (
+                normalized.get("sender") == original_sender
+                and normalized.get("type") == "m.room.message"
+                and isinstance(normalized.get("event_id"), str)
+                and isinstance(relation, Mapping)
+                and relation.get("rel_type") == "m.replace"
+                and relation.get("event_id") == original_event_id
+            ):
+                candidates.append(normalized)
+    return tuple(candidates)
+
+
+def _latest_response_body(
+    events: Collection[Mapping[str, Any]],
+    response_event_id: str,
+    *,
+    sender_id: str | None = None,
+) -> str:
+    """Return the newest standalone or server-bundled response body."""
+    candidates: list[tuple[tuple[int, int, str], str]] = []
+    for event in events:
+        event_id = event.get("event_id")
+        if sender_id is not None and event.get("sender") != sender_id:
+            continue
+        content = event.get("content")
+        if not isinstance(event_id, str) or not isinstance(content, Mapping):
+            continue
+        relation = content.get("m.relates_to")
+        is_original = event_id == response_event_id
+        is_edit = (
+            isinstance(relation, Mapping)
+            and relation.get("rel_type") == "m.replace"
+            and relation.get("event_id") == response_event_id
+        )
+        if is_original:
+            response_events = (event, *_bundled_replacement_events(event))
+        elif is_edit:
+            response_events = (event,)
+        else:
+            continue
+        for response_event in response_events:
+            response_id = response_event.get("event_id")
+            response_content = response_event.get("content")
+            if not isinstance(response_id, str) or not isinstance(response_content, Mapping):
+                continue
+            response_relation = response_content.get("m.relates_to")
+            response_is_edit = (
+                isinstance(response_relation, Mapping)
+                and response_relation.get("rel_type") == "m.replace"
+                and response_relation.get("event_id") == response_event_id
+            )
+            body = _canonical_message_body(response_content, is_edit=response_is_edit)
+            if body is not None:
+                timestamp = response_event.get("origin_server_ts")
+                candidates.append(
+                    (_replacement_order(response_id, timestamp, is_edit=response_is_edit), body),
+                )
+    return max(candidates, default=((0, 0, ""), ""))[1]
 
 
 def _auto_resume_relay_target(
@@ -4288,27 +4378,7 @@ class FinalStateAuditor:
 
     def _latest_agent_body(self, events: Mapping[str, Mapping[str, Any]], reply_event_id: str) -> str:
         """Return the newest visible body for one agent reply."""
-        candidates: list[tuple[tuple[int, int, str], str]] = []
-        for event_id, event in events.items():
-            if event.get("sender") != self.agent_id:
-                continue
-            content = event.get("content")
-            if not isinstance(content, dict):
-                continue
-            relation = content.get("m.relates_to")
-            is_original = event_id == reply_event_id
-            is_edit = (
-                isinstance(relation, dict)
-                and relation.get("rel_type") == "m.replace"
-                and relation.get("event_id") == reply_event_id
-            )
-            if not is_original and not is_edit:
-                continue
-            body = _canonical_message_body(content, is_edit=is_edit)
-            if body is not None:
-                timestamp = event.get("origin_server_ts")
-                candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
-        return max(candidates, default=((0, 0, ""), ""))[1]
+        return _latest_response_body(events.values(), reply_event_id, sender_id=self.agent_id)
 
     def _assert_sync_view_parity(
         self,
@@ -5029,26 +5099,7 @@ class LiveFuzzRunner:
         response_event_id: str,
     ) -> str:
         """Return the newest original or edit body for one response."""
-        candidates: list[tuple[tuple[int, int, str], str]] = []
-        for event in events:
-            event_id = event.get("event_id")
-            content = event.get("content")
-            if not isinstance(event_id, str) or not isinstance(content, dict):
-                continue
-            relation = content.get("m.relates_to")
-            is_original = event_id == response_event_id
-            is_edit = (
-                isinstance(relation, dict)
-                and relation.get("rel_type") == "m.replace"
-                and relation.get("event_id") == response_event_id
-            )
-            if not is_original and not is_edit:
-                continue
-            body = _canonical_message_body(content, is_edit=is_edit)
-            if body is not None:
-                timestamp = event.get("origin_server_ts")
-                candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
-        return max(candidates, default=((0, 0, ""), ""))[1]
+        return _latest_response_body(events, response_event_id)
 
     async def _run_batches(
         self,

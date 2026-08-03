@@ -3199,6 +3199,31 @@ async def test_all_reply_body_oracles_use_same_total_replacement_order() -> None
 
 
 @pytest.mark.asyncio
+async def test_all_reply_body_oracles_read_server_bundled_replacement() -> None:
+    """Compacted history exposes its latest edit through bundled relations."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+    )
+    original = _agent_reply_event("$source", "$reply", "partial")
+    replacement = _agent_edit_event("$reply", "$edit", _short_body_for(7), ts=200)
+    original["unsigned"] = {"m.relations": {"m.replace": {"event": replacement}}}
+    try:
+        oracle._ingest_event(original)
+        assert oracle.latest_reply_bodies["$reply"][1] == _short_body_for(7)
+
+        events = {"$reply": original}
+        assert auditor._latest_agent_body(events, "$reply") == _short_body_for(7)
+        assert LiveFuzzRunner._latest_event_body(events.values(), "$reply") == _short_body_for(7)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "replacement_fields",
     [
