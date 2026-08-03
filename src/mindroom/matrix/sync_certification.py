@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -157,7 +157,7 @@ def certify_sync_response(
     )
     if cache_result.unrecovered_room_ids and token is not None:
         return _uncertain_decision(
-            reason=reason or "sync_recovery_incomplete",
+            reason=cast("str", reason),
             unresolved_recovery_room_ids=unresolved_recovery_room_ids,
             replay_required_after_recovery=replay_required_after_recovery,
         )
@@ -175,19 +175,30 @@ def certify_sync_response(
         )
 
     if reason is not None:
-        tokenless_limited_baseline = (
-            tokenless_baseline_pending and cache_result.complete and reason == "limited_sync_timeline"
-        )
-        reset_client_token = not tokenless_limited_baseline
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=reset_client_token,
+            reset_client_token=reason != "limited_sync_timeline",
         )
 
     checkpoint = SyncCheckpoint(token=cast("str", token))
     return SyncCertificationDecision(
         state=SyncTrustState.CERTIFIED,
         checkpoint_to_save=checkpoint,
+    )
+
+
+def defer_sync_response_after_dispatch_persist_failure(
+    decision: SyncCertificationDecision,
+) -> SyncCertificationDecision:
+    """Preserve NIO recovery while a rejected callback waits for redispatch."""
+    return replace(
+        decision,
+        state=SyncTrustState.UNCERTAIN,
+        checkpoint_to_save=None,
+        clear_saved_token=False,
+        reset_client_token=False,
+        replay_required_after_recovery=True,
+        reason="dispatch_persist_failed",
     )
 
 

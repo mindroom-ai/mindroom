@@ -11,6 +11,7 @@ from mindroom.matrix.sync_certification import (
     SyncCheckpoint,
     SyncTrustState,
     certify_sync_response,
+    defer_sync_response_after_dispatch_persist_failure,
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
@@ -139,6 +140,28 @@ def test_unrecovered_room_outweighs_independent_limited_room() -> None:
     )
 
     assert decision.reason == "sync_recovery_incomplete"
+
+
+def test_dispatch_persist_failure_defers_recovery_before_safe_replay() -> None:
+    """Rejected recovered work must settle in NIO before cache-safe replay."""
+    room_id = "!pending:localhost"
+    planned = certify_sync_response(
+        next_batch="s_after_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    deferred = defer_sync_response_after_dispatch_persist_failure(planned)
+
+    assert deferred.state is SyncTrustState.UNCERTAIN
+    assert deferred.checkpoint_to_save is None
+    assert deferred.clear_saved_token is False
+    assert deferred.reset_client_token is False
+    assert deferred.unresolved_recovery_room_ids == frozenset({room_id})
+    assert deferred.replay_required_after_recovery is True
+    assert deferred.reason == "dispatch_persist_failed"
 
 
 def test_recovery_outcomes_fail_closed_only_for_nio_unrecovered_rooms() -> None:

@@ -1792,7 +1792,37 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    await bot._on_sync_error(sync_error)
+    invalidate_rejected_sync_position = AsyncMock()
+    with patch(
+        "mindroom.bot.invalidate_rejected_sync_position",
+        invalidate_rejected_sync_position,
+    ):
+        await bot._on_sync_error(sync_error)
+
+    invalidate_rejected_sync_position.assert_awaited_once_with(bot.client)
+    assert bot.client.next_batch is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint(tmp_path: Path) -> None:
+    """Cancellation while draining NIO recovery cannot preserve the rejected checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected"
+    save_sync_token(tmp_path, bot.agent_name, "s_rejected", cache_generation=_CACHE_GENERATION)
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    with (
+        patch(
+            "mindroom.bot.invalidate_rejected_sync_position",
+            AsyncMock(side_effect=asyncio.CancelledError("watchdog restart")),
+        ),
+        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+    ):
+        await bot._on_sync_error(sync_error)
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
@@ -2199,7 +2229,7 @@ async def test_classic_loop_exit_defers_rewind_until_nio_retries_failure(
         cache_generation=_CACHE_GENERATION,
     )
 
-    bot._record_dispatch_persist_failure()
+    bot._sync_cache_trust.record_dispatch_persist_failure()
     assert bot.client.next_batch == "s_after_rejected"
     bot._reconcile_classic_sync_cursor_after_loop_exit()
     assert bot.client.next_batch == "s_after_rejected"

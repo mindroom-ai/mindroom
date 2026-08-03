@@ -4295,6 +4295,7 @@ from = ["mindroom.matrix.client_room_admin"]
 expose = [
     "PermanentMatrixStartupError",
     "create_authenticated_client",
+    "invalidate_rejected_sync_position",
     "login",
     "login_flows",
     "login_with_token",

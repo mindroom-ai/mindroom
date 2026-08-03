@@ -208,6 +208,66 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
         await restarted.close()
 
 
+@pytest.mark.asyncio
+async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path: Path) -> None:
+    """A server-rejected cursor and its recovery generation must not survive restart."""
+    room_id = "!room:example.org"
+    user_id = "@mindroom_agent:example.org"
+    device_id = "AGENTDEVICE"
+    config = matrix_client_config()
+
+    def load_client() -> _MindRoomAsyncClient:
+        client = _MindRoomAsyncClient(
+            "https://example.org",
+            user_id,
+            device_id=device_id,
+            store_path=str(tmp_path),
+            config=config,
+        )
+        client.restore_login(user_id, device_id, "access-token")
+        client.load_store()
+        return client
+
+    client = load_client()
+    client.next_batch = "s_before_gap"
+    response = nio.SyncResponse(
+        "s_rejected",
+        nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    nio.Timeline([], limited=True, prev_batch="p_before_gap"),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        nio.DeviceOneTimeKeyCount(None, None),
+        nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
+    await client.receive_response(response)
+
+    assert client.loaded_sync_token == "s_rejected"  # noqa: S105
+    assert tuple(cast("Any", client)._recovery.gaps) == (room_id,)
+
+    await client_session.invalidate_rejected_sync_position(client)
+    await client.close()
+    assert client.store is not None
+    cast("Any", client.store).database.close()
+
+    restarted = load_client()
+    try:
+        assert not restarted.loaded_sync_token
+        assert not cast("Any", restarted)._recovery.gaps
+    finally:
+        await restarted.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
 def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
     """Private Olm identity material is inaccessible to other local users."""

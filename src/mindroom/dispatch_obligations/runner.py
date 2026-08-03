@@ -68,6 +68,14 @@ _SourceRejectionCallback = Callable[
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class _RoomLifecycleMarkerFence:
+    """Snapshot markers blocked by exact or corrupt lifecycle obligations."""
+
+    member_ids: frozenset[tuple[str, str]]
+    corrupt_room_ids: frozenset[str]
+
+
 async def _admit_all_sources(
     _room_id: str,
     _source_event_id: str,
@@ -229,19 +237,36 @@ class DispatchObligationRunner:
             source_event_ids,
         )
 
-    async def unsettled_room_lifecycle_member_ids(self) -> frozenset[tuple[str, str]]:
-        """Return room/member identities still owned by lifecycle obligations."""
-        obligations = await asyncio.to_thread(self.store.pending)
+    async def room_lifecycle_marker_fence(self) -> _RoomLifecycleMarkerFence:
+        """Return exact member and room-wide corruption fences for snapshot markers."""
+        pending = await asyncio.to_thread(self.store.pending_with_corruption)
         members: set[tuple[str, str]] = set()
-        for obligation in obligations:
+        corrupt_room_ids = {
+            row.room_id
+            for row in pending.corrupt_rows
+            if row.callback_kind == DispatchCallbackKind.ROOM_LIFECYCLE.value
+        }
+        for obligation in pending.obligations:
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
                 continue
-            event = parse_recovery_event(obligation)
+            try:
+                event = parse_recovery_event(obligation)
+            except DispatchObligationCorruptionError:
+                event = None
             if not isinstance(event, nio.RoomMemberEvent):
-                msg = f"Room lifecycle obligation {obligation.source_event_id!r} is not a member event"
-                raise DispatchObligationCorruptionError(msg)
+                logger.error(
+                    "dispatch_obligation_recovery_corrupt",
+                    source_event_id=obligation.source_event_id,
+                    callback_kind=obligation.callback_kind.value,
+                    room_id=obligation.room_id,
+                )
+                corrupt_room_ids.add(obligation.room_id)
+                continue
             members.add((obligation.room_id, event.state_key))
-        return frozenset(members)
+        return _RoomLifecycleMarkerFence(
+            member_ids=frozenset(members),
+            corrupt_room_ids=frozenset(corrupt_room_ids),
+        )
 
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""

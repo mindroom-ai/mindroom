@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
+from nio.client.sync_recovery import RecoveryPlan, drain_recovery_dispatches, persist_response_plan
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -74,6 +75,28 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
         return await super().send(*args, **kwargs)
+
+    async def invalidate_rejected_sync_position(self) -> None:
+        """Discard a server-rejected Classic cursor and its recovery generations."""
+        async with self._sync_response_lock:
+            if self.store is not None:
+                # Clear the poisoned transport position before callback drain so
+                # cancellation cannot reintroduce an M_UNKNOWN_POS restart loop.
+                self.store.save_sync_token("")
+            await drain_recovery_dispatches(self._recovery)
+            recovery_room_ids = set(self._recovery.gaps)
+            recovery_room_ids.update(room_id for room_id, generation in self._recovery.events if generation > 0)
+            if recovery_room_ids:
+                async with self._recovery_room_state(recovery_room_ids):
+                    persist_response_plan(
+                        self._recovery,
+                        self._recovery_store,
+                        token=None,
+                        plan=RecoveryPlan(clear_rooms=frozenset(recovery_room_ids)),
+                    )
+            self._recovery.outcomes.clear()
+            self.next_batch = None
+            self.loaded_sync_token = ""
 
     def encrypt(
         self,
@@ -223,6 +246,12 @@ def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> ni
         custom_headers=cast("dict[str, str] | None", custom_headers),
         replace_rotated_device_keys=True,
     )
+
+
+async def invalidate_rejected_sync_position(client: nio.AsyncClient) -> None:
+    """Durably discard a rejected Classic cursor for MindRoom-owned clients."""
+    if isinstance(client, _MindRoomAsyncClient):
+        await client.invalidate_rejected_sync_position()
 
 
 def _create_matrix_client(
@@ -447,6 +476,7 @@ async def restore_login(
 __all__ = [
     "PermanentMatrixStartupError",
     "create_authenticated_client",
+    "invalidate_rejected_sync_position",
     "login",
     "login_flows",
     "login_with_token",

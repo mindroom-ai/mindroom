@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import sqlite3
 import stat
 import threading
 from types import SimpleNamespace
@@ -26,7 +28,7 @@ from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpo
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
-from tests.sync_continuity_helpers import load_sync_checkpoint
+from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -872,6 +874,128 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
         event.event_id,
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["invalid-json", "wrong-event-type"])
+async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Corrupt lifecycle work remains visible without aborting or marking its room."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    event = _room_member_event(event_id="$corrupt-lifecycle")
+    obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert obligation is not None
+    event_source_json = (
+        "{"
+        if corruption == "invalid-json"
+        else json.dumps(
+            {
+                "content": {"body": "not membership", "msgtype": "m.text"},
+                "event_id": event.event_id,
+                "origin_server_ts": 1,
+                "sender": event.sender,
+                "type": "m.room.message",
+            },
+        )
+    )
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            (event_source_json, event.event_id),
+        )
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$profile-snapshot", prev_membership="join")],
+            timeline_limited=True,
+        ),
+        record_only=True,
+    )
+
+    assert bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_restored_join_catchup_survives_recovery_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intermediate recovery settlement must not consume restored timeline catch-up."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    bot.client.rooms = {room.room_id: room}
+    bot.client.loaded_sync_token = ""
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    cache_generation = bot.event_cache.cache_generation
+    assert cache_generation is not None
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_restored",
+        cache_generation=cache_generation,
+    )
+    await bot._prepare_matrix_sync_continuity()
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(
+            return_value=SyncCacheWriteResult(complete=True),
+        ),
+    )
+    monkeypatch.setattr(
+        bot,
+        "_apply_own_room_membership_from_sync",
+        AsyncMock(
+            side_effect=[
+                RuntimeError("transient membership failure"),
+                None,
+                None,
+            ],
+        ),
+    )
+
+    bot.client.next_batch = "s_failed"
+    with pytest.raises(RuntimeError, match="transient membership failure"):
+        await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+
+    bot.client.next_batch = "s_settled"
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+
+    assert bot.client.next_batch == "s_restored"
+    assert not bot._first_sync_done
+
+    bot.client.next_batch = "s_replay"
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$catchup-after-recovery", prev_membership=None)],
+        ),
+    )
+
+    assert seen == ["$catchup-after-recovery"]
+    assert bot._first_sync_done
 
 
 @pytest.mark.asyncio

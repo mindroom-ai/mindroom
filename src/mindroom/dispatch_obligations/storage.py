@@ -121,6 +121,23 @@ class DispatchObligation:
 
 
 @dataclass(frozen=True, slots=True)
+class _CorruptDispatchObligationRow:
+    """Raw identity retained for one pending row whose payload cannot be decoded."""
+
+    source_event_id: str
+    callback_kind: str
+    room_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDispatchObligations:
+    """Valid pending work plus explicit identities for retained corrupt rows."""
+
+    obligations: tuple[DispatchObligation, ...]
+    corrupt_rows: tuple[_CorruptDispatchObligationRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _StoredRow:
     room_id: str
     event_source_json: str
@@ -635,8 +652,8 @@ class DispatchObligationStore:
             eligible_states=(_PENDING_STATE, _DEFERRED_STATE),
         )
 
-    def pending(self) -> tuple[DispatchObligation, ...]:
-        """Return valid pending work oldest-first while retaining corrupt rows."""
+    def pending_with_corruption(self) -> _PendingDispatchObligations:
+        """Return valid pending work and expose retained corrupt row identities."""
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
@@ -650,16 +667,31 @@ class DispatchObligationStore:
                 (self.principal_id, self.entity_name),
             ).fetchall()
         obligations: list[DispatchObligation] = []
+        corrupt_rows: list[_CorruptDispatchObligationRow] = []
         for row in rows:
             try:
                 obligations.append(self._pending_obligation_from_row(row))
             except DispatchObligationCorruptionError:
+                corrupt_rows.append(
+                    _CorruptDispatchObligationRow(
+                        source_event_id=row["source_event_id"],
+                        callback_kind=row["callback_kind"],
+                        room_id=row["room_id"],
+                    ),
+                )
                 logger.error(  # noqa: TRY400
                     "dispatch_obligation_pending_row_corrupt",
                     source_event_id=row["source_event_id"],
                     callback_kind=row["callback_kind"],
                 )
-        return tuple(obligations)
+        return _PendingDispatchObligations(
+            obligations=tuple(obligations),
+            corrupt_rows=tuple(corrupt_rows),
+        )
+
+    def pending(self) -> tuple[DispatchObligation, ...]:
+        """Return valid pending work oldest-first while retaining corrupt rows."""
+        return self.pending_with_corruption().obligations
 
     def unsettled_source_event_ids(self) -> frozenset[str]:
         """Return raw source IDs whose callbacks are not terminal."""
