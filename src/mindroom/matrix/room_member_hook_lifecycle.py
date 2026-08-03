@@ -13,6 +13,8 @@ from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncTr
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from mindroom.matrix.room_member_joins import RoomMemberSnapshot
+
 
 class _RoomMemberHookPhase(Enum):
     """One room-member hook admission and baseline phase."""
@@ -29,7 +31,7 @@ class _RoomMemberHookPhase(Enum):
 class RoomMemberResponsePlan:
     """Room-member work that must precede one response's certification."""
 
-    baseline_record_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] | None = None
+    baseline_record_events: tuple[RoomMemberSnapshot, ...] | None = None
     drain_captured_timeline: bool = False
     dispatch_state: bool = False
 
@@ -41,7 +43,7 @@ class RoomMemberHookLifecycle:
     enabled: bool
     _phase: _RoomMemberHookPhase = field(init=False)
     _transport: Literal["classic", "sliding"] = field(init=False, default="classic")
-    _baseline_record_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] | None = field(
+    _baseline_record_events: tuple[RoomMemberSnapshot, ...] | None = field(
         init=False,
         default=None,
         repr=False,
@@ -112,7 +114,7 @@ class RoomMemberHookLifecycle:
 
     def capture_baseline(
         self,
-        events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
+        events: Iterable[RoomMemberSnapshot],
     ) -> None:
         """Retain one full-state snapshot until its response lineage can certify."""
         if not self.baseline_capture_pending:

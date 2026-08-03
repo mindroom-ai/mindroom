@@ -42,11 +42,19 @@ class RoomMemberJoin:
 
 
 @dataclass(frozen=True, slots=True)
+class RoomMemberSnapshot:
+    """One authoritative room-member state event to mark as already seen."""
+
+    room_id: str
+    event: nio.RoomMemberEvent
+
+
+@dataclass(frozen=True, slots=True)
 class _RoomMemberSyncPlan:
     """Classified room-member state work for one sync response."""
 
     dispatch_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] = ()
-    record_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] = ()
+    record_events: tuple[RoomMemberSnapshot, ...] = ()
 
 
 def _room_member_join_tracking_path(storage_root: Path) -> Path:
@@ -150,7 +158,7 @@ def _human_join_user_id(
 
 
 def record_room_member_joins_seen_from_events(
-    events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
+    events: Iterable[RoomMemberSnapshot],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -158,10 +166,10 @@ def record_room_member_joins_seen_from_events(
 ) -> None:
     """Record human room-member events with one durable batch update."""
     room_user_ids: list[tuple[str, str]] = []
-    for room, event in events:
-        user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
+    for snapshot in events:
+        user_id = _human_join_user_id(snapshot.event, config=config, runtime_paths=runtime_paths)
         if user_id is not None:
-            room_user_ids.append((room.room_id, user_id))
+            room_user_ids.append((snapshot.room_id, user_id))
     _mark_room_member_joins_seen(storage_root, room_user_ids)
 
 
@@ -254,15 +262,13 @@ def _room_member_events_from_sync_state(
     response: nio.SyncResponse,
     *,
     rooms: Mapping[str, nio.MatrixRoom],
-) -> Iterator[tuple[nio.MatrixRoom, nio.RoomMemberEvent]]:
+) -> Iterator[tuple[str, nio.MatrixRoom | None, nio.RoomMemberEvent]]:
     """Yield room-member events from sync state with their resolved room."""
     for room_id, join_info in response.rooms.join.items():
         room = rooms.get(room_id)
-        if room is None:
-            continue
         for event in join_info.state:
             if isinstance(event, nio.RoomMemberEvent):
-                yield room, event
+                yield room_id, room, event
 
 
 def room_member_sync_state_plan(
@@ -275,13 +281,15 @@ def room_member_sync_state_plan(
 ) -> _RoomMemberSyncPlan:
     """Classify state events into durable hook dispatches and baseline markers."""
     dispatch_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
-    record_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
+    record_events: list[RoomMemberSnapshot] = []
     limited_room_ids = frozenset(
         room_id for room_id, join_info in response.rooms.join.items() if join_info.timeline.limited
     )
-    for room, event in _room_member_events_from_sync_state(response, rooms=rooms):
-        if record_only or room.room_id in limited_room_ids:
-            record_events.append((room, event))
+    for room_id, room, event in _room_member_events_from_sync_state(response, rooms=rooms):
+        if record_only or room_id in limited_room_ids:
+            record_events.append(RoomMemberSnapshot(room_id, event))
+            continue
+        if room is None:
             continue
         if (
             _room_member_join_from_event(
@@ -295,7 +303,7 @@ def room_member_sync_state_plan(
         ):
             dispatch_events.append((room, event))
         elif event.prev_membership in {None, "join"}:
-            record_events.append((room, event))
+            record_events.append(RoomMemberSnapshot(room_id, event))
     return _RoomMemberSyncPlan(
         dispatch_events=tuple(dispatch_events),
         record_events=tuple(record_events),

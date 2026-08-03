@@ -121,6 +121,7 @@ from .matrix.client_session import PermanentMatrixStartupError, invalidate_rejec
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.room_member_joins import (
     RoomMemberJoin,
+    RoomMemberSnapshot,
     emit_room_member_join_at_least_once,
     record_room_member_joins_seen_from_events,
     room_member_sync_state_plan,
@@ -2298,7 +2299,7 @@ class AgentBot:
 
     async def _record_room_member_joined_events(
         self,
-        events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
+        events: Iterable[RoomMemberSnapshot],
     ) -> None:
         """Persist snapshot markers that are not fenced by exact lifecycle work."""
         candidate_events = tuple(events)
@@ -2306,9 +2307,10 @@ class AgentBot:
             return
         fenced_members, corrupt_room_ids = await self._dispatch_obligation_runner.room_lifecycle_marker_fence()
         record_events = tuple(
-            (room, event)
-            for room, event in candidate_events
-            if room.room_id not in corrupt_room_ids and (room.room_id, event.state_key) not in fenced_members
+            snapshot
+            for snapshot in candidate_events
+            if snapshot.room_id not in corrupt_room_ids
+            and (snapshot.room_id, snapshot.event.state_key) not in fenced_members
         )
         if record_events:
             async with self._room_member_join_lock:

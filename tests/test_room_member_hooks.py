@@ -694,6 +694,83 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
 
 
 @pytest.mark.asyncio
+async def test_same_token_classic_full_state_records_missing_client_room_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-token NIO response must record its full state without a materialized room."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    bot._first_sync_done = False
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._maybe_start_startup_thread_prewarm = MagicMock()
+    bot._maybe_start_deferred_overdue_task_drain = MagicMock()
+    room_id = "!restored:localhost"
+    existing_member = _room_member_event(event_id="$full-state-existing-member")
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.user_id = bot.matrix_id.full_id
+    client.next_batch = "s_restored"
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_restored",
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    room_id: {
+                        "timeline": {"events": [], "limited": False},
+                        "state": {"events": [existing_member.source]},
+                        "ephemeral": {"events": []},
+                        "account_data": {"events": []},
+                    },
+                },
+            },
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult.from_sync_response(response, complete=True)),
+    )
+
+    try:
+        await client.receive_response(response)
+        assert room_id not in client.rooms
+
+        await bot._on_sync_response(response)
+        await bot._on_room_member(
+            nio.MatrixRoom(room_id, bot.matrix_id.full_id),
+            _room_member_event(event_id="$profile-update", prev_membership=None),
+        )
+
+        assert seen == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_restored_token_timeline_profile_update_for_existing_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
