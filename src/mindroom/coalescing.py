@@ -6,7 +6,7 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .cancellation import request_task_cancel
@@ -509,7 +509,7 @@ class CoalescingGate:
             requester_user_id=coalescing_owner_log_label(key.owner),
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
@@ -591,13 +591,13 @@ class CoalescingGate:
             gate,
             enqueue_start=enqueue_start,
             path=path,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
         )
         emit_elapsed_timing(
             "coalescing_gate.enqueue",
             enqueue_start,
             path=path,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
             pending_count=self._gate_work_count(gate),
             flush_outcome=flush_outcome,
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
@@ -609,11 +609,14 @@ class CoalescingGate:
         if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
             return key
         pending_event = ready_result.pending_event
-        if pending_event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
+        if pending_event.event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
             pending_event.event,
-            pending_event.source_kind,
+            pending_event.event.source_kind,
         ):
-            pending_event.dispatch_policy_source_kind = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            pending_event.event = replace(
+                pending_event.event,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            )
         return active_follow_up_coalescing_key(key.room_id, key.thread_id)
 
     async def admit(
@@ -758,7 +761,7 @@ class CoalescingGate:
             if source_or_event_allows_room_scope_batching(queued.source_kind):
                 return True
             if source_or_event_allows_room_scope_batching(
-                queued.pending_event.source_kind,
+                queued.pending_event.event.source_kind,
                 queued.pending_event.event,
             ):
                 return True
@@ -853,7 +856,7 @@ class CoalescingGate:
     ) -> bool:
         try:
             with turn_dispatch_recovery_scope(
-                active=any(event.turn_dispatch_recovery for event in segment_owner.pending_events),
+                active=any(pending_event.event.turn_dispatch_recovery for pending_event in segment_owner.pending_events),
             ):
                 await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:

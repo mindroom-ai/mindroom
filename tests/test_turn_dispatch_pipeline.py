@@ -89,6 +89,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
+    make_pending_event,
     message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
@@ -145,9 +146,9 @@ class TestAgentBot(AgentBotTestBase):
         fallback = _ReadyVoiceFallback(
             event=fallback_event,
             ready=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=fallback_event,
-                    room=room,
+                pending_event=make_pending_event(
+                    fallback_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     requester_user_id=voice_event.sender,
                     dispatch_metadata=(
@@ -1148,7 +1149,13 @@ class TestAgentBot(AgentBotTestBase):
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
-                event,
+                PreparedIngress(
+                    sender=event.sender,
+                    event_id=event.event_id,
+                    body=event.body,
+                    source=event.source,
+                    server_timestamp=event.server_timestamp,
+                ),
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@user:localhost",
@@ -1164,8 +1171,10 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
-        assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
+        assert pending_event.event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @staticmethod
     def _router_relay_event(
@@ -1595,12 +1604,12 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
+        assert pending_event.event.requester_user_id == "@user:localhost"
         assert isinstance(pending_event.event, PreparedIngress)
         assert pending_event.event.event_id == event.event_id
         assert pending_event.event.body == event.body
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert {item.kind for item in pending_event.dispatch_metadata} == {
             "pending_turn_claim",
             "queued_notice_reservation",
@@ -1679,7 +1688,7 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(pending_event.event, PreparedIngress)
         assert pending_event.event.event_id == event.event_id
         assert pending_event.event.body == event.body
-        assert pending_event.source_kind == source_kind
+        assert pending_event.event.source_kind == source_kind
 
     @pytest.mark.asyncio
     async def test_voice_preview_reserves_active_thread_follow_up(
@@ -1757,10 +1766,11 @@ class TestAgentBot(AgentBotTestBase):
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == VOICE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 2
         metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
@@ -1861,9 +1871,10 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
@@ -1972,10 +1983,11 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"

@@ -31,7 +31,6 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
-    PendingEvent,
     RequesterCoalescingOwner,
     build_coalesced_batch,
 )
@@ -80,6 +79,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_matrix_client_mock,
+    make_pending_event,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -908,9 +908,9 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     batch = build_coalesced_batch(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=event,
-                room=room,
+            make_pending_event(
+                event,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
@@ -966,9 +966,9 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
     batch = build_coalesced_batch(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=event,
-                room=room,
+            make_pending_event(
+                event,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
@@ -1012,9 +1012,9 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
     batch = build_coalesced_batch(
         CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=relay,
-                room=room,
+            make_pending_event(
+                relay,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,

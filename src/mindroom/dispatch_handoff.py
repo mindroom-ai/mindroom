@@ -36,15 +36,28 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import SourceEventMetadata
 
 
+# Voice messages are normalized into PreparedIngress before coalescing, so
+# this contract only includes routed image/file/video events.
+type MediaDispatchEvent = MatrixMediaDispatchEvent
+type DispatchEvent = PreparedIngress | MediaDispatchEvent
+
+
 class _PendingEventLike(Protocol):
-    event: DispatchEvent
-    source_kind: str
-    trust_internal_payload_metadata: bool
+    event: PreparedIngress
 
 
 @dataclass(frozen=True)
 class PreparedIngress:
-    """Canonical prepared ingress value: the sole normalized inbound text event for dispatch."""
+    """Canonical prepared ingress value plus its per-source dispatch evidence.
+
+    The core value (sender/event_id/body/source) is the normalized inbound text
+    for dispatch; raw Matrix media events are wrapped at enqueue with their
+    caption as body and the protocol object retained on ``raw_event`` for
+    attachment registration and media planning. The remaining fields carry the
+    per-source evidence resolved at enqueue (effective requester, source kinds,
+    trust, discovery, and recovery metadata) so queue entries need no parallel
+    mutable fields.
+    """
 
     sender: str
     event_id: str
@@ -52,12 +65,16 @@ class PreparedIngress:
     source: dict[str, Any]
     server_timestamp: int | float | None = None
     source_kind_override: str | None = None
-
-
-# Voice messages are normalized into PreparedIngress before coalescing, so
-# this contract only includes routed image/file/video events.
-type MediaDispatchEvent = MatrixMediaDispatchEvent
-type DispatchEvent = PreparedIngress | MediaDispatchEvent
+    requester_user_id: str | None = None
+    source_kind: str | None = None
+    dispatch_policy_source_kind: str | None = None
+    hook_source: str | None = None
+    message_received_depth: int = 0
+    trust_internal_payload_metadata: bool = False
+    discovery_event_id: str | None = None
+    callback_source_kind: str | None = None
+    turn_dispatch_recovery: bool = False
+    raw_event: MediaDispatchEvent | None = None
 
 
 @dataclass
@@ -141,6 +158,23 @@ def dispatch_prompt_for_event(event: DispatchEvent) -> str:
     return event.body
 
 
+def prepare_media_ingress(event: MediaDispatchEvent) -> PreparedIngress:
+    """Wrap one raw Matrix media event into its prepared ingress form.
+
+    The body is the caption exactly as ``dispatch_prompt_for_event`` renders it;
+    the raw protocol event is retained on ``raw_event`` for attachment
+    registration and media planning.
+    """
+    return PreparedIngress(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=dispatch_prompt_for_event(event),
+        source=event.source,
+        server_timestamp=event.server_timestamp,
+        raw_event=event,
+    )
+
+
 def _collect_batch_mentions_and_formatted_bodies(
     pending_events: tuple[_PendingEventLike, ...],
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, bool | None]:
@@ -164,7 +198,7 @@ def _collect_batch_mentions_and_formatted_bodies(
         formatted_body = content.get("formatted_body")
         if isinstance(formatted_body, str) and formatted_body:
             formatted_parts.append(formatted_body)
-        if pending_event.trust_internal_payload_metadata and content.get(SKIP_MENTIONS_KEY) is True:
+        if pending_event.event.trust_internal_payload_metadata and content.get(SKIP_MENTIONS_KEY) is True:
             skip_mentions = True
     if not inspected_content:
         return None, None, None
@@ -265,7 +299,7 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
         return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
     if thread_id == event.event_id:
         return False
-    return isinstance(event, PreparedIngress) or batch.source_kind == VOICE_SOURCE_KIND
+    return (isinstance(event, PreparedIngress) and event.raw_event is None) or batch.source_kind == VOICE_SOURCE_KIND
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -309,6 +343,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> PreparedIngress:
     if (
         len(batch.pending_events) == 1
         and isinstance(batch.primary_event, PreparedIngress)
+        and batch.primary_event.raw_event is None
         and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
     ):
         return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
@@ -318,6 +353,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> PreparedIngress:
         body=batch.prompt,
         source=_merge_batch_source(batch),
         server_timestamp=batch.primary_event.server_timestamp,
+        source_kind=batch.source_kind,
         source_kind_override=_prepared_source_kind_override(batch.source_kind),
     )
 

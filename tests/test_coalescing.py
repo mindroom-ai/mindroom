@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -40,6 +41,7 @@ from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.ingress_lanes import LaneDelivery
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
+from tests.conftest import make_pending_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,18 +105,18 @@ def _image_event(event_id: str, origin_server_ts: int) -> nio.RoomMessageImage:
 
 def _pending(event: nio.RoomMessageText | nio.RoomMessageImage) -> PendingEvent:
     """Wrap one Matrix event as pending user ingress."""
-    return PendingEvent(
-        event=event,
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    return make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind="message",
     )
 
 
 def _image_pending(event_id: str, origin_server_ts: int) -> PendingEvent:
     """Wrap one image event as pending media ingress."""
-    return PendingEvent(
-        event=_image_event(event_id, origin_server_ts),
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    return make_pending_event(
+        _image_event(event_id, origin_server_ts),
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=IMAGE_SOURCE_KIND,
     )
 
@@ -125,9 +127,9 @@ def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
 
 def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEvent:
     """Wrap one normalized voice transcript as pending voice ingress."""
-    return PendingEvent(
-        event=_text_event(event_id, body, origin_server_ts),
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    return make_pending_event(
+        _text_event(event_id, body, origin_server_ts),
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
     )
 
@@ -168,16 +170,16 @@ def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
     batch = build_coalesced_batch(
         key,
         [
-            PendingEvent(
-                event=_text_event("$a1:localhost", "first", 1_774_019_700_000),
-                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            make_pending_event(
+                _text_event("$a1:localhost", "first", 1_774_019_700_000),
+                nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
                 dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             ),
-            PendingEvent(
-                event=_text_event("$a2:localhost", "second", 1_774_019_760_000),
-                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            make_pending_event(
+                _text_event("$a2:localhost", "second", 1_774_019_760_000),
+                nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
                 dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -233,15 +235,15 @@ def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> Non
     batch = build_coalesced_batch(
         CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@alice:localhost")),
         [
-            PendingEvent(
-                event=_text_event("$a1:localhost", "first <tag>", 1_774_019_700_000),
-                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            make_pending_event(
+                _text_event("$a1:localhost", "first <tag>", 1_774_019_700_000),
+                nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
             ),
-            PendingEvent(
-                event=_text_event("$a2:localhost", "second ]]> message", 1_774_019_760_000),
-                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            make_pending_event(
+                _text_event("$a2:localhost", "second ]]> message", 1_774_019_760_000),
+                nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
             ),
@@ -319,7 +321,7 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.source_kind,
+        source_kind=pending_event.event.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
 
@@ -499,9 +501,9 @@ def test_single_prepared_event_handoff_synthesizes_canonical_thread_relation() -
         server_timestamp=1_000_000,
         source_kind_override=MESSAGE_SOURCE_KIND,
     )
-    pending = PendingEvent(
-        event=prepared,
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    pending = make_pending_event(
+        prepared,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=MESSAGE_SOURCE_KIND,
     )
 
@@ -644,9 +646,9 @@ async def test_voice_transcript_dispatches_without_debounce_wait() -> None:
     await _admit_ready(
         gate,
         key,
-        PendingEvent(
-            event=_text_event("$voice:localhost", "voice transcript", 1_000_000),
-            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        make_pending_event(
+            _text_event("$voice:localhost", "voice transcript", 1_000_000),
+            nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=VOICE_SOURCE_KIND,
         ),
     )
@@ -789,9 +791,9 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
         await _admit_ready(
             gate,
             key,
-            PendingEvent(
-                event=_text_event(event_id, body, 1_000_000),
-                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            make_pending_event(
+                _text_event(event_id, body, 1_000_000),
+                nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id=requester_user_id,
                 dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -846,9 +848,9 @@ async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> N
     await _admit_ready(
         gate,
         key,
-        PendingEvent(
-            event=_image_event("$img:localhost", 1_000_000),
-            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        make_pending_event(
+            _image_event("$img:localhost", 1_000_000),
+            nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=IMAGE_SOURCE_KIND,
             requester_user_id="@user:localhost",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -889,9 +891,9 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
     await _admit_ready(
         gate,
         active_key,
-        PendingEvent(
-            event=_text_event("$active:localhost", "queued while active", 1_000_000),
-            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        make_pending_event(
+            _text_event("$active:localhost", "queued while active", 1_000_000),
+            nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=MESSAGE_SOURCE_KIND,
             requester_user_id="@alice:localhost",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -1224,9 +1226,9 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
     await _admit_ready(
         gate,
         key,
-        PendingEvent(
-            event=_text_event("$text:localhost", "typed", 1_000_000),
-            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        make_pending_event(
+            _text_event("$text:localhost", "typed", 1_000_000),
+            nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=MESSAGE_SOURCE_KIND,
             requester_user_id="@user:localhost",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -1494,7 +1496,7 @@ async def test_recovery_context_survives_existing_lane_and_gate_workers() -> Non
 
     with turn_dispatch_recovery_scope(active=True):
         pending = _pending(_text_event("$recovered:localhost", "retry", 1_000_000))
-        pending.turn_dispatch_recovery = turn_dispatch_recovery_active()
+        pending.event = replace(pending.event, turn_dispatch_recovery=turn_dispatch_recovery_active())
         gate.submit_lane_slot(
             slot,
             key=key,

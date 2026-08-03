@@ -11,18 +11,19 @@ from .attachment_ids import merge_attachment_ids
 from .attachments import parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY, VOICE_TRANSCRIPT_KEY
 from .dispatch_handoff import (
-    DispatchEvent,
     MediaDispatchEvent,
     PendingDispatchMetadata,
+    PreparedIngress,
     dispatch_prompt_for_event,
     event_content_dict,
-    is_media_dispatch_event,
 )
 from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    source_kind_from_content,
 )
 from .handled_turns import SourceEventMetadata
 from .prompt_message_tags import render_msg_tag
@@ -82,19 +83,15 @@ def coalescing_owner_log_label(owner: CoalescingOwner) -> str:
 
 @dataclass
 class PendingEvent:
-    """One queued inbound event waiting to be coalesced."""
+    """One queued prepared ingress plus its queue-local lifecycle state.
 
-    event: DispatchEvent
+    All per-source evidence lives on the frozen ``PreparedIngress``; this
+    wrapper only carries state owned by the queue itself (enqueue timing and
+    opaque dispatch metadata).
+    """
+
+    event: PreparedIngress
     room: nio.MatrixRoom
-    source_kind: str
-    dispatch_policy_source_kind: str | None = None
-    hook_source: str | None = None
-    message_received_depth: int = 0
-    trust_internal_payload_metadata: bool = False
-    requester_user_id: str | None = None
-    discovery_event_id: str | None = None
-    callback_source_kind: str | None = None
-    turn_dispatch_recovery: bool = False
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -105,7 +102,7 @@ class CoalescedBatch:
 
     coalescing_key: CoalescingKey
     room: nio.MatrixRoom
-    primary_event: DispatchEvent
+    primary_event: PreparedIngress
     requester_user_id: str
     pending_events: tuple[PendingEvent, ...]
     prompt: str
@@ -126,7 +123,7 @@ class CoalescedBatch:
 
 
 def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
-    return pending_event.trust_internal_payload_metadata
+    return pending_event.event.trust_internal_payload_metadata
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -167,7 +164,7 @@ def _tagged_pending_message(
     timestamp_formatter: TimestampFormatter | None,
 ) -> str:
     return render_msg_tag(
-        sender=pending_event.requester_user_id or pending_event.event.sender,
+        sender=pending_event.event.requester_user_id or pending_event.event.sender,
         body=dispatch_prompt_for_event(pending_event.event),
         event_id=pending_event.event.event_id,
         ts=_format_event_timestamp(pending_event.event.server_timestamp, timestamp_formatter),
@@ -297,16 +294,33 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 }
 
 
+def _pending_event_source_kind(pending_event: PendingEvent) -> str:
+    """Resolve one pending event's ingress source kind from its stamped evidence.
+
+    Gate-admitted events always carry ``source_kind``; the fallbacks mirror the
+    content-based resolution used for unstamped prepared events.
+    """
+    event = pending_event.event
+    if event.source_kind is not None:
+        return event.source_kind
+    if event.source_kind_override is not None:
+        return event.source_kind_override
+    content = event_content_dict(event)
+    if content is not None and (source_kind := source_kind_from_content(content)) is not None:
+        return source_kind
+    return MESSAGE_SOURCE_KIND
+
+
 def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
-    resolved_source_kinds = [pending_event.source_kind for pending_event in ordered_pending_events]
+    resolved_source_kinds = [_pending_event_source_kind(pending_event) for pending_event in ordered_pending_events]
     return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
 
 
 def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent]) -> str | None:
     resolved_policy_kinds = {
-        pending_event.dispatch_policy_source_kind
+        pending_event.event.dispatch_policy_source_kind
         for pending_event in ordered_pending_events
-        if pending_event.dispatch_policy_source_kind is not None
+        if pending_event.event.dispatch_policy_source_kind is not None
     }
     if not resolved_policy_kinds:
         return None
@@ -322,8 +336,8 @@ def _batch_requester_user_id(key: CoalescingKey, primary_pending_event: PendingE
     A follow-up owner carries no requester, so a requester-less primary event
     falls back to the event sender, matching the per-message sender fallback.
     """
-    if primary_pending_event.requester_user_id:
-        return primary_pending_event.requester_user_id
+    if primary_pending_event.event.requester_user_id:
+        return primary_pending_event.event.requester_user_id
     if isinstance(key.owner, RequesterCoalescingOwner):
         return key.owner.requester_user_id
     return primary_pending_event.event.sender
@@ -331,7 +345,9 @@ def _batch_requester_user_id(key: CoalescingKey, primary_pending_event: PendingE
 
 def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None:
     hook_sources = {
-        pending_event.hook_source for pending_event in ordered_pending_events if pending_event.hook_source is not None
+        pending_event.event.hook_source
+        for pending_event in ordered_pending_events
+        if pending_event.event.hook_source is not None
     }
     if not hook_sources:
         return None
@@ -342,7 +358,7 @@ def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None
 
 
 def _batch_message_received_depth(ordered_pending_events: list[PendingEvent]) -> int:
-    return max((pending_event.message_received_depth for pending_event in ordered_pending_events), default=0)
+    return max((pending_event.event.message_received_depth for pending_event in ordered_pending_events), default=0)
 
 
 def _batch_dispatch_metadata(
@@ -374,9 +390,9 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
 def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> dict[str, SourceEventMetadata]:
     return {
         pending_event.event.event_id: SourceEventMetadata(
-            sender=pending_event.requester_user_id or pending_event.event.sender,
+            sender=pending_event.event.requester_user_id or pending_event.event.sender,
             timestamp_ms=normalize_timestamp_ms(pending_event.event.server_timestamp),
-            discovery_event_id=pending_event.discovery_event_id,
+            discovery_event_id=pending_event.event.discovery_event_id,
         )
         for pending_event in ordered_pending_events
     }
@@ -416,9 +432,9 @@ def build_coalesced_batch(
         source_event_metadata=_batch_source_event_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=[
-            pending_event.event
+            pending_event.event.raw_event
             for pending_event in ordered_pending_events
-            if is_media_dispatch_event(pending_event.event)
+            if pending_event.event.raw_event is not None
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,

@@ -13,7 +13,7 @@ import pytest
 from mindroom import inbound_turn_normalizer, interactive, voice_handler
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -30,6 +30,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
+    make_pending_event,
     prepared_dispatch_result,
     replace_reaction_dispatcher_deps,
     replace_turn_controller_deps,
@@ -84,7 +85,7 @@ def _ready(
     room_id: str = "!room:localhost",
 ) -> ReadyPendingEvent:
     return ReadyPendingEvent(
-        pending_event=PendingEvent(event=event, room=_room(room_id), source_kind=source_kind),
+        pending_event=make_pending_event(event, _room(room_id), source_kind=source_kind),
     )
 
 
@@ -1359,9 +1360,9 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
         nonlocal close_count
         close_count += 1
 
-    pending = PendingEvent(
-        event=_plain_event("$late", "stubborn voice", 1_000_000),
-        room=_room(),
+    pending = make_pending_event(
+        _plain_event("$late", "stubborn voice", 1_000_000),
+        _room(),
         source_kind=VOICE_SOURCE_KIND,
         dispatch_metadata=(PendingDispatchMetadata(kind="test", payload=object(), close=close_metadata),),
     )

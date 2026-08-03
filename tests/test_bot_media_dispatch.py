@@ -14,7 +14,7 @@ from agno.media import Image
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
@@ -61,6 +61,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
+    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -496,8 +497,8 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
             return_value=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=PreparedIngress(
+                pending_event=make_pending_event(
+                    PreparedIngress(
                         sender="@user:localhost",
                         event_id="$voice",
                         body="voice second",
@@ -510,7 +511,7 @@ class TestAgentBot(AgentBotTestBase):
                         },
                         source_kind_override=VOICE_SOURCE_KIND,
                     ),
-                    room=room,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                 ),
             ),

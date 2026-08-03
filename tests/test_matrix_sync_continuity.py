@@ -60,6 +60,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     install_shutdown_drain_mocks,
     make_matrix_client_mock,
+    make_pending_event,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -874,9 +875,9 @@ def _sync_response(
 
 
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
-    return PendingEvent(
-        event=event,
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    return make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind="message",
     )
 
@@ -3673,7 +3674,7 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
     await bot._coalescing_gate.admit(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner(event.sender)),
         ready_result=ReadyPendingEvent(
-            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+            pending_event=make_pending_event(event, room, source_kind="message"),
         ),
         source_event_id=event.event_id,
         source_kind="message",
@@ -3705,9 +3706,9 @@ def test_failed_coalesced_dispatch_retries_exact_source_kind(
 
     bot._retry_failed_coalesced_dispatch(
         (
-            PendingEvent(
-                event=event,
-                room=nio.MatrixRoom("!room:localhost", bot.agent_user.user_id),
+            make_pending_event(
+                event,
+                nio.MatrixRoom("!room:localhost", bot.agent_user.user_id),
                 source_kind=source_kind,
             ),
         ),
@@ -3750,7 +3751,7 @@ async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
         if failure_mode == "readiness_none":
             return None
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+            pending_event=make_pending_event(event, room, source_kind="message"),
         )
 
     if failure_mode == "lane_delivery_failure":
@@ -3817,7 +3818,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     async def ready_event() -> object:
         await release_ready.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+            pending_event=make_pending_event(event, room, source_kind="message"),
         )
 
     gate = CoalescingGate(
@@ -3883,7 +3884,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     async def waiting_ready() -> object:
         await waiting_release.wait()
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=text_event("$waiting", "waiting"), room=room, source_kind="message"),
+            pending_event=make_pending_event(text_event("$waiting", "waiting"), room, source_kind="message"),
         )
 
     waiting_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.owner.requester_user_id)
@@ -3903,7 +3904,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
 
     async def next_ready() -> object:
         return ReadyPendingEvent(
-            pending_event=PendingEvent(event=text_event("$next", "next"), room=room, source_kind="message"),
+            pending_event=make_pending_event(text_event("$next", "next"), room, source_kind="message"),
         )
 
     next_slot = gate.enter_lane(room_id=key.room_id, sender_id=key.owner.requester_user_id)

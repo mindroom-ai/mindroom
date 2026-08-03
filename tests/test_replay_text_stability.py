@@ -43,6 +43,7 @@ from mindroom.handled_turns import (
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from tests.conftest import make_pending_event
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,9 +74,9 @@ def _text_event(event_id: str, body: str, *, server_timestamp: int) -> nio.RoomM
 
 
 def _pending_text(event_id: str, body: str, *, server_timestamp: int) -> PendingEvent:
-    return PendingEvent(
-        event=_text_event(event_id, body, server_timestamp=server_timestamp),
-        room=MagicMock(spec=nio.MatrixRoom),
+    return make_pending_event(
+        _text_event(event_id, body, server_timestamp=server_timestamp),
+        MagicMock(spec=nio.MatrixRoom),
         source_kind=MESSAGE_SOURCE_KIND,
         requester_user_id=_REQUESTER,
     )

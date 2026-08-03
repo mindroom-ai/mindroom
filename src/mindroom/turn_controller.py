@@ -49,6 +49,7 @@ from mindroom.dispatch_handoff import (
     PreparedIngress,
     build_dispatch_handoff,
     payload_metadata_from_source,
+    prepare_media_ingress,
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
@@ -992,14 +993,16 @@ class TurnController:
     ) -> None:
         """Dispatch one command as a control input without entering the coalescing gate."""
         pending_event = PendingEvent(
-            event=dispatch_event,
+            event=replace(
+                dispatch_event,
+                requester_user_id=requester_user_id,
+                source_kind=envelope.source_kind,
+                dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+                hook_source=envelope.hook_source,
+                message_received_depth=envelope.message_received_depth,
+                trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
+            ),
             room=room,
-            requester_user_id=requester_user_id,
-            source_kind=envelope.source_kind,
-            dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
-            hook_source=envelope.hook_source,
-            message_received_depth=envelope.message_received_depth,
-            trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
         )
         batch = build_coalesced_batch(
             derive_coalescing_key(room.room_id, coalescing_thread_id, RequesterCoalescingOwner(requester_user_id)),
@@ -1067,18 +1070,21 @@ class TurnController:
                     close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
                 ),
             )
+        prepared_event = event if isinstance(event, PreparedIngress) else prepare_media_ingress(event)
         pending_event = PendingEvent(
-            event=event,
+            event=replace(
+                prepared_event,
+                requester_user_id=requester_user_id,
+                source_kind=source_kind,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                hook_source=hook_source,
+                message_received_depth=message_received_depth,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+                discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+                callback_source_kind=callback_source_kind,
+                turn_dispatch_recovery=turn_dispatch_recovery_active(),
+            ),
             room=room,
-            requester_user_id=requester_user_id,
-            source_kind=source_kind,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            hook_source=hook_source,
-            message_received_depth=message_received_depth,
-            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
-            callback_source_kind=callback_source_kind,
-            turn_dispatch_recovery=turn_dispatch_recovery_active(),
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -2531,15 +2537,17 @@ class TurnController:
             claim_transferred = True
             return ReadyPendingEvent(
                 pending_event=PendingEvent(
-                    event=normalized_event,
+                    event=replace(
+                        normalized_event,
+                        source_kind=envelope.source_kind,
+                        requester_user_id=prechecked_event.requester_user_id,
+                        dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+                        hook_source=envelope.hook_source,
+                        message_received_depth=envelope.message_received_depth,
+                        trust_internal_payload_metadata=True,
+                        turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                    ),
                     room=room,
-                    source_kind=envelope.source_kind,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
-                    hook_source=envelope.hook_source,
-                    message_received_depth=envelope.message_received_depth,
-                    trust_internal_payload_metadata=True,
-                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=(
                         *_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
                         claim_metadata,
@@ -2681,15 +2689,17 @@ class TurnController:
             event=fallback_event,
             ready=ReadyPendingEvent(
                 pending_event=PendingEvent(
-                    event=fallback_event,
+                    event=replace(
+                        fallback_event,
+                        source_kind=VOICE_SOURCE_KIND,
+                        requester_user_id=requester_user_id,
+                        dispatch_policy_source_kind=dispatch_policy_source_kind,
+                        hook_source=hook_source,
+                        message_received_depth=message_received_depth,
+                        trust_internal_payload_metadata=True,
+                        turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                    ),
                     room=room,
-                    source_kind=VOICE_SOURCE_KIND,
-                    requester_user_id=requester_user_id,
-                    dispatch_policy_source_kind=dispatch_policy_source_kind,
-                    hook_source=hook_source,
-                    message_received_depth=message_received_depth,
-                    trust_internal_payload_metadata=True,
-                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
                 ),
             ),

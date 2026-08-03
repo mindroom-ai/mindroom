@@ -35,7 +35,6 @@ from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing_batch import (
     CoalescingKey,
-    PendingEvent,
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
@@ -90,6 +89,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_pending_event,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
@@ -509,41 +509,41 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
     pending_events = [
-        PendingEvent(
-            event=PreparedIngress(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a1",
                 body="A first",
                 source={"content": {"body": "A first"}},
                 server_timestamp=1,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedIngress(
+        make_pending_event(
+            PreparedIngress(
                 sender="@bob:localhost",
                 event_id="$b1",
                 body="B <context> & more",
                 source={"content": {"body": "B <context> & more"}},
                 server_timestamp=2,
             ),
-            room=room,
+            room,
             requester_user_id="@bob:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedIngress(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a2",
                 body="A follow-up",
                 source={"content": {"body": "A follow-up"}},
                 server_timestamp=3,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -2486,9 +2486,9 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         batch = build_coalesced_batch(
             CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=event,
-                    room=room,
+                make_pending_event(
+                    event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_queued_notice_metadata(reservation),
@@ -2556,16 +2556,16 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         batch = build_coalesced_batch(
             CoalescingKey(room.room_id, "$post_stt_thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=typed_event,
-                    room=room,
+                make_pending_event(
+                    typed_event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(pre_reservation, pre_target),
                 ),
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
@@ -2627,9 +2627,9 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
         batch = build_coalesced_batch(
             CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(voice_reservation, target),
@@ -2821,16 +2821,16 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
             build_coalesced_batch(
                 CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
                 [
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$reserved"),
-                        room=room,
+                    make_pending_event(
+                        _prepared_text_event(event_id="$reserved"),
+                        room,
                         source_kind=MESSAGE_SOURCE_KIND,
                         dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                         dispatch_metadata=_queued_notice_metadata(reservation),
                     ),
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$normal"),
-                        room=room,
+                    make_pending_event(
+                        _prepared_text_event(event_id="$normal"),
+                        room,
                         source_kind=MESSAGE_SOURCE_KIND,
                     ),
                 ],

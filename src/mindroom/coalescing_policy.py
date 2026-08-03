@@ -5,8 +5,6 @@ from __future__ import annotations
 import enum
 from typing import TYPE_CHECKING
 
-import nio
-
 from .dispatch_handoff import DispatchEvent, PreparedIngress, is_media_dispatch_event
 from .dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -57,7 +55,7 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     clients upload attachments first and send the caption text last, so a batch
     ending in text is complete and a batch ending in media may still grow.
     """
-    return isinstance(pending_event.event, nio.RoomMessageText | PreparedIngress)
+    return pending_event.event.raw_event is None
 
 
 def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
@@ -77,6 +75,6 @@ def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
     if _pending_event_requires_solo_batch(pending_event):
         return QueueKind.BYPASS
-    if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
+    if is_coalescing_exempt_source_kind(pending_event.event, pending_event.event.source_kind):
         return QueueKind.BYPASS
     return QueueKind.NORMAL
