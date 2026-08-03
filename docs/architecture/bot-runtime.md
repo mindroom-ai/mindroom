@@ -106,6 +106,76 @@ The matching ordinary nio event callbacks only load and execute already-persiste
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
 
+## Turn Lifecycle Vocabulary
+
+### Ordering identities
+
+Receipt ordering, batching, and response serialization use three different identities because they protect different invariants.
+
+- Physical sender: the Matrix user ID that physically sent the event.
+- Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
+- Receipt lane: the per-(room, physical sender) FIFO in `ingress_lanes.py` that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
+- Batching owner: the requester identity inside `CoalescingKey`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to a reserved active-follow-up owner so follow-ups batch behind the active response.
+- Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it.
+
+### Durable turn and callback states
+
+An ordinary callback sits in exactly one of these states.
+
+- Obligation pending: the durable acceptance row exists and the callback body has not completed.
+- Executing in-process: the non-durable execution claim marks one process running the persisted callback.
+- Downstream-owned (deferred): the callback body handed the source to lane, coalescing, or dispatch work, and the obligation row is marked deferred.
+- Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
+- Terminal turn: `TurnStore._record_terminal_turn` merged the final record (`completed=True`); `TurnSettlementRetry` then settles the obligation into a permanent tombstone.
+
+Two claim types cross these states.
+
+- Pending turn claim: the in-memory exclusive claim on one physical source event ID (`TurnStore.try_claim_turn`); it is acquired before normalization, released on every non-admission or failure path, and transferred into dispatch metadata across the coalescing gate.
+- Semantic consumer: `DispatchSemanticConsumer`, the durable single-consumer claim used only for multi-purpose callbacks (approval replies and reactions); it is not the ordinary message-turn ownership token.
+- Obligation tombstone: the settled permanent row that blocks re-execution when Matrix redelivers an old event.
+
+### Delivery text evidence
+
+The delivery contract keeps three text values separate.
+
+- Canonical delivery text: the unrendered response selected by the response driver before response hooks and Matrix formatting, currently the blocking `response_text` or the streaming `canonical_final_body_candidate`.
+- Rendered Matrix text: the post-hook formatted body actually supplied to a successful send or edit; it is the only source for a known `final_visible_body`.
+- Replayable assistant text: the execution-owned `CompletedAttempt.replayable_text` or streaming recorder text; it is never reconstructed from post-hook or rendered Matrix text.
+
+### Ordinary-turn durable sequence
+
+The ordinary message and media path follows this sequence.
+
+```text
+dispatch obligation pending
+  -> in-process callback execution claim
+  -> pending physical-source turn claim
+  -> normalization and ingress admission under that claim
+  -> callback obligation deferred while downstream owns work
+  -> durable pending TurnStore record when response ownership begins
+  -> durable terminal TurnStore record notifies TurnSettlementRetry
+  -> TurnSettlementRetry queues source IDs and calls obligation-storage settlement
+  -> obligation storage verifies terminal truth and writes the tombstone
+```
+
+The pending claim must be acquired before normalization and released on every non-admission or failure path.
+The exact crash guarantee is durable callback acceptance with retryable callback execution, followed by durable turn ownership and terminal deduplication once the turn record exists.
+
+### Multi-purpose callback sequence
+
+Approval replies and reactions can have several semantic consumers, so they follow a different sequence.
+
+```text
+dispatch obligation pending
+  -> in-process callback execution claim
+  -> DispatchSemanticConsumer durable claim selects exactly one consumer
+  -> claimed consumer runs its side effects (own replay semantics)
+  -> obligation settled to a permanent tombstone by the claimed consumer
+```
+
+For those callback families only, `DispatchSemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+
 ## Completed Simplifications
 
 `TurnController` is now the only normal-turn owner.
