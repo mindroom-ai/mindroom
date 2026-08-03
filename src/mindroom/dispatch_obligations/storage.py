@@ -147,6 +147,7 @@ class DispatchObligationStore:
             self.entity_name,
         )
         self._lock = threading.Lock()
+        self._reported_corrupt_rows: set[tuple[str, str, str]] = set()
         with self._lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("BEGIN IMMEDIATE")
@@ -660,19 +661,27 @@ class DispatchObligationStore:
             try:
                 obligations.append(self._pending_obligation_from_row(row))
             except DispatchObligationCorruptionError:
-                corrupt_rows.append(
-                    (
-                        row["source_event_id"],
-                        row["callback_kind"],
-                        row["room_id"],
-                    ),
+                identity = (
+                    row["source_event_id"],
+                    row["callback_kind"],
+                    row["room_id"],
                 )
-                logger.error(  # noqa: TRY400
-                    "dispatch_obligation_pending_row_corrupt",
-                    source_event_id=row["source_event_id"],
-                    callback_kind=row["callback_kind"],
-                )
+                corrupt_rows.append(identity)
+                self._log_corrupt_row_once(identity)
         return tuple(obligations), tuple(corrupt_rows)
+
+    def _log_corrupt_row_once(self, identity: tuple[str, str, str]) -> None:
+        """Log one retained corrupt row once per store lifetime."""
+        with self._lock:
+            if identity in self._reported_corrupt_rows:
+                return
+            self._reported_corrupt_rows.add(identity)
+        source_event_id, callback_kind, _room_id = identity
+        logger.error(
+            "dispatch_obligation_pending_row_corrupt",
+            source_event_id=source_event_id,
+            callback_kind=callback_kind,
+        )
 
     def pending(self) -> tuple[DispatchObligation, ...]:
         """Return valid pending work oldest-first while retaining corrupt rows."""

@@ -10,7 +10,7 @@ import stat
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -490,12 +490,9 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("record_only", [False, True])
 async def test_sync_state_baseline_markers_batch_one_worker_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    record_only: bool,
 ) -> None:
     """Full-state baseline recording must write once without blocking the event loop."""
 
@@ -523,7 +520,6 @@ async def test_sync_state_baseline_markers_batch_one_worker_write(
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(room.room_id, events),
-        record_only=record_only,
     )
 
     assert len(save_threads) == 1
@@ -547,14 +543,18 @@ async def test_sync_state_marker_update_waits_for_live_marker_lock(tmp_path: Pat
     room = _room()
     bot.client.rooms = {room.room_id: room}
     await bot._room_member_join_lock.acquire()
-    marker_task = asyncio.create_task(
-        bot._emit_room_member_joined_sync_state_hooks(
-            _sync_response_with_state(
-                room.room_id,
-                [_room_member_event(event_id="$baseline", prev_membership=None)],
-            ),
-            record_only=True,
+    plan = room_member_joins.room_member_sync_state_plan(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$baseline", prev_membership=None)],
         ),
+        rooms=bot.client.rooms,
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+        record_only=True,
+    )
+    marker_task = asyncio.create_task(
+        bot._record_room_member_joined_events(plan.record_events),
     )
     try:
         await asyncio.sleep(0.05)
@@ -1078,18 +1078,29 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
                 (event_source_json, event.event_id),
             )
 
-    await bot._emit_room_member_joined_sync_state_hooks(
+    plan = room_member_joins.room_member_sync_state_plan(
         _sync_response_with_state(
             room.room_id,
             [_room_member_event(event_id="$profile-snapshot", prev_membership="join")],
             timeline_limited=True,
         ),
+        rooms=bot.client.rooms,
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
         record_only=True,
     )
-    await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
+    with (
+        patch("mindroom.dispatch_obligations.runner.logger") as runner_logger,
+        patch("mindroom.dispatch_obligations.storage.logger") as storage_logger,
+    ):
+        await bot._record_room_member_joined_events(plan.record_events)
+        await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
+        await bot._record_room_member_joined_events(plan.record_events)
+        await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
 
     assert event.event_id in bot._dispatch_obligation_store.unsettled_source_event_ids()
     assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
+    assert runner_logger.error.call_count + storage_logger.error.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1795,6 +1806,18 @@ async def test_sliding_response_drains_only_live_room_member_obligations(tmp_pat
     assert not bot._room_member_hook_lifecycle.admission_enabled(
         nio.TimelineEventProvenance.HISTORY,
     )
+
+
+@pytest.mark.asyncio
+async def test_sliding_response_skips_lifecycle_drain_when_hooks_are_disabled(tmp_path: Path) -> None:
+    """Non-router Sliding responses must not scan for lifecycle work they cannot own."""
+    bot = _agent_bot(tmp_path)
+    drain = AsyncMock()
+    bot._dispatch_obligation_runner.drain_pending_room_lifecycle = drain
+
+    await bot._handle_sliding_sync_response(nio.SlidingSyncResponse("pos"))
+
+    drain.assert_not_awaited()
 
 
 @pytest.mark.asyncio

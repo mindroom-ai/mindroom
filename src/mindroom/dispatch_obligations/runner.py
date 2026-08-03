@@ -57,7 +57,7 @@ _RETRY_MAX_DELAY_SECONDS = 30.0
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
 
 _SourceAdmission = Callable[
-    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None, bool],
+    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
     Awaitable[DispatchSourceAdmission],
 ]
 _EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
@@ -74,7 +74,6 @@ async def _admit_all_sources(
     _source_event_id: str,
     _callback_kind: DispatchCallbackKind,
     _provenance: nio.TimelineEventProvenance | None,
-    _allow_historical_recovery: bool,
 ) -> DispatchSourceAdmission:
     return DispatchSourceAdmission.ACCEPTED
 
@@ -101,19 +100,6 @@ def _log_corrupt_obligation(obligation: DispatchObligation) -> None:
         callback_kind=obligation.callback_kind.value,
         room_id=obligation.room_id,
     )
-
-
-def _room_lifecycle_event(obligation: DispatchObligation) -> nio.RoomMemberEvent | None:
-    """Parse one lifecycle event, logging malformed retained work once."""
-    try:
-        event = parse_recovery_event(obligation)
-    except DispatchObligationCorruptionError:
-        _log_corrupt_obligation(obligation)
-        return None
-    if not isinstance(event, nio.RoomMemberEvent):
-        _log_corrupt_obligation(obligation)
-        return None
-    return event
 
 
 async def _ignore_historical_event_cache(
@@ -151,9 +137,10 @@ class DispatchObligationRunner:
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
     _active: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
-    _active_condition: asyncio.Condition = field(default_factory=asyncio.Condition, init=False, repr=False)
+    _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _retry_keys: dict[DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
     _retry_corrupt: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
+    _reported_corrupt: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
@@ -275,7 +262,7 @@ class DispatchObligationRunner:
         for obligation in obligations:
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
                 continue
-            event = _room_lifecycle_event(obligation)
+            event = self._room_lifecycle_event(obligation)
             if event is None:
                 corrupt_room_ids.add(obligation.room_id)
                 continue
@@ -287,14 +274,13 @@ class DispatchObligationRunner:
         for obligation in await asyncio.to_thread(self.store.pending):
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
                 continue
-            event = _room_lifecycle_event(obligation)
+            event = self._room_lifecycle_event(obligation)
             if event is None:
                 continue
             await self._run_persisted(
                 obligation,
                 room=self.room_for_id(obligation.room_id),
                 event=event,
-                wait_for_active=True,
             )
 
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
@@ -345,10 +331,6 @@ class DispatchObligationRunner:
                 event,
                 callback_kind,
                 provenance,
-                allow_historical_recovery=(
-                    callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
-                    and provenance is nio.TimelineEventProvenance.HISTORY
-                ),
             )
         except asyncio.CancelledError:
             raise
@@ -410,8 +392,6 @@ class DispatchObligationRunner:
         event: DispatchEvent,
         callback_kind: DispatchCallbackKind,
         provenance: nio.TimelineEventProvenance | None = None,
-        *,
-        allow_historical_recovery: bool = False,
     ) -> DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
@@ -421,7 +401,6 @@ class DispatchObligationRunner:
                 obligation.source_event_id,
                 callback_kind,
                 provenance,
-                allow_historical_recovery,
             )
             if admission is not DispatchSourceAdmission.ACCEPTED:
                 if self.on_source_rejected is not None:
@@ -533,7 +512,6 @@ class DispatchObligationRunner:
         *,
         room: nio.MatrixRoom,
         event: DispatchEvent,
-        wait_for_active: bool = False,
     ) -> None:
         """Execute work whose exact durable obligation already exists."""
         if room.room_id != obligation.room_id or dispatch_event_source(event) != obligation.event_source:
@@ -545,15 +523,32 @@ class DispatchObligationRunner:
                     obligation,
                     room=room,
                     event=event,
-                    wait_for_active=wait_for_active,
                 )
             return
         await self._run_obligation(
             obligation,
             room=room,
             event=event,
-            wait_for_active=wait_for_active,
         )
+
+    def _room_lifecycle_event(self, obligation: DispatchObligation) -> nio.RoomMemberEvent | None:
+        """Parse one lifecycle event, logging malformed retained work once."""
+        try:
+            event = parse_recovery_event(obligation)
+        except DispatchObligationCorruptionError:
+            self._log_corrupt_obligation_once(obligation)
+            return None
+        if not isinstance(event, nio.RoomMemberEvent):
+            self._log_corrupt_obligation_once(obligation)
+            return None
+        return event
+
+    def _log_corrupt_obligation_once(self, obligation: DispatchObligation) -> None:
+        """Log one parseable retained row once per runner lifetime."""
+        if obligation.key in self._reported_corrupt:
+            return
+        self._reported_corrupt.add(obligation.key)
+        _log_corrupt_obligation(obligation)
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
@@ -575,7 +570,7 @@ class DispatchObligationRunner:
             except asyncio.CancelledError:
                 raise
             except DispatchObligationCorruptionError:
-                _log_corrupt_obligation(obligation)
+                self._log_corrupt_obligation_once(obligation)
             except Exception:
                 logger.exception(
                     "dispatch_obligation_recovery_failed",
@@ -678,12 +673,9 @@ class DispatchObligationRunner:
         *,
         room: nio.MatrixRoom,
         event: DispatchEvent,
-        wait_for_active: bool = False,
     ) -> bool:
         """Run one obligation, returning whether this caller acquired its live claim."""
-        claimed = (
-            await self._claim_when_available(obligation.key) if wait_for_active else await self._claim(obligation.key)
-        )
+        claimed = await self._claim(obligation.key)
         if not claimed:
             return False
         try:
@@ -754,23 +746,15 @@ class DispatchObligationRunner:
         await run_blocking_until_complete(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: DispatchObligationKey) -> bool:
-        async with self._active_condition:
+        async with self._active_lock:
             if key in self._active:
                 return False
             self._active.add(key)
             return True
 
-    async def _claim_when_available(self, key: DispatchObligationKey) -> bool:
-        """Wait until this exact callback has no competing in-process owner."""
-        async with self._active_condition:
-            await self._active_condition.wait_for(lambda: key not in self._active)
-            self._active.add(key)
-            return True
-
     async def _release(self, key: DispatchObligationKey) -> None:
-        async with self._active_condition:
+        async with self._active_lock:
             self._active.discard(key)
-            self._active_condition.notify_all()
 
 
 @dataclass(frozen=True, slots=True)

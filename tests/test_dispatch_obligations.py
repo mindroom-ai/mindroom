@@ -666,6 +666,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
     restarted = _store(tmp_path)
     with patch("mindroom.dispatch_obligations.storage.logger") as logger:
         assert restarted.pending() == (valid,)
+        assert restarted.pending() == (valid,)
 
     logger.error.assert_called_once_with(
         "dispatch_obligation_pending_row_corrupt",
@@ -699,8 +700,10 @@ async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> N
         recovered.append(event.event_id)
         return DispatchCallbackResult.SUCCEEDED
 
+    runner = _runner(store, callback)
     with patch("mindroom.dispatch_obligations.runner.logger") as logger:
-        await _runner(store, callback).recover_pending()
+        await runner.recover_pending()
+        await runner.recover_pending()
 
     assert recovered == ["$valid-event"]
     logger.error.assert_called_once_with(
@@ -1292,58 +1295,6 @@ async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) 
     await first
 
     assert not _store(tmp_path).has_pending("$duplicate", DispatchCallbackKind.MESSAGE)
-
-
-@pytest.mark.asyncio
-async def test_room_lifecycle_drain_waits_for_exact_active_owner(tmp_path: Path) -> None:
-    """Certification drain must wait for an active callback instead of skipping it."""
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    attempts = 0
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        nonlocal attempts
-        attempts += 1
-        entered.set()
-        await release.wait()
-        return DispatchCallbackResult.SUCCEEDED
-
-    store = _store(tmp_path)
-    pending_loaded = asyncio.Event()
-    event_loop = asyncio.get_running_loop()
-    original_pending = store.pending
-
-    def observed_pending() -> list[DispatchObligation]:
-        pending = original_pending()
-        event_loop.call_soon_threadsafe(pending_loaded.set)
-        return pending
-
-    store.pending = observed_pending
-    runner = DispatchObligationRunner(
-        store=store,
-        callbacks={DispatchCallbackKind.ROOM_LIFECYCLE: callback},
-        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
-        turn_is_terminal=lambda _event_id: False,
-    )
-    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
-    event = _member_event("$member")
-    obligation = await runner.persist(room, event, DispatchCallbackKind.ROOM_LIFECYCLE)
-    assert obligation is not None
-
-    active = asyncio.create_task(runner._run_persisted(obligation, room=room, event=event))
-    await entered.wait()
-    drain = asyncio.create_task(runner.drain_pending_room_lifecycle())
-    await pending_loaded.wait()
-    await asyncio.sleep(0)
-
-    assert not drain.done()
-
-    release.set()
-    await active
-    await drain
-
-    assert attempts == 1
-    assert not store.has_pending(event.event_id, DispatchCallbackKind.ROOM_LIFECYCLE)
 
 
 @pytest.mark.asyncio

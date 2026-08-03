@@ -66,7 +66,6 @@ class ColdHistoryFence:
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
         provenance: nio.TimelineEventProvenance | None = None,
-        allow_historical_recovery: bool = False,
     ) -> DispatchSourceAdmission:
         """Apply invite, decrypt-notice, and event-provenance policy."""
         if callback_kind is DispatchCallbackKind.INVITE:
@@ -75,7 +74,7 @@ class ColdHistoryFence:
             return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
         if provenance is not nio.TimelineEventProvenance.HISTORY:
             return DispatchSourceAdmission.ACCEPTED
-        if callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE and allow_historical_recovery:
+        if callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE:
             return DispatchSourceAdmission.ACCEPTED
         if await asyncio.to_thread(
             self.obligations.has_pending,

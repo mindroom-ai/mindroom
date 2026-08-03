@@ -23,7 +23,6 @@ class _RoomMemberHookPhase(Enum):
     BASELINE = "baseline"
     FULL_STATE_CATCHUP = "full_state_catchup"
     CATCHUP = "catchup"
-    SLIDING_CATCHUP = "sliding_catchup"
     LIVE = "live"
 
 
@@ -75,6 +74,11 @@ class RoomMemberHookLifecycle:
         """Return whether the next Classic response carries a new full-state baseline."""
         return self._baseline_record_pending and self._baseline_record_events is None
 
+    @property
+    def response_drain_required(self) -> bool:
+        """Return whether this owner has admitted lifecycle callbacks to drain."""
+        return self._phase is not _RoomMemberHookPhase.DISABLED
+
     def admission_enabled(self, provenance: nio.TimelineEventProvenance) -> bool:
         """Return whether one member event should enter durable callback ownership."""
         if self._phase is _RoomMemberHookPhase.DISABLED:
@@ -99,7 +103,7 @@ class RoomMemberHookLifecycle:
             self._discard_baseline()
             return
         if transport == "sliding":
-            self._phase = _RoomMemberHookPhase.SLIDING_CATCHUP
+            self._phase = _RoomMemberHookPhase.LIVE
             self._discard_baseline()
             return
         self._phase = _RoomMemberHookPhase.FULL_STATE_CATCHUP if resuming_position else _RoomMemberHookPhase.BASELINE
@@ -172,12 +176,6 @@ class RoomMemberHookLifecycle:
         if self._baseline_record_pending:
             return
         self._phase = _RoomMemberHookPhase.CATCHUP
-
-    def unknown_position(self) -> None:
-        """Treat a server-rejected cursor as a fresh tokenless baseline."""
-        if self.enabled:
-            self._phase = _RoomMemberHookPhase.BASELINE
-            self._discard_baseline()
 
     def stop(self) -> None:
         """Disable all lifecycle admission after the owning bot stops."""

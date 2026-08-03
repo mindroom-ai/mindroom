@@ -1525,8 +1525,8 @@ class AgentBot:
             await self._room_lifecycle.observe_trusted_sync_rooms(
                 room_id for room_id, room in response.rooms.items() if room.membership == "join"
             )
-        await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
-        self._room_member_hook_lifecycle.certified()
+        if self._room_member_hook_lifecycle.response_drain_required:
+            await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
         self._mark_sync_progress()
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
@@ -1594,7 +1594,6 @@ class AgentBot:
                     decision = await self._sync_cache_trust.reject_unknown_pos()
                     if cleanup_succeeded:
                         self._apply_client_rewind_decision(decision)
-                        self._room_member_hook_lifecycle.unknown_position()
                     else:
                         self._sync_cache_trust.defer_replay_after_pre_certification_failure()
 
@@ -2270,13 +2269,11 @@ class AgentBot:
     async def _emit_room_member_joined_sync_state_hooks(
         self,
         response: nio.SyncResponse,
-        *,
-        record_only: bool = False,
     ) -> None:
-        """Expose or record human joins that matrix-nio delivers through sync room state."""
+        """Expose human joins that matrix-nio delivers through sync room state."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        if not record_only and not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
         client = self.client
         if client is None:
@@ -2287,7 +2284,6 @@ class AgentBot:
             rooms=client.rooms,
             config=self.config,
             runtime_paths=self.runtime_paths,
-            record_only=record_only,
         )
         for room, event in plan.dispatch_events:
             await self._dispatch_obligation_runner.dispatch(

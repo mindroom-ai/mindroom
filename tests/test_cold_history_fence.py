@@ -158,14 +158,12 @@ async def test_lifecycle_catchup_may_admit_authorized_historical_recovery() -> N
         "$member",
         DispatchCallbackKind.ROOM_LIFECYCLE,
         nio.TimelineEventProvenance.HISTORY,
-        allow_historical_recovery=True,
     )
     message = await fence.admit_source(
         "!room:example.org",
         "$message",
         DispatchCallbackKind.MESSAGE,
         nio.TimelineEventProvenance.HISTORY,
-        allow_historical_recovery=True,
     )
 
     assert lifecycle is DispatchSourceAdmission.ACCEPTED

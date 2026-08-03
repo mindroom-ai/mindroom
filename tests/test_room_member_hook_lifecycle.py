@@ -117,18 +117,16 @@ def test_safe_rewind_and_loop_replacement_require_full_state_catchup() -> None:
     assert not lifecycle._baseline_record_pending
 
 
-def test_unknown_position_and_stop_reset_phase_boundaries() -> None:
-    """Rejected positions restart at a history baseline and stop disables admission."""
+def test_stop_disables_phase_boundaries() -> None:
+    """Stop must disable admission and response-owned lifecycle drains."""
     lifecycle = RoomMemberHookLifecycle(enabled=True)
     lifecycle.prepare_startup(transport="classic", resuming_position=True)
-    lifecycle.unknown_position()
 
-    assert lifecycle._baseline_record_pending
-    assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
-    assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
+    assert lifecycle.response_drain_required
 
     lifecycle.stop()
     assert not lifecycle.full_state_required
+    assert not lifecycle.response_drain_required
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
 
 
@@ -157,8 +155,10 @@ def test_sliding_startup_admits_only_live_events_without_classic_baseline() -> N
 
     assert not lifecycle._baseline_record_pending
     assert not lifecycle.full_state_required
+    assert lifecycle.response_drain_required
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
 
-    lifecycle.certified()
-    assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
+    disabled = RoomMemberHookLifecycle(enabled=False)
+    disabled.prepare_startup(transport="sliding", resuming_position=True)
+    assert not disabled.response_drain_required
