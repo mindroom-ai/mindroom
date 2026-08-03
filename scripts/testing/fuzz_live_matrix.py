@@ -90,6 +90,183 @@ class LiveOperationKind(StrEnum):
     RESTART_MINDROOM = "restart_mindroom"
 
 
+@dataclass(frozen=True, slots=True)
+class LiveOperation:
+    """One replayable live Matrix action."""
+
+    operation_id: int
+    kind: LiveOperationKind
+    thread: int
+    target: str | None
+
+    @property
+    def event_ref(self) -> str:
+        """Return the logical reference for this operation's event."""
+        return f"op:{self.operation_id}"
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> LiveOperation:
+        """Parse one serialized operation."""
+        raw_target = value.get("target")
+        if raw_target is not None and not isinstance(raw_target, str):
+            msg = "Live Matrix fuzz operation target must be a string or null"
+            raise TypeError(msg)
+        return cls(
+            operation_id=_required_int(value, "operation_id"),
+            kind=LiveOperationKind(_required_string(value, "kind")),
+            thread=_required_int(value, "thread"),
+            target=raw_target,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LiveFuzzScenario:
+    """Concurrent live batches with logical references instead of event IDs."""
+
+    thread_count: int
+    batches: tuple[tuple[LiveOperation, ...], ...]
+    profile: str = "fuzz"
+
+    def to_json(self) -> str:
+        """Serialize the complete trace for exact replay on a fresh server."""
+        return json.dumps(
+            {
+                "version": 1,
+                "profile": self.profile,
+                "thread_count": self.thread_count,
+                "batches": [[asdict(operation) for operation in batch] for batch in self.batches],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> LiveFuzzScenario:
+        """Load a trace emitted by :meth:`to_json`."""
+        payload = json.loads(value)
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            msg = "unsupported live Matrix fuzz trace"
+            raise ValueError(msg)
+        raw_batches = payload.get("batches")
+        if not isinstance(raw_batches, list):
+            msg = "live Matrix fuzz trace is missing batches"
+            raise TypeError(msg)
+        scenario = cls(
+            thread_count=_required_int(payload, "thread_count"),
+            batches=tuple(
+                tuple(LiveOperation.from_dict(cast("dict[str, object]", operation)) for operation in batch)
+                for batch in raw_batches
+            ),
+            profile=_required_string(payload, "profile"),
+        )
+        scenario.validate()
+        return scenario
+
+    def validate(self) -> None:
+        """Reject traces with impossible same-batch or forward dependencies."""
+        if self.thread_count < 1:
+            msg = "live Matrix fuzz trace must contain at least one thread"
+            raise ValueError(msg)
+        _reject_unknown_live_scenario_profile(self)
+        if self.profile == "restart-regression":
+            _validate_restart_regression_trace(self)
+            return
+        known_events = {f"root:{thread}" for thread in range(self.thread_count)}
+        known_responses = {f"response:root:{thread}" for thread in range(self.thread_count)}
+        message_events = set(known_events)
+        operation_ids: set[int] = set()
+
+        for batch in self.batches:
+            if not batch:
+                msg = "live Matrix fuzz batches must not be empty"
+                raise ValueError(msg)
+            restart_operations = [
+                operation for operation in batch if operation.kind is LiveOperationKind.RESTART_MINDROOM
+            ]
+            if restart_operations and len(batch) != 1:
+                msg = "MindRoom restart must be a singleton batch"
+                raise ValueError(msg)
+            reply_threads = [
+                operation.thread
+                for operation in batch
+                if operation.kind
+                in {
+                    LiveOperationKind.THREAD_MESSAGE,
+                    LiveOperationKind.PLAIN_REPLY,
+                }
+            ]
+            if len(reply_threads) != len(set(reply_threads)):
+                msg = "same-thread messages requiring replies must use separate batches"
+                raise ValueError(msg)
+
+            new_events: set[str] = set()
+            new_responses: set[str] = set()
+            new_messages: set[str] = set()
+            for operation in batch:
+                _validate_live_operation(
+                    operation,
+                    thread_count=self.thread_count,
+                    operation_ids=operation_ids,
+                    allowed_targets=known_events | known_responses,
+                    message_events=message_events,
+                )
+                if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
+                    new_events.add(operation.event_ref)
+                if operation.kind in {
+                    LiveOperationKind.THREAD_MESSAGE,
+                    LiveOperationKind.PLAIN_REPLY,
+                }:
+                    new_messages.add(operation.event_ref)
+                    new_responses.add(f"response:{operation.event_ref}")
+
+            known_events.update(new_events)
+            known_responses.update(new_responses)
+            message_events.update(new_messages)
+
+
+def _normalized_log(log: str) -> str:
+    """Remove renderer control codes before content-free log matching."""
+    return _ANSI_ESCAPE_PATTERN.sub("", log)
+
+
+def _log_count(log: str, *markers: str) -> int:
+    """Count log lines containing every content-free marker."""
+    return sum(all(marker in line for marker in markers) for line in _normalized_log(log).splitlines())
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout: float) -> bool:
+    """Poll one content-free live invariant until its bounded deadline."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+
+
+def _reject_unknown_live_scenario_profile(scenario: LiveFuzzScenario) -> None:
+    """Reject profiles without a runner implementation."""
+    if scenario.profile not in {"fuzz", "restart-regression", "saturation"}:
+        msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
+        raise ValueError(msg)
+
+
+def _validate_restart_regression_trace(scenario: LiveFuzzScenario) -> None:
+    """Require the fixed restart profile to own its operations outside the trace."""
+    if scenario.thread_count != 1 or scenario.batches:
+        msg = "restart-regression profile requires its fixed empty trace"
+        raise ValueError(msg)
+
+
+def restart_regression_scenario() -> LiveFuzzScenario:
+    """Return the fixed config-replacement regression trace."""
+    scenario = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+    scenario.validate()
+    return scenario
+
+
 def _restart_failure(
     invariant: str,
     *,
@@ -306,35 +483,6 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
     )
 
 
-@dataclass(frozen=True, slots=True)
-class LiveOperation:
-    """One replayable live Matrix action."""
-
-    operation_id: int
-    kind: LiveOperationKind
-    thread: int
-    target: str | None
-
-    @property
-    def event_ref(self) -> str:
-        """Return the logical reference for this operation's event."""
-        return f"op:{self.operation_id}"
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> LiveOperation:
-        """Parse one serialized operation."""
-        raw_target = value.get("target")
-        if raw_target is not None and not isinstance(raw_target, str):
-            msg = "Live Matrix fuzz operation target must be a string or null"
-            raise TypeError(msg)
-        return cls(
-            operation_id=_required_int(value, "operation_id"),
-            kind=LiveOperationKind(_required_string(value, "kind")),
-            thread=_required_int(value, "thread"),
-            target=raw_target,
-        )
-
-
 def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tuple[str, str]) -> tuple[bool, bool]:
     """Report fresh prompt presence and any historical-event overlap."""
     fresh_lines = [
@@ -343,154 +491,6 @@ def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tu
         if "Preparing agent and prompt" in line and f"agent={AGENT_NAME}" in line and fresh_event_id in line
     ]
     return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in old_event_ids)
-
-
-def _normalized_log(log: str) -> str:
-    """Remove renderer control codes before content-free log matching."""
-    return _ANSI_ESCAPE_PATTERN.sub("", log)
-
-
-def _log_count(log: str, *markers: str) -> int:
-    """Count log lines containing every content-free marker."""
-    return sum(all(marker in line for marker in markers) for line in _normalized_log(log).splitlines())
-
-
-def _wait_until(predicate: Callable[[], bool], *, timeout: float) -> bool:
-    """Poll one content-free live invariant until its bounded deadline."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if predicate():
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.1, remaining))
-
-
-@dataclass(frozen=True, slots=True)
-class LiveFuzzScenario:
-    """Concurrent live batches with logical references instead of event IDs."""
-
-    thread_count: int
-    batches: tuple[tuple[LiveOperation, ...], ...]
-    profile: str = "fuzz"
-
-    def to_json(self) -> str:
-        """Serialize the complete trace for exact replay on a fresh server."""
-        return json.dumps(
-            {
-                "version": 1,
-                "profile": self.profile,
-                "thread_count": self.thread_count,
-                "batches": [[asdict(operation) for operation in batch] for batch in self.batches],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-
-    @classmethod
-    def from_json(cls, value: str) -> LiveFuzzScenario:
-        """Load a trace emitted by :meth:`to_json`."""
-        payload = json.loads(value)
-        if not isinstance(payload, dict) or payload.get("version") != 1:
-            msg = "unsupported live Matrix fuzz trace"
-            raise ValueError(msg)
-        raw_batches = payload.get("batches")
-        if not isinstance(raw_batches, list):
-            msg = "live Matrix fuzz trace is missing batches"
-            raise TypeError(msg)
-        scenario = cls(
-            thread_count=_required_int(payload, "thread_count"),
-            batches=tuple(
-                tuple(LiveOperation.from_dict(cast("dict[str, object]", operation)) for operation in batch)
-                for batch in raw_batches
-            ),
-            profile=_required_string(payload, "profile"),
-        )
-        scenario.validate()
-        return scenario
-
-    def validate(self) -> None:
-        """Reject traces with impossible same-batch or forward dependencies."""
-        if self.thread_count < 1:
-            msg = "live Matrix fuzz trace must contain at least one thread"
-            raise ValueError(msg)
-        _reject_unknown_live_scenario_profile(self)
-        if self.profile == "restart-regression":
-            _validate_restart_regression_trace(self)
-            return
-        known_events = {f"root:{thread}" for thread in range(self.thread_count)}
-        known_responses = {f"response:root:{thread}" for thread in range(self.thread_count)}
-        message_events = set(known_events)
-        operation_ids: set[int] = set()
-
-        for batch in self.batches:
-            if not batch:
-                msg = "live Matrix fuzz batches must not be empty"
-                raise ValueError(msg)
-            restart_operations = [
-                operation for operation in batch if operation.kind is LiveOperationKind.RESTART_MINDROOM
-            ]
-            if restart_operations and len(batch) != 1:
-                msg = "MindRoom restart must be a singleton batch"
-                raise ValueError(msg)
-            reply_threads = [
-                operation.thread
-                for operation in batch
-                if operation.kind
-                in {
-                    LiveOperationKind.THREAD_MESSAGE,
-                    LiveOperationKind.PLAIN_REPLY,
-                }
-            ]
-            if len(reply_threads) != len(set(reply_threads)):
-                msg = "same-thread messages requiring replies must use separate batches"
-                raise ValueError(msg)
-
-            new_events: set[str] = set()
-            new_responses: set[str] = set()
-            new_messages: set[str] = set()
-            for operation in batch:
-                _validate_live_operation(
-                    operation,
-                    thread_count=self.thread_count,
-                    operation_ids=operation_ids,
-                    allowed_targets=known_events | known_responses,
-                    message_events=message_events,
-                )
-                if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
-                    new_events.add(operation.event_ref)
-                if operation.kind in {
-                    LiveOperationKind.THREAD_MESSAGE,
-                    LiveOperationKind.PLAIN_REPLY,
-                }:
-                    new_messages.add(operation.event_ref)
-                    new_responses.add(f"response:{operation.event_ref}")
-
-            known_events.update(new_events)
-            known_responses.update(new_responses)
-            message_events.update(new_messages)
-
-
-def _reject_unknown_live_scenario_profile(scenario: LiveFuzzScenario) -> None:
-    """Reject profiles without a runner implementation."""
-    if scenario.profile not in {"fuzz", "restart-regression", "saturation"}:
-        msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
-        raise ValueError(msg)
-
-
-def _validate_restart_regression_trace(scenario: LiveFuzzScenario) -> None:
-    """Require the fixed restart profile to own its operations outside the trace."""
-    if scenario.thread_count != 1 or scenario.batches:
-        msg = "restart-regression profile requires its fixed empty trace"
-        raise ValueError(msg)
-
-
-def restart_regression_scenario() -> LiveFuzzScenario:
-    """Return the fixed config-replacement regression trace."""
-    scenario = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
-    scenario.validate()
-    return scenario
 
 
 def _validate_live_operation(
@@ -1853,12 +1853,14 @@ class LiveFuzzRunner:
         log = self.stack.read_log()
         agent = self._canonical_response_ids(events)
         router = self._canonical_response_ids(events, sender_id=self.stack.router_id)
-        historical_output_counts = tuple(
-            self._combined_response_count(source_event_id, agent, router) for source_event_id in historical_event_ids
+        historical_text_id, historical_media_id = historical_event_ids
+        historical_output_counts = (
+            self._combined_response_count(historical_text_id, agent, router),
+            self._combined_response_count(historical_media_id, agent, router),
         )
-        historical_callback_counts = tuple(
-            _log_count(log, "matrix_event_callback_started", dormant.room_id, event_id)
-            for event_id in historical_event_ids
+        historical_callback_counts = (
+            _log_count(log, "matrix_event_callback_started", dormant.room_id, historical_text_id),
+            _log_count(log, "matrix_event_callback_started", dormant.room_id, historical_media_id),
         )
         cached_event_pair_count = self.stack.cached_restart_event_pair_count(
             dormant.room_id,
@@ -1871,16 +1873,16 @@ class LiveFuzzRunner:
         )
         fresh_agent_response_ids = agent.get(fresh_event_id, set())
         fresh_router_response_ids = router.get(fresh_event_id, set())
-        fresh_response_body = self._latest_event_body(
-            events,
-            next(iter(fresh_agent_response_ids), ""),
+        fresh_response_bodies = tuple(
+            self._latest_event_body(events, response_id) for response_id in sorted(fresh_agent_response_ids)
         )
+        fresh_response_body = fresh_response_bodies[0] if len(fresh_response_bodies) == 1 else ""
         fresh_response_complete = (
             len(fresh_agent_response_ids) == 1 and not fresh_router_response_ids and "END call=" in fresh_response_body
         )
         return RestartRegressionObservation(
-            historical_output_counts=(historical_output_counts[0], historical_output_counts[1]),
-            historical_callback_counts=(historical_callback_counts[0], historical_callback_counts[1]),
+            historical_output_counts=historical_output_counts,
+            historical_callback_counts=historical_callback_counts,
             fresh_agent_output_count=len(fresh_agent_response_ids),
             fresh_router_output_count=len(fresh_router_response_ids),
             fresh_response_complete=fresh_response_complete,
@@ -1892,7 +1894,10 @@ class LiveFuzzRunner:
                 dormant.room_id,
                 fresh_event_id,
             ),
-            recovered_generation_response_observed=(RECOVERED_RUNTIME_GENERATION_MARKER in fresh_response_body),
+            recovered_generation_response_observed=(
+                bool(fresh_response_bodies)
+                and all(RECOVERED_RUNTIME_GENERATION_MARKER in body for body in fresh_response_bodies)
+            ),
             fresh_obligation_recovered=(self.stack.restart_dispatch_obligation_state(fresh_event_id) == "succeeded"),
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
@@ -2411,9 +2416,9 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
 
 
 def _require_python_313(profile: str) -> None:
-    """Keep the restart runtime aligned with the production Python version."""
-    if profile == "restart-regression" and sys.version_info[:2] != (3, 13):
-        msg = "restart-regression requires Python 3.13"
+    """Keep every live runtime aligned with the production Python version."""
+    if sys.version_info[:2] != (3, 13):
+        msg = f"{profile} requires Python 3.13"
         raise RuntimeError(msg)
 
 

@@ -406,14 +406,16 @@ def test_restart_regression_scenario_has_fixed_empty_shape() -> None:
     scenario.validate()
 
 
-def test_python_313_requirement_is_scoped_to_restart_regression(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Supported Python versions must retain ordinary fuzz and CLI access."""
+@pytest.mark.parametrize("profile", ["fuzz", "saturation", "restart-regression"])
+def test_python_313_requirement_applies_to_every_live_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    """Every live profile must match the production Python runtime."""
     monkeypatch.setattr(sys, "version_info", (3, 12))
 
-    _require_python_313("fuzz")
-    _require_python_313("saturation")
-    with pytest.raises(RuntimeError, match=r"restart-regression requires Python 3\.13"):
-        _require_python_313("restart-regression")
+    with pytest.raises(RuntimeError, match=rf"{profile} requires Python 3\.13"):
+        _require_python_313(profile)
 
 
 def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
@@ -638,8 +640,8 @@ async def test_restart_regression_does_not_send_fresh_event_before_historical_ca
         stack.close()
 
 
-def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
-    """Principal, room, and event filters must reject plausible distractor rows."""
+def test_restart_log_wait_handles_ansi_and_multiple_markers() -> None:
+    """Rendered log fields must still support exact multi-marker waits."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
@@ -660,6 +662,15 @@ def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filt
             1,
             timeout=0,
         )
+    finally:
+        stack.close()
+
+
+def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
+    """Principal, room, and event filters must reject plausible distractor rows."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.storage_path.mkdir()
         database_path = stack.storage_path / "event_cache.db"
         database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
@@ -695,39 +706,37 @@ def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filt
 
         event_ids = ("$old-text", "$old-media")
         assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 4
-        assert _restart_prompt_observation(
-            "Preparing agent and prompt agent=general $fresh $old-text",
-            "$fresh",
-            event_ids,
-        ) == (True, True)
-        assert _restart_prompt_observation(
-            "Preparing agent and prompt agent=general $fresh",
-            "$fresh",
-            event_ids,
-        ) == (True, False)
-        assert _restart_prompt_observation(
-            "Preparing agent and prompt agent=router $fresh",
-            "$fresh",
-            event_ids,
-        ) == (False, False)
-        assert _restart_prompt_observation(
-            "Preparing agent and prompt agent=general $old-text",
-            "$fresh",
-            event_ids,
-        ) == (
-            False,
-            False,
-        )
-        assert (
-            LiveFuzzRunner._combined_response_count(
-                "$fresh",
-                {"$fresh": {"$agent-response"}},
-                {"$fresh": {"$router-response"}},
-            )
-            == 2
-        )
     finally:
         stack.close()
+
+
+@pytest.mark.parametrize(
+    ("log", "expected"),
+    [
+        ("Preparing agent and prompt agent=general $fresh $old-text", (True, True)),
+        ("Preparing agent and prompt agent=general $fresh", (True, False)),
+        ("Preparing agent and prompt agent=router $fresh", (False, False)),
+        ("Preparing agent and prompt agent=general $old-text", (False, False)),
+    ],
+)
+def test_restart_prompt_observation_filters_exact_fresh_agent_prompt(
+    log: str,
+    expected: tuple[bool, bool],
+) -> None:
+    """Prompt evidence must identify the fresh agent turn and historical overlap independently."""
+    assert _restart_prompt_observation(log, "$fresh", ("$old-text", "$old-media")) == expected
+
+
+def test_combined_response_count_includes_every_configured_sender() -> None:
+    """The restart oracle must count agent and router responses to the same source."""
+    assert (
+        LiveFuzzRunner._combined_response_count(
+            "$fresh",
+            {"$fresh": {"$agent-response"}},
+            {"$fresh": {"$router-response"}},
+        )
+        == 2
+    )
 
 
 def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> None:
@@ -1202,6 +1211,38 @@ async def test_restart_observation_rejects_nonqualifying_evidence(
     assert stop_calls == expected_stop_calls
     assert observation.orderly_drain_completed is expected_orderly_drain
     assert any(f"invariant={expected_failure}" in failure for failure in evaluate_restart_regression(observation))
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_rejects_mixed_runtime_generations(
+    seeded_restart_observation_stack: tuple[ManagedTuwunelStack, list[float]],
+) -> None:
+    """Any duplicate response from the old runtime must invalidate recovered-generation evidence."""
+    stack, _stop_calls = seeded_restart_observation_stack
+    response_ids = ("$agent-response-a", "$agent-response-b")
+    selected_first = next(iter(set(response_ids)))
+    events = tuple(
+        _restart_response(
+            response_id,
+            stack.agent_id,
+            "$fresh",
+            body=(
+                "LIVE-FUZZ runtime-generation=recovered END call=1"
+                if response_id == selected_first
+                else "LIVE-FUZZ runtime-generation=replacement END call=1"
+            ),
+        )
+        for response_id in response_ids
+    )
+
+    observation = await _collect_seeded_restart_observation(
+        stack,
+        log=_RESTART_OBSERVATION_LOG,
+        events=events,
+        reply_timeout=0,
+    )
+
+    assert not observation.recovered_generation_response_observed
 
 
 @pytest.mark.asyncio
