@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-import nio
-
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -28,10 +26,11 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
     is_video_message_event,
 )
-from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    import nio
 
     from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
     from mindroom.handled_turns import SourceEventMetadata
@@ -58,8 +57,7 @@ class PreparedIngress:
 # Voice messages are normalized into PreparedIngress before coalescing, so
 # this contract only includes routed image/file/video events.
 type MediaDispatchEvent = MatrixMediaDispatchEvent
-type TextDispatchEvent = nio.RoomMessageText | PreparedIngress
-type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
+type DispatchEvent = PreparedIngress | MediaDispatchEvent
 
 
 @dataclass
@@ -102,11 +100,10 @@ class DispatchHandoff:
     """Coalesced dispatch input handed to the turn controller."""
 
     room: nio.MatrixRoom
-    event: TextDispatchEvent
+    event: PreparedIngress
     requester_user_id: str
     ingress: DispatchIngressMetadata
     payload: DispatchPayloadMetadata = field(default_factory=DispatchPayloadMetadata)
-    trust_hydrated_internal_metadata: bool = False
     source_event_ids: tuple[str, ...] = ()
     source_event_prompts: Mapping[str, str] = field(default_factory=dict)
     source_event_metadata: Mapping[str, SourceEventMetadata] = field(default_factory=dict)
@@ -175,22 +172,17 @@ def _collect_batch_mentions_and_formatted_bodies(
 
 
 def _batch_payload_metadata(batch: CoalescedBatch) -> DispatchPayloadMetadata:
-    single_raw_sidecar_preview = (
-        len(batch.pending_events) == 1
-        and isinstance(batch.primary_event, nio.RoomMessageText)
-        and is_v2_sidecar_text_preview(batch.primary_event.source)
-    )
     mentioned_user_ids, formatted_bodies, skip_mentions = _collect_batch_mentions_and_formatted_bodies(
         batch.pending_events,
     )
     return DispatchPayloadMetadata(
-        attachment_ids=None if single_raw_sidecar_preview else tuple(batch.attachment_ids),
-        original_sender=None if single_raw_sidecar_preview else batch.original_sender,
-        raw_audio_fallback=None if single_raw_sidecar_preview else batch.raw_audio_fallback,
-        voice_transcript=None if single_raw_sidecar_preview else batch.voice_transcript,
-        mentioned_user_ids=None if single_raw_sidecar_preview else mentioned_user_ids,
-        formatted_bodies=None if single_raw_sidecar_preview else formatted_bodies,
-        skip_mentions=None if single_raw_sidecar_preview else skip_mentions,
+        attachment_ids=tuple(batch.attachment_ids),
+        original_sender=batch.original_sender,
+        raw_audio_fallback=batch.raw_audio_fallback,
+        voice_transcript=batch.voice_transcript,
+        mentioned_user_ids=mentioned_user_ids,
+        formatted_bodies=formatted_bodies,
+        skip_mentions=skip_mentions,
     )
 
 
@@ -233,48 +225,6 @@ def payload_metadata_from_source(
         mentioned_user_ids=mentioned_user_ids,
         formatted_bodies=formatted_bodies,
         skip_mentions=content.get(SKIP_MENTIONS_KEY) is True,
-    )
-
-
-def merge_payload_metadata(
-    base: DispatchPayloadMetadata,
-    hydrated: DispatchPayloadMetadata,
-    *,
-    trust_hydrated_internal_metadata: bool,
-) -> DispatchPayloadMetadata:
-    """Fill unknown handoff metadata from hydrated text content."""
-    attachment_ids = base.attachment_ids
-    original_sender = base.original_sender
-    raw_audio_fallback = base.raw_audio_fallback
-    voice_transcript = base.voice_transcript
-    skip_mentions = base.skip_mentions
-    if trust_hydrated_internal_metadata:
-        if attachment_ids is None:
-            attachment_ids = hydrated.attachment_ids
-        if original_sender is None:
-            original_sender = hydrated.original_sender
-        if raw_audio_fallback is None:
-            raw_audio_fallback = hydrated.raw_audio_fallback
-        if voice_transcript is None:
-            voice_transcript = hydrated.voice_transcript
-        if skip_mentions is None:
-            skip_mentions = hydrated.skip_mentions
-    else:
-        attachment_ids = attachment_ids if attachment_ids is not None else ()
-        raw_audio_fallback = raw_audio_fallback if raw_audio_fallback is not None else False
-        voice_transcript = voice_transcript if voice_transcript is not None else False
-        skip_mentions = skip_mentions if skip_mentions is not None else False
-
-    return DispatchPayloadMetadata(
-        attachment_ids=attachment_ids,
-        original_sender=original_sender,
-        raw_audio_fallback=raw_audio_fallback,
-        voice_transcript=voice_transcript,
-        mentioned_user_ids=base.mentioned_user_ids
-        if base.mentioned_user_ids is not None
-        else hydrated.mentioned_user_ids,
-        formatted_bodies=base.formatted_bodies if base.formatted_bodies is not None else hydrated.formatted_bodies,
-        skip_mentions=skip_mentions,
     )
 
 
@@ -354,16 +304,14 @@ def _prepared_source_kind_override(source_kind: str) -> str | None:
     return None if source_kind == MESSAGE_SOURCE_KIND else source_kind
 
 
-def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
+def _build_batch_dispatch_event(batch: CoalescedBatch) -> PreparedIngress:
     """Return the text dispatch event for one batch."""
     if (
         len(batch.pending_events) == 1
-        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedIngress)
+        and isinstance(batch.primary_event, PreparedIngress)
         and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
     ):
-        if isinstance(batch.primary_event, PreparedIngress):
-            return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
-        return batch.primary_event
+        return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
     return PreparedIngress(
         sender=batch.primary_event.sender,
         event_id=batch.primary_event.event_id,
@@ -388,9 +336,6 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
             message_received_depth=batch.message_received_depth,
         ),
         payload=_batch_payload_metadata(batch),
-        trust_hydrated_internal_metadata=any(
-            pending_event.trust_internal_payload_metadata for pending_event in batch.pending_events
-        ),
         source_event_ids=tuple(batch.source_event_ids),
         source_event_prompts=dict(batch.source_event_prompts),
         source_event_metadata=dict(batch.source_event_metadata),

@@ -629,4 +629,3 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
     assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
     mock_enqueue.assert_awaited_once()
     assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event
-    assert mock_enqueue.await_args.kwargs["dispatch_event"] is prepared_event

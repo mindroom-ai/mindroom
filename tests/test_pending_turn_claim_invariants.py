@@ -214,10 +214,11 @@ async def test_text_claim_is_held_before_text_normalization(
 ) -> None:
     """The live-turn claim is acquired before any text normalization runs.
 
-    At every ``InboundTurnNormalizer.resolve_text_event`` call (ingress and,
-    later, dispatch-side preparation), a competing claim for the same source
-    must fail because a live claim already owns it, and the claim event must
-    precede the normalization marker in the claim ledger.
+    At every ``InboundTurnNormalizer.resolve_text_event`` call, a competing
+    claim for the same source must fail because a live claim already owns it,
+    and the claim event must precede the normalization marker in the claim
+    ledger. Ordinary text is normalized exactly once per live turn, during
+    lane-delivered admission; dispatch no longer re-normalizes.
     """
     harness = _build_harness(config, tmp_path)
     ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
@@ -235,7 +236,7 @@ async def test_text_claim_is_held_before_text_normalization(
 
     assert spy.claim_live_at_resolve, "text normalization never ran"
     assert all(spy.claim_live_at_resolve), "normalization ran without a live claim for the source"
-    assert ledger.kinds() == ["claim", "normalize", "release", "claim", "normalize", "release"]
+    assert ledger.kinds() == ["claim", "normalize", "release", "claim", "release"]
     _assert_claims_released_exactly_once(ledger)
     _assert_no_live_claim(harness.turn_store, event.event_id)
 

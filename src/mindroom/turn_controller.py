@@ -47,7 +47,6 @@ from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
     PendingDispatchMetadata,
     PreparedIngress,
-    TextDispatchEvent,
     build_dispatch_handoff,
     payload_metadata_from_source,
 )
@@ -256,7 +255,7 @@ async def _send_router_relay_after_readiness_recheck(
     )
 
 
-def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
+def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
     """Return an event view that cannot pull dispatch context through Matrix relations."""
     if not isinstance(event.source, dict):
         return event
@@ -389,7 +388,7 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
-type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
+type _PrecheckedPreparedIngress = _PrecheckedEvent[PreparedIngress]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
 
@@ -497,7 +496,7 @@ class TurnController:
 
     def _has_newer_unresponded_in_thread(
         self,
-        event: TextDispatchEvent,
+        event: PreparedIngress,
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
@@ -523,7 +522,7 @@ class TurnController:
         self,
         *,
         room_id: str,
-        event: TextDispatchEvent,
+        event: PreparedIngress,
         requester_user_id: str,
         thread_id: str | None,
         may_be_superseded_by_newer_requester_turn: bool,
@@ -624,7 +623,6 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         prepared_event: PreparedIngress,
-        dispatch_event: TextDispatchEvent,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
@@ -647,7 +645,7 @@ class TurnController:
         )
         try:
             await self._enqueue_for_dispatch(
-                dispatch_event,
+                prepared_event,
                 room,
                 source_kind=envelope.source_kind,
                 callback_source_kind=callback_source_kind,
@@ -839,7 +837,6 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         prepared_event: PreparedIngress,
-        dispatch_event: TextDispatchEvent,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
         coalescing_thread_id: str | None,
@@ -902,7 +899,7 @@ class TurnController:
                 reservation_owner.pending_turn_claim = None
             await self._dispatch_command_control_input(
                 room=room,
-                dispatch_event=dispatch_event,
+                dispatch_event=prepared_event,
                 envelope=envelope,
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
@@ -911,7 +908,6 @@ class TurnController:
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,
-            dispatch_event=dispatch_event,
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
             requester_user_id=requester_user_id,
@@ -989,7 +985,7 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        dispatch_event: TextDispatchEvent,
+        dispatch_event: PreparedIngress,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
@@ -1111,7 +1107,7 @@ class TurnController:
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: TextDispatchEvent,
+        event: PreparedIngress,
         requester_user_id: str,
         *,
         event_label: str,
@@ -2063,7 +2059,6 @@ class TurnController:
             handled_turn=handled_turn,
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
-            trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
             current_prompt_is_structured=handoff.current_prompt_is_structured,
         )
 
@@ -2222,7 +2217,6 @@ class TurnController:
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_event,
-            dispatch_event=prepared_event,
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=ingress_thread_id,
@@ -2231,7 +2225,7 @@ class TurnController:
     async def _dispatch_text_message(
         self,
         room: nio.MatrixRoom,
-        event: TextDispatchEvent | _PrecheckedTextDispatchEvent,
+        event: PreparedIngress | _PrecheckedPreparedIngress,
         requester_user_id: str | None = None,
         *,
         media_events: list[MediaDispatchEvent] | None = None,
@@ -2239,14 +2233,13 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        trust_hydrated_internal_metadata: bool | None = None,
         current_prompt_is_structured: bool = False,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
-        raw_event: TextDispatchEvent
+        raw_event: PreparedIngress
         if isinstance(event, _PrecheckedEvent):
             requester_user_id = event.requester_user_id
-            raw_event = cast("TextDispatchEvent", event.event)
+            raw_event = cast("PreparedIngress", event.event)
         else:
             raw_event = event
         if requester_user_id is None:
@@ -2264,7 +2257,6 @@ class TurnController:
             queued_notice_reservation=queued_notice_reservation,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
-            trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
             current_prompt_is_structured=current_prompt_is_structured,
         )
 
@@ -2784,7 +2776,6 @@ class TurnController:
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_text_event,
-            dispatch_event=prepared_text_event,
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=coalescing_thread_id,

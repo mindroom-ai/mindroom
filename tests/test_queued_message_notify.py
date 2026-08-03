@@ -2422,48 +2422,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$normalize",
-        target=target,
-    )
-    event = _prepared_text_event(event_id="$normalize")
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        with (
-            patch.object(
-                type(bot._turn_controller.deps.normalizer),
-                "resolve_text_event",
-                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
-            ),
-            pytest.raises(RuntimeError, match="normalization failed"),
-        ):
-            await bot._turn_controller._dispatch_text_message(
-                room,
-                event,
-                "@user:localhost",
-                queued_notice_reservation=reservation,
-            )
-    finally:
-        queued_signal.finish_response_turn()
-
-    assert not queued_signal.is_set()
-
-
-@pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up when dispatch preparation fails."""
+    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2717,7 +2677,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
                     prepared_event=event,
-                    dispatch_event=event,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",

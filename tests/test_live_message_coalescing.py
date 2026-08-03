@@ -237,35 +237,41 @@ def _make_room(room_id: str = "!room:localhost") -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path: Path) -> None:
-    """A replay arriving during cache resolution must not repeat that work."""
+    """A replay arriving during dispatch planning must not repeat that work."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    event = _text_event(event_id="$duplicate", body="@test_agent hello")
-    resolution_started = asyncio.Event()
+    event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$duplicate",
+        body="@test_agent hello",
+        source={"event_id": "$duplicate", "sender": "@user:localhost", "content": {"msgtype": "m.text"}},
+        server_timestamp=1000,
+    )
+    plan_started = asyncio.Event()
     duplicate_reservation = MagicMock()
 
-    async def slow_normalize(*_args: object, **_kwargs: object) -> None:
-        resolution_started.set()
+    async def slow_plan(*_args: object, **_kwargs: object) -> None:
+        plan_started.set()
         await asyncio.Event().wait()
 
-    normalizer = MagicMock()
-    normalizer.resolve_text_event = AsyncMock(side_effect=slow_normalize)
-    controller = replace_turn_controller_deps(bot, normalizer=normalizer)
-    first = asyncio.create_task(
-        controller._dispatch_text_message(room, event, "@user:localhost"),
-    )
-    await resolution_started.wait()
-    await controller._dispatch_text_message(
-        room,
-        event,
-        "@user:localhost",
-        queued_notice_reservation=duplicate_reservation,
-    )
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
+    controller = replace_turn_controller_deps(bot)
+    plan_turn = AsyncMock(side_effect=slow_plan)
+    with patch.object(controller.deps.turn_policy, "plan_turn", new=plan_turn):
+        first = asyncio.create_task(
+            controller._dispatch_text_message(room, event, "@user:localhost"),
+        )
+        await plan_started.wait()
+        await controller._dispatch_text_message(
+            room,
+            event,
+            "@user:localhost",
+            queued_notice_reservation=duplicate_reservation,
+        )
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
 
-    normalizer.resolve_text_event.assert_awaited_once()
+    plan_turn.assert_awaited_once()
     duplicate_reservation.cancel.assert_called_once_with()
 
 
@@ -5435,7 +5441,13 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
 def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
     """Single text active follow-ups should expose policy without changing source kind."""
     room = _make_room()
-    event = _text_event(event_id="$relay", body="@agent relay", server_timestamp=1000)
+    event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$relay",
+        body="@agent relay",
+        source={"event_id": "$relay", "sender": "@user:localhost", "content": {"msgtype": "m.text"}},
+        server_timestamp=1000,
+    )
 
     batch = build_coalesced_batch(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
@@ -5453,7 +5465,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
 
     assert handoff.ingress.source_kind == "message"
     assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert isinstance(dispatch_event, nio.RoomMessageText)
+    assert dispatch_event is event
 
 
 def test_batch_dispatch_event_preserves_original_sender() -> None:
@@ -6961,11 +6973,6 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     """Trusted hydrated sidecar attachment metadata should feed the envelope and payload request."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    preview = _text_event(
-        event_id="$trusted-sidecar",
-        body="preview",
-        sender="@mindroom_test_agent:localhost",
-    )
     hydrated = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$trusted-sidecar",
@@ -6997,11 +7004,6 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     with (
         patch.object(
             bot._inbound_turn_normalizer,
-            "resolve_text_event",
-            new=AsyncMock(return_value=hydrated),
-        ),
-        patch.object(
-            bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(side_effect=record_payload_request),
         ),
@@ -7010,7 +7012,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     ):
         await bot._turn_controller._dispatch_text_message(
             room,
-            preview,
+            hydrated,
             "@requester:localhost",
             ingress_metadata=DispatchIngressMetadata(source_kind="scheduled"),
             payload_metadata=DispatchPayloadMetadata(attachment_ids=None),
@@ -7023,10 +7025,9 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
 
 @pytest.mark.asyncio
 async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(tmp_path: Path) -> None:
-    """Hydrated sidecar metadata should replace preview prompt and feed final context extraction."""
+    """Prepared sidecar metadata should feed the envelope and persisted prompts before dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
-    preview = _text_event(event_id="$sidecar", body="preview")
     hydrated = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar",
@@ -7051,19 +7052,14 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     async def record_response(*_args: object, **kwargs: object) -> None:
         captured_handled_turns.append(cast("TurnRecord", kwargs["handled_turn"]))
 
-    handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "preview"})
+    handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "@test_agent hydrated body"})
     with (
-        patch.object(
-            bot._inbound_turn_normalizer,
-            "resolve_text_event",
-            new=AsyncMock(return_value=hydrated),
-        ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
         await bot._turn_controller._dispatch_text_message(
             room,
-            preview,
+            hydrated,
             "@user:localhost",
             handled_turn=handled_turn,
         )

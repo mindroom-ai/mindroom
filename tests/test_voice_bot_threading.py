@@ -1428,7 +1428,6 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
-            dispatch_event=echo_event,
             requester_user_id="@user:example.com",
             reservation_owner=reservation_owner,
             coalescing_thread_id="$thread_root",
@@ -1468,7 +1467,6 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=forged_event,
-            dispatch_event=forged_event,
             requester_user_id="@user:example.com",
             reservation_owner=reservation_owner,
             coalescing_thread_id="$thread_root",

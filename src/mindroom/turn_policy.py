@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.conversation_resolver import MessageContext
-    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
+    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
 
@@ -640,7 +640,7 @@ class TurnPolicy:
     async def plan_turn(
         self,
         room: nio.MatrixRoom,
-        event: TextDispatchEvent,
+        event: PreparedIngress,
         dispatch: PreparedDispatch,
         *,
         is_dm: bool,

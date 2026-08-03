@@ -38,7 +38,6 @@ if TYPE_CHECKING:
         DispatchEvent,
         DispatchIngressMetadata,
         DispatchPayloadMetadata,
-        TextDispatchEvent,
     )
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -304,7 +303,7 @@ class IngressValidator:
 
         return requester_user_id
 
-    def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
+    def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""
         if source_kind_bypasses_coalescing(source_kind):
             return None
