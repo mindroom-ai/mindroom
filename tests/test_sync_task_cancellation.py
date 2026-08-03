@@ -1888,6 +1888,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
     bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=False)
+    bot._rejected_sync_room_ids = set()
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 

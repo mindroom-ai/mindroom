@@ -4304,6 +4304,7 @@ expose = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
+    "timeline_event_has_authoritative_room_state",
 ]
 from = ["mindroom.matrix.client_session"]
 

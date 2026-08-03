@@ -566,6 +566,77 @@ async def test_rejected_sync_position_replay_cannot_overwrite_fresh_member_state
 
 
 @pytest.mark.asyncio
+async def test_rejected_sync_position_drops_stale_room_account_data(tmp_path: Path) -> None:
+    """A fresh tokenless response must not recreate a departed room from retained account data."""
+    room_id = "!room:example.org"
+    user_id = "@mindroom_agent:example.org"
+    device_id = "AGENTDEVICE"
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=matrix_client_config(),
+    )
+    client.next_batch = "s_before_gap"
+    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
+    await client.receive_response(
+        nio.SyncResponse(
+            "s_rejected",
+            nio.Rooms(
+                invite={},
+                join={
+                    room_id: nio.RoomInfo(
+                        nio.Timeline([], limited=True, prev_batch="p_before_gap"),
+                        state=[],
+                        ephemeral=[],
+                        account_data=[
+                            nio.FullyReadEvent.from_dict(
+                                {
+                                    "type": "m.fully_read",
+                                    "content": {"event_id": "$stale-marker"},
+                                },
+                            ),
+                        ],
+                    ),
+                },
+                leave={},
+            ),
+            nio.DeviceOneTimeKeyCount(None, None),
+            nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        ),
+    )
+
+    await client.invalidate_rejected_sync_position()
+    await client.close()
+    assert client.store is not None
+    cast("Any", client.store).database.close()
+
+    restarted = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=matrix_client_config(),
+    )
+    try:
+        await restarted.receive_response(
+            nio.SyncResponse(
+                "s_fresh",
+                nio.Rooms(invite={}, join={}, leave={}),
+                nio.DeviceOneTimeKeyCount(None, None),
+                nio.DeviceList(changed=[], left=[]),
+                to_device_events=[],
+                presence_events=[],
+            ),
+        )
+
+        assert room_id not in restarted.rooms
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
 async def test_sliding_initial_timeline_reports_only_num_live_tail_as_live(tmp_path: Path) -> None:
     """Pinned nio must distinguish Sliding snapshot history from its explicit live tail."""
     user_id = "@mindroom_agent:example.org"

@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 from nio.client.sync_recovery import (
+    PendingEventKind,
     drain_recovery_dispatches,
     merge_recovery_plans,
     persist_response_plan,
@@ -31,9 +33,14 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
 logger = get_logger(__name__)
+
+_TIMELINE_EVENT_HAS_AUTHORITATIVE_ROOM_STATE: ContextVar[bool] = ContextVar(
+    "mindroom_timeline_event_has_authoritative_room_state",
+    default=True,
+)
 
 _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
     {
@@ -65,6 +72,11 @@ class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
+def timeline_event_has_authoritative_room_state() -> bool:
+    """Return whether the current nio callback was allowed to update room state."""
+    return _TIMELINE_EVENT_HAS_AUTHORITATIVE_ROOM_STATE.get()
+
+
 @runtime_checkable
 class _AsyncRequestHeaders(Protocol):
     async def prepare(self) -> None:
@@ -81,6 +93,37 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
         return await super().send(*args, **kwargs)
+
+    async def _dispatch_timeline_event(
+        self,
+        room_id: str,
+        event: nio.Event | nio.BadEventType | nio.EphemeralEvent | nio.AccountDataEvent,
+        was_completed: bool,
+        kind: PendingEventKind,
+        provenance: nio.TimelineEventProvenance,
+        sync_origin: bool,
+        apply_room_state: bool,
+        admission_accepted: bool,
+        mark_admission_accepted: Callable[[], None],
+    ) -> nio.Event | nio.BadEventType | nio.EphemeralEvent | nio.AccountDataEvent | None:
+        """Expose nio's state-suppression decision to same-task auxiliary callbacks."""
+        token = _TIMELINE_EVENT_HAS_AUTHORITATIVE_ROOM_STATE.set(
+            kind != "timeline" or not sync_origin or apply_room_state,
+        )
+        try:
+            return await super()._dispatch_timeline_event(
+                room_id,
+                event,
+                was_completed,
+                kind,
+                provenance,
+                sync_origin,
+                apply_room_state,
+                admission_accepted,
+                mark_admission_accepted,
+            )
+        finally:
+            _TIMELINE_EVENT_HAS_AUTHORITATIVE_ROOM_STATE.reset(token)
 
     async def invalidate_rejected_sync_position(self) -> None:
         """Discard a server-rejected Classic cursor and its recovery generations."""
@@ -115,10 +158,17 @@ class _MindRoomAsyncClient(nio.AsyncClient):
                         for room_id in sorted(recovery_room_ids)
                     )
                     # The fresh tokenless response is the new room-state
-                    # authority; retained events preserve callbacks only.
+                    # authority. Retained timeline events preserve source-
+                    # backed callbacks only; transient and account-data
+                    # events cannot replay without applying stale state.
+                    events = tuple(
+                        replace(event, apply_room_state=False) for event in plan.events if event.kind == "timeline"
+                    )
+                    event_room_ids = {event.room_id for event in events}
                     plan = replace(
                         plan,
-                        events=tuple(replace(event, apply_room_state=False) for event in plan.events),
+                        gaps=tuple(gap for gap in plan.gaps if gap.room_id in event_room_ids),
+                        events=events,
                     )
                     persist_response_plan(
                         self._recovery,
@@ -514,4 +564,5 @@ __all__ = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
+    "timeline_event_has_authoritative_room_state",
 ]

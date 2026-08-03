@@ -24,12 +24,13 @@ from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
-from mindroom.matrix.client_session import _MindRoomAsyncClient
+from mindroom.matrix.client_session import _MindRoomAsyncClient, matrix_client_config
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_call_manager_mock,
     install_runtime_cache_support,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -163,6 +164,126 @@ def test_room_member_joined_is_a_builtin_hook_event() -> None:
     registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     assert registry.has_hooks(EVENT_ROOM_MEMBER_JOINED)
+
+
+@pytest.mark.parametrize(
+    ("fresh_membership", "retained_membership"),
+    [("join", "leave"), ("leave", "join")],
+)
+@pytest.mark.asyncio
+async def test_retained_live_membership_cannot_override_fresh_call_membership(
+    tmp_path: Path,
+    fresh_membership: str,
+    retained_membership: str,
+) -> None:
+    """Call reconciliation must reject retained membership that contradicts fresh room state."""
+    bot = _router_bot(tmp_path)
+    room = nio.MatrixRoom("!call:localhost", bot.agent_user.user_id)
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        bot.agent_user.user_id,
+        config=matrix_client_config(),
+    )
+    client.rooms[room.room_id] = room
+    bot.client = client
+    fresh = _room_member_event(
+        event_id="$fresh",
+        user_id=bot.agent_user.user_id,
+        membership=fresh_membership,
+        prev_membership=retained_membership,
+    )
+    retained = _room_member_event(
+        event_id="$retained",
+        user_id=bot.agent_user.user_id,
+        membership=retained_membership,
+        prev_membership=fresh_membership,
+    )
+    room.handle_membership(fresh)
+    admitted: list[bool] = []
+
+    async def observe_provenance(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        bot._cold_history_fence.observe_event_provenance(event.event_id, provenance)
+
+    async def admit_call_event(callback_room: nio.MatrixRoom, event: nio.Event) -> None:
+        admitted.append(bot._admit_live_call_event(callback_room, event))
+
+    client.add_event_admission_callback(observe_provenance)
+    client.add_event_callback(admit_call_event, nio.RoomMemberEvent)
+    try:
+        await client._dispatch_timeline_event(
+            room.room_id,
+            retained,
+            False,
+            "timeline",
+            nio.TimelineEventProvenance.LIVE,
+            True,
+            False,
+            False,
+            lambda: None,
+        )
+
+        assert admitted == [False]
+        assert (bot.agent_user.user_id in room.users) == (fresh_membership == "join")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tokenless_baseline_treats_pre_reset_absent_rooms_as_departed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-client reset must reconcile rooms omitted from the fresh full-state response."""
+    joined_room_id = "!joined:localhost"
+    departed_room_id = "!departed:localhost"
+    bot = _router_bot(tmp_path)
+    client = _MindRoomAsyncClient("https://example.org", bot.agent_user.user_id)
+    client.rooms = {
+        joined_room_id: nio.MatrixRoom(joined_room_id, bot.agent_user.user_id),
+        departed_room_id: nio.MatrixRoom(departed_room_id, bot.agent_user.user_id),
+    }
+    bot.client = client
+    purged_room_ids: list[set[str]] = []
+    membership_updates: list[tuple[set[str], set[str]]] = []
+
+    class CallManagerProbe:
+        async def on_sync_room_membership(
+            self,
+            *,
+            joined_room_ids: set[str],
+            left_room_ids: set[str],
+        ) -> None:
+            membership_updates.append((joined_room_ids, left_room_ids))
+
+    async def purge_rooms(room_ids: set[str]) -> None:
+        purged_room_ids.append(room_ids)
+
+    monkeypatch.setattr(bot._conversation_cache, "purge_rooms", purge_rooms)
+    monkeypatch.setattr(bot._conversation_cache, "mark_room_joined", AsyncMock())
+    monkeypatch.setattr(
+        bot._sync_cache_trust,
+        "invalidate_for_cache_scope_cleanup",
+        AsyncMock(return_value=True),
+    )
+    install_call_manager_mock(bot, CallManagerProbe())
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+    try:
+        await bot._on_sync_error(sync_error)
+        await bot._apply_own_room_membership_from_sync(
+            _sync_response_with_state(joined_room_id, []),
+        )
+
+        assert purged_room_ids == [{departed_room_id}]
+        assert membership_updates == [({joined_room_id}, {departed_room_id})]
+        assert departed_room_id not in client.rooms
+        assert bot._rejected_sync_room_ids == set()
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -1422,10 +1543,67 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     )
 
     assert seen == []
+    assert bot._rejected_sync_room_ids == set()
 
     await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
 
     assert seen == ["$live"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_room_scope_is_not_reapplied_to_incremental_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limited baseline may stay uncertified without making later incremental omissions departures."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_rejected"
+    membership_updates: list[tuple[set[str], set[str]]] = []
+
+    class CallManagerProbe:
+        async def on_sync_room_membership(
+            self,
+            *,
+            joined_room_ids: set[str],
+            left_room_ids: set[str],
+        ) -> None:
+            membership_updates.append((joined_room_ids, left_room_ids))
+
+    install_call_manager_mock(bot, CallManagerProbe())
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(
+            side_effect=[
+                SyncCacheWriteResult(
+                    complete=True,
+                    limited_room_ids=(room.room_id,),
+                ),
+                SyncCacheWriteResult(complete=True),
+            ],
+        ),
+    )
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_limited=True,
+        ),
+    )
+    assert bot._rejected_sync_room_ids == set()
+
+    incremental = _sync_response_with_state(room.room_id, [])
+    incremental.rooms.join = {}
+    await bot._on_sync_response(incremental)
+
+    assert room.room_id in bot.client.rooms
+    assert membership_updates == [({room.room_id}, set()), (set(), set())]
 
 
 @pytest.mark.asyncio
@@ -1466,6 +1644,8 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
         ),
     )
 
+    assert bot._rejected_sync_room_ids == set()
+
     room_member_admission = bot._dispatch_obligation_runner._admit_source_event
     live_event = _room_member_event(
         event_id="$join-during-bootstrap",
@@ -1490,6 +1670,7 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
 
     assert not bot._room_member_hook_lifecycle.full_state_required
     assert seen == ["$join-during-bootstrap"]
+    assert bot._rejected_sync_room_ids == set()
 
     await bot._on_room_member(
         room,

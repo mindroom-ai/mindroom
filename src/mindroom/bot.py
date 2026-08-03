@@ -117,7 +117,7 @@ from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
-from .matrix.client_session import PermanentMatrixStartupError
+from .matrix.client_session import PermanentMatrixStartupError, timeline_event_has_authoritative_room_state
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.room_member_joins import (
     RoomMemberJoin,
@@ -335,6 +335,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
+    _rejected_sync_room_ids: set[str]
     _sync_continuity_store: SyncContinuityStore
     _sync_cache_trust: SyncCacheTrust
     _cold_history_fence: ColdHistoryFence
@@ -391,6 +392,7 @@ class AgentBot:
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
+        self._rejected_sync_room_ids = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -1587,6 +1589,7 @@ class AgentBot:
         if _response.status_code == "M_UNKNOWN_POS":
             client = self.client
             assert client is not None
+            self._rejected_sync_room_ids.update(client.rooms)
 
             async def reject_position() -> None:
                 try:
@@ -1692,12 +1695,17 @@ class AgentBot:
 
     def _admit_live_call_event(self, _room: nio.MatrixRoom, event: nio.Event) -> bool:
         """Admit call-runtime room state only for this live nio delivery."""
-        return self._cold_history_fence.event_is_live(event.event_id)
+        return self._cold_history_fence.event_is_live(event.event_id) and timeline_event_has_authoritative_room_state()
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
         joined_room_ids = set(response.rooms.join)
-        left_room_ids = set(response.rooms.leave)
+        client = self.client
+        rejected_position_departures = self._rejected_sync_room_ids - joined_room_ids
+        if client is not None:
+            for room_id in rejected_position_departures:
+                client.rooms.pop(room_id, None)
+        left_room_ids = set(response.rooms.leave) | rejected_position_departures
         timeline_departure_room_ids = {
             room_id
             for room_id, room_info in response.rooms.join.items()
@@ -1713,6 +1721,7 @@ class AgentBot:
             left_room_ids=left_room_ids,
             departed_room_ids=left_room_ids | timeline_departure_room_ids,
         )
+        self._rejected_sync_room_ids.clear()
 
     async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
         """Apply this bot's room memberships reported by one sliding sync response."""
@@ -1949,6 +1958,7 @@ class AgentBot:
         call_manager = self._call_manager
         self._call_manager = None
         self._calls_reconcile_pending = False
+        self._rejected_sync_room_ids.clear()
         if call_manager is not None:
             await call_manager.shutdown()
 
