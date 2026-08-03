@@ -111,6 +111,16 @@ class StartupMaintenanceController:
             return
         self.start(bots, config)
 
+    async def recover_after_bot_start(self, bots: list[_StartupBot], config: Config) -> None:
+        """Attempt one recovered bot's cleanup without truncating runtime finalization."""
+        recovery_complete = await self._run_phase(
+            "startup_maintenance.stale_stream_recovery.background_bot",
+            lambda: self.recover_stale_streams(bots, config, set()),
+            failure_message="Recovered bot stale stream recovery failed",
+        )
+        if not recovery_complete:
+            self.replay_pending = True
+
     async def _run(self, bots: list[_StartupBot], config: Config) -> None:
         scanned_room_ids: set[str] = set()
         room_setup_task = asyncio.create_task(

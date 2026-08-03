@@ -2607,6 +2607,48 @@ class TestMultiAgentOrchestrator:
         assert bot.mock_calls == []
 
     @pytest.mark.asyncio
+    async def test_bot_recovery_defers_failed_stale_cleanup_without_truncating_finalization(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Transient stale cleanup failure must retain debt and finish binding recovered runtime support."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        config = MagicMock()
+        orchestrator.config = config
+        orchestrator.running = True
+        bot = MagicMock()
+        bot.agent_name = "general"
+        bot.running = True
+        orchestrator.agent_bots = {"general": bot}
+
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_schedule_ready_turn_dispatch_recovery"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(
+                orchestrator._startup_maintenance,
+                "recover_stale_streams",
+                new=AsyncMock(side_effect=RuntimeError("incomplete")),
+            ),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as recover_replacements,
+            patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind_external_triggers,
+            patch.object(
+                orchestrator._startup_maintenance,
+                "resume_pending_maintenance",
+            ) as resume_maintenance,
+        ):
+            await orchestrator._finish_recovered_bot_start("general", bot)
+
+        assert orchestrator._startup_maintenance.replay_pending is True
+        recover_replacements.assert_awaited_once_with(config)
+        bind_external_triggers.assert_called_once_with(config, orchestrator.agent_bots)
+        resume_maintenance.assert_called_once_with(
+            config=config,
+            running_bots=orchestrator._running_startup_maintenance_bots,
+        )
+
+    @pytest.mark.asyncio
     async def test_bot_recovery_stops_when_shutdown_begins_during_room_setup(self, tmp_path: Path) -> None:
         """A recovered bot must not restart runtime work after room setup crosses shutdown."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)

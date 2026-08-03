@@ -676,7 +676,7 @@ class _MultiAgentOrchestrator:
             logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
             return
         if config is not None:
-            await self._recover_stale_streams_after_restart([bot], config, set())
+            await self._startup_maintenance.recover_after_bot_start([bot], config)
         if not self.running:
             logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
             return
