@@ -1894,6 +1894,118 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_unknown_pos_after_cold_restart_purges_rooms_missing_from_fresh_baseline(
+    tmp_path: Path,
+) -> None:
+    """A rejected restored cursor cannot leave inaccessible room history cached."""
+    principal_id = "@mindroom_code:localhost"
+    room_id = "!departed:localhost"
+    event_id = "$cached-before-departure"
+    event = {
+        "content": {"body": "private history", "msgtype": "m.text"},
+        "event_id": event_id,
+        "origin_server_ts": 1,
+        "room_id": room_id,
+        "sender": "@user:localhost",
+        "type": "m.room.message",
+    }
+    cache_path = tmp_path / "event-cache.db"
+    seed_root = SqliteEventCache(cache_path)
+    await seed_root.initialize()
+    seed_cache = seed_root.for_principal(principal_id)
+    await seed_cache.store_event(event_id, room_id, event)
+    cache_generation = seed_cache.cache_generation
+    assert cache_generation is not None
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s_rejected",
+        cache_generation=cache_generation,
+    )
+    await seed_root.close()
+
+    restarted_root = SqliteEventCache(cache_path)
+    await restarted_root.initialize()
+    restarted_cache = restarted_root.for_principal(principal_id)
+    assert await restarted_cache.get_event(room_id, event_id) == event
+    bot = _agent_bot(tmp_path)
+    bot.event_cache = restarted_cache
+    bot.client = make_matrix_client_mock(user_id=principal_id)
+    bot.client.rooms = {}
+    bot.client.next_batch = await bot._sync_cache_trust.prepare_startup()
+    bot.client.invalidate_rejected_sync_position = AsyncMock()
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    try:
+        await bot._on_sync_error(sync_error)
+        await bot._on_sync_response(_sync_response("s_fresh"))
+
+        assert bot._rejected_sync_room_ids == set()
+        assert await restarted_cache.get_event(room_id, event_id) is None
+        checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_fresh"  # noqa: S105
+    finally:
+        await restarted_root.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_checkpoint_clear_failure_still_purges_cache_across_restart(
+    tmp_path: Path,
+) -> None:
+    """Failed token deletion cannot prevent durable rejected-scope cleanup."""
+    principal_id = "@mindroom_code:localhost"
+    room_id = "!departed:localhost"
+    event_id = "$cached-before-rejection"
+    event = {
+        "content": {"body": "private history", "msgtype": "m.text"},
+        "event_id": event_id,
+        "origin_server_ts": 1,
+        "room_id": room_id,
+        "sender": "@user:localhost",
+        "type": "m.room.message",
+    }
+    cache_path = tmp_path / "event-cache.db"
+    first_root = SqliteEventCache(cache_path)
+    await first_root.initialize()
+    first_cache = first_root.for_principal(principal_id)
+    await first_cache.store_event(event_id, room_id, event)
+    cache_generation = first_cache.cache_generation
+    assert cache_generation is not None
+    save_sync_token(
+        tmp_path,
+        "code",
+        "s_rejected",
+        cache_generation=cache_generation,
+    )
+    first_bot = _agent_bot(tmp_path)
+    first_bot.event_cache = first_cache
+    assert await first_bot._sync_cache_trust.prepare_startup() == "s_rejected"
+
+    try:
+        with patch.object(
+            first_bot._sync_continuity_store,
+            "clear_checkpoint",
+            side_effect=OSError("checkpoint cannot be removed"),
+        ):
+            await first_bot._sync_cache_trust.reject_unknown_pos()
+    finally:
+        await first_root.close()
+
+    reopened_root = SqliteEventCache(cache_path)
+    await reopened_root.initialize()
+    reopened_cache = reopened_root.for_principal(principal_id)
+    restarted_bot = _agent_bot(tmp_path)
+    restarted_bot.event_cache = reopened_cache
+    try:
+        assert await restarted_bot._sync_cache_trust.prepare_startup() == "s_rejected"
+        assert await reopened_cache.get_event(room_id, event_id) is None
+    finally:
+        await reopened_root.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_path: Path) -> None:
     """Post-start M_UNKNOWN_POS must not leave a poisoned sync token in place."""
     bot = _agent_bot(tmp_path)

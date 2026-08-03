@@ -70,11 +70,7 @@ class SyncCacheTrust:
         self._saved_checkpoint = None if record is None else record.checkpoint
         loaded = self._load_valid_checkpoint(self._saved_checkpoint)
         if loaded is None and await self.invalidate_for_cache_scope_cleanup():
-            try:
-                await cache.purge_principal()
-            except Exception as exc:
-                cache.disable("untrusted_principal_cache_cleanup_failed")
-                self.logger.warning("matrix_untrusted_principal_cache_disabled", error=str(exc))
+            await self._purge_untrusted_principal_cache()
 
         self.checkpoint = None
         self._clear_recovery_handoff()
@@ -294,11 +290,19 @@ class SyncCacheTrust:
         return await run_coroutine_until_complete(apply())
 
     async def reject_unknown_pos(self) -> SyncCertificationDecision:
-        """Invalidate a checkpoint rejected by the homeserver."""
+        """Invalidate a checkpoint and cache scope rejected by the homeserver."""
 
         async def reject() -> SyncCertificationDecision:
             async with self._mutation_lock:
-                decision = handle_unknown_pos()
+                self._cache_scope_epoch += 1
+                decision = replace(
+                    handle_unknown_pos(),
+                    cache_scope_epoch=self._cache_scope_epoch,
+                )
+                # The purge first fences reads synchronously. A failed checkpoint
+                # clear disables writes, so reversing this order could preserve
+                # rejected-scope rows across process restart.
+                await self._purge_untrusted_principal_cache()
                 await self._apply_decision_locked(decision)
                 self._clear_recovery_handoff()
                 self._safe_checkpoint_catchup_pending = False
@@ -306,6 +310,15 @@ class SyncCacheTrust:
                 return decision
 
         return await run_coroutine_until_complete(reject())
+
+    async def _purge_untrusted_principal_cache(self) -> None:
+        """Remove cache rows whose room scope no certified position can prove."""
+        cache = self.runtime.event_cache
+        try:
+            await cache.purge_principal()
+        except Exception as exc:
+            cache.disable("untrusted_principal_cache_cleanup_failed")
+            self.logger.warning("matrix_untrusted_principal_cache_disabled", error=str(exc))
 
     async def _apply_decision_locked(
         self,

@@ -910,7 +910,7 @@ async def test_cold_limited_initial_window_rewinds_until_certified(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_unknown_position_limited_window_keeps_rewinding_until_certified(tmp_path: Path) -> None:
     """M_UNKNOWN_POS recovery cannot advance past an uncertified window."""
-    trust, _cache, _runtime = _trust(tmp_path)
+    trust, cache, _runtime = _trust(tmp_path)
 
     unknown = await trust.reject_unknown_pos()
     initial = await trust.certify_response(
@@ -923,6 +923,46 @@ async def test_unknown_position_limited_window_keeps_rewinding_until_certified(t
 
     assert unknown.reset_client_token is True
     assert initial.reset_client_token is True
+    cache.purge_principal.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unknown_position_purge_failure_disables_cache(tmp_path: Path) -> None:
+    """Rejected continuity cannot expose rows when principal cleanup fails."""
+    trust, cache, _runtime = _trust(tmp_path)
+    cache.purge_principal.side_effect = RuntimeError("purge failed")
+
+    decision = await trust.reject_unknown_pos()
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    cache.disable.assert_called_once_with("untrusted_principal_cache_cleanup_failed")
+    trust.logger.warning.assert_any_call(
+        "matrix_untrusted_principal_cache_disabled",
+        error="purge failed",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_position_rejects_pre_purge_certification_plan(tmp_path: Path) -> None:
+    """A response planned before rejected-position cleanup cannot certify afterward."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    cache_result = SyncCacheWriteResult(complete=True)
+    stale_decision = trust.plan_response(
+        next_batch="s_stale",
+        cache_result=cache_result,
+    )
+
+    await trust.reject_unknown_pos()
+    applied, _record = await trust.apply_response(
+        stale_decision,
+        cache_result=cache_result,
+    )
+
+    assert applied.reason == "cache_scope_invalidated"
+    assert applied.reset_client_token is True
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
 
 
 @pytest.mark.asyncio
