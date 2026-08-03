@@ -327,6 +327,87 @@ async def test_real_nio_initial_history_is_fenced_and_continuation_is_live(
 
 
 @pytest.mark.asyncio
+async def test_cold_room_window_reentry_message_is_dispatched(
+    tmp_path: Path,
+) -> None:
+    """A cold room's window re-entry message must reach its message callback.
+
+    Regression (2026-08-03, mindroom.chat "Test" room): rooms outside the
+    sliding-sync list window come back flagged ``initial`` and without
+    ``num_live`` (Tuwunel omits it), so nio classifies the delivered tail —
+    including the very message the user just sent — as HISTORY, and the
+    cold-history fence silently drops it. Every agent in every idle room
+    stops answering; the drop is only visible at debug level.
+    """
+    store = DispatchObligationStore(
+        tracking_path=tmp_path,
+        principal_id="@code:example.org",
+        entity_name="code",
+    )
+    fence = ColdHistoryFence(store)
+    seen: list[str] = []
+
+    async def callback(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+    ) -> DispatchCallbackResult:
+        seen.append(event.event_id)
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(store, fence, callback)
+    client = nio.AsyncClient(
+        "https://example.org",
+        "@code:example.org",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    owner = object()
+    runner.register_source_callbacks(client, owner=owner)
+
+    def sliding(pos: str, rooms: dict[str, object]) -> nio.SlidingSyncResponse:
+        response = nio.SlidingSyncResponse.from_dict({"pos": pos, "rooms": rooms})
+        assert isinstance(response, nio.SlidingSyncResponse)
+        return response
+
+    try:
+        # Ordinary continuation while the room is inside the list window.
+        await client.receive_response(
+            sliding(
+                "s1",
+                {
+                    "!room:example.org": {
+                        "membership": "join",
+                        "timeline": [_message("$warm").source],
+                    },
+                },
+            ),
+        )
+        # The room falls out of the window; nothing is delivered for it.
+        await client.receive_response(sliding("s2", {}))
+        # A new user message pulls the room back in: the server flags the
+        # delivery ``initial`` and omits ``num_live``.
+        await client.receive_response(
+            sliding(
+                "s3",
+                {
+                    "!room:example.org": {
+                        "initial": True,
+                        "membership": "join",
+                        "timeline": [_message("$cold_mention").source],
+                    },
+                },
+            ),
+        )
+        await wait_for_background_tasks(timeout=1, owner=owner)
+    finally:
+        await client.close()
+
+    assert seen == ["$warm", "$cold_mention"]
+
+
+@pytest.mark.asyncio
 async def test_direct_recovery_bypasses_timeline_provenance(
     tmp_path: Path,
 ) -> None:
