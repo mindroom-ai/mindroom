@@ -2919,7 +2919,10 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
         )
 
-    assert not bot._turn_store.is_handled("$older")
+    persisted = bot._turn_store.get_turn_record("$older")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert coordinator._lifecycle_coordinator._thread_queued_signals == {}
