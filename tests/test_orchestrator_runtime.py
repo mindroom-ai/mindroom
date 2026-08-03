@@ -2472,7 +2472,6 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
             patch.object(orchestrator, "_start_sync_task"),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
         ):
             await orchestrator._run_bot_start_retry("general")
 
@@ -2522,7 +2521,6 @@ class TestMultiAgentOrchestrator:
                 side_effect=lambda *_args: order.append("sync_started"),
             ),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         ):
             await orchestrator._run_bot_start_retry("general")
