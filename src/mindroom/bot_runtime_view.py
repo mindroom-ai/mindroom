@@ -59,11 +59,6 @@ class BotRuntimeView(Protocol):
     @property
     def runtime_generation(self) -> str: ...  # noqa: D102
 
-    @property
-    def callback_failure_count(self) -> int: ...  # noqa: D102
-
-    def mark_callback_failed(self) -> None: ...  # noqa: D102
-
 
 @dataclass
 class BotRuntimeState:
@@ -84,7 +79,6 @@ class BotRuntimeState:
     # Clock-free ownership stamp for streams created by this bot start.
     runtime_generation: str = field(default_factory=lambda: uuid4().hex)
     _runtime_generation_lease: RuntimeGenerationLease | None = field(default=None, init=False, repr=False)
-    callback_failure_count: int = 0
 
     def mark_runtime_started(self) -> None:
         """Rotate the generation and hold its cross-process lease for this bot start."""
@@ -102,7 +96,3 @@ class BotRuntimeState:
             return
         self._runtime_generation_lease.release()
         self._runtime_generation_lease = None
-
-    def mark_callback_failed(self) -> None:
-        """Record that a Matrix callback failed after sync certification."""
-        self.callback_failure_count += 1

@@ -985,7 +985,7 @@ async def test_obsolete_sync_schema_at_legacy_path_starts_cold(
     )
     trust = SyncCacheTrust(
         continuity_store=continuity_store,
-        runtime=MagicMock(event_cache=cache, callback_failure_count=0),
+        runtime=MagicMock(event_cache=cache),
         logger=MagicMock(),
     )
     try:
