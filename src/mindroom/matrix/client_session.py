@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
-from nio.client.sync_recovery import RecoveryPlan, drain_recovery_dispatches, persist_response_plan
+from nio.client.sync_recovery import (
+    drain_recovery_dispatches,
+    merge_recovery_plans,
+    persist_response_plan,
+    plan_room_timeline,
+)
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -88,11 +93,21 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             recovery_room_ids.update(room_id for room_id, generation in self._recovery.events if generation > 0)
             if recovery_room_ids:
                 async with self._recovery_room_state(recovery_room_ids):
+                    plan = merge_recovery_plans(
+                        plan_room_timeline(
+                            self._recovery,
+                            room_id=room_id,
+                            timeline_events=(),
+                            user_id=self.user_id,
+                            membership="leave",
+                        )
+                        for room_id in sorted(recovery_room_ids)
+                    )
                     persist_response_plan(
                         self._recovery,
                         self._recovery_store,
                         token=None,
-                        plan=RecoveryPlan(clear_rooms=frozenset(recovery_room_ids)),
+                        plan=plan,
                     )
             self._recovery.outcomes.clear()
             self.next_batch = None

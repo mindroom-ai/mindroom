@@ -265,21 +265,6 @@ def _room_member_events_from_sync_state(
                 yield room, event
 
 
-def _room_member_events_from_sync_timeline(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-) -> Iterator[tuple[nio.MatrixRoom, nio.RoomMemberEvent]]:
-    """Yield room-member events from sync timelines with their resolved room."""
-    for room_id, join_info in response.rooms.join.items():
-        room = rooms.get(room_id)
-        if room is None:
-            continue
-        for event in join_info.timeline.events:
-            if isinstance(event, nio.RoomMemberEvent):
-                yield room, event
-
-
 def room_member_sync_state_plan(
     response: nio.SyncResponse,
     *,
@@ -314,28 +299,6 @@ def room_member_sync_state_plan(
     return _RoomMemberSyncPlan(
         dispatch_events=tuple(dispatch_events),
         record_events=tuple(record_events),
-    )
-
-
-def room_member_sync_timeline_events(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...]:
-    """Return eligible live joins carried by a restored-token timeline."""
-    return tuple(
-        (room, event)
-        for room, event in _room_member_events_from_sync_timeline(response, rooms=rooms)
-        if _room_member_join_from_event(
-            room,
-            event,
-            config=config,
-            runtime_paths=runtime_paths,
-            require_previous_membership=False,
-        )
-        is not None
     )
 
 

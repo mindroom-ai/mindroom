@@ -88,17 +88,21 @@ The registered `DispatchObligationRunner` source callback durably accepts each r
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 `SyncCacheTrust` certifies a complete recovered response, rewinds every locally incomplete, failed, or nio-unrecovered response to the retained pre-gap checkpoint, and relies on nio's persisted aggregate gap state instead of duplicating it.
+A safe-checkpoint startup retains its catch-up replay debt through intermediate nio recovery settlement and clears that debt only after a response certifies.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 When no generation-safe checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
 Classic receive-loop exit also reconciles nio's live cursor with the last certified checkpoint, covering cancellation after nio applies a response but before its response callback starts.
+A server-rejected Classic cursor clears the persisted transport token and rejected historical recovery generations while moving every unstarted live event into a fresh synthetic generation for later dispatch.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.
-`ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
+`ColdHistoryFence` admits live events immediately and admits historical events only when the exact callback is already pending or the room-member lifecycle phase explicitly owns catch-up recovery.
 The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 Checkpoint mutations serialize their epoch check, durable transform, and runtime publication, while continuity revisions prevent older completed tasks from overwriting newer join-fence state.
 Malformed or future continuity records are durably repaired to an empty cold record before startup room lifecycle restoration.
 Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+`RoomMemberHookLifecycle` owns baseline, catch-up, and live phases, persists authorized timeline joins while ordinary hooks are fenced, and drains those lifecycle obligations before certification.
+Malformed room-member lifecycle obligations fence snapshot-marker writes for their entire room and remain durable for operator repair.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 Current invite callbacks bypass cold-history admission because they represent live membership work, while their callback runner still provides exact durable retry.

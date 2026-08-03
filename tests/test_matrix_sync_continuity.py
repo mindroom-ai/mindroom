@@ -3473,7 +3473,6 @@ async def test_certification_cancellation_is_not_logged_as_durability_failure(
         await bot._handle_classic_sync_response(
             response,
             first_sync_response=False,
-            room_member_join_hooks_were_armed=True,
         )
 
     assert not any(entry["event"] == "matrix_sync_certification_apply_failed" for entry in logs)

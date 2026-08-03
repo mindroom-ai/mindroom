@@ -90,6 +90,22 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     return event
 
 
+def _member_event(event_id: str) -> nio.RoomMemberEvent:
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": event_id,
+            "sender": "@user:example.org",
+            "state_key": "@user:example.org",
+            "origin_server_ts": 1_234,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
+
+
 def _reaction_obligation(event_id: str) -> DispatchObligation:
     """Build one replayable reaction obligation."""
     return replace(
@@ -1276,6 +1292,47 @@ async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) 
     await first
 
     assert not _store(tmp_path).has_pending("$duplicate", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_room_lifecycle_drain_waits_for_exact_active_owner(tmp_path: Path) -> None:
+    """Certification drain must wait for an active callback instead of skipping it."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        await release.wait()
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.ROOM_LIFECYCLE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _member_event("$member")
+    obligation = await runner.persist(room, event, DispatchCallbackKind.ROOM_LIFECYCLE)
+    assert obligation is not None
+
+    active = asyncio.create_task(runner._run_persisted(obligation, room=room, event=event))
+    await entered.wait()
+    drain = asyncio.create_task(runner.drain_pending_room_lifecycle())
+    await asyncio.sleep(0)
+
+    assert not drain.done()
+
+    release.set()
+    await active
+    await drain
+
+    assert attempts == 1
+    assert not store.has_pending(event.event_id, DispatchCallbackKind.ROOM_LIFECYCLE)
 
 
 @pytest.mark.asyncio

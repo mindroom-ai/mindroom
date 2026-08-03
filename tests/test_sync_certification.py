@@ -142,6 +142,29 @@ def test_unrecovered_room_outweighs_independent_limited_room() -> None:
     assert decision.reason == "sync_recovery_incomplete"
 
 
+def test_checkpoint_catchup_requests_replay_only_after_unresolved_recovery() -> None:
+    """Safe catch-up policy must not rewind a complete response without a gap."""
+    room_id = "!pending:localhost"
+
+    unresolved = certify_sync_response(
+        next_batch="s_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+        replay_after_unresolved_recovery=True,
+    )
+    complete = certify_sync_response(
+        next_batch="s_complete",
+        cache_result=SyncCacheWriteResult(complete=True),
+        replay_after_unresolved_recovery=True,
+    )
+
+    assert unresolved.replay_required_after_recovery is True
+    assert complete.state is SyncTrustState.CERTIFIED
+    assert complete.reset_client_token is False
+
+
 def test_dispatch_persist_failure_defers_recovery_before_safe_replay() -> None:
     """Rejected recovered work must settle in NIO before cache-safe replay."""
     room_id = "!pending:localhost"

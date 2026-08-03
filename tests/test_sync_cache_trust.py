@@ -573,20 +573,94 @@ async def test_terminal_unrecovered_gap_rewinds_after_outcome_disappears(
 
 
 @pytest.mark.asyncio
-async def test_recovered_outcome_settles_prior_gap_and_certifies(tmp_path: Path) -> None:
-    """A later positive NIO outcome must settle exact recovery debt."""
+async def test_safe_checkpoint_catchup_replays_after_recovery_before_certifying(
+    tmp_path: Path,
+) -> None:
+    """Startup catch-up debt must survive recovery until one clean replay certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
+    first_room_id = "!first:localhost"
+    second_room_id = "!second:localhost"
+
+    first_gap = await trust.certify_response(
+        next_batch="s_first_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({first_room_id}),
+        ),
+    )
+    first_recovery = await trust.certify_response(
+        next_batch="s_first_recovery",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            recovered_room_ids=frozenset({first_room_id}),
+        ),
+    )
+    second_gap = await trust.certify_response(
+        next_batch="s_second_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({second_room_id}),
+        ),
+    )
+    second_recovery = await trust.certify_response(
+        next_batch="s_second_recovery",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            recovered_room_ids=frozenset({second_room_id}),
+        ),
+    )
+    replayed = await trust.certify_response(
+        next_batch="s_replayed",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+    post_certification_room_id = "!post-certification:localhost"
+    post_certification_gap = await trust.certify_response(
+        next_batch="s_post_certification_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({post_certification_room_id}),
+        ),
+    )
+    post_certification_recovery = await trust.certify_response(
+        next_batch="s_post_certification_recovery",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            recovered_room_ids=frozenset({post_certification_room_id}),
+        ),
+    )
+
+    assert first_gap.replay_required_after_recovery is True
+    assert first_recovery.reason == "sync_cache_replay_required"
+    assert first_recovery.reset_client_token is True
+    assert second_gap.replay_required_after_recovery is True
+    assert second_recovery.reason == "sync_cache_replay_required"
+    assert second_recovery.reset_client_token is True
+    assert replayed.state is SyncTrustState.CERTIFIED
+    assert post_certification_gap.replay_required_after_recovery is False
+    assert post_certification_recovery.state is SyncTrustState.CERTIFIED
+    assert trust.retry_token() == "s_post_certification_recovery"
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_post_certification_recovery",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tokenless_cold_start_recovery_certifies_without_replay(tmp_path: Path) -> None:
+    """A tokenless cold startup must not invent safe-checkpoint catch-up debt."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    assert await trust.prepare_startup() is None
     room_id = "!room:localhost"
-    await trust.certify_response(
+
+    gap = await trust.certify_response(
         next_batch="s_after_gap",
         cache_result=SyncCacheWriteResult(
             complete=True,
             unrecovered_room_ids=frozenset({room_id}),
         ),
     )
-
     recovered = await trust.certify_response(
         next_batch="s_after_recovery",
         cache_result=SyncCacheWriteResult(
@@ -595,6 +669,7 @@ async def test_recovered_outcome_settles_prior_gap_and_certifies(tmp_path: Path)
         ),
     )
 
+    assert gap.replay_required_after_recovery is False
     assert recovered.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_after_recovery",

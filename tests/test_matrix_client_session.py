@@ -284,6 +284,105 @@ async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path
         await restarted.close()
 
 
+@pytest.mark.asyncio
+async def test_rejected_sync_position_preserves_unadmitted_live_events(tmp_path: Path) -> None:
+    """Rejected recovery history must not discard later live callback work."""
+    room_id = "!room:example.org"
+    user_id = "@mindroom_agent:example.org"
+    device_id = "AGENTDEVICE"
+    config = matrix_client_config()
+    admitted: list[tuple[str, nio.TimelineEventProvenance]] = []
+
+    async def admit(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        admitted.append((event.event_id, provenance))
+
+    live_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "live", "msgtype": "m.text"},
+            "event_id": "$live-unadmitted:example.org",
+            "origin_server_ts": 1,
+            "sender": "@alice:example.org",
+            "type": "m.room.message",
+        },
+    )
+    assert isinstance(live_event, nio.RoomMessageText)
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
+    client.add_event_admission_callback(admit)
+    client.next_batch = "s_before_gap"
+    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
+    await client.receive_response(
+        nio.SyncResponse(
+            "s_rejected",
+            nio.Rooms(
+                invite={},
+                join={
+                    room_id: nio.RoomInfo(
+                        nio.Timeline(
+                            [live_event],
+                            limited=True,
+                            prev_batch="p_before_gap",
+                        ),
+                        state=[],
+                        ephemeral=[],
+                        account_data=[],
+                    ),
+                },
+                leave={},
+            ),
+            nio.DeviceOneTimeKeyCount(None, None),
+            nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        ),
+    )
+
+    recovery = cast("Any", client)._recovery
+    assert admitted == []
+    assert not recovery._active_dispatches
+    assert [event.event_id for events in recovery.events.values() for event in events] == [live_event.event_id]
+
+    await client_session.invalidate_rejected_sync_position(client)
+    await client.close()
+    assert client.store is not None
+    cast("Any", client.store).database.close()
+
+    restarted = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
+    restarted.add_event_admission_callback(admit)
+    try:
+        assert not restarted.loaded_sync_token
+        queued = [event for events in cast("Any", restarted)._recovery.events.values() for event in events]
+        assert [(event.event_id, event.is_live) for event in queued] == [(live_event.event_id, True)]
+
+        await restarted.receive_response(
+            nio.SyncResponse(
+                "s_fresh",
+                nio.Rooms(invite={}, join={}, leave={}),
+                nio.DeviceOneTimeKeyCount(None, None),
+                nio.DeviceList(changed=[], left=[]),
+                to_device_events=[],
+                presence_events=[],
+            ),
+        )
+
+        assert admitted == [(live_event.event_id, nio.TimelineEventProvenance.LIVE)]
+    finally:
+        await restarted.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
 def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
     """Private Olm identity material is inaccessible to other local users."""

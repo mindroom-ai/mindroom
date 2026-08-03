@@ -60,7 +60,7 @@ _NON_LIFECYCLE_CALLBACK_KIND_VALUES = frozenset(
 )
 
 _SourceAdmission = Callable[
-    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
+    [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None, bool],
     Awaitable[DispatchSourceAdmission],
 ]
 _EventProvenanceObserver = Callable[[str, nio.TimelineEventProvenance], None]
@@ -69,6 +69,8 @@ _SourceRejectionCallback = Callable[
     [nio.MatrixRoom, DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
     Awaitable[None],
 ]
+_RoomLifecycleAdmission = Callable[[nio.TimelineEventProvenance], bool]
+_RoomLifecycleExecution = Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +86,7 @@ async def _admit_all_sources(
     _source_event_id: str,
     _callback_kind: DispatchCallbackKind,
     _provenance: nio.TimelineEventProvenance | None,
+    _allow_historical_recovery: bool,
 ) -> DispatchSourceAdmission:
     return DispatchSourceAdmission.ACCEPTED
 
@@ -126,11 +129,12 @@ class DispatchObligationRunner:
     cache_historical_event: _HistoricalEventCache = _ignore_historical_event_cache
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
-    room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
+    room_lifecycle_admission_enabled: _RoomLifecycleAdmission = lambda _provenance: False
+    room_lifecycle_execution_enabled: _RoomLifecycleExecution = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
     _active: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
-    _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _active_condition: asyncio.Condition = field(default_factory=asyncio.Condition, init=False, repr=False)
     _retry_keys: dict[DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
     _retry_corrupt: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -269,6 +273,36 @@ class DispatchObligationRunner:
             corrupt_room_ids=frozenset(corrupt_room_ids),
         )
 
+    async def drain_pending_room_lifecycle(self) -> None:
+        """Complete every valid captured member callback before certification."""
+        for obligation in await asyncio.to_thread(self.store.pending):
+            if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
+                continue
+            try:
+                event = parse_recovery_event(obligation)
+            except DispatchObligationCorruptionError:
+                logger.error(  # noqa: TRY400
+                    "dispatch_obligation_recovery_corrupt",
+                    source_event_id=obligation.source_event_id,
+                    callback_kind=obligation.callback_kind.value,
+                    room_id=obligation.room_id,
+                )
+                continue
+            if not isinstance(event, nio.RoomMemberEvent):
+                logger.error(
+                    "dispatch_obligation_recovery_corrupt",
+                    source_event_id=obligation.source_event_id,
+                    callback_kind=obligation.callback_kind.value,
+                    room_id=obligation.room_id,
+                )
+                continue
+            await self._run_persisted(
+                obligation,
+                room=self.room_for_id(obligation.room_id),
+                event=event,
+                wait_for_active=True,
+            )
+
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
         client.add_event_admission_callback(self._admit_source_event)
@@ -307,24 +341,37 @@ class DispatchObligationRunner:
                 raise
             except Exception as error:
                 raise nio.CallbackNotAcceptedError(str(error)) from error
-        callback_kind = self._admission_kind(event)
+        callback_kind = self._admission_kind(event, provenance)
         if callback_kind is None:
             return
         _ADMITTED_OBLIGATION.set(None)
         try:
-            obligation = await self.persist(room, event, callback_kind, provenance)
+            obligation = await self.persist(
+                room,
+                event,
+                callback_kind,
+                provenance,
+                allow_historical_recovery=(
+                    callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+                    and provenance is nio.TimelineEventProvenance.HISTORY
+                ),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             raise nio.CallbackNotAcceptedError(str(error)) from error
         _ADMITTED_OBLIGATION.set(obligation)
 
-    def _admission_kind(self, event: nio.Event) -> DispatchCallbackKind | None:
+    def _admission_kind(
+        self,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> DispatchCallbackKind | None:
         """Return the one durable callback kind owned by a timeline event."""
         for policy in SOURCE_CALLBACK_POLICIES:
             if policy.matches(event):
                 return policy.callback_kind
-        if isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_admission_enabled():
+        if isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_admission_enabled(provenance):
             return DispatchCallbackKind.ROOM_LIFECYCLE
         return None
 
@@ -369,6 +416,8 @@ class DispatchObligationRunner:
         event: DispatchEvent,
         callback_kind: DispatchCallbackKind,
         provenance: nio.TimelineEventProvenance | None = None,
+        *,
+        allow_historical_recovery: bool = False,
     ) -> DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
@@ -378,6 +427,7 @@ class DispatchObligationRunner:
                 obligation.source_event_id,
                 callback_kind,
                 provenance,
+                allow_historical_recovery,
             )
             if admission is not DispatchSourceAdmission.ACCEPTED:
                 if self.on_source_rejected is not None:
@@ -489,6 +539,7 @@ class DispatchObligationRunner:
         *,
         room: nio.MatrixRoom,
         event: DispatchEvent,
+        wait_for_active: bool = False,
     ) -> None:
         """Execute work whose exact durable obligation already exists."""
         if room.room_id != obligation.room_id or dispatch_event_source(event) != obligation.event_source:
@@ -496,9 +547,19 @@ class DispatchObligationRunner:
             event = parse_recovery_event(obligation)
         if obligation.requires_pending_check:
             with turn_dispatch_recovery_scope(active=obligation.callback_kind in _TURN_BACKED_KINDS):
-                await self._run_obligation(obligation, room=room, event=event)
+                await self._run_obligation(
+                    obligation,
+                    room=room,
+                    event=event,
+                    wait_for_active=wait_for_active,
+                )
             return
-        await self._run_obligation(obligation, room=room, event=event)
+        await self._run_obligation(
+            obligation,
+            room=room,
+            event=event,
+            wait_for_active=wait_for_active,
+        )
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
@@ -624,9 +685,13 @@ class DispatchObligationRunner:
         *,
         room: nio.MatrixRoom,
         event: DispatchEvent,
+        wait_for_active: bool = False,
     ) -> bool:
         """Run one obligation, returning whether this caller acquired its live claim."""
-        if not await self._claim(obligation.key):
+        claimed = (
+            await self._claim_when_available(obligation.key) if wait_for_active else await self._claim(obligation.key)
+        )
+        if not claimed:
             return False
         try:
             if obligation.requires_pending_check and not await asyncio.to_thread(
@@ -696,15 +761,23 @@ class DispatchObligationRunner:
         await run_blocking_until_complete(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: DispatchObligationKey) -> bool:
-        async with self._active_lock:
+        async with self._active_condition:
             if key in self._active:
                 return False
             self._active.add(key)
             return True
 
+    async def _claim_when_available(self, key: DispatchObligationKey) -> bool:
+        """Wait until this exact callback has no competing in-process owner."""
+        async with self._active_condition:
+            await self._active_condition.wait_for(lambda: key not in self._active)
+            self._active.add(key)
+            return True
+
     async def _release(self, key: DispatchObligationKey) -> None:
-        async with self._active_lock:
+        async with self._active_condition:
             self._active.discard(key)
+            self._active_condition.notify_all()
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +793,11 @@ class _DispatchObligationTaskWrapper:
         key = self.runner._obligation_for_event(room, event, self.callback_kind).key
         obligation = _ADMITTED_OBLIGATION.get()
         _ADMITTED_OBLIGATION.set(None)
+        if (
+            self.callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+            and not self.runner.room_lifecycle_execution_enabled()
+        ):
+            return
         if obligation is not None and obligation.key == key:
             self.runner._schedule_background_obligation(
                 obligation,

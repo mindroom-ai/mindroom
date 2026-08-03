@@ -141,6 +141,7 @@ def certify_sync_response(
     tokenless_baseline_pending: bool = False,
     unresolved_recovery_room_ids: frozenset[str] = frozenset(),
     replay_required_after_recovery: bool = False,
+    replay_after_unresolved_recovery: bool = False,
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     token = normalize_sync_token(next_batch)
@@ -154,6 +155,9 @@ def certify_sync_response(
     )
     replay_required_after_recovery = replay_required_after_recovery or bool(
         cache_result.errors or not cache_result.complete,
+    )
+    replay_required_after_recovery = replay_required_after_recovery or bool(
+        replay_after_unresolved_recovery and cache_result.unrecovered_room_ids,
     )
     if cache_result.unrecovered_room_ids and token is not None:
         return _uncertain_decision(

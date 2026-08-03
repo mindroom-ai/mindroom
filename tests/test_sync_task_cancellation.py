@@ -37,6 +37,7 @@ from mindroom.matrix.health import (
     track_matrix_sync_cache_write,
 )
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.room_member_hook_lifecycle import RoomMemberHookLifecycle
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
@@ -1218,7 +1219,7 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
-    bot._room_member_join_bootstrap_pending = True
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
     bot._sync_shutting_down = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
@@ -1260,10 +1261,9 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
     bot._first_sync_done = False
-    bot._room_member_join_bootstrap_pending = False
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
-    bot._room_member_join_hooks_armed = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
     bot.client = FakeClient()
@@ -1280,7 +1280,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
 
     # Call the real sync_forever method
     await AgentBot.sync_forever(bot)
-    await AgentBot._on_sync_response(bot, MagicMock())
+    bot._room_member_hook_lifecycle.certified()
     await AgentBot.sync_forever(bot)
 
     assert full_state_values == [True, False]
@@ -1297,7 +1297,8 @@ async def test_pending_member_bootstrap_forces_replacement_full_state() -> None:
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True
-    bot._room_member_join_bootstrap_pending = True
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
+    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
     bot._sync_shutting_down = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
@@ -1339,6 +1340,7 @@ async def test_sliding_sync_mode_uses_sliding_sync_forever() -> None:
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = "code"
     bot._first_sync_done = False
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=False)
     bot.rooms = ["!alpha:localhost", "#lobby:localhost", "!beta:localhost"]
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="sliding", sliding_timeline_limit=7))
     bot.client = FakeClient()
@@ -1407,7 +1409,8 @@ async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True
-    bot._room_member_join_bootstrap_pending = False
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
+    bot._room_member_hook_lifecycle.certified()
     bot._sync_shutting_down = False
     bot.config = Config()
     bot.rooms = []
@@ -1423,7 +1426,6 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
     """A sliding sync response must feed the watchdog clock and first-sync lifecycle."""
     bot = _sliding_response_bot(tmp_path)
     bot._first_sync_done = False
-    bot._room_member_join_hooks_armed = False
 
     with patch.object(
         bot,
@@ -1434,7 +1436,7 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
 
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
-    assert bot._room_member_join_hooks_armed is True
+    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:
@@ -1523,7 +1525,6 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
     install_runtime_cache_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
-    bot._room_member_join_hooks_armed = True
     return bot
 
 
@@ -1676,7 +1677,7 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
         await bot._on_sync_error(error)
 
     assert bot._sync_continuity_store.load().checkpoint is not None
-    assert bot._room_member_join_hooks_armed is True
+    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
     assert not any(entry["log_level"] == "warning" for entry in logs)
 
 
@@ -1824,6 +1825,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=False)
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 

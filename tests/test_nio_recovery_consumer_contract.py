@@ -349,8 +349,8 @@ async def test_real_nio_terminal_gap_retries_from_safe_checkpoint(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_real_nio_timeout_can_recover_without_replanning_the_gap(tmp_path: Path) -> None:
-    """A transient timeout must leave nio's live cursor free to drain the same gap."""
+async def test_real_nio_timeout_settles_before_safe_checkpoint_replay(tmp_path: Path) -> None:
+    """A transient timeout must settle nio's gap before replaying the safe catch-up."""
     room_id = "!transient-history:localhost"
     client = nio.AsyncClient(
         "https://localhost",
@@ -414,14 +414,20 @@ async def test_real_nio_timeout_can_recover_without_replanning_the_gap(tmp_path:
                     complete=True,
                 ),
             )
+            replayed = await trust.certify_response(
+                next_batch="s_replayed",
+                cache_result=SyncCacheWriteResult(complete=True),
+            )
     finally:
         await client.close()
 
     assert gap_response.unrecovered_room_ids == frozenset({room_id})
     assert recovery_response.recovered_room_ids == frozenset({room_id})
-    assert recovered.state is SyncTrustState.CERTIFIED
+    assert recovered.reason == "sync_cache_replay_required"
+    assert recovered.reset_client_token is True
+    assert replayed.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        "s_recovered",
+        "s_replayed",
         cache_generation=_CACHE_GENERATION,
     )
 

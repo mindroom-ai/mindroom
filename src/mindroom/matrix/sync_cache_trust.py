@@ -42,6 +42,7 @@ class SyncCacheTrust:
     # Ephemeral context for typed nio outcomes while the durable checkpoint is withheld.
     _unresolved_recovery_room_ids: frozenset[str] = field(default=frozenset(), init=False, repr=False)
     _replay_required_after_recovery: bool = field(default=False, init=False, repr=False)
+    _safe_checkpoint_catchup_pending: bool = field(default=False, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
@@ -78,6 +79,7 @@ class SyncCacheTrust:
         self.checkpoint = None
         self._clear_recovery_handoff()
         safe_token = loaded.token if loaded is not None else None
+        self._safe_checkpoint_catchup_pending = safe_token is not None
         nio_token = transport_resume_token or None
         startup_token = safe_token
         if nio_token is not None and nio_token != safe_token:
@@ -157,6 +159,7 @@ class SyncCacheTrust:
                 self._cache_scope_epoch += 1
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
+                self._safe_checkpoint_catchup_pending = False
                 if self._unresolved_recovery_room_ids:
                     self._replay_required_after_recovery = True
                 if await self._clear_saved_locked():
@@ -240,6 +243,7 @@ class SyncCacheTrust:
             tokenless_baseline_pending=self._tokenless_baseline_pending,
             unresolved_recovery_room_ids=self._unresolved_recovery_room_ids,
             replay_required_after_recovery=self._replay_required_after_recovery,
+            replay_after_unresolved_recovery=self._safe_checkpoint_catchup_pending,
         )
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
@@ -275,6 +279,8 @@ class SyncCacheTrust:
                 )
                 self._unresolved_recovery_room_ids = decision.unresolved_recovery_room_ids
                 self._replay_required_after_recovery = decision.replay_required_after_recovery
+                if decision.state is SyncTrustState.CERTIFIED or decision.clear_saved_token:
+                    self._safe_checkpoint_catchup_pending = False
                 if decision.reset_client_token:
                     self._refresh_tokenless_baseline_pending()
                 else:
@@ -291,6 +297,7 @@ class SyncCacheTrust:
                 decision = handle_unknown_pos()
                 await self._apply_decision_locked(decision)
                 self._clear_recovery_handoff()
+                self._safe_checkpoint_catchup_pending = False
                 self._refresh_tokenless_baseline_pending()
                 return decision
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -50,6 +50,10 @@ from mindroom.matrix.health import (
 )
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
+from mindroom.matrix.room_member_hook_lifecycle import (
+    RoomMemberHookLifecycle,
+    RoomMemberResponsePlan,
+)
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -120,7 +124,6 @@ from .matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     record_room_member_joins_seen_from_events,
     room_member_sync_state_plan,
-    room_member_sync_timeline_events,
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
@@ -179,16 +182,6 @@ _SYNC_TIMEOUT_MS = 30000
 # out.
 _SYNC_TIMELINE_LIMIT = 50
 _SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
-
-
-@dataclass(frozen=True, slots=True)
-class _RoomMemberJoinSyncHookPlan:
-    """Room-member join hook actions derived from one sync response."""
-
-    arm_after_response: bool = True
-    emit_state: bool = False
-    emit_timeline: bool = False
-    record_state_seen: bool = False
 
 
 def _create_best_effort_task_wrapper(
@@ -337,10 +330,7 @@ class AgentBot:
     _call_manager: CallManager | None
     _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
-    _room_member_join_hooks_armed: bool
-    _restored_token_catchup_pending: bool
-    _room_member_join_bootstrap_pending: bool
-    _room_member_join_baseline_record_pending: bool
+    _room_member_hook_lifecycle: RoomMemberHookLifecycle
     _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
@@ -376,10 +366,9 @@ class AgentBot:
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
-        self._room_member_join_hooks_armed = False
-        self._restored_token_catchup_pending = False
-        self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
-        self._room_member_join_baseline_record_pending = self.agent_name == ROUTER_AGENT_NAME
+        self._room_member_hook_lifecycle = RoomMemberHookLifecycle(
+            enabled=self.agent_name == ROUTER_AGENT_NAME,
+        )
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
@@ -566,9 +555,8 @@ class AgentBot:
             cache_historical_event=self._conversation_cache.cache_historical_event,
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
-            room_lifecycle_admission_enabled=lambda: (
-                self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
-            ),
+            room_lifecycle_admission_enabled=self._room_member_hook_lifecycle.admission_enabled,
+            room_lifecycle_execution_enabled=lambda: self._room_member_hook_lifecycle.callback_execution_enabled,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1212,9 +1200,7 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
-        if self.agent_name == ROUTER_AGENT_NAME and not self._room_member_join_hooks_armed:
-            self._room_member_join_bootstrap_pending = True
-            self._room_member_join_baseline_record_pending = True
+        self._room_member_hook_lifecycle.begin_sync_loop()
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1231,7 +1217,9 @@ class AgentBot:
             transport_resume_token=cast("Any", client).loaded_sync_token,
         )
         cast("Any", client).next_batch = sync_token
-        self._restored_token_catchup_pending = self._sync_cache_trust.retry_token() is not None
+        self._room_member_hook_lifecycle.prepare_startup(
+            resuming_position=sync_token is not None,
+        )
 
     async def _certify_sync_response(
         self,
@@ -1272,7 +1260,8 @@ class AgentBot:
         """Apply one cache-certification rewind to the Matrix client cursor."""
         if not decision.reset_client_token:
             return
-        self._rewind_client_to_retry_token()
+        _, has_retry_token = self._rewind_client_to_retry_token()
+        self._room_member_hook_lifecycle.rewound(has_retry_token=has_retry_token)
 
     def _rewind_client_to_retry_token(self) -> tuple[bool, bool]:
         """Move the Matrix client to the exact generation-safe retry cursor."""
@@ -1299,6 +1288,7 @@ class AgentBot:
         rewound, has_retry_token = self._rewind_client_to_retry_token()
         if not rewound:
             return
+        self._room_member_hook_lifecycle.rewound(has_retry_token=has_retry_token)
         self.logger.warning(
             "matrix_sync_receive_loop_exit_rewound_uncertified_cursor",
             has_retry_token=has_retry_token,
@@ -1309,6 +1299,7 @@ class AgentBot:
         rewound, has_retry_token = self._rewind_client_to_retry_token()
         if not rewound:
             return
+        self._room_member_hook_lifecycle.rewound(has_retry_token=has_retry_token)
         self.logger.warning(
             "pre_certification_sync_side_effect_failed_replaying_sync",
             has_retry_token=has_retry_token,
@@ -1357,9 +1348,8 @@ class AgentBot:
         decision: SyncCertificationDecision,
         *,
         cache_result: SyncCacheWriteResult,
-        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
         response: nio.SyncResponse,
-    ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
+    ) -> tuple[SyncCertificationDecision, bool]:
         """Apply certification only when every source callback reached durable ownership."""
         if self._sync_cache_trust.consume_dispatch_persist_failure():
             if decision.unresolved_recovery_room_ids:
@@ -1371,18 +1361,16 @@ class AgentBot:
                     cache_result=cache_result,
                     joined_room_ids=response.rooms.join,
                 )
-                return applied, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
+                return applied, True
             self._sync_cache_trust.reject_response_before_certification()
             self._rewind_sync_after_pre_certification_failure()
-            return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
+            return decision, True
         applied = await self._apply_sync_response_decision(
             decision,
             cache_result=cache_result,
             joined_room_ids=response.rooms.join,
         )
-        if applied.reset_client_token:
-            room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
-        return applied, room_member_join_hook_plan, False
+        return applied, False
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1423,45 +1411,16 @@ class AgentBot:
 
         return wrapper
 
-    def _room_member_join_sync_hook_plan(
-        self,
-        *,
-        first_sync_response: bool,
-        restored_token_first_sync_response: bool,
-        hooks_were_armed: bool,
-        decision: SyncCertificationDecision,
-    ) -> _RoomMemberJoinSyncHookPlan:
-        """Return room-member join hook actions for one certified sync response."""
-        if decision.reset_client_token:
-            return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
-        # The first restored-token sync is requested with full_state=True, so its
-        # state block is a current snapshot. Only the timeline is a catch-up stream.
-        emit_certified_state = (
-            decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
-        )
-        return _RoomMemberJoinSyncHookPlan(
-            arm_after_response=hooks_were_armed or decision.state is SyncTrustState.CERTIFIED,
-            emit_state=emit_certified_state,
-            emit_timeline=(decision.state is SyncTrustState.CERTIFIED and restored_token_first_sync_response),
-            record_state_seen=(
-                decision.state is SyncTrustState.CERTIFIED
-                and not emit_certified_state
-                and not self._room_member_join_bootstrap_pending
-            ),
-        )
-
     async def _run_pre_certification_sync_response_side_effects(
         self,
         response: nio.SyncResponse,
         *,
-        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
+        room_member_plan: RoomMemberResponsePlan,
     ) -> None:
         """Finish source-backed lifecycle work before certifying its sync position."""
-        if room_member_join_hook_plan.record_state_seen:
-            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-        if room_member_join_hook_plan.emit_timeline:
-            await self._emit_room_member_joined_sync_timeline_hooks(response)
-        if room_member_join_hook_plan.emit_state:
+        if room_member_plan.drain_captured_timeline:
+            await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
+        if room_member_plan.dispatch_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
 
     async def _run_sync_response_side_effects(
@@ -1490,25 +1449,17 @@ class AgentBot:
         response: nio.SyncResponse,
         *,
         first_sync_response: bool,
-        room_member_join_hooks_were_armed: bool,
-    ) -> tuple[_RoomMemberJoinSyncHookPlan, bool]:
+    ) -> bool:
         """Apply one Classic response through transport and cache owners."""
-        if (
-            self.agent_name == ROUTER_AGENT_NAME
-            and not room_member_join_hooks_were_armed
-            and not self._room_member_join_bootstrap_pending
-        ):
-            self._room_member_join_bootstrap_pending = True
-            self._room_member_join_baseline_record_pending = True
         self._apply_transport_recovery_outcome(
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
-                if self._room_member_join_baseline_record_pending:
+                if self._room_member_hook_lifecycle.baseline_record_pending:
                     await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-                    self._room_member_join_baseline_record_pending = False
+                    self._room_member_hook_lifecycle.baseline_recorded()
                 await self._apply_own_room_membership_from_sync(response)
                 await cache_fenced_world_readable_join_history(
                     cast("nio.AsyncClient", self.client),
@@ -1519,9 +1470,6 @@ class AgentBot:
             except BaseException:
                 self._sync_cache_trust.defer_replay_after_pre_certification_failure()
                 raise
-            restored_token_first_sync_response = self._restored_token_catchup_pending or (
-                first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
-            )
             try:
                 cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(response)
             except asyncio.CancelledError as exc:
@@ -1543,31 +1491,22 @@ class AgentBot:
                 next_batch=response.next_batch,
                 cache_result=cache_result,
             )
-            if restored_token_first_sync_response and decision.unresolved_recovery_room_ids:
-                decision = replace(decision, replay_required_after_recovery=True)
-            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
-                first_sync_response=first_sync_response,
-                restored_token_first_sync_response=restored_token_first_sync_response,
-                hooks_were_armed=room_member_join_hooks_were_armed,
+            room_member_plan = self._room_member_hook_lifecycle.plan_response(
                 decision=decision,
+                first_sync_response=first_sync_response,
             )
             try:
                 await self._run_pre_certification_sync_response_side_effects(
                     response,
-                    room_member_join_hook_plan=room_member_join_hook_plan,
+                    room_member_plan=room_member_plan,
                 )
             except BaseException:
                 self._sync_cache_trust.defer_replay_after_pre_certification_failure()
                 raise
             try:
-                (
-                    applied_decision,
-                    room_member_join_hook_plan,
-                    rejected_response,
-                ) = await self._apply_sync_response_after_dispatch_acceptance(
+                applied_decision, rejected_response = await self._apply_sync_response_after_dispatch_acceptance(
                     decision,
                     cache_result=cache_result,
-                    room_member_join_hook_plan=room_member_join_hook_plan,
                     response=response,
                 )
             except asyncio.CancelledError:
@@ -1580,11 +1519,9 @@ class AgentBot:
                 )
                 raise
         if applied_decision.state is SyncTrustState.CERTIFIED and not rejected_response:
-            self._restored_token_catchup_pending = False
-            self._room_member_join_bootstrap_pending = False
-            self._room_member_join_baseline_record_pending = False
+            self._room_member_hook_lifecycle.certified()
         self._mark_sync_progress()
-        return room_member_join_hook_plan, rejected_response
+        return rejected_response
 
     async def _handle_sliding_sync_response(self, response: nio.SlidingSyncResponse) -> None:
         """Apply one Sliding response through membership and transport owners."""
@@ -1599,34 +1536,28 @@ class AgentBot:
             await self._room_lifecycle.observe_trusted_sync_rooms(
                 room_id for room_id, room in response.rooms.items() if room.membership == "join"
             )
+        self._room_member_hook_lifecycle.certified()
         self._mark_sync_progress()
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
         dispatch_persist_failure_rejected_response = False
-        room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
-        room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
         self._mark_sync_progress()
 
         if self._sync_shutting_down:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            (
-                room_member_join_hook_plan,
-                dispatch_persist_failure_rejected_response,
-            ) = await self._handle_classic_sync_response(
+            dispatch_persist_failure_rejected_response = await self._handle_classic_sync_response(
                 _response,
                 first_sync_response=first_sync_response,
-                room_member_join_hooks_were_armed=room_member_join_hooks_were_armed,
             )
         elif isinstance(_response, nio.SlidingSyncResponse):
             await self._handle_sliding_sync_response(_response)
         if dispatch_persist_failure_rejected_response:
             return
         self._first_sync_done = True
-        self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
         await self._run_sync_response_side_effects(
             first_sync_response=first_sync_response,
@@ -1665,10 +1596,7 @@ class AgentBot:
             finally:
                 decision = await self._sync_cache_trust.reject_unknown_pos()
                 self._apply_client_rewind_decision(decision)
-                self._room_member_join_hooks_armed = False
-                self._restored_token_catchup_pending = False
-                self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
-                self._room_member_join_baseline_record_pending = self.agent_name == ROUTER_AGENT_NAME
+                self._room_member_hook_lifecycle.unknown_position()
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -2012,10 +1940,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._orchestrator_ready_handled = False
-        self._room_member_join_hooks_armed = False
-        self._restored_token_catchup_pending = False
-        self._room_member_join_bootstrap_pending = False
-        self._room_member_join_baseline_record_pending = False
+        self._room_member_hook_lifecycle.stop()
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
@@ -2186,7 +2111,7 @@ class AgentBot:
                 room_ids=self.rooms,
                 timeout_ms=_SYNC_TIMEOUT_MS,
                 sync_filter=_SYNC_FILTER,
-                first_sync_done=(self._first_sync_done and not self._room_member_join_bootstrap_pending),
+                first_sync_done=not self._room_member_hook_lifecycle.full_state_required,
             )
         finally:
             self._reconcile_classic_sync_cursor_after_loop_exit()
@@ -2388,28 +2313,6 @@ class AgentBot:
                     runtime_paths=self.runtime_paths,
                     storage_root=self.runtime_paths.storage_root,
                 )
-
-    async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
-        """Expose human joins from a restored-token catch-up sync timeline."""
-        if self.agent_name != ROUTER_AGENT_NAME:
-            return
-        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
-            return
-        client = self.client
-        if client is None:
-            return
-
-        for room, event in room_member_sync_timeline_events(
-            response,
-            rooms=client.rooms,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-        ):
-            await self._dispatch_obligation_runner.dispatch(
-                room,
-                event,
-                DispatchCallbackKind.ROOM_LIFECYCLE,
-            )
 
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
         await self._handle_decryption_failure_event(

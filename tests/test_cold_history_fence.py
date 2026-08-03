@@ -148,6 +148,31 @@ async def test_history_requires_one_exact_pending_obligation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_catchup_may_admit_authorized_historical_recovery() -> None:
+    """The lifecycle phase owner may admit recovered joins without opening other history."""
+    obligations = _PendingObligations()
+    fence = ColdHistoryFence(obligations)
+
+    lifecycle = await fence.admit_source(
+        "!room:example.org",
+        "$member",
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+        nio.TimelineEventProvenance.HISTORY,
+        allow_historical_recovery=True,
+    )
+    message = await fence.admit_source(
+        "!room:example.org",
+        "$message",
+        DispatchCallbackKind.MESSAGE,
+        nio.TimelineEventProvenance.HISTORY,
+        allow_historical_recovery=True,
+    )
+
+    assert lifecycle is DispatchSourceAdmission.ACCEPTED
+    assert message is DispatchSourceAdmission.COLD_HISTORY_FENCED
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "provenance",
     [nio.TimelineEventProvenance.LIVE, None],
