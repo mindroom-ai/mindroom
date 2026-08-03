@@ -12,6 +12,7 @@ from mindroom.matrix.client_delivery import (
     build_edit_event_content,
     send_message_result,
 )
+from tests.conftest import TEST_ACCESS_TOKEN
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -97,6 +98,7 @@ async def test_send_message_result_rechecks_plaintext_proof_authoritatively(
     """A plaintext proof must detect server-side encryption before exact send."""
     client = AsyncMock(spec=nio.AsyncClient)
     room_id = "!room:localhost"
+    client.access_token = TEST_ACCESS_TOKEN
     client.rooms = {room_id: nio.MatrixRoom(room_id, "@bot:localhost")} if cached_plaintext else {}
     plaintext_response = nio.RoomGetStateEventError(
         "No encryption state",
@@ -125,6 +127,44 @@ async def test_send_message_result_rechecks_plaintext_proof_authoritatively(
     assert delivered is None
     assert client.room_get_state_event.await_count == (1 if cached_plaintext else 2)
     client.room_send.assert_not_awaited()
+    client._send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_plaintext_proof_rechecks_cache_after_final_remote_query() -> None:
+    """A sync update during the final remote read must still block plaintext send."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    client.access_token = TEST_ACCESS_TOKEN
+    client.rooms = {}
+    plaintext_response = nio.RoomGetStateEventError(
+        "No encryption state",
+        "M_NOT_FOUND",
+        room_id=room_id,
+    )
+    remote_reads = 0
+
+    async def remote_encryption_state(*_args: object, **_kwargs: object) -> nio.RoomGetStateEventError:
+        nonlocal remote_reads
+        remote_reads += 1
+        if remote_reads == 2:
+            concurrent_room = nio.MatrixRoom(room_id, "@bot:localhost")
+            concurrent_room.encrypted = True
+            client.rooms[room_id] = concurrent_room
+        return plaintext_response
+
+    client.room_get_state_event = AsyncMock(side_effect=remote_encryption_state)
+    client._send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id=room_id)
+
+    delivered = await send_message_result(
+        client,
+        room_id,
+        {"body": "hello", "msgtype": "m.text"},
+        delivery_proof=RoomDeliveryHydrationProof(encrypted=False),
+    )
+
+    assert delivered is None
+    assert remote_reads == 2
     client._send.assert_not_awaited()
 
 

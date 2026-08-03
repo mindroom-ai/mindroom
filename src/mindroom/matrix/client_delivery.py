@@ -476,11 +476,11 @@ async def _delivery_hydration_is_current_at_send(
     proof: RoomDeliveryHydrationProof,
 ) -> bool:
     """Validate one proof against local state and authoritative plaintext state."""
-    if not delivery_hydration_is_current(client, room_id, proof):
-        return False
     if proof.encrypted:
-        return True
-    return await _remote_room_encrypted(client, room_id) is False
+        return delivery_hydration_is_current(client, room_id, proof)
+    if await _remote_room_encrypted(client, room_id) is not False:
+        return False
+    return delivery_hydration_is_current(client, room_id, proof)
 
 
 async def send_message_result(
