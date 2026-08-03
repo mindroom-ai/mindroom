@@ -1849,7 +1849,7 @@ async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint
 
 @pytest.mark.asyncio
 async def test_unknown_pos_cleanup_failure_keeps_rejected_client_position(tmp_path: Path) -> None:
-    """Failed transport sanitation must restart without exposing stale gaps tokenlessly."""
+    """Loop exit after failed sanitation must preserve the rejected position."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
@@ -1858,6 +1858,11 @@ async def test_unknown_pos_cleanup_failure_keeps_rejected_client_position(tmp_pa
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
+    async def rejected_sync_loop(**_kwargs: object) -> None:
+        await bot._on_sync_error(sync_error)
+
+    bot.client.sync_forever = AsyncMock(side_effect=rejected_sync_loop)
+
     with (
         patch(
             "mindroom.bot.invalidate_rejected_sync_position",
@@ -1865,7 +1870,7 @@ async def test_unknown_pos_cleanup_failure_keeps_rejected_client_position(tmp_pa
         ),
         pytest.raises(OSError, match="recovery reset failed"),
     ):
-        await bot._on_sync_error(sync_error)
+        await bot.sync_forever()
 
     assert bot.client.next_batch == "s_rejected"
     assert bot.client.loaded_sync_token == "s_rejected"  # noqa: S105

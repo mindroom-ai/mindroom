@@ -1571,6 +1571,8 @@ class AgentBot:
                     if cleanup_succeeded:
                         self._apply_client_rewind_decision(decision)
                         self._room_member_hook_lifecycle.unknown_position()
+                    else:
+                        self._sync_cache_trust.defer_replay_after_pre_certification_failure()
 
             await run_coroutine_until_complete(reject_position())
             self.logger.warning(
