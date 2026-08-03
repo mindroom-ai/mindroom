@@ -25,6 +25,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1066,7 +1067,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare.assert_awaited_once_with(new_config, {"writer"})
@@ -1100,7 +1101,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare.assert_awaited_once_with(new_config, {"general"})
@@ -1172,7 +1173,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock()) as prepare_entities,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare_entities.assert_not_awaited()
@@ -1348,7 +1349,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         hooks_module._AUTO_POKE_TASK = task
 
         _write_plugin_removal_test_config(tmp_path, with_plugin=False)
-        updated = await orchestrator.config_reload.update_config()
+        updated = await orchestrator.config_reload._update_config()
         await asyncio.sleep(0)
 
         assert updated is True
@@ -1459,7 +1460,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         assert reload_task is not None
@@ -1485,7 +1486,13 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     tmp_path: Path,
 ) -> None:
     """Manual plugin reloads and MCP restarts must wait for config application."""
-    config = _runtime_bound_config(Config(), tmp_path)
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1", tools=["mcp_demo"])},
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}},
+        ),
+        tmp_path,
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
@@ -1507,7 +1514,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
         patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
     ):
-        config_task = asyncio.create_task(orchestrator.config_reload.update_config())
+        config_task = asyncio.create_task(orchestrator.config_reload._update_config())
         await asyncio.wait_for(apply_started.wait(), timeout=1)
         plugin_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
         mcp_task = asyncio.create_task(orchestrator._handle_mcp_catalog_change("demo"))
@@ -1517,12 +1524,16 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         assert not mcp_task.done()
         reload_plugins_mock.assert_not_called()
 
+        # The authoritative under-lock recheck must observe the config current
+        # when the queued MCP replacement finally applies.
+        replacement_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator.config = replacement_config
         finish_apply.set()
         assert await config_task is False
         assert await plugin_task is reload_result
         await mcp_task
 
-    reload_plugins_mock.assert_called_once_with(config, orchestrator.runtime_paths)
+    reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -1533,7 +1544,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 ) -> None:
     """Queued reloads should wait for tracked responses even without a Matrix event ID."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
     config = _runtime_bound_config(
         Config(
@@ -1575,7 +1586,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        return await runner.run_cancellable_response(
+        return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
             thinking_message="Thinking...",
@@ -1586,7 +1597,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.agent_bots["agent1"] = bot
     # The orchestrator owns one shared gate that every managed bot admits through.
     bot.admission_gate = orchestrator.config_reload.response_admission_gate
-    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
@@ -1606,13 +1617,13 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         assert task is not None
 
         await asyncio.sleep(0.05)
-        orchestrator.config_reload.update_config.assert_not_awaited()
+        orchestrator.config_reload._update_config.assert_not_awaited()
 
         release_response.set()
         await asyncio.wait_for(response_task, timeout=1)
         await asyncio.wait_for(task, timeout=1)
 
-        orchestrator.config_reload.update_config.assert_awaited_once()
+        orchestrator.config_reload._update_config.assert_awaited_once()
     finally:
         release_response.set()
         await asyncio.gather(response_task, return_exceptions=True)
@@ -2186,12 +2197,12 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
@@ -2276,9 +2287,9 @@ async def test_router_updates_rooms_on_config_reload(
     joined_rooms: list[str] = []
     left_rooms: list[str] = []
 
-    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         joined_rooms.append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(_client: AsyncMock, room_id: str) -> bool:
         left_rooms.append(room_id)
@@ -2358,12 +2369,12 @@ async def test_new_agent_joins_rooms_on_config_reload(
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
@@ -2425,12 +2436,12 @@ async def test_team_room_changes_on_config_reload(
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
@@ -2583,7 +2594,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         monkeypatch.setattr(bot, "sync_forever", AsyncMock(side_effect=asyncio.CancelledError()))
 
     # Update config
-    updated = await orchestrator.config_reload.update_config()
+    updated = await orchestrator.config_reload._update_config()
     assert updated  # Should return True since config changed
 
     # Verify updated state
@@ -2639,9 +2650,9 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
             if room_id in room_memberships and user_id in room_memberships[room_id]:
                 room_memberships[room_id].remove(user_id)
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         update_room_membership(client.user_id, room_id, "join")
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         update_room_membership(client.user_id, room_id, "leave")
@@ -2801,7 +2812,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        return await runner.run_cancellable_response(
+        return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
             thinking_message="Thinking...",
@@ -3004,6 +3015,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
             ),
         ),
         name="test_reload_admission_race",
+        recovery_proof_ready=lambda: False,
     )
     try:
         await asyncio.sleep(0)
@@ -3020,10 +3032,11 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         assert task.done()
         assert not task.cancelled()
         assert isinstance(task.exception(), ResponseAdmissionRefusedError)
+        assert str(task.exception()) == "Runtime replacement is restarting this entity"
         assert bot.in_flight_response_count == 0
         send_response.assert_not_awaited()
         assert any(
-            call.args and call.args[0] == "response_deferred_during_config_apply"
+            call.args and call.args[0] == "response_deferred_during_replacement"
             for call in refusal_logger.info.call_args_list
         )
         assert any(
@@ -3079,7 +3092,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
     async def response_function(message_id: str | None) -> None:
         assert message_id == "$thinking"
 
-    await bot._response_runner.run_cancellable_response(
+    await bot._response_runner._run_cancellable_response(
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
         thinking_message="Thinking...",
@@ -3096,7 +3109,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
 ) -> None:
     """Calling stop() during an active drain must cancel the reload without applying it."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
@@ -3106,18 +3119,18 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.agent_bots["agent1"] = mock_bot
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
-    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task
     assert task is not None
 
     # Let the drain loop start polling
     await asyncio.sleep(0.05)
-    orchestrator.config_reload.update_config.assert_not_awaited()
+    orchestrator.config_reload._update_config.assert_not_awaited()
 
     # Shutdown
     await orchestrator.stop()
 
     # The reload task should have been cancelled
     assert task.done()
-    orchestrator.config_reload.update_config.assert_not_awaited()
+    orchestrator.config_reload._update_config.assert_not_awaited()

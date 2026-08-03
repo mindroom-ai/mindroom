@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
+from agno.tools.google.calendar import GoogleCalendarTools as AgnoGoogleCalendarTools
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger

@@ -25,6 +25,7 @@ from mindroom.coalescing_batch import (
 )
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -285,6 +286,29 @@ async def _admit_ready(
         source_kind=pending_event.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
+
+
+@pytest.mark.asyncio
+async def test_pending_source_event_tracks_queued_and_dispatched_work() -> None:
+    """The durable callback boundary must know when coalescing owns one exact source."""
+    release = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        await release.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$owned:localhost", "hello", 1_000_000))
+
+    await _admit_ready(gate, key, pending)
+    assert gate.has_pending_source_event("$owned:localhost")
+
+    release.set()
+    await _wait_for(lambda: not gate.has_pending_source_event("$owned:localhost"))
 
 
 class FakeMonotonicClock:
@@ -1413,6 +1437,39 @@ async def test_none_resolving_lane_slot_settles_without_residue() -> None:
     assert [batch.source_event_ids for batch in batches] == [["$later:localhost"]]
     assert none_slot.settled.is_set()
     assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_recovery_context_survives_existing_lane_and_gate_workers() -> None:
+    """Durable recovery intent must reach dispatch workers created outside its context."""
+    observed_recovery: list[bool] = []
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        observed_recovery.append(turn_dispatch_recovery_active())
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    await asyncio.sleep(0)
+
+    with turn_dispatch_recovery_scope(active=True):
+        pending = _pending(_text_event("$recovered:localhost", "retry", 1_000_000))
+        pending.turn_dispatch_recovery = turn_dispatch_recovery_active()
+        gate.submit_lane_slot(
+            slot,
+            key=key,
+            source_event_id=pending.event.event_id,
+            source_kind=MESSAGE_SOURCE_KIND,
+            ready_result=ReadyPendingEvent(pending_event=pending),
+        )
+
+    await gate.drain_all()
+
+    assert observed_recovery == [True]
 
 
 @pytest.mark.asyncio

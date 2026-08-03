@@ -308,10 +308,12 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
             msg = "corrupt collection"
             raise RuntimeError(msg)
 
+    # One tripwire per module that can construct a collection handle. The
+    # manager builds none: it narrows types against ChromaDb but delegates
+    # construction to mindroom.knowledge.collections.
     with (
-        patch("mindroom.knowledge.manager.ChromaDb", _BrokenVectorDb),
-        patch("mindroom.knowledge.registry.ChromaDb", _BrokenVectorDb),
-        patch("mindroom.knowledge.indexing_config.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.collections.ChromaDb", _BrokenVectorDb),
+        patch("agno.vectordb.chroma.ChromaDb", _BrokenVectorDb),
         patch(
             "mindroom.knowledge.manager.create_configured_embedder",
             side_effect=AssertionError("embedder should not load"),
@@ -612,11 +614,11 @@ async def test_git_status_probe_does_not_block_event_loop(
         time.sleep(0.2)
         return False
 
-    async def _empty_file_info(*_args: object, **_kwargs: object) -> knowledge_api._FileListInfo:
-        return knowledge_api._FileListInfo(files=[], total_size=0)
+    async def _empty_file_count(*_args: object, **_kwargs: object) -> knowledge_api._FileCountInfo:
+        return knowledge_api._FileCountInfo(count=0)
 
     monkeypatch.setattr(knowledge_api, "git_checkout_present", _slow_git_checkout_present)
-    monkeypatch.setattr(knowledge_api, "_list_file_info", _empty_file_info)
+    monkeypatch.setattr(knowledge_api, "_count_managed_files", _empty_file_count)
 
     status_task = asyncio.create_task(
         knowledge_api.knowledge_status(

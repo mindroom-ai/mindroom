@@ -1,20 +1,20 @@
 """Thread-history reads and reconstruction helpers.
 
-Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
+Cache rules (each encodes a shipped regression fix; do not weaken them):
 
-1. A cached thread snapshot is served only when ``thread_cache_rejection_reason`` accepts its durable
-   state: the state row exists, ``validated_at`` is set, and neither ``invalidated_at`` nor
-   ``room_invalidated_at`` is at or after ``validated_at`` (see
-   ``mindroom.matrix.cache.thread_cache_helpers`` for the age and restart rules).
+1. A cached thread snapshot is served only when no gap marker is recorded against it
+   (``thread_cache_rejection_reason``). A stale or incomplete snapshot is detected and refetched,
+   not prevented — see ``mindroom.matrix.cache.thread_cache_state`` for the two rules governing the
+   marker.
 
 2. Cached rows that do not include the thread-root event or that still contain opaque
-   ``m.room.encrypted`` payloads are never served: both the trusted-read path and the stale-fallback
+   ``m.room.encrypted`` payloads are never served: both the read path and the stale-fallback
    path refuse such rows and invalidate the entry, and an incomplete fresh homeserver fetch is never
    stored (PR #741).
 
-3. Cache repopulation is guarded against write races: every store passes the fetch start time plus the
-   durable room-membership epoch to ``replace_thread_if_not_newer``, so a fetch cannot bury a newer
-   stale marker (PR #716) or cross a leave/rejoin boundary in this or another process.
+3. Cache repopulation passes the fetch start time plus the durable room-membership epoch to
+   ``replace_thread``. The epoch stops a fetch crossing a leave/rejoin boundary in this or another
+   process; the fetch start time stops a gap detected mid-fetch being cleared by that fetch.
 
 4. Stale fallback exists only on the advisory path: ``fetch_thread_history`` may serve stale cached rows
    when a refetch fails, labelled ``stale_cache`` source with the degraded flag set.
@@ -33,8 +33,8 @@ Cache-trust rules (each encodes a shipped regression fix; do not weaken them):
 
 7. Still-opaque encrypted evidence fails closed: a reconstruction whose sources include an
    undecryptable relation-bearing event for the requested thread, or whose scan contains one with
-   unresolved thread impact, marks the thread stale and raises ``OpaqueEncryptedThreadHistoryError``
-   instead of certifying incomplete history; the stale marker survives until a decryption-capable
+   unresolved thread impact, gap-marks the thread and raises ``OpaqueEncryptedThreadHistoryError``
+   instead of certifying incomplete history; the gap marker survives until a decryption-capable
    refresh replaces the snapshot.
 """
 
@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -52,23 +52,22 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
-    ThreadCacheReplaceOutcome,
-    ThreadCacheState,
+    ThreadCacheGap,
     ThreadHistoryResult,
-    ThreadRevision,
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
+    thread_cache_gap_reason,
     thread_cache_rejection_reason,
     thread_history_result,
 )
-from mindroom.matrix.cache.thread_cache_invalidation import (
-    mark_room_threads_stale_fail_closed,
-    mark_thread_stale_fail_closed,
+from mindroom.matrix.cache.thread_cache_gap import (
+    mark_room_threads_gap_fail_closed,
+    mark_thread_gap_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
+    ThreadEditCandidates,
     apply_latest_edits_to_messages,
-    record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.media import (
@@ -79,7 +78,6 @@ from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
     extract_and_resolve_message,
-    has_sidecar_references,
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
@@ -104,13 +102,6 @@ from mindroom.matrix.thread_projection import (
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
-from mindroom.matrix.thread_resolution_reuse import (
-    ThreadResolutionReuseCache,
-    ThreadResolutionSnapshot,
-    build_thread_resolution_snapshot,
-    reusable_event_source_suffix,
-    snapshot_matches_revision,
-)
 from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
@@ -125,35 +116,11 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
-_MAX_THREAD_REPAIR_ATTEMPTS = 2
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
     Awaitable[ThreadHistoryResult],
 ]
-
-
-@dataclass(slots=True)
-class RetainedThreadEventSourceProvider:
-    """Late-bound retained deltas captured after the homeserver scan completes."""
-
-    get_event_sources: Callable[[], Collection[dict[str, Any]]]
-    _provided_event_ids: set[str] = field(default_factory=set, init=False)
-
-    def current_event_sources(self) -> tuple[dict[str, Any], ...]:
-        """Return current retained deltas and remember which IDs entered this snapshot."""
-        event_sources = tuple(dict(event_source) for event_source in self.get_event_sources())
-        self._provided_event_ids.update(
-            event_id
-            for event_source in event_sources
-            if isinstance((event_id := event_source.get("event_id")), str) and event_id
-        )
-        return event_sources
-
-    @property
-    def provided_event_ids(self) -> frozenset[str]:
-        """Return IDs supplied to snapshot reconstruction."""
-        return frozenset(self._provided_event_ids)
 
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
@@ -190,6 +157,7 @@ class _ThreadHistoryFetchResult:
     scanned_event_count: int
     resolution_ms: float
     sidecar_hydration_ms: float
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -199,6 +167,7 @@ class _ThreadEventSourceScanResult:
     event_sources: list[dict[str, Any]]
     page_count: int
     scanned_event_count: int
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 def _thread_history_result(
@@ -219,8 +188,10 @@ def log_thread_history_refresh(
     mode: str,
     diagnostics: Mapping[str, _ThreadHistoryDiagnosticValue],
     coordinator_queue_wait_ms: float,
+    post_coordinator_read_started: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""
+    post_coordinator_read_ms = elapsed_ms_since(post_coordinator_read_started, clock=time.perf_counter)
     log_fields: dict[str, _ThreadHistoryDiagnosticValue] = {
         "room_id": room_id,
         "thread_id": thread_id,
@@ -234,32 +205,23 @@ def log_thread_history_refresh(
         "resolution_ms": diagnostics.get("resolution_ms", 0.0),
         "sidecar_hydration_ms": diagnostics.get("sidecar_hydration_ms", 0.0),
         "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
+        "post_coordinator_read_ms": post_coordinator_read_ms,
+        "thread_read_total_ms": coordinator_queue_wait_ms + post_coordinator_read_ms,
+        "refill_singleflight_wait_ms": diagnostics.get("refill_singleflight_wait_ms", 0.0),
+        "refill_singleflight_shared": diagnostics.get("refill_singleflight_shared", False),
+        "homeserver_scan_parse_cpu_ms": diagnostics.get("homeserver_scan_parse_cpu_ms", 0.0),
         "cache_reject_reason": diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
         "thread_read_source": diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
         "thread_read_degraded": diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
         "thread_read_error": diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
     }
     for field_name in (
-        "cache_store_outcome",
-        "cache_repair_attempts",
-        "cache_repair_usable",
-        "cache_repair_backoff_seconds",
+        "cache_store_written",
+        "cache_store_failed",
     ):
         if field_name in diagnostics:
             log_fields[field_name] = diagnostics[field_name]
     logger.info("matrix_cache_thread_history_refreshed", **log_fields)
-
-
-def thread_history_refresh_mode(result: ThreadHistoryResult, *, cache_hit: bool) -> str:
-    """Classify one completed public read from its authoritative diagnostics."""
-    if cache_hit:
-        return "cache_hit"
-    if (
-        result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_CACHE
-        and result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
-    ):
-        return "cache_hit_after_repair_conflict"
-    return "full_scan"
 
 
 def _report_direct_source_refresh(
@@ -269,16 +231,18 @@ def _report_direct_source_refresh(
     thread_id: str,
     caller_label: str | None,
     coordinator_queue_wait_ms: float,
+    post_coordinator_read_started: float,
 ) -> ThreadHistoryResult:
-    """Report a direct source caller; shared repairs report at their outer caller boundary."""
+    """Log one direct source refresh under its caller's label."""
     if caller_label is not None:
         log_thread_history_refresh(
             room_id=room_id,
             thread_id=thread_id,
             caller_label=caller_label,
-            mode=thread_history_refresh_mode(result, cache_hit=False),
+            mode="full_scan",
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            post_coordinator_read_started=post_coordinator_read_started,
         )
     return result
 
@@ -447,14 +411,12 @@ def _sidecar_hydration_sources(
 
 @dataclass(slots=True)
 class _ResolvedThreadEventSources:
-    """One resolution pass over raw thread rows plus the inputs needed to reuse it later."""
+    """One resolution pass over raw thread rows."""
 
     messages: list[ResolvedVisibleMessage]
     sidecar_hydration_ms: float
     input_order_by_event_id: dict[str, int]
     related_event_id_by_event_id: dict[str, str]
-    hydration_complete: bool
-    sidecar_texts: dict[tuple[str, str], str]
 
 
 async def _resolve_thread_history_from_event_sources_timed(
@@ -485,7 +447,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         if (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    edit_candidates = ThreadEditCandidates()
     sidecar_hydration_started = time.perf_counter()
     hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
     hydration_batch = await prepare_sidecar_hydration_batch(
@@ -501,15 +463,13 @@ async def _resolve_thread_history_from_event_sources_timed(
         if bundled_replacement_source is not None:
             bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
             if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                record_latest_thread_edit(
+                edit_candidates.record(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
-                    latest_edits_by_original_event_id=latest_edits_by_original_event_id,
                 )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
             event,
             event_info=event_info,
-            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
         ):
             continue
         if event_info.is_edit or event.event_id in messages_by_event_id:
@@ -531,7 +491,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates=edit_candidates,
         required_thread_id=thread_id,
         event_cache=event_cache,
         room_id=room_id,
@@ -546,17 +506,11 @@ async def _resolve_thread_history_from_event_sources_timed(
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
     )
-    if hydration_batch is None:
-        hydration_complete = not has_sidecar_references(hydration_sources)
-    else:
-        hydration_complete = hydration_batch.references <= frozenset(hydration_batch.cached_texts)
     return _ResolvedThreadEventSources(
         messages=messages,
         sidecar_hydration_ms=elapsed_ms_since(sidecar_hydration_started, clock=time.perf_counter),
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
-        hydration_complete=hydration_complete,
-        sidecar_texts={} if hydration_batch is None else dict(hydration_batch.cached_texts),
     )
 
 
@@ -629,6 +583,9 @@ async def _load_stale_cached_thread_history(
     }
     if cache_reject_diagnostics is not None:
         diagnostics.update(cache_reject_diagnostics)
+    # Same rule as the trusted-cache path: a cached read cannot drop messages, so completeness
+    # turns only on whether sidecars were hydrated. This result is already flagged degraded, but
+    # is_full_history is a separate signal gating planning completeness and the model refresh.
     return _thread_history_result(
         resolved_history,
         is_full_history=hydrate_sidecars,
@@ -646,22 +603,18 @@ async def _resolve_cached_thread_history(
     hydrate_sidecars: bool = True,
     expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
-    revision: ThreadRevision | None = None,
 ) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
-        return await _resolve_cached_thread_history_with_reuse(
+        resolved = await _resolve_thread_history_from_event_sources_timed(
             client,
             room_id=room_id,
             thread_id=thread_id,
-            event_cache=event_cache,
-            cached_event_sources=cached_event_sources,
+            event_sources=cached_event_sources,
             hydrate_sidecars=hydrate_sidecars,
+            event_cache=event_cache,
             expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
-            revision=revision,
         )
     except Exception as exc:
         logger.warning(
@@ -670,281 +623,25 @@ async def _resolve_cached_thread_history(
             thread_id=thread_id,
             error=str(exc),
         )
-        if resolution_reuse is not None:
-            resolution_reuse.discard(room_id, thread_id)
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         return None, 0.0
-
-
-async def _resolve_cached_thread_history_with_reuse(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    cached_event_sources: Sequence[dict[str, Any]],
-    hydrate_sidecars: bool,
-    expected_membership_epoch: int,
-    trusted_sender_ids: Collection[str],
-    resolution_reuse: ThreadResolutionReuseCache | None,
-    revision: ThreadRevision | None,
-) -> tuple[list[ResolvedVisibleMessage], float]:
-    """Fully resolve one durable-cache read and retain its reusable projection."""
-    resolved = await _resolve_thread_history_from_event_sources_timed(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=cached_event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-        event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    # The revision may predate the rows just resolved. Sequences are monotonic, so a stale
-    # revision can never produce a false exact match later, and the known-ID suffix guard
-    # rejects any delta row the snapshot already contains; the race costs one full re-resolve.
-    if resolution_reuse is not None and resolved.hydration_complete and revision is not None:
-        resolution_reuse.store(
-            room_id,
-            thread_id,
-            build_thread_resolution_snapshot(
-                event_sources=cached_event_sources,
-                messages=resolved.messages,
-                input_order_by_event_id=resolved.input_order_by_event_id,
-                related_event_id_by_event_id=resolved.related_event_id_by_event_id,
-                trusted_sender_ids=frozenset(trusted_sender_ids),
-                membership_epoch=expected_membership_epoch,
-                revision=revision,
-                sidecar_texts=resolved.sidecar_texts,
-            ),
-        )
     return resolved.messages, resolved.sidecar_hydration_ms
 
 
-async def _resolve_reused_thread_suffix(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    snapshot: ThreadResolutionSnapshot,
-    suffix: list[dict[str, Any]],
-    revision: ThreadRevision,
-    expected_membership_epoch: int,
-    trusted_sender_ids: Collection[str],
-    resolution_reuse: ThreadResolutionReuseCache,
-) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
-    """Resolve only the appended raw rows and merge them onto the reusable snapshot."""
-    suffix_resolution = await _resolve_thread_history_from_event_sources_timed(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=suffix,
-        hydrate_sidecars=True,
-        event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if not suffix_resolution.hydration_complete:
-        return None
-    prefix_length = snapshot.revision.event_count
-    input_order_by_event_id = dict(snapshot.input_order_by_event_id)
-    for event_id, suffix_index in suffix_resolution.input_order_by_event_id.items():
-        input_order_by_event_id[event_id] = prefix_length + suffix_index
-    related_event_id_by_event_id = dict(snapshot.related_event_id_by_event_id)
-    related_event_id_by_event_id.update(suffix_resolution.related_event_id_by_event_id)
-    messages = snapshot.cloned_messages() + suffix_resolution.messages
-    sort_thread_messages_root_first(
-        messages,
-        thread_id=thread_id,
-        input_order_by_event_id=input_order_by_event_id,
-        related_event_id_by_event_id=related_event_id_by_event_id,
-    )
-    resolution_reuse.store(
-        room_id,
-        thread_id,
-        build_thread_resolution_snapshot(
-            event_sources=suffix,
-            messages=messages,
-            input_order_by_event_id=input_order_by_event_id,
-            related_event_id_by_event_id=related_event_id_by_event_id,
-            trusted_sender_ids=snapshot.trusted_sender_ids,
-            membership_epoch=expected_membership_epoch,
-            revision=revision,
-            sidecar_texts={**snapshot.sidecar_texts, **suffix_resolution.sidecar_texts},
-            prior_known_event_ids=snapshot.known_event_ids,
-        ),
-    )
-    return messages, suffix_resolution.sidecar_hydration_ms, "incremental"
+def _cache_reject_diagnostics(gap: ThreadCacheGap) -> dict[str, str | int | float | bool]:
+    """Describe one gap-marked snapshot for the read that refused it.
 
-
-def _cache_reject_diagnostics(
-    *,
-    cache_state: object,
-    rejection_reason: str,
-) -> dict[str, str | int | float | bool]:
+    The rejection reason comes from ``thread_cache_gap_reason`` rather than an argument, so
+    the label a read logs and the gate that produced it cannot drift apart.
+    """
     diagnostics: dict[str, str | int | float | bool] = {
-        THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: rejection_reason,
+        THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: thread_cache_gap_reason(gap),
+        "cache_gap_marked_at": gap.gap_marked_at,
+        "cache_gap_age_ms": elapsed_ms_since(gap.gap_marked_at, clock=time.time),
     }
-    if not isinstance(cache_state, ThreadCacheState):
-        return diagnostics
-    if cache_state.validated_at is not None:
-        diagnostics["cache_validated_at"] = cache_state.validated_at
-        diagnostics["cache_age_ms"] = elapsed_ms_since(cache_state.validated_at, clock=time.time)
-    if cache_state.invalidated_at is not None:
-        diagnostics["cache_invalidated_at"] = cache_state.invalidated_at
-    if cache_state.invalidation_reason is not None:
-        diagnostics["cache_invalidation_reason"] = cache_state.invalidation_reason
-    if cache_state.room_invalidated_at is not None:
-        diagnostics["room_cache_invalidated_at"] = cache_state.room_invalidated_at
-    if cache_state.room_invalidation_reason is not None:
-        diagnostics["room_cache_invalidation_reason"] = cache_state.room_invalidation_reason
+    if gap.gap_reason is not None:
+        diagnostics["cache_gap_reason"] = gap.gap_reason
     return diagnostics
-
-
-async def _try_reuse_cached_thread_resolution(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    revision: ThreadRevision | None,
-    membership_epoch: int,
-    trusted_sender_ids: Collection[str],
-    resolution_reuse: ThreadResolutionReuseCache | None,
-) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
-    """Reuse an exact projection or merge a complete append-only durable delta."""
-    if resolution_reuse is None or revision is None or (snapshot := resolution_reuse.get(room_id, thread_id)) is None:
-        return None
-    snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
-    if snapshot_matches_revision(
-        snapshot,
-        trusted_sender_ids=snapshot_trusted_sender_ids,
-        membership_epoch=membership_epoch,
-        revision=revision,
-    ):
-        if not await _snapshot_sidecars_unchanged(
-            event_cache,
-            room_id=room_id,
-            thread_id=thread_id,
-            membership_epoch=membership_epoch,
-            snapshot=snapshot,
-        ):
-            return None
-        return snapshot.cloned_messages(), 0.0, "reuse"
-    if (
-        snapshot.trusted_sender_ids != snapshot_trusted_sender_ids
-        or snapshot.membership_epoch != membership_epoch
-        or revision.event_count <= snapshot.revision.event_count
-    ):
-        return None
-    if not await _snapshot_sidecars_unchanged(
-        event_cache,
-        room_id=room_id,
-        thread_id=thread_id,
-        membership_epoch=membership_epoch,
-        snapshot=snapshot,
-    ):
-        return None
-    return await _try_merge_cached_thread_delta(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        revision=revision,
-        membership_epoch=membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-        resolution_reuse=resolution_reuse,
-        snapshot=snapshot,
-        snapshot_trusted_sender_ids=snapshot_trusted_sender_ids,
-    )
-
-
-async def _snapshot_sidecars_unchanged(
-    event_cache: ConversationEventCache,
-    *,
-    room_id: str,
-    thread_id: str,
-    membership_epoch: int,
-    snapshot: ThreadResolutionSnapshot,
-) -> bool:
-    """Return whether every sidecar dependency still has its exact cached text."""
-    if not snapshot.sidecar_texts:
-        return True
-    try:
-        current_texts = await event_cache.get_mxc_texts(
-            room_id,
-            tuple(snapshot.sidecar_texts),
-            expected_membership_epoch=membership_epoch,
-        )
-    except Exception as exc:
-        logger.debug(
-            "Thread resolution sidecar check failed; falling back to full resolution",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        return False
-    return current_texts == snapshot.sidecar_texts
-
-
-async def _try_merge_cached_thread_delta(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    revision: ThreadRevision,
-    membership_epoch: int,
-    trusted_sender_ids: Collection[str],
-    resolution_reuse: ThreadResolutionReuseCache,
-    snapshot: ThreadResolutionSnapshot,
-    snapshot_trusted_sender_ids: frozenset[str],
-) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
-    """Load and merge one complete append-only durable delta."""
-    if (
-        revision.max_write_seq <= snapshot.revision.max_write_seq
-        and revision.max_thread_write_seq <= snapshot.revision.max_thread_write_seq
-    ):
-        return None
-    try:
-        candidate_suffix = await event_cache.get_thread_events_written_between(
-            room_id,
-            thread_id,
-            after_write_seq=snapshot.revision.max_write_seq,
-            through_write_seq=revision.max_write_seq,
-            after_thread_write_seq=snapshot.revision.max_thread_write_seq,
-            through_thread_write_seq=revision.max_thread_write_seq,
-        )
-    except Exception as exc:
-        logger.debug(
-            "Thread resolution delta read failed; falling back to full resolution",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        return None
-    suffix = reusable_event_source_suffix(
-        snapshot,
-        candidate_suffix,
-        trusted_sender_ids=snapshot_trusted_sender_ids,
-        membership_epoch=membership_epoch,
-        revision=revision,
-    )
-    if suffix is None:
-        return None
-    return await _resolve_reused_thread_suffix(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        snapshot=snapshot,
-        suffix=suffix,
-        revision=revision,
-        expected_membership_epoch=membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-        resolution_reuse=resolution_reuse,
-    )
 
 
 async def _load_cached_thread_history_if_usable(
@@ -955,17 +652,12 @@ async def _load_cached_thread_history_if_usable(
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
     trusted_sender_ids: Collection[str] = (),
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a durable thread snapshot when the current runtime may safely trust it."""
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
-    rejection_reason = thread_cache_rejection_reason(cache_state)
-    if rejection_reason is not None:
-        cache_reject_diagnostics = _cache_reject_diagnostics(
-            cache_state=cache_state,
-            rejection_reason=rejection_reason,
-        )
+    gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
+    if gap is not None:
+        cache_reject_diagnostics = _cache_reject_diagnostics(gap)
         logger.info(
             "Thread cache rejected for read",
             room_id=room_id,
@@ -975,67 +667,41 @@ async def _load_cached_thread_history_if_usable(
         return None, cache_reject_diagnostics
 
     resolution_started = time.perf_counter()
-    cache_read_ms = 0.0
-    resolved_history: list[ResolvedVisibleMessage] | None = None
-    sidecar_hydration_ms = 0.0
-    resolution_reuse_kind = "full"
-    # Reuse only applies to fully hydrated reads: snapshot-mode bodies are intentionally degraded
-    # and must never be frozen into (or served from) a reusable resolution.
-    reuse_cache = resolution_reuse if hydrate_sidecars else None
-    revision = None if reuse_cache is None else await event_cache.get_thread_revision(room_id, thread_id)
-    reused = await _try_reuse_cached_thread_resolution(
+    cache_read_started = time.perf_counter()
+    cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
+    cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
+    if cached_event_sources is None:
+        return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing"}
+    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    if cached_rejection_reason is not None:
+        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
+        payload_reject_diagnostics: dict[str, str | int | float | bool] = {
+            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: f"cache_{cached_rejection_reason}",
+        }
+        logger.info(
+            "Thread cache rejected for read",
+            room_id=room_id,
+            thread_id=thread_id,
+            **payload_reject_diagnostics,
+        )
+        return None, payload_reject_diagnostics
+
+    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        revision=revision,
-        membership_epoch=cached_membership_epoch,
+        cached_event_sources=cached_event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+        expected_membership_epoch=cached_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
-        resolution_reuse=reuse_cache,
     )
-    if reused is not None:
-        resolved_history, sidecar_hydration_ms, resolution_reuse_kind = reused
-
     if resolved_history is None:
-        cache_read_started = time.perf_counter()
-        cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
-        cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
-        if cached_event_sources is None:
-            cache_reject_diagnostics: dict[str, str | int | float | bool] = {
-                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
-            }
-            return None, cache_reject_diagnostics
-        cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
-        if cached_rejection_reason is not None:
-            await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-            payload_reject_diagnostics: dict[str, str | int | float | bool] = {
-                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: f"cache_{cached_rejection_reason}",
-            }
-            logger.info(
-                "Thread cache rejected for read",
-                room_id=room_id,
-                thread_id=thread_id,
-                **payload_reject_diagnostics,
-            )
-            return None, payload_reject_diagnostics
+        return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_payload_unresolvable"}
 
-        resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            cached_event_sources=cached_event_sources,
-            hydrate_sidecars=hydrate_sidecars,
-            expected_membership_epoch=cached_membership_epoch,
-            trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=reuse_cache,
-            revision=revision,
-        )
-    if resolved_history is None:
-        return None, {
-            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_payload_unresolvable",
-        }
-
+    # A window that left messages out is not full history, whatever its sidecars did. Callers gate
+    # completeness-dependent planning and the model-history refresh on this flag, so claiming a
+    # truncated tail is complete silently drops older participants and mentions from the context.
     return _thread_history_result(
         resolved_history,
         is_full_history=hydrate_sidecars,
@@ -1043,7 +709,6 @@ async def _load_cached_thread_history_if_usable(
             "cache_read_ms": cache_read_ms,
             "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
-            "thread_resolution_reuse": resolution_reuse_kind,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
         },
     ), None
@@ -1088,120 +753,6 @@ async def _fetch_thread_history_with_events(
     )
 
 
-def _merge_retained_thread_event_sources(
-    event_sources: Sequence[dict[str, Any]],
-    retained_event_sources: Collection[dict[str, Any]],
-    *,
-    thread_id: str,
-) -> tuple[list[dict[str, Any]], bool]:
-    """Merge certified concurrent deltas exactly once in canonical event order."""
-    merged_by_event_id = {
-        event_id: dict(event_source)
-        for event_source in event_sources
-        if (event_id := _event_id_from_source(event_source)) is not None
-    }
-    changed = False
-    for event_source in retained_event_sources:
-        event_id = _event_id_from_source(event_source)
-        if event_id is None or event_id in merged_by_event_id:
-            continue
-        merged_by_event_id[event_id] = dict(event_source)
-        changed = True
-    return (
-        sort_thread_event_sources_root_first(
-            list(merged_by_event_id.values()),
-            thread_id=thread_id,
-        ),
-        changed,
-    )
-
-
-async def _resolve_merged_thread_fetch_result(
-    fetch_result: _ThreadHistoryFetchResult,
-    *,
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    expected_membership_epoch: int,
-    hydrate_sidecars: bool,
-    retained_event_sources: RetainedThreadEventSourceProvider | None,
-    trusted_sender_ids: Collection[str],
-) -> _ThreadHistoryFetchResult:
-    """Replay retained deltas onto a fetched snapshot before installation and delivery."""
-    merged_event_sources, changed = _merge_retained_thread_event_sources(
-        fetch_result.event_sources,
-        () if retained_event_sources is None else retained_event_sources.current_event_sources(),
-        thread_id=thread_id,
-    )
-    if not changed:
-        return fetch_result
-    resolution_started = time.perf_counter()
-    resolution = await _resolve_thread_history_from_event_sources_timed(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=merged_event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-        event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-        register_sidecar_owners=True,
-    )
-    return _ThreadHistoryFetchResult(
-        history=resolution.messages,
-        event_sources=merged_event_sources,
-        fetch_ms=fetch_result.fetch_ms,
-        room_scan_pages=fetch_result.room_scan_pages,
-        scanned_event_count=fetch_result.scanned_event_count,
-        resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
-        sidecar_hydration_ms=resolution.sidecar_hydration_ms,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _ThreadCacheRefillAttempt:
-    """One completed reconstruct-and-store attempt and any already-usable winner."""
-
-    replace_outcome: ThreadCacheReplaceOutcome
-    cache_repair_usable: bool
-    existing_history: ThreadHistoryResult | None = None
-
-
-async def _fetch_thread_repair_snapshot(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    membership_epoch: int,
-    hydrate_sidecars: bool,
-    retained_event_sources: RetainedThreadEventSourceProvider | None,
-    trusted_sender_ids: Collection[str],
-) -> _ThreadHistoryFetchResult:
-    """Fetch and resolve one snapshot with every retained live delta."""
-    fetch_result = await _fetch_thread_history_with_events(
-        client,
-        room_id,
-        thread_id,
-        hydrate_sidecars=hydrate_sidecars,
-        event_cache=event_cache,
-        expected_membership_epoch=membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    return await _resolve_merged_thread_fetch_result(
-        fetch_result,
-        client=client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        expected_membership_epoch=membership_epoch,
-        hydrate_sidecars=hydrate_sidecars,
-        retained_event_sources=retained_event_sources,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-
-
 async def _reject_opaque_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
@@ -1212,13 +763,25 @@ async def _reject_opaque_thread_snapshot(
     """Reject an opaque-poisoned reconstruction before its guarded store."""
     if not any(is_opaque_encrypted_event_source(source) for source in fetch_result.event_sources):
         return
-    await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+    await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
     msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
     raise OpaqueEncryptedThreadHistoryError(msg)
 
 
-async def _store_repaired_thread_snapshot(
-    client: nio.AsyncClient,
+@dataclass(frozen=True, slots=True)
+class _ThreadCacheStoreResult:
+    """What one snapshot store attempt did.
+
+    ``written`` and ``failed`` are independent, not two views of one flag: a cache whose writes are
+    unavailable stores nothing without failing, and operators reading the two diagnostics keys need
+    to tell that case apart from a genuine write fault.
+    """
+
+    written: bool
+    failed: bool
+
+
+async def _store_reconstructed_thread_snapshot(
     *,
     room_id: str,
     thread_id: str,
@@ -1226,18 +789,15 @@ async def _store_repaired_thread_snapshot(
     fetch_result: _ThreadHistoryFetchResult,
     membership_epoch: int,
     fetch_started_at: float,
-    hydrate_sidecars: bool,
-    trusted_sender_ids: Collection[str],
-    repair_attempt: int,
-) -> _ThreadCacheRefillAttempt:
-    """Guard one snapshot replacement and resolve any existing usable winner."""
+) -> _ThreadCacheStoreResult:
+    """Install one reconstructed snapshot and report what the store attempt did."""
     await _reject_opaque_thread_snapshot(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
         fetch_result=fetch_result,
     )
-    outcome = await _store_thread_history_cache(
+    store_result = await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
@@ -1249,71 +809,25 @@ async def _store_repaired_thread_snapshot(
         "Thread history cache store completed",
         room_id=room_id,
         thread_id=thread_id,
-        cache_store_outcome=outcome.value,
-        cache_store_written=outcome.written,
-        cache_repair_attempt=repair_attempt,
+        cache_store_written=store_result.written,
+        cache_store_failed=store_result.failed,
         event_count=len(fetch_result.event_sources),
         homeserver_scan_pages=fetch_result.room_scan_pages,
         homeserver_scanned_event_count=fetch_result.scanned_event_count,
         homeserver_thread_event_count=len(fetch_result.event_sources),
+        homeserver_scan_parse_cpu_ms=fetch_result.homeserver_scan_parse_cpu_ms,
     )
-    if outcome is not ThreadCacheReplaceOutcome.EXISTING_USABLE:
-        return _ThreadCacheRefillAttempt(
-            replace_outcome=outcome,
-            cache_repair_usable=outcome.usable,
-        )
-    try:
-        existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=hydrate_sidecars,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to load usable concurrent thread snapshot; continuing with fetched history",
-            room_id=room_id,
-            thread_id=thread_id,
-            cache_store_outcome=outcome.value,
-            cache_repair_attempt=repair_attempt,
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
-        return _ThreadCacheRefillAttempt(
-            replace_outcome=outcome,
-            cache_repair_usable=False,
-        )
-    if existing_history is None:
-        logger.warning(
-            "Concurrent usable thread snapshot was unavailable; continuing with fetched history",
-            room_id=room_id,
-            thread_id=thread_id,
-            cache_store_outcome=outcome.value,
-            cache_repair_attempt=repair_attempt,
-        )
-        return _ThreadCacheRefillAttempt(
-            replace_outcome=outcome,
-            cache_repair_usable=False,
-        )
-    return _ThreadCacheRefillAttempt(
-        replace_outcome=outcome,
-        cache_repair_usable=True,
-        existing_history=existing_history,
-    )
+    return store_result
 
 
 def _homeserver_thread_history_result(
     fetch_result: _ThreadHistoryFetchResult,
     *,
     hydrate_sidecars: bool,
-    cache_store_outcome: str,
-    repair_attempts: int,
-    cache_repair_usable: bool,
+    store_result: _ThreadCacheStoreResult,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
 ) -> ThreadHistoryResult:
-    """Build the fail-open homeserver result after a repair attempt."""
+    """Build the fail-open homeserver result after one reconstruct-and-store."""
     diagnostics: dict[str, str | int | float | bool] = {
         "cache_read_ms": 0.0,
         "homeserver_fetch_ms": fetch_result.fetch_ms,
@@ -1322,9 +836,9 @@ def _homeserver_thread_history_result(
         "homeserver_thread_event_count": len(fetch_result.event_sources),
         "resolution_ms": fetch_result.resolution_ms,
         "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
-        "cache_store_outcome": cache_store_outcome,
-        "cache_repair_attempts": repair_attempts,
-        "cache_repair_usable": cache_repair_usable,
+        "homeserver_scan_parse_cpu_ms": fetch_result.homeserver_scan_parse_cpu_ms,
+        "cache_store_written": store_result.written,
+        "cache_store_failed": store_result.failed,
         THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
     }
     if cache_reject_diagnostics is not None:
@@ -1346,119 +860,86 @@ async def refresh_thread_history_from_source(
     allow_stale_fallback: bool = True,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
     trusted_sender_ids: Collection[str] = (),
-    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
-    fetch_result: _ThreadHistoryFetchResult | None = None
-    attempt: _ThreadCacheRefillAttempt | None = None
-    repair_attempts = 0
-    for repair_attempts in range(1, _MAX_THREAD_REPAIR_ATTEMPTS + 1):
-        fetch_started_at = time.time()
-        fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-        try:
-            fetch_result = await _fetch_thread_repair_snapshot(
+    """Fetch fresh thread history from Matrix and repopulate the advisory cache.
+
+    One fetch, one store. There is no retry loop: a replacement cannot lose a race any more, and a
+    gap that lands mid-fetch survives the store so the next read refetches it.
+    """
+    resolved_post_coordinator_read_started = (
+        time.perf_counter() if post_coordinator_read_started is None else post_coordinator_read_started
+    )
+    fetch_started_at = time.time()
+    fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
+    try:
+        fetch_result = await _fetch_thread_history_with_events(
+            client,
+            room_id,
+            thread_id,
+            hydrate_sidecars=hydrate_sidecars,
+            event_cache=event_cache,
+            expected_membership_epoch=fetch_membership_epoch,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    except _UnresolvedOpaqueRoomHistoryError:
+        await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
+        raise
+    except Exception as exc:
+        stale_history = (
+            await _load_stale_cached_thread_history(
                 client,
                 room_id=room_id,
                 thread_id=thread_id,
                 event_cache=event_cache,
-                membership_epoch=fetch_membership_epoch,
                 hydrate_sidecars=hydrate_sidecars,
-                retained_event_sources=retained_event_sources,
+                fetch_error=exc,
+                cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=trusted_sender_ids,
             )
-        except _UnresolvedOpaqueRoomHistoryError:
-            await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
-            raise
-        except Exception as exc:
-            stale_history = (
-                await _load_stale_cached_thread_history(
-                    client,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    event_cache=event_cache,
-                    hydrate_sidecars=hydrate_sidecars,
-                    fetch_error=exc,
-                    cache_reject_diagnostics=cache_reject_diagnostics,
-                    trusted_sender_ids=trusted_sender_ids,
-                )
-                if allow_stale_fallback
-                else None
-            )
-            if stale_history is not None:
-                return _report_direct_source_refresh(
-                    stale_history,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    caller_label=caller_label,
-                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-                )
-            raise
-        attempt = await _store_repaired_thread_snapshot(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            fetch_result=fetch_result,
-            membership_epoch=fetch_membership_epoch,
-            fetch_started_at=fetch_started_at,
-            hydrate_sidecars=hydrate_sidecars,
-            trusted_sender_ids=trusted_sender_ids,
-            repair_attempt=repair_attempts,
+            if allow_stale_fallback
+            else None
         )
-        if attempt.existing_history is not None:
+        if stale_history is not None:
             return _report_direct_source_refresh(
-                _thread_history_result(
-                    list(attempt.existing_history),
-                    is_full_history=hydrate_sidecars,
-                    diagnostics={
-                        **attempt.existing_history.diagnostics,
-                        "cache_store_outcome": attempt.replace_outcome.value,
-                        "cache_repair_attempts": repair_attempts,
-                        "cache_repair_usable": True,
-                    },
-                ),
+                stale_history,
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                post_coordinator_read_started=resolved_post_coordinator_read_started,
             )
-        if not attempt.replace_outcome.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
-            break
+        raise
+    store_result = await _store_reconstructed_thread_snapshot(
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        fetch_result=fetch_result,
+        membership_epoch=fetch_membership_epoch,
+        fetch_started_at=fetch_started_at,
+    )
+    if not store_result.written:
+        # A cache that cannot accept writes is the condition operators most need to see, and it is
+        # otherwise only logged at INFO.
         logger.warning(
-            "Retrying thread cache repair after guarded replacement conflict",
+            "Thread cache refill did not install a snapshot",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome=attempt.replace_outcome.value,
-            cache_repair_attempt=repair_attempts,
-        )
-
-    assert fetch_result is not None
-    assert attempt is not None
-    if not attempt.cache_repair_usable:
-        # Covers durable-write faults too, not just conflicts: a cache that cannot accept writes is
-        # the condition operators most need to see, and it is otherwise only logged at INFO.
-        logger.warning(
-            "Thread cache repair did not install a usable snapshot",
-            room_id=room_id,
-            thread_id=thread_id,
-            cache_store_outcome=attempt.replace_outcome.value,
-            cache_repair_attempts=repair_attempts,
         )
     return _report_direct_source_refresh(
         _homeserver_thread_history_result(
             fetch_result,
             hydrate_sidecars=hydrate_sidecars,
-            cache_store_outcome=attempt.replace_outcome.value,
-            repair_attempts=repair_attempts,
-            cache_repair_usable=attempt.cache_repair_usable,
+            store_result=store_result,
             cache_reject_diagnostics=cache_reject_diagnostics,
         ),
         room_id=room_id,
         thread_id=thread_id,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=resolved_post_coordinator_read_started,
     )
 
 
@@ -1470,10 +951,10 @@ async def _store_thread_history_cache(
     event_sources: Sequence[dict[str, Any]],
     expected_membership_epoch: int,
     fetch_started_at: float,
-) -> ThreadCacheReplaceOutcome:
+) -> _ThreadCacheStoreResult:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        return await event_cache.replace_thread_if_not_newer(
+        written = await event_cache.replace_thread(
             room_id,
             thread_id,
             list(event_sources),
@@ -1485,12 +966,12 @@ async def _store_thread_history_cache(
             "Event cache write failed; continuing without cache",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome=ThreadCacheReplaceOutcome.HARD_FAILURE.value,
             event_count=len(event_sources),
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return ThreadCacheReplaceOutcome.HARD_FAILURE
+        return _ThreadCacheStoreResult(written=False, failed=True)
+    return _ThreadCacheStoreResult(written=written, failed=False)
 
 
 def _thread_history_cache_rejection_reason(
@@ -1506,14 +987,14 @@ def _thread_history_cache_rejection_reason(
     return None
 
 
-async def _mark_thread_stale_for_opaque_history(
+async def _mark_thread_gap_for_opaque_history(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
 ) -> None:
-    """Keep one opaque-poisoned thread durably stale, deleting the snapshot only when the marker fails."""
-    await mark_thread_stale_fail_closed(
+    """Keep one opaque-poisoned thread durably gapped, deleting the snapshot only when the marker fails."""
+    await mark_thread_gap_fail_closed(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
@@ -1522,13 +1003,13 @@ async def _mark_thread_stale_for_opaque_history(
     )
 
 
-async def _mark_room_stale_for_opaque_history(
+async def _mark_room_gap_for_opaque_history(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
 ) -> None:
-    """Keep every thread stale when opaque relation impact cannot be scoped within the room."""
-    await mark_room_threads_stale_fail_closed(
+    """Keep every thread gapped when opaque relation impact cannot be scoped within the room."""
+    await mark_room_threads_gap_fail_closed(
         event_cache,
         room_id=room_id,
         reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
@@ -1602,10 +1083,13 @@ async def _fetch_thread_history_with_cache_policy(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    post_coordinator_read_started: float | None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Serve one trusted cache hit or delegate only the required refill."""
+    resolved_post_coordinator_read_started = (
+        time.perf_counter() if post_coordinator_read_started is None else post_coordinator_read_started
+    )
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
     cached_history: ThreadHistoryResult | None = None
     try:
@@ -1616,7 +1100,6 @@ async def _fetch_thread_history_with_cache_policy(
             event_cache=event_cache,
             hydrate_sidecars=hydrate_sidecars,
             trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
@@ -1644,9 +1127,10 @@ async def _fetch_thread_history_with_cache_policy(
         room_id=room_id,
         thread_id=thread_id,
         caller_label=caller_label,
-        mode=thread_history_refresh_mode(result, cache_hit=cached_history is not None),
+        mode="cache_hit" if cached_history is not None else "full_scan",
         diagnostics=result.diagnostics,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=resolved_post_coordinator_read_started,
     )
     return result
 
@@ -1660,10 +1144,15 @@ async def fetch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch all messages in a thread, allowing advisory stale fallback."""
+    """Fetch all messages in a thread, allowing advisory stale fallback.
+
+    Cached reads are collapsed but never truncated, so a caller whose output is the history
+    itself - export, and anything else that must be complete rather than recent - gets every
+    message. ``is_full_history`` still reports false when sidecar hydration was skipped.
+    """
     return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
@@ -1675,7 +1164,7 @@ async def fetch_thread_history(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        resolution_reuse=resolution_reuse,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1689,7 +1178,7 @@ async def fetch_dispatch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history from trusted cache or a fresh refill."""
@@ -1704,7 +1193,7 @@ async def fetch_dispatch_thread_history(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        resolution_reuse=resolution_reuse,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1718,7 +1207,7 @@ async def fetch_dispatch_thread_snapshot(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
-    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context from trusted cache or a fresh refill."""
@@ -1733,7 +1222,7 @@ async def fetch_dispatch_thread_snapshot(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        resolution_reuse=resolution_reuse,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1771,6 +1260,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         scanned_event_count=scan_result.scanned_event_count,
         resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
         sidecar_hydration_ms=resolution.sidecar_hydration_ms,
+        homeserver_scan_parse_cpu_ms=scan_result.homeserver_scan_parse_cpu_ms,
     )
 
 
@@ -1785,7 +1275,7 @@ def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) ->
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    edit_candidates: ThreadEditCandidates,
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
@@ -1799,10 +1289,9 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
         event,
         event_info=event_info,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
     ):
         return None
     if event_info.is_edit:
@@ -1825,6 +1314,7 @@ async def fetch_thread_event_sources_via_room_messages(
             "Thread room scan ended without finding root",
             room_id=room_id,
             thread_id=thread_id,
+            user_id=client.user_id,
             room_scan_pages=scan_result.page_count,
             scanned_event_count=scan_result.scanned_event_count,
         )
@@ -1834,6 +1324,7 @@ async def fetch_thread_event_sources_via_room_messages(
             "Thread room scan contains opaque encrypted relations with unresolved impact",
             room_id=room_id,
             thread_id=thread_id,
+            user_id=client.user_id,
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
         msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
@@ -1842,7 +1333,61 @@ async def fetch_thread_event_sources_via_room_messages(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
+        homeserver_scan_parse_cpu_ms=scan_result.homeserver_scan_parse_cpu_ms,
     )
+
+
+async def find_response_event_ids_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    response_sender: str,
+    source_event_ids: Collection[str],
+    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> frozenset[str]:
+    """Find original responses to exact source events in recent room history."""
+    sources = set(source_event_ids)
+    remaining_sources = set(sources)
+    response_event_ids: set[str] = set()
+    from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
+
+    while remaining_sources:
+        response = await client.room_messages(
+            room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"response recovery room scan failed for {room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        if not response.chunk:
+            break
+        for event in response.chunk:
+            if not isinstance(event, nio.Event):
+                continue
+            remaining_sources.discard(event.event_id)
+            event_source = event.source if isinstance(event.source, dict) else {}
+            event_info = EventInfo.from_event(event_source)
+            if (
+                event_source.get("sender") == response_sender
+                and not event_info.is_edit
+                and not event_info.is_thread_fallback
+                and event_info.reply_to_event_id in sources
+                and (response_source_filter is None or response_source_filter(event_source))
+            ):
+                response_event_ids.add(event.event_id)
+        if not response.end:
+            break
+        if response.end in seen_pagination_tokens:
+            msg = f"response recovery room scan repeated pagination token for {room_id}"
+            raise RuntimeError(msg)
+        seen_pagination_tokens.add(response.end)
+        from_token = response.end
+
+    return frozenset(response_event_ids)
 
 
 @dataclass(frozen=True)
@@ -1855,6 +1400,7 @@ class _BulkThreadScanResult:
     page_count: int
     scanned_event_count: int
     scan_truncated: bool
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1895,12 +1441,20 @@ async def _unresolved_opaque_relation_event_ids(
     return frozenset(unresolved_event_ids)
 
 
+def _scanned_event_sender(event_source: dict[str, Any] | None) -> str | None:
+    """Return one scanned event's sender, or None when the event was never scanned."""
+    if event_source is None:
+        return None
+    sender = event_source.get("sender")
+    return sender if isinstance(sender, str) else None
+
+
 async def _group_scanned_sources_by_thread(
     *,
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    edit_candidates: ThreadEditCandidates,
 ) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
     """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
@@ -1936,7 +1490,14 @@ async def _group_scanned_sources_by_thread(
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
-    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+    for original_event_id in edit_candidates.original_event_ids():
+        winner = edit_candidates.winner_for(
+            original_event_id,
+            sender=_scanned_event_sender(scanned_message_sources.get(original_event_id)),
+        )
+        if winner is None:
+            continue
+        edit_event, edit_thread_id = winner
         target_roots = {
             root_id
             for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
@@ -1966,13 +1527,14 @@ async def _bulk_scan_thread_event_sources(
     if max_scan_pages is not None and max_scan_pages < 1:
         msg = "max_scan_pages must be at least 1"
         raise ValueError(msg)
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    edit_candidates = ThreadEditCandidates()
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
     page_count = 0
     scanned_event_count = 0
     scan_truncated = False
+    homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
         if max_scan_pages is not None and page_count >= max_scan_pages:
@@ -1987,22 +1549,29 @@ async def _bulk_scan_thread_event_sources(
         )
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"bulk room scan failed for {room_id}: {response}"
-            logger.error("Failed bulk thread history scan", room_id=room_id, error=str(response))
+            logger.error(
+                "Failed bulk thread history scan",
+                room_id=room_id,
+                user_id=client.user_id,
+                error=str(response),
+            )
             raise RuntimeError(msg)  # noqa: TRY004
         if not response.chunk:
             break
         page_count += 1
+        parse_cpu_started = time.thread_time()
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
             scanned_event_count += 1
             recorded_event_id = _record_scanned_room_message_source(
                 event,
-                latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+                edit_candidates=edit_candidates,
                 scanned_message_sources=scanned_message_sources,
             )
             if recorded_event_id is not None:
                 remaining_root_ids.discard(recorded_event_id)
+        homeserver_scan_parse_cpu_ms += elapsed_ms_since(parse_cpu_started, clock=time.thread_time)
         if not response.end:
             break
         from_token = response.end
@@ -2011,7 +1580,7 @@ async def _bulk_scan_thread_event_sources(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates=edit_candidates,
     )
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
@@ -2020,6 +1589,7 @@ async def _bulk_scan_thread_event_sources(
         page_count=page_count,
         scanned_event_count=scanned_event_count,
         scan_truncated=scan_truncated,
+        homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
     )
 
 
@@ -2037,12 +1607,12 @@ async def bulk_refresh_room_thread_histories(
     The per-thread refresh walks room history until it sees that one thread's root, so bulk
     backfills of dormant rooms degrade to O(threads x history) homeserver work. This performs one
     O(history) walk, buckets every scanned event with the same canonical resolution rules as the
-    per-thread path, and stores each requested thread through the same guarded
-    ``replace_thread_if_not_newer`` path. Threads whose root never appeared in the scan are
+    per-thread path, and stores each requested thread through the same
+    ``replace_thread`` path. Threads whose root never appeared in the scan are
     reported in ``missing_root_ids`` and never stored. A caller-provided page budget stops the scan
     with remaining roots reported as missing and ``scan_truncated`` set. Threads whose reconstruction
-    contains still-opaque encrypted evidence are marked stale instead of stored, and a scan holding
-    opaque relations with unresolved impact marks every requested thread stale.
+    contains still-opaque encrypted evidence are gap-marked instead of stored, and a scan holding
+    opaque relations with unresolved impact gap-marks every requested thread.
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
@@ -2053,26 +1623,27 @@ async def bulk_refresh_room_thread_histories(
         max_scan_pages=max_scan_pages,
     )
     usable_threads = 0
-    opaque_stale_threads = 0
+    opaque_gap_threads = 0
     if scan_result.unresolved_opaque_event_ids:
         logger.warning(
             "Bulk thread refresh scan contains opaque encrypted relations with unresolved impact",
             room_id=room_id,
             caller_label=caller_label,
+            user_id=client.user_id,
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
-        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
-        opaque_stale_threads = len(set(thread_root_ids))
+        await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
+        opaque_gap_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
             rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
             if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
-                await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-                opaque_stale_threads += 1
+                await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+                opaque_gap_threads += 1
                 continue
             if rejection_reason is not None:
                 continue
-            store_outcome = await _store_thread_history_cache(
+            store_result = await _store_thread_history_cache(
                 event_cache,
                 room_id=room_id,
                 thread_id=thread_id,
@@ -2080,7 +1651,7 @@ async def bulk_refresh_room_thread_histories(
                 expected_membership_epoch=fetch_membership_epoch,
                 fetch_started_at=fetch_started_at,
             )
-            if store_outcome.usable:
+            if store_result.written:
                 usable_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
@@ -2096,7 +1667,7 @@ async def bulk_refresh_room_thread_histories(
         caller_label=caller_label,
         requested_threads=stats.requested_threads,
         usable_threads=stats.usable_threads,
-        opaque_stale_threads=opaque_stale_threads,
+        opaque_gap_threads=opaque_gap_threads,
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,
         scanned_event_count=stats.scanned_event_count,
@@ -2105,19 +1676,30 @@ async def bulk_refresh_room_thread_histories(
     return stats
 
 
-async def untrusted_cached_thread_ids(
+async def thread_ids_needing_refill(
     event_cache: ConversationEventCache,
     room_id: str,
     thread_ids: Collection[str],
 ) -> tuple[str, ...]:
-    """Return the given threads whose durable snapshots would not be served from cache."""
-    cache_states = await asyncio.gather(
-        *(event_cache.get_thread_cache_state(room_id, thread_id) for thread_id in thread_ids),
+    """Return the given threads whose durable snapshots would not be served from cache.
+
+    Two ways a thread fails to serve, and both have to be asked about: it carries a gap marker, or
+    it has no snapshot at all. Checking only the marker silently reports every never-cached thread
+    as a cache hit, which turns startup prewarm into a no-op.
+    """
+    reads = await asyncio.gather(
+        *(
+            asyncio.gather(
+                event_cache.get_thread_cache_gap(room_id, thread_id),
+                event_cache.has_thread_snapshot(room_id, thread_id),
+            )
+            for thread_id in thread_ids
+        ),
     )
     return tuple(
         thread_id
-        for thread_id, cache_state in zip(thread_ids, cache_states, strict=True)
-        if thread_cache_rejection_reason(cache_state) is not None
+        for thread_id, (gap, has_snapshot) in zip(thread_ids, reads, strict=True)
+        if thread_cache_rejection_reason(gap) is not None or not has_snapshot
     )
 
 
@@ -2277,7 +1859,6 @@ async def enumerate_room_thread_root_ids(
 __all__ = [
     "BulkThreadRefreshStats",
     "OpaqueEncryptedThreadHistoryError",
-    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
@@ -2286,9 +1867,9 @@ __all__ = [
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
+    "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_history_refresh_mode",
-    "untrusted_cached_thread_ids",
+    "thread_ids_needing_refill",
 ]

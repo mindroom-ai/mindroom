@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
 
@@ -36,6 +37,7 @@ from mindroom.workers.backends._dedicated_worker_common import build_dedicated_w
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
     _load_docker_client_and_errors,
+    _worker_health_compatibility_error,
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
@@ -50,6 +52,7 @@ from mindroom.workers.backends.docker_projection import (
     DockerProjectionManager,
 )
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
+from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -510,7 +513,7 @@ router:
         tmp_path,
         config_text=config_text,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "mapped-plugin"),
         materialize=True,
     )
@@ -542,7 +545,7 @@ def test_docker_worker_projection_resolves_config_includes(
         tmp_path,
         config_text=config_text,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "split-config"),
         materialize=True,
     )
@@ -809,7 +812,7 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
         storage_path=tmp_path / "storage",
         runtime_paths=runtime_paths,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test"),
         materialize=False,
     )
@@ -1111,7 +1114,7 @@ def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) ->
             runtime_paths=runtime_paths,
         )
         paths = local_worker_state_paths_for_root(tmp_path / "workers" / "worker-a")
-        projection = manager.projected_config(
+        projection = manager._projected_config(
             paths,
             worker_key="v1:default:shared:alpha",
             materialize=False,
@@ -1961,6 +1964,92 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     assert len(message) < 4300
 
 
+def test_docker_worker_health_accepts_matching_protocol() -> None:
+    """A worker using the host protocol should pass the compatibility handshake."""
+    response = httpx.Response(
+        200,
+        json={
+            "status": "ok",
+            "mindroom_version": "2026.8.1",
+            "worker_protocol": WORKER_PROTOCOL_VERSION,
+        },
+    )
+
+    assert _worker_health_compatibility_error(response, image="mindroom:2026.8.1") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "ok"},
+        {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
+        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
+        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
+    ],
+)
+def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, object]) -> None:
+    """Missing and stale worker protocols should fail with image guidance."""
+    response = httpx.Response(200, json=payload)
+
+    error = _worker_health_compatibility_error(response, image="mindroom:stale")
+
+    assert error is not None
+    assert "mindroom:stale" in error
+    assert f"expected worker protocol {WORKER_PROTOCOL_VERSION}" in error
+    assert "Use a worker image built for this MindRoom release" in error
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(httpx.Response(200, text="ok"), id="invalid-json"),
+        pytest.param(httpx.Response(200, json=[]), id="non-object-json"),
+    ],
+)
+def test_docker_worker_health_rejects_malformed_payload(response: httpx.Response) -> None:
+    """Malformed worker health responses should be treated as incompatible."""
+    error = _worker_health_compatibility_error(response, image="mindroom:malformed")
+
+    assert error is not None
+    assert "got missing" in error
+    assert "worker MindRoom version unknown" in error
+
+
+def test_docker_worker_readiness_rejects_incompatible_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful stale health endpoint must not make the worker ready."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    container = _FakeContainer(
+        name="mindroom-worker-stale",
+        image="mindroom:stale",
+        image_identity="sha256:stale",
+        host_port=44999,
+        environment={},
+        labels={},
+        user=None,
+    )
+
+    class _IncompatibleHealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _IncompatibleHealthClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _IncompatibleHealthClient)
+
+    with pytest.raises(WorkerBackendError, match="expected worker protocol"):
+        DockerWorkerBackend._wait_for_ready(backend, container)
+
+
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2105,7 +2194,7 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
         runtime_paths=runtime_paths,
     )
     worker_paths = local_worker_state_paths_for_root(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
-    projection = manager.projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
+    projection = manager._projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
     projected_config = yaml.safe_load(projection.projected_yaml)
     projected_context_file = projected_config["agents"]["code"]["context_files"][0]
     worker_runtime = build_dedicated_worker_runtime_paths(
@@ -2127,9 +2216,13 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
     )
 
     assert len(loaded) == 1
-    assert loaded[0].kind == "personality"
-    assert loaded[0].title == "00-context.md"
     assert loaded[0].body == "# Context"
+    # The title is the worker-visible path, so the rendered prompt names a file
+    # the worker runtime can actually open.
+    title_path = Path(loaded[0].title)
+    assert title_path.is_absolute()
+    assert title_path.name == "00-context.md"
+    assert title_path.read_text(encoding="utf-8").strip() == "# Context"
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", "unscoped"])
@@ -2200,7 +2293,7 @@ router:
     else:
         worker_key = resolve_unscoped_worker_key("My Agent")
 
-    projection = manager.projected_config(worker_paths, worker_key=worker_key, materialize=False)
+    projection = manager._projected_config(worker_paths, worker_key=worker_key, materialize=False)
     projected_config = yaml.safe_load(projection.projected_yaml)
 
     assert list(projected_config["agents"]) == ["My Agent"]
@@ -3325,14 +3418,14 @@ router:
         projected_configs_root=tmp_path / "projections",
         runtime_paths=runtime_paths,
     )
-    first_projection = first_manager.projected_config(paths, materialize=True)
+    first_projection = first_manager._projected_config(paths, materialize=True)
 
     renamed_manager = DockerProjectionManager(
         config=replace(base_config, config_path="/app/config-host/alt.yaml"),
         projected_configs_root=tmp_path / "projections",
         runtime_paths=runtime_paths,
     )
-    renamed_projection = renamed_manager.projected_config(paths, materialize=True)
+    renamed_projection = renamed_manager._projected_config(paths, materialize=True)
 
     assert renamed_projection.root != first_projection.root
     assert not first_projection.root.exists()
@@ -3386,13 +3479,13 @@ router:
         runtime_paths=runtime_paths,
     )
 
-    first_projection = manager.projected_config(paths, materialize=True)
+    first_projection = manager._projected_config(paths, materialize=True)
     first_projected_file = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
     assert first_projected_file.stat().st_mode & 0o777 == 0o644
 
     plugin_file.chmod(0o755)
 
-    second_projection = manager.projected_config(paths, materialize=True)
+    second_projection = manager._projected_config(paths, materialize=True)
     second_projected_file = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
 
     assert second_projection.root != first_projection.root
@@ -3445,13 +3538,13 @@ router:
         runtime_paths=runtime_paths,
     )
 
-    first_projection = manager.projected_config(paths, materialize=True)
+    first_projection = manager._projected_config(paths, materialize=True)
     first_projected_dir = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
     assert first_projected_dir.stat().st_mode & 0o777 == 0o755
 
     plugin_dir.chmod(0o700)
 
-    second_projection = manager.projected_config(paths, materialize=True)
+    second_projection = manager._projected_config(paths, materialize=True)
     second_projected_dir = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
 
     assert second_projection.root != first_projection.root

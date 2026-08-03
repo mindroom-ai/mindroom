@@ -640,7 +640,8 @@ mindroom threads export --storage-path mindroom_data --prefer-cache
 ## service
 
 Install and manage MindRoom as a background user service.
-MindRoom runs through `uv tool run` and starts automatically at login.
+MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
 
@@ -661,7 +662,9 @@ On Linux, MindRoom uses systemd user services.
 
  Install and manage MindRoom as a background user service.
 
- MindRoom runs through `uv tool run` and starts automatically at login.
+ MindRoom runs the version installed by this command through `uv tool run` and starts
+ automatically at login.
+ Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
  - macOS: launchd (`~/Library/LaunchAgents/`)
@@ -873,7 +876,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -909,6 +912,9 @@ The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+
+The `--provider kimi` preset generates `provider: kimi` with `id: k3` and `context_window: 1048576`.
+Run `kimi` and `/login` first so MindRoom can read `~/.kimi-code/credentials/kimi-code.json`.
 
 The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:

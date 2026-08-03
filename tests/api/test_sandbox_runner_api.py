@@ -31,7 +31,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
-from mindroom import runtime_env_policy
+from mindroom import __version__, runtime_env_policy
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
@@ -66,6 +66,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
+from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import requires_linux
 
@@ -2493,10 +2494,14 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
 
 
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
-    """Sandbox runner should expose a minimal unauthenticated health endpoint."""
+    """Sandbox runner should advertise its compatibility contract without auth."""
     response = runner_client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "mindroom_version": __version__,
+        "worker_protocol": WORKER_PROTOCOL_VERSION,
+    }
 
 
 def test_sandbox_runner_executes_tool_call_in_subprocess_mode(

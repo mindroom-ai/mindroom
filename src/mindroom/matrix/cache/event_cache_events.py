@@ -23,6 +23,21 @@ class SerializedCachedEvent:
     event_json: str
     event: dict[str, Any]
 
+    @property
+    def sender(self) -> str:
+        """Return the Matrix user that sent this event.
+
+        Persisted as its own narrow column so a collapsed thread read can compare an edit's sender
+        against the sender of the event it replaces without reading either payload. A replacement
+        is only legitimate from the original's sender, and a read that cannot check that cheaply
+        ranks a foreign edit as the survivor. The fold then finds nothing in the author's own
+        bucket and renders the pre-edit body, so the damage is a silent rollback of the author's
+        own edit rather than the impersonation it first looks like - the fold, not this column,
+        is what stops someone else's text being shown.
+        """
+        sender = self.event.get("sender")
+        return sender if isinstance(sender, str) else ""
+
 
 @dataclass(frozen=True, slots=True)
 class CachedEventRow:

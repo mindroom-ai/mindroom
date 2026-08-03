@@ -13,14 +13,15 @@ If STT is unavailable, disabled, or fails, the audio still remains available as 
 When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
-2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
-3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
-4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
-5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
-7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-8. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-9. The responding entity receives the original audio attachment alongside the normalized prompt.
+2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
+3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
+4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
+7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
+8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
+9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
 
 ## Configuration
 
@@ -43,7 +44,8 @@ Or use the dashboard's Voice tab.
 
 With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt.
 Enabling voice adds STT and command-recognition on top of that attachment flow.
-With `voice.visible_router_echo: true`, the router also posts the normalized transcript or fallback text for inspection when it is present in the room and allowed to reply.
+With `voice.visible_router_echo: true` and `voice.enabled: true`, the router immediately posts a transcription placeholder and replaces that message with the normalized transcript or fallback text when it is present in the room and allowed to reply.
+When `voice.enabled: false`, the router posts the fallback text directly without claiming that transcription is running.
 
 ## STT Providers
 
@@ -153,7 +155,8 @@ If only one eligible agent or team is visible, that responder answers the normal
 If the audio caption or transcript explicitly mentions an agent or team, that targeted responder answers directly as well.
 In these cases, the router does not post an extra visible routing handoff.
 The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
-If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but responders ignore that echo and continue responding to the original audio event.
+If voice STT and `voice.visible_router_echo` are enabled, the router still posts a display-only placeholder and replaces it with the normalized transcript or fallback text, but responders ignore that echo and continue responding to the original audio event.
+With STT disabled, the router posts the display-only fallback directly.
 
 ### Multi-responder rooms where the router must choose
 
@@ -161,7 +164,8 @@ If multiple agents or teams are available and the audio does not already target 
 The router then posts a normal handoff message such as `@home could you help with this?`.
 The selected agent or team responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
 This is the case where a visible router message appears.
-If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
+If voice STT and `voice.visible_router_echo` are enabled, the router immediately posts a display-only transcription placeholder, replaces it with the normalized transcript or fallback text, and then posts the normal handoff.
+With STT disabled, the router posts the display-only fallback directly before the normal handoff.
 
 ### No router, or router cannot reply
 
@@ -173,7 +177,8 @@ If multiple eligible responders remain and the audio does not already target one
 
 ### Visibility rule
 
-By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
+By default, MindRoom immediately posts a display-only router transcription placeholder when voice STT is enabled and the router is allowed to process the event, then replaces it with the normalized transcript or fallback text.
+With STT disabled, MindRoom posts the display-only fallback directly.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
 Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.

@@ -78,7 +78,7 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=failing_process)),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
@@ -124,7 +124,7 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=failing_process)),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
@@ -201,7 +201,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
         _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
         with patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=_run_response_function_directly),
         ):
             await coordinator.generate_team_response_helper(
@@ -276,7 +276,7 @@ async def test_team_pre_delivery_failure_finalizes_terminal_note_and_reraises(tm
         with (
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=_run_response_function_directly),
             ),
             pytest.raises(RuntimeError, match="team prep exploded"),

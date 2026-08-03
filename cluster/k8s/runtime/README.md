@@ -101,12 +101,14 @@ config:
 
 ## Runtime State Storage
 
-MindRoom stores Matrix encryption keys and sync-token checkpoints under `MINDROOM_STORAGE_PATH`.
+MindRoom stores Matrix encryption keys and crash-atomic sync continuity records under `MINDROOM_STORAGE_PATH`.
 Hosted installs can keep those restart-critical directories on a dedicated PVC while normal workspace data stays on `storage`.
 The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
 `initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
 By default, the init container runs as UID 0 because it performs `chown` and `chmod`, while the main runtime container keeps its own security context.
+Upgrades from chart versions that used `stateStorage.syncTokens` must rename that values block to `stateStorage.syncContinuity` and use the `sync_continuity` subpath.
+The old sync-token data is intentionally not migrated, so the first upgraded start performs a cold sync while the history fence prevents duplicate replies.
 
 Use an existing PVC when another platform layer owns durable storage:
 
@@ -124,10 +126,10 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/encryption_keys
     subPath: encryption_keys
-  syncTokens:
+  syncContinuity:
     enabled: true
-    mountPath: /app/agent_data/sync_tokens
-    subPath: sync_tokens
+    mountPath: /app/agent_data/sync_continuity
+    subPath: sync_continuity
   initPermissions:
     enabled: true
     runAsUser: 1000

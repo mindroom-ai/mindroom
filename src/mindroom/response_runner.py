@@ -16,7 +16,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -57,7 +57,9 @@ from mindroom.response_terminal import (
 )
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -125,24 +127,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_StateMutationResult = TypeVar("_StateMutationResult")
-
-
-async def _run_locked_source_preparation(
-    operation: Callable[[], _StateMutationResult],
-) -> _StateMutationResult:
-    """Run blocking source preparation off-loop without releasing its lock early."""
-    worker_task = asyncio.create_task(asyncio.to_thread(operation))
-    try:
-        return await asyncio.shield(worker_task)
-    except asyncio.CancelledError:
-        while not worker_task.done():
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-        worker_task.result()
-        raise
 
 
 def _merge_response_extra_content(
@@ -328,11 +312,14 @@ class ResponseRequest:
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
+    on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
-    on_sync_restart_cancelled: Callable[[], None] | None = None
+    on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    on_user_stop_handled: Callable[[str, int], None] | None = None
+    on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def room_id(self) -> str:
@@ -481,6 +468,14 @@ class _PreparedResponseRuntime:
     tool_dispatch: ToolDispatchContext
 
 
+@dataclass(frozen=True)
+class _InboxResponseOwnership:
+    """Recovery callbacks retained with one detached inbox response."""
+
+    recovery_proof_ready: Callable[[], bool]
+    on_failure: Callable[[], None] | None
+
+
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
@@ -493,18 +488,40 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
+    _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
 
-    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+    def track_inbox_response(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        name: str,
+        recovery_proof_ready: Callable[[], bool],
+        on_failure: Callable[[], None] | None = None,
+    ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
-        self._inbox_response_tasks.add(task)
+        self._inbox_response_tasks[task] = _InboxResponseOwnership(
+            recovery_proof_ready=recovery_proof_ready,
+            on_failure=on_failure,
+        )
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
+    @property
+    def pending_inbox_response_count(self) -> int:
+        """Return an event-loop-local snapshot of runner-owned unsettled responses."""
+        return sum(not task.done() for task in self._inbox_response_tasks)
+
+    @property
+    def incomplete_inbox_responses_recoverable(self) -> bool:
+        """Return whether every timed-out response has finished cleanup with recovery proof."""
+        return self._incomplete_inbox_responses_recoverable
+
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
-        self._inbox_response_tasks.discard(task)
+        ownership = self._inbox_response_tasks.pop(task, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -513,6 +530,8 @@ class ResponseRunner:
             # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
+            if ownership is not None and ownership.on_failure is not None:
+                ownership.on_failure()
             self.deps.logger.error(
                 "inbox_response_task_failed",
                 task_name=task.get_name(),
@@ -533,6 +552,8 @@ class ResponseRunner:
         waiting for completion and one letting cancelled tasks run cleanup.
         """
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        # Done callbacks pop tasks, so snapshot proofs before an await can run them.
+        recovery_checks = {task: self._inbox_response_tasks[task].recovery_proof_ready for task in tasks}
         if not tasks:
             return True
         if cancel_after_seconds is None:
@@ -544,6 +565,8 @@ class ResponseRunner:
         for task in pending:
             request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
+        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+        self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         return False
 
     def _client(self) -> nio.AsyncClient:
@@ -586,7 +609,7 @@ class ResponseRunner:
         """Wake pre-admission responses whose owning runtime is shutting down."""
         self._admission_shutdown_requested.set()
 
-    async def _wait_for_admission_or_shutdown(self) -> bool:
+    async def wait_for_admission_or_shutdown(self) -> bool:
         """Return whether admission reopened before this runtime started shutdown."""
         if self._admission_shutdown_requested.is_set():
             return False
@@ -767,6 +790,37 @@ class ResponseRunner:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
+    async def finalize_user_stop(
+        self,
+        message_id: str,
+        target: MessageTarget,
+        stop_receipt_order: int,
+        should_cancel: Callable[[], bool],
+        finalize: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """Cancel the live response, then durably finalize its turn under the same lock."""
+        cancellation_requested = False
+        self._user_stop_receipt_orders.setdefault(message_id, set()).add(stop_receipt_order)
+
+        async def cancel_live_response() -> None:
+            nonlocal cancellation_requested
+            if cancellation_requested:
+                return
+            cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
+
+        try:
+            return await self._lifecycle_coordinator.run_locked_target_operation(
+                target=target,
+                while_waiting=cancel_live_response,
+                locked_operation=finalize,
+            )
+        finally:
+            receipt_orders = self._user_stop_receipt_orders.get(message_id)
+            if receipt_orders is not None:
+                receipt_orders.discard(stop_receipt_order)
+            if not receipt_orders:
+                self._user_stop_receipt_orders.pop(message_id, None)
+
     def reserve_waiting_human_message(
         self,
         *,
@@ -830,11 +884,11 @@ class ResponseRunner:
             if not admission_deferred:
                 admission_deferred = True
                 self.deps.logger.info(
-                    "response_deferred_during_config_apply",
+                    "response_deferred_during_replacement",
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
-            if not await self._wait_for_admission_or_shutdown():
+            if not await self.wait_for_admission_or_shutdown():
                 self.deps.logger.warning(
                     "response_refused_after_runtime_replacement",
                     response_kind=response_kind,
@@ -1142,26 +1196,60 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
-    def _notify_sync_restart_cancelled(
+    def _notify_interrupted_response_recoverable(
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
-    ) -> None:
-        """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
+    ) -> bool:
+        """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
-        Only turns that end as a visible interrupted note are reported: they get
-        recorded in the handled-turn ledger, so the replacement runtime's sync
-        replay dedups them away and room-scoped recovery is their only route back.
-        Unmarked turns are recovered by that replay instead; recovering them too
-        would answer twice.
+        Only turns whose terminal interruption update reached Matrix are
+        reported: restart cleanup can discover that note, while the handled-turn
+        ledger prevents source replay from answering it twice. Explicit user
+        stops are terminal user intent and must never schedule recovery.
         """
-        if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
+        if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
+            return False
+        if (
+            not final_outcome.mark_handled
+            or final_outcome.delivery_kind is None
+            or request.response_envelope.target.resolved_thread_id is None
+        ):
+            return False
+        cancel_source = final_outcome.cancel_source or cancel_source_from_failure_reason(final_outcome.failure_reason)
+        if cancel_source == "user_stop":
+            return False
+        expected_note = (
+            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
+        )
+        if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
+            expected_note,
+        ):
+            return False
+        request.on_interrupted_response_recoverable()
+        return True
+
+    async def _record_user_stop_handled(
+        self,
+        request: ResponseRequest,
+        final_outcome: FinalDeliveryOutcome,
+        *,
+        cancel_source: str | None,
+        source_handled: bool,
+    ) -> None:
+        """Make explicit user-stop settlement durable before releasing the response lock."""
+        on_user_stop_handled = request.on_user_stop_handled
+        if not source_handled or cancel_source != "user_stop" or on_user_stop_handled is None:
             return
-        if not final_outcome.mark_handled:
+        response_event_id = final_outcome.final_visible_event_id
+        assert response_event_id is not None
+        stop_receipt_orders = self._user_stop_receipt_orders.get(response_event_id)
+        if not stop_receipt_orders:
             return
-        if cancel_source_from_failure_reason(final_outcome.failure_reason) != "sync_restart":
-            return
-        request.on_sync_restart_cancelled()
+        stop_receipt_order = max(stop_receipt_orders)
+        await run_blocking_until_complete(
+            lambda: on_user_stop_handled(response_event_id, stop_receipt_order),
+        )
 
     async def _begin_locked_turn(
         self,
@@ -1184,11 +1272,11 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await _run_locked_source_preparation(
+        if request.prepare_source_turn is not None and await run_blocking_until_complete(
             request.prepare_source_turn,
         ):
             self.deps.logger.info(
-                "response_suppressed_for_redacted_source",
+                "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
@@ -1204,6 +1292,8 @@ class ResponseRunner:
                         ),
                     ),
                 )
+            if request.on_source_turn_suppressed is not None:
+                await request.on_source_turn_suppressed()
             return None
         placeholder_event_id = None
         if (
@@ -1233,6 +1323,8 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
+                if request.on_visible_response is not None:
+                    await request.on_visible_response(placeholder_event_id)
         request = await self._prepare_request_after_lock(
             request,
             exclude_history_event_id=placeholder_event_id,
@@ -1420,7 +1512,7 @@ class ResponseRunner:
         run_message_id: str | None = None
         deferred_error: BaseException | None = None
         try:
-            run_message_id = await self.run_cancellable_response(
+            run_message_id = await self._run_cancellable_response(
                 target=target,
                 response_function=response_function,
                 thinking_message=thinking_message,
@@ -1429,6 +1521,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
+                on_visible_response=request.on_visible_response,
             )
             if progress.tracked_event_id is None:
                 progress.track_event(run_message_id)
@@ -1489,14 +1582,29 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_sync_restart_cancelled(request, final_outcome)
+        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
+        cancel_source = final_outcome.cancel_source
+        if cancel_source is None and final_outcome.terminal_status == "cancelled":
+            cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
+        source_handled = final_outcome.mark_handled and (
+            request.on_deferred_outcome_handled is None
+            or cancel_source is None
+            or cancel_source == "user_stop"
+            or interruption_recovery_registered
+        )
+        await self._record_user_stop_handled(
+            request,
+            final_outcome,
+            cancel_source=cancel_source,
+            source_handled=source_handled,
+        )
         if deferred_error is not None:
-            if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
+            if source_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id
                 assert response_event_id is not None
                 request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
-        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
+        return final_outcome.final_visible_event_id if source_handled else None
 
     def _build_lifecycle(
         self,
@@ -1572,10 +1680,12 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="team",
-            locked_operation=lambda resolved_target, early_placeholder_state: self.generate_team_response_helper_locked(
-                team_request,
-                resolved_target=resolved_target,
-                early_placeholder_state=early_placeholder_state,
+            locked_operation=lambda resolved_target, early_placeholder_state: (
+                self._generate_team_response_helper_locked(
+                    team_request,
+                    resolved_target=resolved_target,
+                    early_placeholder_state=early_placeholder_state,
+                )
             ),
         )
 
@@ -1596,7 +1706,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_team_response_helper_locked(  # noqa: C901, PLR0915
+    async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
         self,
         team_request: _TeamResponseRequest,
         *,
@@ -1932,11 +2042,13 @@ class ResponseRunner:
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 )
-                progress.settle(
-                    await self.deps.delivery_gateway.finalize_streamed_response(finalize_request),
-                )
+                delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
+                progress.settle(delivery)
                 if request.pipeline_timing is not None:
-                    request.pipeline_timing.mark_first_visible_reply("final")
+                    request.pipeline_timing.mark_first_visible_reply(
+                        "final",
+                        substantive=delivery.delivered_substantive_content,
+                    )
                     request.pipeline_timing.mark("response_complete")
             else:
                 try:
@@ -2023,23 +2135,22 @@ class ResponseRunner:
 
                 progress.note_delivery_started(None)
                 try:
-                    progress.settle(
-                        await self.deps.delivery_gateway.deliver_final(
-                            FinalDeliveryRequest(
-                                target=delivery_target,
-                                existing_event_id=message_id,
-                                existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
-                                response_text=response_text,
-                                identity=response_identity,
-                                tool_trace=None,
-                                extra_content=_merge_response_extra_content(
-                                    team_run_metadata_content
-                                    or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
-                                    request.attachment_ids,
-                                ),
+                    delivery = await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=delivery_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            response_text=response_text,
+                            identity=response_identity,
+                            tool_trace=None,
+                            extra_content=_merge_response_extra_content(
+                                team_run_metadata_content
+                                or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                                request.attachment_ids,
                             ),
                         ),
                     )
+                    progress.settle(delivery)
                 except asyncio.CancelledError:
                     await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
@@ -2052,7 +2163,10 @@ class ResponseRunner:
                     )
                     raise
                 if request.pipeline_timing is not None:
-                    request.pipeline_timing.mark_first_visible_reply("final")
+                    request.pipeline_timing.mark_first_visible_reply(
+                        "final",
+                        substantive=delivery.delivered_substantive_content,
+                    )
                     request.pipeline_timing.mark("response_complete")
 
         async def settle_team_streaming_delivery_error(error: StreamingDeliveryError) -> FinalDeliveryOutcome:
@@ -2150,7 +2264,7 @@ class ResponseRunner:
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
         )
 
-    async def run_cancellable_response(
+    async def _run_cancellable_response(
         self,
         *,
         target: MessageTarget,
@@ -2161,6 +2275,7 @@ class ResponseRunner:
         run_id: str | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
+        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -2184,6 +2299,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=pipeline_timing,
                 on_cancelled=on_cancelled,
+                on_visible_response=on_visible_response,
             ),
         )
 
@@ -2437,7 +2553,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def _process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -2577,11 +2693,14 @@ class ResponseRunner:
             )
             raise
         if request.pipeline_timing is not None:
-            request.pipeline_timing.mark_first_visible_reply("final")
+            request.pipeline_timing.mark_first_visible_reply(
+                "final",
+                substantive=delivery.delivered_substantive_content,
+            )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2760,7 +2879,10 @@ class ResponseRunner:
         )
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
         if request.pipeline_timing is not None:
-            request.pipeline_timing.mark_first_visible_reply("final")
+            request.pipeline_timing.mark_first_visible_reply(
+                "final",
+                substantive=delivery.delivered_substantive_content,
+            )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 
@@ -2769,14 +2891,14 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
-            locked_operation=lambda resolved_target, early_placeholder_state: self.generate_response_locked(
+            locked_operation=lambda resolved_target, early_placeholder_state: self._generate_response_locked(
                 request,
                 resolved_target=resolved_target,
                 early_placeholder_state=early_placeholder_state,
             ),
         )
 
-    async def generate_response_locked(
+    async def _generate_response_locked(
         self,
         request: ResponseRequest,
         *,
@@ -2888,14 +3010,14 @@ class ResponseRunner:
             progress.track_event(message_id)
             delivery_request = self._request_for_delivery(normalized_request, message_id=message_id)
             if use_streaming:
-                generation = await self.process_and_respond_streaming(
+                generation = await self._process_and_respond_streaming(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
                     attempt_run_id_collector=attempt_run_ids,
                 )
             else:
-                generation = await self.process_and_respond(
+                generation = await self._process_and_respond(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,

@@ -1817,7 +1817,9 @@ def _write_ledger(ledger_path: Path, records: dict[str, TurnRecord]) -> None:
         json.dumps(
             {
                 "schema_version": TurnRecordCodec.schema_version(),
-                "records": {event_id: TurnRecordCodec.to_ledger_record(record) for event_id, record in records.items()},
+                "records": {
+                    event_id: TurnRecordCodec._to_ledger_record(record) for event_id, record in records.items()
+                },
             },
         ),
         encoding="utf-8",
@@ -1857,12 +1859,12 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
 
         # A completed no-response supersession record proves the older source was
         # legitimately skipped; it now settles and its cover is the combined reply.
-        second_record = TurnRecord(
+        second_record = TurnRecord.create(
             source_event_ids=("$second",),
             response_event_id="$combined-reply",
             completed=True,
         )
-        superseded_record = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True)
+        superseded_record = TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=True)
         _write_ledger(ledger_path, {"$first": superseded_record, "$second": second_record})
         oracle.refresh_ledger_attributions(min_interval=0.0)
         assert oracle.unsettled_required_sources() == []
@@ -1870,7 +1872,7 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
 
         # A dedicated response-backed record instead attributes the older source
         # directly to its own reply.
-        dedicated_record = TurnRecord(
+        dedicated_record = TurnRecord.create(
             source_event_ids=("$first",),
             response_event_id="$dedicated-reply",
             completed=True,
@@ -1901,13 +1903,13 @@ async def test_coalescing_oracle_requires_own_record_for_incomplete_supersession
             oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
         oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
 
-        second_record = TurnRecord(
+        second_record = TurnRecord.create(
             source_event_ids=("$second",),
             response_event_id="$combined-reply",
             completed=True,
         )
         # An incomplete older record never proves supersession.
-        incomplete = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=False)
+        incomplete = TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=False)
         _write_ledger(ledger_path, {"$first": incomplete, "$second": second_record})
         oracle.refresh_ledger_attributions(min_interval=0.0)
         assert oracle.unsettled_required_sources() == ["$first"]
@@ -1937,8 +1939,8 @@ async def test_redacting_settled_coalesced_source_does_not_mark_optional(tmp_pat
         _write_ledger(
             ledger_path,
             {
-                "$first": TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True),
-                "$second": TurnRecord(
+                "$first": TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=True),
+                "$second": TurnRecord.create(
                     source_event_ids=("$second",),
                     response_event_id="$combined",
                     completed=True,
@@ -2074,7 +2076,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         oracle.expect("op:2", "$second", thread=0)
         replies = {"$second": {"$combined-reply"}}
 
-        coalesced_record = TurnRecord(
+        coalesced_record = TurnRecord.create(
             source_event_ids=("$first", "$second"),
             response_event_id="$combined-reply",
             completed=True,
@@ -2093,8 +2095,8 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             auditor._assert_ledger_attribution(replies)
 
         # Final audit rejects an incomplete record directly.
-        incomplete_first = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=False)
-        anchor_second = TurnRecord(
+        incomplete_first = TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=False)
+        anchor_second = TurnRecord.create(
             source_event_ids=("$second",),
             response_event_id="$combined-reply",
             completed=True,
@@ -2104,7 +2106,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             auditor._assert_ledger_attribution(replies)
 
         # A completed no-response record for the older source proves supersession.
-        superseded_first = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True)
+        superseded_first = TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=True)
         _write_ledger(ledger_path, {"$first": superseded_first, "$second": anchor_second})
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 1,
@@ -2122,7 +2124,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         with pytest.raises(AssertionError, match="newest chain source"):
             auditor._assert_ledger_attribution(replies)
 
-        foreign = TurnRecord(
+        foreign = TurnRecord.create(
             source_event_ids=("$other",),
             discovery_event_ids=("$first",),
             response_event_id="$combined-reply",
@@ -2153,7 +2155,7 @@ async def test_ledger_attribution_accepts_cross_requester_coalesced_record(
     try:
         oracle.expect("op:1", "$chain-a", thread=0, client=0)
         oracle.expect("op:2", "$chain-b", thread=0, client=1)
-        coalesced = TurnRecord(
+        coalesced = TurnRecord.create(
             source_event_ids=("$chain-a", "$chain-b"),
             response_event_id="$one-reply",
             completed=True,
@@ -2170,12 +2172,12 @@ async def test_ledger_attribution_accepts_cross_requester_coalesced_record(
         with pytest.raises(AssertionError, match=r"\$stale-reply.*not a visible canonical reply"):
             auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}})
 
-        chain_a = TurnRecord(
+        chain_a = TurnRecord.create(
             source_event_ids=("$chain-a",),
             response_event_id="$one-reply",
             completed=True,
         )
-        chain_b = TurnRecord(
+        chain_b = TurnRecord.create(
             source_event_ids=("$chain-b",),
             response_event_id="$one-reply",
             completed=True,
@@ -2205,7 +2207,7 @@ async def test_ledger_attribution_rejects_coalesced_record_across_threads(
     try:
         oracle.expect("op:1", "$chain-a", thread=0, client=0)
         oracle.expect("op:2", "$chain-b", thread=1, client=1)
-        forged = TurnRecord(
+        forged = TurnRecord.create(
             source_event_ids=("$chain-a", "$chain-b"),
             response_event_id="$one-reply",
             completed=True,
@@ -2233,13 +2235,13 @@ async def test_final_ledger_audit_rejects_one_malformed_projection(tmp_path: Pat
     )
     try:
         oracle.expect("op:1", "$source", thread=0)
-        record = TurnRecord(source_event_ids=("$source",), response_event_id="$reply", completed=True)
+        record = TurnRecord.create(source_event_ids=("$source",), response_event_id="$reply", completed=True)
         ledger_path.write_text(
             json.dumps(
                 {
                     "schema_version": TurnRecordCodec.schema_version(),
                     "records": {
-                        "$source": TurnRecordCodec.to_ledger_record(record),
+                        "$source": TurnRecordCodec._to_ledger_record(record),
                         "$corrupt": {"completed": True},
                     },
                 },
@@ -2261,7 +2263,7 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
     _write_ledger(
         ledger_path,
         {
-            "$pending": TurnRecord(
+            "$pending": TurnRecord.create(
                 source_event_ids=("$pending",),
                 response_event_id=None,
                 completed=False,
@@ -2316,7 +2318,7 @@ async def test_final_audit_reuses_one_ledger_snapshot(
 def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) -> None:
     """A fully redacted turn is terminal once durable cleanup has completed."""
     ledger_path = tmp_path / "general_responded.json"
-    tombstone = TurnRecord(
+    tombstone = TurnRecord.create(
         source_event_ids=("$stop-reaction",),
         redacted_source_event_ids=("$stop-reaction",),
         response_event_id=None,
@@ -2366,7 +2368,7 @@ async def test_visible_optional_reply_requires_durable_attribution(tmp_path: Pat
         with pytest.raises(AssertionError, match="optional-source reply"):
             auditor._assert_ledger_attribution(replies)
 
-        record = TurnRecord(source_event_ids=("$optional",), response_event_id="$reply", completed=True)
+        record = TurnRecord.create(source_event_ids=("$optional",), response_event_id="$reply", completed=True)
         _write_ledger(ledger_path, {"$optional": record})
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 1,
@@ -2376,7 +2378,7 @@ async def test_visible_optional_reply_requires_durable_attribution(tmp_path: Pat
         _write_ledger(
             ledger_path,
             {
-                "$optional": TurnRecord(
+                "$optional": TurnRecord.create(
                     source_event_ids=("$optional",),
                     response_event_id="$phantom",
                     completed=True,
@@ -2978,7 +2980,7 @@ async def test_model_source_audit_rejects_response_from_wrong_source(tmp_path: P
         observed={7: frozenset({marker_b})},
     )
     try:
-        record = TurnRecord(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
         _write_ledger(ledger_path, {"$a": record})
         events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(7))}
         with pytest.raises(AssertionError, match="without current source markers"):
@@ -3002,7 +3004,7 @@ async def test_model_source_audit_rejects_pre_edit_revision(tmp_path: Path) -> N
         observed={4: frozenset({orig})},
     )
     try:
-        record = TurnRecord(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
         _write_ledger(ledger_path, {"$a": record})
         events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4))}
         with pytest.raises(AssertionError, match="without current source markers"):
@@ -3029,7 +3031,7 @@ async def test_model_source_audit_rejects_coalesced_missing_one_source(tmp_path:
         observed={9: frozenset({marker_a})},
     )
     try:
-        coalesced = TurnRecord(source_event_ids=("$a", "$b"), response_event_id="$combined", completed=True)
+        coalesced = TurnRecord.create(source_event_ids=("$a", "$b"), response_event_id="$combined", completed=True)
         _write_ledger(ledger_path, {"$a": coalesced, "$b": coalesced})
         events = {"$combined": _agent_reply_event("$b", "$combined", _short_body_for(9))}
         with pytest.raises(AssertionError, match="without current source markers"):
@@ -3056,7 +3058,7 @@ async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Pat
         observed={},
     )
     try:
-        superseded = TurnRecord(source_event_ids=("$a",), response_event_id=None, completed=True)
+        superseded = TurnRecord.create(source_event_ids=("$a",), response_event_id=None, completed=True)
         _write_ledger(ledger_path, {"$a": superseded})
         auditor._assert_model_saw_current_sources({})
     finally:
@@ -3086,7 +3088,7 @@ async def test_model_source_audit_uses_harness_redaction_truth(tmp_path: Path) -
         observed={4: frozenset({orig})},
     )
     try:
-        redacted = TurnRecord(
+        redacted = TurnRecord.create(
             source_event_ids=("$a",),
             redacted_source_event_ids=("$a",),
             response_event_id="$reply-a",
@@ -3115,7 +3117,7 @@ async def test_model_source_audit_uses_harness_redaction_truth(tmp_path: Path) -
 
 def test_ledger_redaction_audit_requires_harness_expected_tombstone() -> None:
     """Harness-observed source redaction must exist in the durable source row."""
-    live = TurnRecord(
+    live = TurnRecord.create(
         source_event_ids=("$source",),
         response_event_id="$reply",
         completed=True,
@@ -3125,7 +3127,7 @@ def test_ledger_redaction_audit_requires_harness_expected_tombstone() -> None:
         {"$source"},
     ) == ["harness-redacted source $source has no durable tombstone"]
 
-    tombstoned = TurnRecord(
+    tombstoned = TurnRecord.create(
         source_event_ids=("$source",),
         redacted_source_event_ids=("$source",),
         response_event_id="$reply",
@@ -3155,7 +3157,7 @@ async def test_model_source_audit_requires_live_sibling_not_redacted_sibling(tmp
         observed={9: frozenset({marker_a})},
     )
     try:
-        coalesced = TurnRecord(
+        coalesced = TurnRecord.create(
             source_event_ids=("$a", "$b"),
             redacted_source_event_ids=("$b",),
             response_event_id="$combined",

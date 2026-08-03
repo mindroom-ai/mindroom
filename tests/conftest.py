@@ -43,6 +43,8 @@ import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import CoalescingDrainResult
+from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -69,7 +71,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -79,6 +81,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
+from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -91,6 +94,9 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
+from mindroom.user_stop_reconciliation import UserStopReconciler
+from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -168,6 +174,7 @@ __all__ = [
     "install_generate_response_mock",
     "install_runtime_cache_support",
     "install_send_response_mock",
+    "install_shutdown_drain_mocks",
     "load_config_yaml",
     "make_conversation_cache_mock",
     "make_event_cache_mock",
@@ -672,7 +679,7 @@ def _outcome(
         suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
-        interactive_metadata=InteractiveMetadata.from_parts(option_map, options_list),
+        interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
     )
 
 
@@ -722,6 +729,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
     return client
 
 
@@ -789,8 +797,12 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_recent_room_events.return_value = []
     event_cache.get_recent_room_thread_ids.return_value = []
     event_cache.get_thread_events.return_value = None
-    event_cache.get_thread_cache_state.return_value = None
-    event_cache.get_thread_revision.return_value = None
+
+    async def has_thread_snapshot(room_id: str, thread_id: str) -> bool:
+        return await event_cache.get_thread_events(room_id, thread_id) is not None
+
+    event_cache.has_thread_snapshot.side_effect = has_thread_snapshot
+    event_cache.get_thread_cache_gap.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
     event_cache.get_latest_agent_message_snapshot.return_value = None
     event_cache.pending_durable_write_room_ids.return_value = ()
@@ -806,10 +818,10 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.room_departure_epoch.side_effect = lambda room_id: departure_epochs.get(room_id, 0)
     event_cache.room_membership_epoch.return_value = 0
     event_cache.flush_pending_durable_writes.return_value = None
-    event_cache.append_event.return_value = True
+    event_cache.apply_thread_mutation_append.return_value = ThreadAppendOutcome.APPENDED
     event_cache.redact_event.return_value = False
     event_cache.store_mxc_text.return_value = True
-    event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.STORED
+    event_cache.replace_thread.return_value = True
     return event_cache
 
 
@@ -1175,6 +1187,7 @@ def wrap_extracted_collaborators(bot: RuntimeBot, *names: str) -> RuntimeBot:
         "_delivery_gateway",
         "_response_runner",
         "_turn_store",
+        "_visible_voice_echo",
         "_edit_regenerator",
         "_inbound_turn_normalizer",
         "_conversation_resolver",
@@ -1310,6 +1323,13 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     if "logger" in rebuilt_changes:
         logger = rebuilt_changes.pop("logger")
         rebuilt_changes["get_logger"] = lambda logger=logger: logger
+    if "receipt_order" not in rebuilt_changes:
+        receipt_orders = count(1)
+
+        async def next_receipt_order() -> int:
+            return next(receipt_orders)
+
+        rebuilt_changes["receipt_order"] = next_receipt_order
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
@@ -1319,6 +1339,13 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     bot._edit_regenerator = rebuilt
     wrap_extracted_collaborators(bot, "_edit_regenerator")
     replace_turn_controller_deps(bot, edit_regenerator=bot._edit_regenerator)
+    return rebuilt
+
+
+def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> ReactionDispatcher:
+    """Rebuild reaction dispatch after swapping collaborators captured at construction."""
+    rebuilt = ReactionDispatcher(replace(bot._reaction_dispatcher.deps, **changes))
+    bot._reaction_dispatcher = rebuilt
     return rebuilt
 
 
@@ -1332,6 +1359,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
+        "command_executor": "_command_turn_executor",
         "turn_policy": "_turn_policy",
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
@@ -1339,6 +1367,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",
+        "visible_responses": "_visible_responses",
     }
     for field_name, attr_name in default_collaborators.items():
         if field_name in rebuilt_changes:
@@ -1360,8 +1389,109 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
+    visible_voice_echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
+    bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
+        replace(
+            visible_voice_echo.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+            turn_store=rebuilt_changes["turn_store"],
+            ingress=rebuilt_changes["ingress"],
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_visible_voice_echo")
+    rebuilt_changes["visible_voice_echo"] = bot._visible_voice_echo
+    visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
+    visible_response_changes = {
+        name: value
+        for name, value in changes.items()
+        if name in visible_responses.deps.__dataclass_fields__
+        and name not in {"runtime", "logger", "turn_store", "delivery_gateway"}
+    }
+    bot._visible_responses = VisibleResponseReconciler(
+        replace(
+            visible_responses.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            turn_store=rebuilt_changes["turn_store"],
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+            **visible_response_changes,
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_visible_responses")
+    rebuilt_changes["visible_responses"] = bot._visible_responses
+    command_executor = unwrap_extracted_collaborator(bot._command_turn_executor)
+    command_changes = {
+        name: value
+        for name, value in changes.items()
+        if name in command_executor.deps.__dataclass_fields__
+        and name
+        not in {
+            "runtime",
+            "logger",
+            "runtime_paths",
+            "agent_name",
+            "normalizer",
+            "conversation_cache",
+            "turn_policy",
+            "turn_store",
+            "visible_responses",
+        }
+    }
+    bot._command_turn_executor = CommandTurnExecutor(
+        replace(
+            command_executor.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
+            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            normalizer=rebuilt_changes["normalizer"],
+            conversation_cache=rebuilt_changes["conversation_cache"],
+            turn_policy=rebuilt_changes["turn_policy"],
+            turn_store=rebuilt_changes["turn_store"],
+            visible_responses=rebuilt_changes["visible_responses"],
+            **command_changes,
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_command_turn_executor")
+    rebuilt_changes["command_executor"] = bot._command_turn_executor
+    user_stop_reconciler = unwrap_extracted_collaborator(bot._user_stop_reconciler)
+    bot._user_stop_reconciler = UserStopReconciler(
+        replace(
+            user_stop_reconciler.deps,
+            turn_store=rebuilt_changes["turn_store"],
+            response_runner=rebuilt_changes["response_runner"],
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_user_stop_reconciler")
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
+    reaction_dispatcher = bot._reaction_dispatcher
+    replace_reaction_dispatcher_deps(
+        bot,
+        runtime=rebuilt.deps.runtime,
+        logger=rebuilt.deps.logger,
+        runtime_paths=rebuilt.deps.runtime_paths,
+        agent_name=rebuilt.deps.agent_name,
+        turn_policy=rebuilt.deps.turn_policy,
+        turn_store=rebuilt.deps.turn_store,
+        conversation_cache=rebuilt.deps.conversation_cache,
+        user_stop_reconciler=bot._user_stop_reconciler,
+        ingress=rebuilt.deps.ingress,
+        stop_manager=bot.stop_manager,
+        reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
+        handle_interactive_selection=rebuilt.handle_interactive_selection,
+        config_confirmation=replace(
+            reaction_dispatcher.deps.config_confirmation,
+            runtime=rebuilt.deps.runtime,
+            runtime_paths=rebuilt.deps.runtime_paths,
+            build_message_target=rebuilt.deps.resolver.build_message_target,
+            delivery_gateway=rebuilt.deps.delivery_gateway,
+        ),
+    )
     edit_changes = {
         name: value
         for name, value in changes.items()
@@ -1382,6 +1512,24 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
             )
             stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
+
+
+def install_shutdown_drain_mocks(
+    bot: RuntimeBot,
+    *,
+    coalescing_drain_result: CoalescingDrainResult,
+    responses_drained: bool,
+    response_recovery_complete: bool,
+) -> None:
+    """Install exact shutdown drain outcomes through stable collaborator seams."""
+    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=coalescing_drain_result,
+    )
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    unwrap_extracted_collaborator(
+        bot._response_runner,
+    )._incomplete_inbox_responses_recoverable = response_recovery_complete
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
@@ -1576,6 +1724,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_voice_echo_barriers() -> Generator[None, None, None]:
+    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
+    _reset_visible_voice_echo_barriers()
+    yield
+    _reset_visible_voice_echo_barriers()
+
+
+@pytest.fixture(autouse=True)
 def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Bypass authorization checks in tests by default.
 
@@ -1591,5 +1747,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
         ):
             yield

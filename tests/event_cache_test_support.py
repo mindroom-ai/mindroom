@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
-
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -19,19 +17,22 @@ async def replace_thread_unconditionally(
     thread_id: str,
     events: list[dict[str, Any]],
     *,
-    validated_at: float | None = None,
+    fetch_started_at: float | None = None,
 ) -> None:
-    """Replace a cached thread snapshot without timestamp race rejection."""
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
+    """Replace a cached thread snapshot, clearing any gap already recorded against it.
+
+    The default stands in for "a fetch that started just now": it covers every marker laid down
+    before this call, and -- unlike an infinite sentinel -- still lets a later fetch replace what
+    it installs, since replacement is ordered by ``fetch_started_at``.
+    """
+    stored = await cache.replace_thread(
         room_id,
         thread_id,
         events,
         expected_membership_epoch=await cache.room_membership_epoch(room_id),
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
+        fetch_started_at=time.time() if fetch_started_at is None else fetch_started_at,
     )
-    assert replaced is ThreadCacheReplaceOutcome.STORED
+    assert stored
 
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:

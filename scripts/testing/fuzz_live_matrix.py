@@ -2430,7 +2430,7 @@ def _decode_ledger_rows(
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
-        record = TurnRecordCodec.from_ledger_record(event_id, raw_record)
+        record = TurnRecordCodec._from_ledger_record(event_id, raw_record)
         if record is None:
             _invalid_ledger(ledger_path, f"record {event_id!r} is malformed", strict=strict)
             continue

@@ -34,6 +34,7 @@ from mindroom.scheduling import (
     drain_deferred_overdue_tasks,
     edit_scheduled_task,
     get_pending_schedule_thread_ids_for_room,
+    get_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -1077,6 +1078,66 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_task_retries_transient_state_read_failure() -> None:
+    """An unreadable checkpoint must keep the in-memory schedule retry-owned."""
+    client = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Run after retry",
+        description="Retry state read",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    state_response = nio.RoomGetStateEventResponse(
+        content={
+            "task_id": "task_once_retry",
+            "workflow": workflow.model_dump_json(),
+            "status": "pending",
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task_once_retry",
+        room_id="!test:server",
+    )
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
+        state_response,
+        state_response,
+    ]
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$completed"},
+        room_id="!test:server",
+    )
+
+    with (
+        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+        ) as execute,
+        patch(
+            "mindroom.scheduling_executor.send_scheduled_failure_notice",
+            new=AsyncMock(),
+        ) as failure_notice,
+    ):
+        await _run_once_task(
+            client,
+            "task_once_retry",
+            workflow,
+            config,
+            _runtime_paths(),
+            _event_cache(),
+            _conversation_cache(),
+        )
+
+    sleep.assert_awaited_once()
+    assert client.room_get_state_event.await_count == 3
+    execute.assert_awaited_once()
+    failure_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_once_task_marks_completed_after_success() -> None:
     """One-time tasks should overwrite pending state with completed after firing."""
     client = AsyncMock()
@@ -1167,7 +1228,6 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
     assert put_kwargs["content"]["workflow"] == workflow.model_dump_json()
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_run_cron_task_executes_latest_state_workflow() -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
@@ -1379,6 +1439,25 @@ async def test_cancel_scheduled_task_returns_error_when_state_write_fails() -> N
     )
 
     assert result.startswith("❌ Failed to cancel task `taskcancel`")
+
+
+@pytest.mark.asyncio
+async def test_cancel_scheduled_task_keeps_transient_state_read_retryable() -> None:
+    """A transient Matrix read failure must not become a terminal not-found result."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        message="rate limited",
+        status_code="M_LIMIT_EXCEEDED",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="taskcancel",
+        )
+
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1653,6 +1732,19 @@ async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> N
 
     with pytest.raises(RuntimeError, match="Failed to get scheduled task state"):
         await get_pending_schedule_thread_ids_for_room(client, "!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_scheduled_task_raises_on_transient_matrix_error() -> None:
+    """A transient checkpoint read failure must not look like an absent task."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError.from_dict(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
+        "!test:server",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await get_scheduled_task(client, "!test:server", "task123")
 
 
 @pytest.mark.asyncio

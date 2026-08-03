@@ -56,17 +56,20 @@
 {{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.storage.mountPath) -}}
 {{- fail "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath" -}}
 {{- end -}}
-{{- if and .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.syncTokens.mountPath .Values.storage.mountPath) -}}
-{{- fail "stateStorage.syncTokens.mountPath must differ from storage.mountPath" -}}
+{{- if and .Values.stateStorage.syncContinuity.enabled .Values.stateStorage.syncContinuity.mountPath (eq .Values.stateStorage.syncContinuity.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.syncContinuity.mountPath must differ from storage.mountPath" -}}
 {{- end -}}
 {{- if and .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.mountPath) -}}
 {{- fail "stateStorage.mountPath must differ from stateStorage.encryptionKeys.mountPath" -}}
 {{- end -}}
-{{- if and .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
-{{- fail "stateStorage.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- if and .Values.stateStorage.mountPath .Values.stateStorage.syncContinuity.enabled .Values.stateStorage.syncContinuity.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.syncContinuity.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from stateStorage.syncContinuity.mountPath" -}}
 {{- end -}}
-{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
-{{- fail "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncContinuity.enabled .Values.stateStorage.syncContinuity.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncContinuity.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncContinuity.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.syncContinuity.enabled (eq .Values.stateStorage.encryptionKeys.subPath .Values.stateStorage.syncContinuity.subPath) -}}
+{{- fail "stateStorage.encryptionKeys.subPath must differ from stateStorage.syncContinuity.subPath" -}}
 {{- end -}}
 {{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.mountPath) -}}
 {{- fail "stateStorage.encryptionKeys.mountPath is required when stateStorage.encryptionKeys.enabled=true" -}}
@@ -74,11 +77,11 @@
 {{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.subPath) -}}
 {{- fail "stateStorage.encryptionKeys.subPath is required when stateStorage.encryptionKeys.enabled=true" -}}
 {{- end -}}
-{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.mountPath) -}}
-{{- fail "stateStorage.syncTokens.mountPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- if and .Values.stateStorage.syncContinuity.enabled (not .Values.stateStorage.syncContinuity.mountPath) -}}
+{{- fail "stateStorage.syncContinuity.mountPath is required when stateStorage.syncContinuity.enabled=true" -}}
 {{- end -}}
-{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.subPath) -}}
-{{- fail "stateStorage.syncTokens.subPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- if and .Values.stateStorage.syncContinuity.enabled (not .Values.stateStorage.syncContinuity.subPath) -}}
+{{- fail "stateStorage.syncContinuity.subPath is required when stateStorage.syncContinuity.enabled=true" -}}
 {{- end -}}
 {{- end -}}
 {{- $contentBundleNames := dict -}}

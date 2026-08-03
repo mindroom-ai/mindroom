@@ -7,6 +7,7 @@ These tests ensure that fixed bugs don't resurface, particularly:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,21 +16,29 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import EntityStartResults
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
@@ -46,6 +55,7 @@ from tests.conftest import (
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from pathlib import Path
 
     from mindroom.turn_origin import TurnOrigin
@@ -141,6 +151,117 @@ def setup_test_bot(
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
     return install_runtime_cache_support(bot)
+
+
+def _router_readiness_runtime(
+    tmp_path: Path,
+    *,
+    with_mcp_server: bool = False,
+) -> tuple[AgentBot, AgentBot, _MultiAgentOrchestrator, nio.MatrixRoom]:
+    """Return a live router and one running target that has not completed first sync."""
+    room_id = "!router-readiness:localhost"
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=[room_id],
+                    tools=["mcp_demo"] if with_mcp_server else [],
+                ),
+            },
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}} if with_mcp_server else {},
+            authorization={"default_room_access": True},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+
+    def make_bot(entity_name: str) -> AgentBot:
+        user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
+        return setup_test_bot(user, tmp_path, room_id, config=config)
+
+    router_bot = make_bot("router")
+    target_bot = make_bot("general")
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator.config = config
+    orchestrator.agent_bots = {"router": router_bot, "general": target_bot}
+    router_bot.orchestrator = orchestrator
+    router_bot.running = target_bot.running = True
+    router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+        {"event_id": "$router-response"},
+        room_id=room_id,
+    )
+    room = nio.MatrixRoom(room_id=room_id, own_user_id=ids["router"].full_id)
+    room.users = {ids["general"].full_id: MagicMock(), "@user:localhost": MagicMock()}
+    return router_bot, target_bot, orchestrator, room
+
+
+def _selective_router_recovery_runtime(
+    tmp_path: Path,
+) -> tuple[AgentBot, AgentBot, AgentBot, nio.MatrixRoom]:
+    """Return router recovery state with one ready and one unready room candidate."""
+    room_id = "!selective-router-recovery:localhost"
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "healthy": AgentConfig(display_name="Healthy", rooms=[room_id]),
+                "stuck": AgentConfig(display_name="Stuck", rooms=[room_id]),
+            },
+            authorization={"default_room_access": True},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+
+    def make_bot(entity_name: str) -> AgentBot:
+        user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
+        return setup_test_bot(user, tmp_path, room_id, config=config)
+
+    router_bot = make_bot("router")
+    healthy_bot = make_bot("healthy")
+    stuck_bot = make_bot("stuck")
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator.config = config
+    orchestrator.agent_bots = {
+        "router": router_bot,
+        "healthy": healthy_bot,
+        "stuck": stuck_bot,
+    }
+    router_bot.orchestrator = orchestrator
+    router_bot.running = healthy_bot.running = stuck_bot.running = True
+    router_bot._first_sync_done = healthy_bot._first_sync_done = True
+    stuck_bot._first_sync_done = False
+    room = nio.MatrixRoom(room_id, ids["router"].full_id)
+    room.users = {
+        ids["healthy"].full_id: MagicMock(),
+        ids["stuck"].full_id: MagicMock(),
+        "@user:localhost": MagicMock(),
+    }
+    router_bot.client.rooms[room_id] = room
+    return router_bot, healthy_bot, stuck_bot, room
+
+
+def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_000,
+            "content": {"msgtype": "m.text", "body": "Please route this"},
+        },
+    )
+
+
+def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[None]:
+    return router_bot._turn_controller._execute_router_relay(
+        room,
+        _router_readiness_event(event_id),
+        [],
+        requester_user_id="@user:localhost",
+    )
 
 
 @pytest.mark.asyncio
@@ -307,7 +428,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
         ),
     )
 
-    filtered = policy.filter_materializable_responders(
+    filtered = policy._filter_materializable_responders(
         [
             ids["worker"],
             ids["idle"],
@@ -344,6 +465,237 @@ def mock_news_agent() -> AgentMatrixUser:
 
 class TestRoutingRegression:
     """Regression tests for routing behavior."""
+
+    @pytest.mark.asyncio
+    @patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_router_turn_recovery_defers_only_selected_unready_candidate(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Recover ready selections while retaining only an exact unready target."""
+        router_bot, _healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        room_id = room.room_id
+        event = _router_readiness_event("$selective-recovery")
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$router-response"},
+            room_id=room_id,
+        )
+        mock_suggest_responder.return_value = "healthy"
+        await router_bot._dispatch_obligation_runner.persist(
+            room,
+            event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+        await router_bot.recover_pending_turn_dispatch_obligations()
+
+        mock_suggest_responder.assert_awaited_once()
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        blocked_event = _router_readiness_event("$blocked-recovery")
+        mock_suggest_responder.reset_mock(return_value=True)
+        mock_suggest_responder.return_value = "stuck"
+        router_bot.client.room_send.reset_mock()
+        await router_bot._dispatch_obligation_runner.persist(
+            room,
+            blocked_event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+
+        mock_suggest_responder.assert_awaited_once()
+        router_bot.client.room_send.assert_not_awaited()
+        assert router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+        assert not router_bot._dispatch_obligation_runner._retry_keys
+
+        stuck_bot._first_sync_done = True
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$stuck-router-response"},
+            room_id=room_id,
+        )
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+        await router_bot.recover_pending_turn_dispatch_obligations()
+
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+    @pytest.mark.asyncio
+    async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
+        """An unavailable target gets a visible status, then one relay after readiness."""
+        router_bot, target_bot, _, room = _router_readiness_runtime(tmp_path)
+        await _router_relay(router_bot, room, "$before-ready")
+        target_bot._first_sync_done = True
+        await _router_relay(router_bot, room, "$after-ready")
+        sent_contents = [call.kwargs["content"] for call in router_bot.client.room_send.await_args_list]
+        assert sent_contents[0]["body"] == "That agent is still starting. Please try again shortly."
+        assert ORIGINAL_SENDER_KEY not in sent_contents[0]
+        assert SOURCE_KIND_KEY not in sent_contents[0]
+        assert sent_contents[1][SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        assert sent_contents[1]["body"] == "@mindroom_general:localhost could you help with this?"
+        assert sent_contents[1][ORIGINAL_SENDER_KEY] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
+        """Config apply waits for relay delivery, and replacement readiness starts fresh."""
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        router_bot._first_sync_done = target_bot._first_sync_done = True
+        replacement = MagicMock(spec=AgentBot, running=True, first_sync_complete=False)
+        fresh_replacement = MagicMock(spec=AgentBot, running=True, first_sync_complete=False)
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        def admitted_relay(event_id: str) -> Awaitable[None]:
+            return _run_admitted_router_relay(
+                router_bot._turn_controller,
+                lambda: _router_relay(router_bot, room, event_id),
+            )
+
+        async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
+            send_started.set()
+            await release_send.wait()
+            return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
+
+        async def replace_target(relay_task: asyncio.Task[None]) -> None:
+            await relay_task
+            assert router_bot.admission_gate.close_if_idle()
+            async with orchestrator._config_update_lock:
+                orchestrator.agent_bots["general"] = fresh_replacement
+            router_bot.admission_gate.reopen()
+
+        router_bot.admission_gate.close()
+        target_reload_task = asyncio.create_task(admitted_relay("$target-reload"))
+        await asyncio.sleep(0)
+        assert not target_reload_task.done()
+        orchestrator.agent_bots["general"] = replacement
+        router_bot.admission_gate.reopen()
+        await target_reload_task
+        assert router_bot.client.room_send.await_count == 1
+        replacement.first_sync_complete = True
+
+        router_bot.client.room_send.side_effect = blocking_room_send
+        relay_task = asyncio.create_task(admitted_relay("$replacement-during-send"))
+        await send_started.wait()
+        assert not router_bot.admission_gate.close_if_idle()
+        replacement_task = asyncio.create_task(replace_target(relay_task))
+        release_send.set()
+        await asyncio.gather(relay_task, replacement_task)
+
+        assert orchestrator.agent_bots["general"] is fresh_replacement
+        await admitted_relay("$replacement-starting")
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "That agent is still starting. Please try again shortly."
+        assert SOURCE_KIND_KEY not in content
+
+        coalescing_gate = CoalescingGate(
+            dispatch_batch=lambda _: admitted_relay("$router-shutdown"),
+            debounce_seconds=lambda: 0,
+            is_shutting_down=lambda: False,
+        )
+        router_bot.admission_gate.close()
+        router_bot._response_runner.refuse_pending_admissions()
+        await coalescing_gate.admit(
+            CoalescingKey(room.room_id, None, "@user:localhost"),
+            ready_result=ReadyPendingEvent(
+                pending_event=PendingEvent(
+                    event=_router_readiness_event("$router-shutdown"),
+                    room=room,
+                    source_kind="message",
+                ),
+            ),
+        )
+        await coalescing_gate.drain_all()
+        router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+        router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
+        await router_bot.prepare_for_sync_shutdown()
+        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
+
+    @pytest.mark.asyncio
+    async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """MCP replacement must not stop the selected target during relay delivery."""
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(
+            tmp_path,
+            with_mcp_server=True,
+        )
+        assert router_bot.config is orchestrator.config
+        monkeypatch.setattr(
+            "mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS",
+            0,
+        )
+        router_bot._first_sync_done = target_bot._first_sync_done = True
+        router_bot.admission_gate = target_bot.admission_gate = orchestrator._response_admission_gate
+        orchestrator.running = True
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
+            send_started.set()
+            await release_send.wait()
+            return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
+
+        router_bot.client.room_send.side_effect = blocking_room_send
+        relay_task = asyncio.create_task(
+            _run_admitted_router_relay(
+                router_bot._turn_controller,
+                lambda: _router_relay(router_bot, room, "$mcp-restart"),
+            ),
+        )
+        await send_started.wait()
+        assert router_bot.admission_gate.in_flight_response_count == 1
+
+        with (
+            patch("mindroom.orchestrator.stop_entities", new_callable=AsyncMock) as mock_stop,
+            patch.object(
+                orchestrator,
+                "_create_and_start_entities",
+                new=AsyncMock(return_value=EntityStartResults()),
+            ),
+        ):
+            await orchestrator._notify_mcp_catalog_change("demo")
+            try:
+                await asyncio.sleep(0)
+                assert mock_stop.await_count == 0
+            finally:
+                release_send.set()
+                await relay_task
+                assert await wait_for_background_tasks(
+                    timeout=1,
+                    owner=orchestrator._mcp_catalog_change_task_owner,
+                )
+
+        mock_stop.assert_awaited_once()
+        assert router_bot.admission_gate.closed is False
+
+    @pytest.mark.asyncio
+    async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:
+        """A removed target stays unavailable instead of gaining a false-ready path."""
+        router_bot, _, orchestrator, room = _router_readiness_runtime(tmp_path)
+        del orchestrator.agent_bots["general"]
+        await _router_relay(router_bot, room, "$removed")
+        router_bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
@@ -886,15 +1238,16 @@ class TestRoutingRegression:
             user_id=ids["router"].full_id,
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
-        router_bot.orchestrator = SimpleNamespace(
-            agent_bots={
-                "alpha": SimpleNamespace(running=True),
-                "beta": SimpleNamespace(running=False),
-                "writer": SimpleNamespace(running=True),
-                "ops": SimpleNamespace(running=True),
-                "router": SimpleNamespace(running=True),
-            },
-        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths)
+        orchestrator.config = test_config
+        orchestrator.agent_bots = {
+            "alpha": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
+            "beta": MagicMock(spec=AgentBot, running=False, first_sync_complete=False),
+            "writer": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
+            "ops": MagicMock(spec=TeamBot, running=True, first_sync_complete=True),
+            "router": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
+        }
+        router_bot.orchestrator = orchestrator
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
         mock_send_response = MagicMock()
@@ -1006,7 +1359,7 @@ class TestRoutingRegression:
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await alpha_bot._turn_policy.resolve_response_action(
+            action = await alpha_bot._turn_policy._resolve_response_action(
                 _policy_dispatch(
                     agent_name=alpha_bot.agent_name,
                     room_id=room.room_id,
@@ -1087,7 +1440,7 @@ class TestRoutingRegression:
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(
                 agent_name=bot.agent_name,
                 room_id=room.room_id,

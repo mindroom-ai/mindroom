@@ -23,6 +23,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
     {
         "AGENT_IDENTITY_CONTEXT_TEMPLATE",
         "CODEX_DEFAULT_INSTRUCTIONS",
+        "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
         "DATETIME_CONTEXT_TEMPLATE",
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
@@ -58,7 +59,7 @@ class ConfigUpdatePlan:
     added_entities: set[str] = field(default_factory=set)
 
     @property
-    def has_entity_changes(self) -> bool:
+    def _has_entity_changes(self) -> bool:
         """Return whether any bots must be created, restarted, or removed."""
         return bool(self.entities_to_restart or self.new_entities or self.removed_entities)
 
@@ -66,7 +67,7 @@ class ConfigUpdatePlan:
     def only_support_service_changes(self) -> bool:
         """Return whether only non-bot support services changed."""
         return not (
-            self.has_entity_changes
+            self._has_entity_changes
             or self.mindroom_user_changed
             or self.matrix_room_access_changed
             or self.matrix_space_changed

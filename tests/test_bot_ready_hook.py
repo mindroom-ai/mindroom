@@ -19,6 +19,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.storage import DispatchObligation
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -171,6 +173,57 @@ def _plugin(name: str, callbacks: list[object]) -> object:
 
 
 @pytest.mark.asyncio
+async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
+    """Startup cleanup must run after recovery and preserve every raw unsettled source."""
+    bot = _agent_bot(tmp_path)
+    call_order: list[str] = []
+    unsettled_source_event_ids = frozenset({"$pending"})
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(
+        side_effect=lambda **_kwargs: call_order.append("recover"),
+    )
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(
+        side_effect=lambda: (call_order.append("unsettled"), unsettled_source_event_ids)[1],
+    )
+    bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
+
+    await bot.recover_pending_turn_dispatch_obligations()
+
+    assert call_order == ["recover", "unsettled", "cleanup"]
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(
+        unsettled_source_event_ids=unsettled_source_event_ids,
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: Path) -> None:
+    """Ledger pruning failure must remain visible to the orchestrator retry owner."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock()
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(return_value=frozenset())
+    bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        await bot.recover_pending_turn_dispatch_obligations()
+
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(unsettled_source_event_ids=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_non_turn_recovery_retries_store_enumeration_failure(tmp_path: Path) -> None:
+    """A transient discovery failure must not strand accepted non-turn callbacks."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(side_effect=[OSError("disk unavailable"), None])
+
+    with patch("mindroom.bot.wait_exponential", return_value=lambda _retry_state: 0):
+        await bot._recover_non_turn_dispatch_obligations()
+
+    assert bot._dispatch_obligation_runner.recover_pending.await_count == 2
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     """bot:ready should fire when the first sync response is received."""
     bot = _agent_bot(tmp_path)
@@ -232,6 +285,153 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
         nio.UnknownEvent,
     ]
     client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
+
+
+@pytest.mark.asyncio
+async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -> None:
+    """Historical room membership and call state cannot mutate the live call runtime."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    call_manager.on_room_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$historical-member",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+    call_event = nio.UnknownEvent(
+        {
+            "event_id": "$historical-call",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+        },
+        "org.matrix.msc3401.call.member",
+    )
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    call_callback = client.add_event_callback.call_args_list[1].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+    await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+    await call_callback(room, call_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
+    call_manager.on_room_event.assert_not_awaited()
+
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
+    await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
+    await call_callback(room, call_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_awaited_once_with(room, membership_event)
+    call_manager.on_room_event.assert_awaited_once_with(room, call_event)
+
+
+@pytest.mark.asyncio
+async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tmp_path: Path) -> None:
+    """Opening continuity after delivery cannot admit a callback delivered cold."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$historical-member",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+    await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_path: Path) -> None:
+    """A router-hook retry cannot license an unrelated call-runtime mutation."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$pending-router-hook",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "join"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+    bot._dispatch_obligation_store.create_pending(
+        DispatchObligation(
+            principal_id=bot._dispatch_obligation_store.principal_id,
+            entity_name=bot._dispatch_obligation_store.entity_name,
+            source_event_id=membership_event.event_id,
+            callback_kind=DispatchCallbackKind.ROOM_LIFECYCLE,
+            room_id=room.room_id,
+            event_source=dict(membership_event.source),
+        ),
+    )
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+    await membership_callback(room, membership_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
 
 
 def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
@@ -483,6 +683,28 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_ready_notification_retries_after_failure(tmp_path: Path) -> None:
+    """A transient readiness failure must retry after the first sync was recorded."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.handle_bot_ready = AsyncMock(side_effect=[RuntimeError("transient recovery failure"), None])
+    bot.orchestrator = orchestrator
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(RuntimeError, match="transient recovery failure"),
+    ):
+        await bot._on_sync_response(MagicMock())
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(MagicMock())
+
+    assert bot.first_sync_complete
+    assert orchestrator.handle_bot_ready.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
     """bot:ready must fire after agent:started since it depends on sync being established."""
     bot = _agent_bot(tmp_path)
@@ -515,6 +737,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     """Hooks on bot:ready should be able to send messages through the bound sender."""
     bot = _agent_bot(tmp_path, agent_name="router")
     bot.client = AsyncMock()
+    bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}
@@ -951,7 +1174,7 @@ async def test_startup_thread_prewarm_bulk_refresh_does_not_block_live_write(tmp
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
             new=AsyncMock(return_value=tuple(thread_ids)),
         ),
         patch(
@@ -1011,7 +1234,7 @@ async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_pat
     thread_ids = ["$thread:localhost"]
     shutting_down = False
 
-    async def probe_untrusted_threads(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+    async def probe_threads_needing_refill(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         nonlocal shutting_down
         shutting_down = True
         return tuple(thread_ids)
@@ -1023,8 +1246,8 @@ async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_pat
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
-            new=AsyncMock(side_effect=probe_untrusted_threads),
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
+            new=AsyncMock(side_effect=probe_threads_needing_refill),
         ),
         patch.object(
             bot._conversation_cache,
@@ -1055,7 +1278,7 @@ async def test_startup_thread_prewarm_cache_probe_failure_is_fail_open(tmp_path:
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
             new=AsyncMock(side_effect=RuntimeError("database unavailable")),
         ),
         patch.object(

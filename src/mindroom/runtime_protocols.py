@@ -33,7 +33,7 @@ class SupportsRunningState(Protocol):
     running: bool
 
 
-class OrchestratorRuntime(Protocol):
+class OrchestratorRuntime(SupportsRunningState, Protocol):
     """Narrow orchestrator surface used by extracted runtime collaborators."""
 
     @property
@@ -60,6 +60,10 @@ class OrchestratorRuntime(Protocol):
 
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
+        ...
+
+    def entity_first_sync_complete(self, entity_name: str) -> bool | None:
+        """Return first-sync readiness for the current entity generation."""
         ...
 
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:

@@ -41,9 +41,9 @@ def _auth_error() -> AuthenticationError:
     return AuthenticationError(f"Incorrect API key provided: {SECRET}", response=response, body=None)
 
 
-def _success_response() -> SimpleNamespace:
+def _success_response(*, count: int = 1) -> SimpleNamespace:
     return SimpleNamespace(
-        data=[SimpleNamespace(embedding=[1.0, 2.0])],
+        data=[SimpleNamespace(embedding=[1.0, 2.0]) for _ in range(count)],
         usage=SimpleNamespace(model_dump=lambda: {"total_tokens": 1}),
     )
 
@@ -241,6 +241,21 @@ def test_get_embedding_and_usage_success_returns_vector_and_usage() -> None:
 
     assert embedding == [1.0, 2.0]
     assert usage == {"total_tokens": 1}
+
+
+def test_file_reference_like_inputs_are_sent_as_literal_text() -> None:
+    """Text beginning with LiteLLM's files/ sentinel cannot become a file reference."""
+    text = "files/bootsel.service#L9> If the embedded daemons do not start"
+    client = MagicMock()
+    client.embeddings.create.side_effect = [_success_response(), _success_response(count=2)]
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, openai_client=client)
+
+    assert embedder.get_embedding(text) == [1.0, 2.0]
+    assert embedder.get_embeddings_batch(["ordinary text", text]) == [[1.0, 2.0], [1.0, 2.0]]
+
+    first_request, second_request = client.embeddings.create.call_args_list
+    assert first_request.kwargs["input"] == f" {text}"
+    assert second_request.kwargs["input"] == ["ordinary text", f" {text}"]
 
 
 @pytest.mark.asyncio

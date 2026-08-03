@@ -275,11 +275,11 @@ async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) ->
         return ["!campground:example.org"]
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
-        assert await orchestrator._external_trigger_runtime.is_ready(
+        assert await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(trigger_id="campground", room_id="!campground:example.org"),
             orchestrator.agent_bots,
         )
-        assert not await orchestrator._external_trigger_runtime.is_ready(
+        assert not await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(trigger_id="campground_other", room_id="!other:example.org"),
             orchestrator.agent_bots,
         )
@@ -309,7 +309,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
         }[client]
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
-        assert await orchestrator._external_trigger_runtime.is_ready(
+        assert await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(),
             orchestrator.agent_bots,
         )
@@ -585,6 +585,41 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Path) -> None:
+    """A configured server with no dependents should not wait for unrelated responses."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "agents": {
+                "plain": {
+                    "display_name": "Plain",
+                    "role": "No MCP",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    orchestrator.running = True
+    assert orchestrator._response_admission_gate.admit()
+
+    try:
+        with patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache:
+            await asyncio.wait_for(orchestrator._handle_mcp_catalog_change("demo"), timeout=0.1)
+    finally:
+        orchestrator._response_admission_gate.release()
+
+    mock_clear_snapshot_cache.assert_called_once_with()
+    assert orchestrator._response_admission_gate.closed is False
+
+
+@pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
     """MCP restarts refresh rooms before publishing trigger runtime."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -646,6 +681,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     old_code_bot = MagicMock(spec=AgentBot)
     old_code_bot.pending_sync_restart_retry_room_ids = frozenset()
     old_team_bot = MagicMock(spec=AgentBot)
+    old_team_bot.running = False
     old_team_bot.pending_sync_restart_retry_room_ids = frozenset()
     new_code_bot = MagicMock(spec=AgentBot)
     new_code_bot.agent_name = "code"
@@ -655,6 +691,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
     orchestrator._external_trigger_runtime.api_enabled = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
@@ -689,7 +726,9 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config(tmp_path)
     orchestrator.config = config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(spec=AgentBot)}
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = False
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
     order: list[str] = []
     external_trigger_runtime_bound = True
 
@@ -752,9 +791,16 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     order: list[str] = []
     external_trigger_runtime_bound = True
@@ -782,7 +828,8 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
     async def fake_create_and_start_entities(*_args: object, **_kwargs: object) -> EntityStartResults:
         order.append("create")
-        return EntityStartResults(started_bots=[orchestrator.agent_bots["code"]])
+        code_bot.running = True
+        return EntityStartResults(started_bots=[code_bot])
 
     with (
         patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
@@ -1093,9 +1140,16 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator.config = current_config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1181,9 +1235,16 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator.config = current_config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1381,6 +1442,6 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert call_order[:2] == ["stop", "sync"]

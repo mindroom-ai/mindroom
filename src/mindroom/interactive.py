@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -60,7 +60,7 @@ class InteractiveMetadata:
     options_list: tuple[dict[str, str], ...]
 
     @classmethod
-    def from_parts(
+    def _from_parts(
         cls,
         option_map: dict[str, str] | None,
         options_list: Sequence[dict[str, str]] | None,
@@ -115,6 +115,7 @@ class InteractiveSelection:
     selected_label: str
     selected_value: str
     thread_id: str | None
+    claimed_question: _InteractiveQuestion | None = field(default=None, compare=False, repr=False)
 
 
 # Track active interactive questions by event_id
@@ -126,6 +127,7 @@ _persistence_lock_file: Path | None = None
 _thread_lock = threading.RLock()
 _dirty_question_ids: set[str] = set()
 _deleted_question_ids: set[str] = set()
+_claimed_question_ids: set[str] = set()
 
 # Constants
 # Match interactive code blocks
@@ -232,7 +234,9 @@ def _write_active_questions_atomically_locked(questions: dict[str, _InteractiveQ
 def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
     """Replace in-memory state after a successful load or save."""
     global _active_questions
-    _active_questions = questions
+    _active_questions = {
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+    }
     _dirty_question_ids.clear()
     _deleted_question_ids.clear()
 
@@ -240,7 +244,9 @@ def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion])
 def _set_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
     """Replace the in-memory snapshot without clearing pending local changes."""
     global _active_questions
-    _active_questions = questions
+    _active_questions = {
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+    }
 
 
 def _store_active_question_locked(event_id: str, question: _InteractiveQuestion) -> None:
@@ -258,6 +264,49 @@ def _remove_active_question_locked(event_id: str) -> bool:
     _dirty_question_ids.discard(event_id)
     _deleted_question_ids.add(event_id)
     return True
+
+
+def _copy_question(question: _InteractiveQuestion) -> _InteractiveQuestion:
+    """Return an isolated snapshot suitable for restoring one failed claim."""
+    return replace(
+        question,
+        options=dict(question.options),
+        option_labels=dict(question.option_labels),
+    )
+
+
+def _claim_question_locked(event_id: str, question: _InteractiveQuestion) -> _InteractiveQuestion:
+    """Hide one question only after any unsaved durable state is flushed."""
+    if event_id in _dirty_question_ids:
+        _persist_local_changes_locked(rebuild_on_read_error=False)
+    claimed_question = _copy_question(question)
+    del _active_questions[event_id]
+    _claimed_question_ids.add(event_id)
+    return claimed_question
+
+
+def commit_selection(selection: InteractiveSelection) -> None:
+    """Durably consume a question after its selected turn reaches terminal truth."""
+    if selection.claimed_question is None:
+        return
+    with _thread_lock:
+        _deleted_question_ids.add(selection.question_event_id)
+        _persist_local_changes_locked(rebuild_on_read_error=False)
+        _claimed_question_ids.discard(selection.question_event_id)
+        _dirty_question_ids.discard(selection.question_event_id)
+        _deleted_question_ids.discard(selection.question_event_id)
+
+
+def restore_selection(selection: InteractiveSelection) -> None:
+    """Restore an in-process question claim after retryable selection failure."""
+    question = selection.claimed_question
+    if question is None:
+        return
+    with _thread_lock:
+        _claimed_question_ids.discard(selection.question_event_id)
+        if selection.question_event_id in _active_questions:
+            return
+        _store_active_question_locked(selection.question_event_id, _copy_question(question))
 
 
 def _apply_local_changes_locked(
@@ -295,28 +344,36 @@ def _refresh_active_questions_locked() -> None:
     _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
 
 
-def _save_active_questions_locked() -> None:
-    """Persist active questions when persistence is enabled.
+def _persist_local_changes_locked(*, rebuild_on_read_error: bool) -> None:
+    """Merge and persist local question changes through the sole write path.
 
     This method must be called while holding ``_thread_lock``.
     """
     if _persistence_file is None or _persistence_lock_file is None:
         return
 
+    _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+    with advisory_file_lock(_persistence_lock_file):
+        try:
+            persisted_questions = _load_persisted_questions()
+        except Exception as exc:
+            if not rebuild_on_read_error:
+                raise
+            persisted_questions = dict(_active_questions)
+            logger.warning(
+                "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
+                path=str(_persistence_file),
+                error=str(exc),
+            )
+        merged_questions = _apply_local_changes_locked(persisted_questions)
+        _write_active_questions_atomically_locked(merged_questions)
+        _replace_active_questions_locked(merged_questions)
+
+
+def _save_active_questions_locked() -> None:
+    """Best-effort persist active questions when persistence is enabled."""
     try:
-        _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-        with advisory_file_lock(_persistence_lock_file):
-            try:
-                merged_questions = _apply_local_changes_locked(_load_persisted_questions())
-            except Exception as exc:
-                merged_questions = dict(_active_questions)
-                logger.warning(
-                    "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
-                    path=str(_persistence_file),
-                    error=str(exc),
-                )
-            _write_active_questions_atomically_locked(merged_questions)
-            _replace_active_questions_locked(merged_questions)
+        _persist_local_changes_locked(rebuild_on_read_error=True)
     except Exception as exc:
         logger.warning(
             "Failed to persist interactive questions; continuing in-memory",
@@ -501,9 +558,9 @@ async def handle_reaction(
                 value=selected_value,
             )
 
-        # The emoji reaction itself is the user's response, so just consume the question.
-        if _remove_active_question_locked(event.reacts_to):
-            _save_active_questions_locked()
+        # Remove in-memory to exclude concurrent selections, but defer the durable
+        # deletion until the selected turn reaches terminal truth.
+        claimed_question = _claim_question_locked(event.reacts_to, question)
 
         return InteractiveSelection(
             question_event_id=event.reacts_to,
@@ -512,6 +569,7 @@ async def handle_reaction(
             selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
+            claimed_question=claimed_question,
         )
 
 
@@ -584,8 +642,7 @@ def _handle_text_response_locked(
                 text=message_text,
                 value=selected_value,
             )
-        if _remove_active_question_locked(question_event_id):
-            _save_active_questions_locked()
+        claimed_question = _claim_question_locked(question_event_id, question)
         return InteractiveSelection(
             question_event_id=question_event_id,
             question_text=question.question_text,
@@ -593,6 +650,7 @@ def _handle_text_response_locked(
             selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
+            claimed_question=claimed_question,
         )
     return None
 
@@ -769,7 +827,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     return _InteractiveResponse(
         final_text,
-        InteractiveMetadata.from_parts(
+        InteractiveMetadata._from_parts(
             option_map,
             options if extract_mapping else None,
             question_text=question,
@@ -865,5 +923,6 @@ def _cleanup() -> None:
         _active_questions.clear()
         _dirty_question_ids.clear()
         _deleted_question_ids.clear()
+        _claimed_question_ids.clear()
         _persistence_file = None
         _persistence_lock_file = None

@@ -37,22 +37,43 @@ from mindroom.services.systemd import _stop_service as _stop_systemd_service
 runner = CliRunner()
 
 
-def test_build_service_command_runs_mindroom_with_uv_tool(tmp_path: Path) -> None:
-    """The service command runs the published MindRoom CLI through uv."""
+def test_build_service_command_pins_mindroom_version(tmp_path: Path) -> None:
+    """The service command must not resolve a newer MindRoom release on restart."""
     uv_path = tmp_path / "uv"
     uv_path.touch()
 
-    command = build_service_command(uv_path)
+    command = build_service_command(uv_path, package_version="2026.8.1")
 
     assert command == [
         str(uv_path),
         "tool",
         "run",
         "--from",
-        "mindroom",
+        "mindroom==2026.8.1",
         "mindroom",
         "run",
     ]
+
+
+@pytest.mark.parametrize(
+    ("package_version", "expected_requirement"),
+    [
+        ("2026.8.1.post1.dev0+g7b7439571.d20260801", "mindroom==2026.8.1"),
+        ("2026.8.1rc1.post1.dev0+g7b7439571.d20260801", "mindroom==2026.8.1rc1"),
+    ],
+)
+def test_build_service_command_pins_source_checkout_to_published_version(
+    tmp_path: Path,
+    package_version: str,
+    expected_requirement: str,
+) -> None:
+    """A VCS development version should resolve to its published predecessor."""
+    command = build_service_command(
+        tmp_path / "uv",
+        package_version=package_version,
+    )
+
+    assert command[4] == expected_requirement
 
 
 def test_find_uv_prefers_extra_paths(tmp_path: Path) -> None:
@@ -119,18 +140,19 @@ def test_get_service_manager_unsupported(mock_system: MagicMock) -> None:
 
 def test_systemd_unit_runs_mindroom() -> None:
     """The generated systemd unit starts MindRoom and restarts on failure."""
-    unit = _generate_unit_file(
-        Path("/usr/bin/uv"),
-        {
-            "MINDROOM_CONFIG_PATH": "/Users/test/Mind Room/config.yaml",
-            "MINDROOM_STORAGE_PATH": "/Users/test/Mind Room/data%root",
-            "PATH": "/Users/test/.local/bin:/usr/bin",
-        },
-    )
+    with patch("mindroom.services.config.distribution_version", return_value="2026.8.1"):
+        unit = _generate_unit_file(
+            Path("/usr/bin/uv"),
+            {
+                "MINDROOM_CONFIG_PATH": "/Users/test/Mind Room/config.yaml",
+                "MINDROOM_STORAGE_PATH": "/Users/test/Mind Room/data%root",
+                "PATH": "/Users/test/.local/bin:/usr/bin",
+            },
+        )
 
     assert _get_unit_name() == "mindroom.service"
     assert "Description=MindRoom" in unit
-    assert "ExecStart=/usr/bin/uv tool run --from mindroom mindroom run" in unit
+    assert "ExecStart=/usr/bin/uv tool run --from mindroom==2026.8.1 mindroom run" in unit
     assert 'Environment="MINDROOM_CONFIG_PATH=/Users/test/Mind Room/config.yaml"' in unit
     assert 'Environment="MINDROOM_STORAGE_PATH=/Users/test/Mind Room/data%%root"' in unit
     assert 'Environment="PATH=/Users/test/.local/bin:/usr/bin"' in unit
@@ -144,7 +166,8 @@ def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
         "MINDROOM_STORAGE_PATH": str(tmp_path / "mindroom_data"),
         "PATH": f"{tmp_path}/bin:/usr/bin",
     }
-    plist_data = _generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs", service_environment)
+    with patch("mindroom.services.config.distribution_version", return_value="2026.8.1"):
+        plist_data = _generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs", service_environment)
     rendered = plistlib.dumps(plist_data)
 
     assert plist_data["Label"] == "chat.mindroom.local"
@@ -153,7 +176,7 @@ def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
         "tool",
         "run",
         "--from",
-        "mindroom",
+        "mindroom==2026.8.1",
         "mindroom",
         "run",
     ]
@@ -492,6 +515,7 @@ def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
 
     assert result.exit_code == 0
     assert "Installed and started" in result.output
+    assert "After upgrading, rerun mindroom service install" in result.output
     mock_manager.install_service.assert_called_once_with()
 
 

@@ -26,7 +26,7 @@ from mindroom.approval_manager import (
     TransportSenderProvider,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.entity_resolution import is_human_requester_id
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
@@ -199,11 +199,7 @@ def resolve_tool_approval_approver(
     """Return the human requester allowed to resolve one approval request."""
     if requester_id is None or not requester_id.startswith("@") or ":" not in requester_id:
         return None
-    if entity_identity_registry(config, runtime_paths).is_managed_user_id(requester_id):
-        return None
-    if requester_id in config.bot_accounts:
-        return None
-    if requester_id == mindroom_user_id(config, runtime_paths):
+    if not is_human_requester_id(requester_id, config, runtime_paths):
         return None
     return requester_id
 
@@ -299,7 +295,11 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
     return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
-async def handle_matrix_approval_action(action: MatrixApprovalAction) -> ApprovalActionResult:
+async def handle_matrix_approval_action(
+    action: MatrixApprovalAction,
+    *,
+    before_consume: Callable[[], Awaitable[None]] | None = None,
+) -> ApprovalActionResult:
     """Resolve a live approval or expire a validated detached Matrix card."""
     manager = approval_manager.get_approval_store()
     if manager is None:
@@ -312,6 +312,7 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
             approval_id=action.approval_id,
             status=action.status,
             reason=sanitized_reason,
+            before_consume=before_consume,
         )
         if result.consumed or action.card_event_id is None:
             return result
@@ -323,6 +324,7 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
         card_event_id=action.card_event_id,
         status=action.status,
         reason=sanitized_reason,
+        before_consume=before_consume,
     )
 
 

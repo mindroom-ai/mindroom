@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,8 +29,8 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -1374,12 +1373,13 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
                 target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
@@ -1433,12 +1433,13 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
                 target=stable_target,
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
@@ -1567,7 +1568,7 @@ class TestExtractedModuleLoggerRebinding:
         bot.logger = rebound_logger
 
         event_cache = AsyncMock()
-        event_cache.append_event.side_effect = RuntimeError("cache write failed")
+        event_cache.apply_thread_mutation_append.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -1606,14 +1607,8 @@ class TestExtractedModuleLoggerRebinding:
             context="live",
             error="cache write failed",
         )
-        original_logger.warning.assert_any_call(
-            "Background thread cache repair failed",
-            room_id="!room:localhost",
-            thread_id="$threadroot",
-            error_type="RuntimeError",
-            error="Matrix client is not ready for conversation cache",
-        )
-        assert original_logger.warning.call_count == 2
+        # Background repair is gone, so the append failure is the only warning left to rebind.
+        assert original_logger.warning.call_count == 1
         rebound_logger.warning.assert_not_called()
 
     def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
@@ -1736,15 +1731,8 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
-        bot.event_cache.get_thread_cache_state = AsyncMock(
-            return_value=ThreadCacheState(
-                validated_at=time.time(),
-                invalidated_at=None,
-                invalidation_reason=None,
-                room_invalidated_at=None,
-                room_invalidation_reason=None,
-            ),
-        )
+        # No gap marker: the cached snapshot reads as usable.
+        bot.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
         bot.event_cache.get_thread_events = AsyncMock(
             return_value=[
                 {

@@ -43,7 +43,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
-from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
+from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.backend import maintain_workers
@@ -51,6 +51,7 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
+    serialized_kubernetes_worker_config_snapshot,
     serialized_kubernetes_worker_validation_snapshot,
 )
 
@@ -208,11 +209,13 @@ def _cleanup_workers_once(
         return 0
 
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    kubernetes_config_snapshot: dict[str, object] | None = None
     if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
             runtime_paths,
             runtime_config=runtime_config,
         )
+        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
         if worker_grantable_credentials is None:
             worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
     worker_manager = get_primary_worker_manager(
@@ -221,6 +224,7 @@ def _cleanup_workers_once(
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
     maintenance = maintain_workers(worker_manager)
@@ -397,11 +401,18 @@ async def _reload_config_after_file_change(
     await _reload_config_into_app(api_app, runtime_paths)
 
 
-def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
-    """Return the runtime paths and mtimes of the config file plus its !include files."""
-    snapshot = _app_context(api_app)
-    paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
-    return snapshot.runtime_paths, file_watcher.paths_mtime_snapshot(paths)
+async def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
+    """Return the runtime paths and mtimes of the config file plus its !include files.
+
+    The scan stats every config source on each poll, so it runs in a worker
+    thread rather than on the event loop.
+    """
+    while True:
+        snapshot = _app_context(api_app)
+        paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
+        mtimes = await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
+        if _app_context(api_app) is snapshot:
+            return snapshot.runtime_paths, mtimes
 
 
 async def _watch_config(
@@ -416,7 +427,7 @@ async def _watch_config(
     them instead of reloading, so multi-file updates (git pull, rsync) land
     completely before the reload reads the tree.
     """
-    runtime_paths, last_mtimes = _watched_config_mtimes(api_app)
+    runtime_paths, last_mtimes = await _watched_config_mtimes(api_app)
     watched_config_path: Path = runtime_paths.config_path
     pending_paths: set[Path] = set()
 
@@ -428,7 +439,7 @@ async def _watch_config(
             pass
 
         try:
-            runtime_paths, current_mtimes = _watched_config_mtimes(api_app)
+            runtime_paths, current_mtimes = await _watched_config_mtimes(api_app)
             if runtime_paths.config_path != watched_config_path:
                 # Runtime swap: rebaseline the new source set without reloading.
                 watched_config_path = runtime_paths.config_path
@@ -710,6 +721,7 @@ async def health_check(request: Request) -> JSONResponse:
     runtime_paths = _api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
+        cache_write_grace_seconds=matrix_sync_cache_write_grace_seconds(runtime_paths),
     )
 
     response: dict[str, object] = {

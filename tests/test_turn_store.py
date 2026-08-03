@@ -50,12 +50,18 @@ from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.text_ingress_dispatch import _ReplayGuard
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch
 
 
-def _store(tmp_path: Path) -> TurnStore:
+def _store(
+    tmp_path: Path,
+    *,
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
+) -> TurnStore:
     return TurnStore(
         TurnStoreDeps(
             agent_name="agent",
@@ -63,6 +69,7 @@ def _store(tmp_path: Path) -> TurnStore:
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            on_terminal_turn_persisted=on_terminal_turn_persisted,
         ),
     )
 
@@ -139,6 +146,8 @@ async def test_dispatch_releases_claim_when_router_alias_discovery_fails(tmp_pat
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
         )
 
     assert _is_claimed(store, "$relay") is False
@@ -194,6 +203,8 @@ async def test_dispatch_claims_complete_router_relay_turn_before_first_await(tmp
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
         )
 
     assert observed["routed_in_flight"] is True
@@ -252,6 +263,8 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
         )
 
     # The relay released its complete record; the routed original still owns its source.
@@ -321,6 +334,8 @@ async def test_full_replay_guard_receives_every_current_turn_event_id() -> None:
             controller,
             MagicMock(room_id="!room:example.org"),
             prepared,
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
             requester_user_id="@user:example.org",
         )
         is False
@@ -348,6 +363,8 @@ async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> N
             controller,
             MagicMock(room_id="!room:example.org"),
             prepared,
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
             requester_user_id="@user:example.org",
         )
         is False
@@ -421,6 +438,8 @@ async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_p
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=SimpleNamespace(settle_source_events_ignored=AsyncMock()),
         )
 
     persisted = store.get_turn_record("$relay")
@@ -510,10 +529,254 @@ def _prepare_redaction(
 ) -> bool:
     """Tombstone one source and run the next response's locked cleanup gate."""
     store.mark_source_redacted(redacted_event_id)
-    return store.prepare_response_for_redactions(
+    return store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
+
+
+def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
+    """Pending TurnStore state must not retire callback work that startup cannot resume."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    pending = TurnRecord.create(
+        ["$source"],
+        discovery_event_ids=["$alias"],
+        completed=False,
+    )
+
+    store.record_pending_turn(pending)
+    assert notifications == []
+
+    store.record_turn(pending)
+    store._ledger.flush()
+
+    assert notifications == [("$source", "$alias")]
+
+
+def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: Path) -> None:
+    """A user stop must become durable turn truth before dispatch settles it."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+
+    stop_receipt_order = 2
+    stopped = store.record_user_stopped_response("$reply", stop_receipt_order)
+
+    assert stopped is not None
+    assert stopped.completed is True
+    assert stopped.user_stop_receipt_order == stop_receipt_order
+    assert stopped.user_stop_settled_receipt_order is None
+    assert store.is_durably_handled("$source") is True
+    assert notifications == [("$source",)]
+    retried = store.record_user_stopped_response("$reply", stop_receipt_order)
+    assert retried is not None
+    assert retried.completed is True
+    assert retried.user_stop_receipt_order == stop_receipt_order
+    assert retried.user_stop_settled_receipt_order is None
+    assert notifications == [("$source",)]
+
+    finalized = store.record_user_stopped_response(
+        "$reply",
+        stop_receipt_order,
+        delivery_settled=True,
+    )
+    assert finalized is not None
+    assert finalized.user_stop_settled_receipt_order == stop_receipt_order
+    assert notifications == [("$source",)]
+
+
+def test_settled_user_stop_retry_reenters_durable_persistence(tmp_path: Path) -> None:
+    """A failed settled-STOP write must not make an in-memory retry look durable."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    store.record_pending_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$reply",
+            completed=False,
+            response_owner="agent",
+            requester_id="@user:example.org",
+            conversation_target=target,
+        ),
+    )
+    stop_receipt_order = 2
+    store.record_user_stopped_response("$reply", stop_receipt_order)
+    persist_attempts = 0
+
+    def fail_persist(_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal persist_attempts
+        persist_attempts += 1
+        msg = "disk unavailable"
+        raise OSError(msg)
+
+    with (
+        patch.object(store._ledger, "_persist_records", side_effect=fail_persist),
+        patch.object(store._ledger, "_schedule_persist_retry_locked"),
+    ):
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 2
+
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 4
+
+
+@pytest.mark.parametrize("invalid_receipt_order", [0, -1, True])
+def test_user_stop_rejects_invalid_receipt_order(tmp_path: Path, invalid_receipt_order: int) -> None:
+    """STOP ordering requires a real positive durable admission sequence."""
+    with pytest.raises(ValueError, match="receipt order must be positive"):
+        _store(tmp_path).record_user_stopped_response("$reply", invalid_receipt_order)
+
+
+def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(tmp_path: Path) -> None:
+    """A response queued before STOP must recheck terminal truth after taking its lock."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is False
+    )
+
+    store.record_user_stopped_response("$reply", 2)
+
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is True
+    )
+
+
+def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery(tmp_path: Path) -> None:
+    """Only later edits run, and they durably supersede an older STOP delivery."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    store.record_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            conversation_target=target,
+            user_stop_receipt_order=2,
+        ),
+    )
+
+    assert store.prepare_edit_response_source(
+        target=target,
+        source_event_ids=("$source",),
+        response_event_id="$reply",
+        edit_receipt_order=1,
+    )
+    stopped = store.get_turn_record("$source")
+    assert stopped is not None
+    assert stopped.latest_edit_receipt_order is None
+    assert stopped.user_stop_settled_receipt_order is None
+
+    assert not store.prepare_edit_response_source(
+        target=target,
+        source_event_ids=("$source",),
+        response_event_id="$reply",
+        edit_receipt_order=3,
+    )
+    reopened = store.get_turn_record("$source")
+    assert reopened is not None
+    assert reopened.latest_edit_receipt_order == 3
+    assert reopened.user_stop_settled_receipt_order == 2
+
+
+def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
+    """Response ownership and target distinguish delivery intent from a raw visible echo."""
+    store = _store(tmp_path)
+    source_event_ids = ("$source",)
+    visible_echo = TurnRecord.create(
+        source_event_ids,
+        response_event_id="$echo",
+        completed=False,
+    )
+    store.record_pending_turn(visible_echo)
+    assert store.has_pending_response_intent(source_event_ids) is False
+
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    delivery_intent = store.attach_response_context(
+        visible_echo,
+        history_scope=None,
+        conversation_target=target,
+    )
+    store.record_pending_turn(delivery_intent)
+
+    assert store.has_pending_response_intent(source_event_ids) is True
+    record = store.get_turn_record("$source")
+    assert record is not None
+    assert record.response_owner == "agent"
+    assert record.conversation_target == target
+    assert record.history_scope is None
+
+
+def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
+    """Dispatch truth must remain until its replacing TurnStore write reaches disk."""
+    notified = threading.Event()
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    store = _store(tmp_path, on_terminal_turn_persisted=lambda _event_ids: notified.set())
+    original_persist = store._ledger._persist_records
+
+    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(records)
+
+    with patch.object(store._ledger, "_persist_records", side_effect=blocking_persist):
+        record_thread = threading.Thread(
+            target=store.record_turn,
+            args=(TurnRecord.create(["$source"], response_event_id="$response"),),
+        )
+        record_thread.start()
+        try:
+            assert persist_started.wait(timeout=2)
+            assert not notified.wait(timeout=0.1)
+            record_thread.join(timeout=0.1)
+            assert not record_thread.is_alive()
+        finally:
+            release_persist.set()
+            record_thread.join(timeout=2)
+
+    assert not record_thread.is_alive()
+    assert notified.wait(timeout=2)
 
 
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:
@@ -1022,7 +1285,7 @@ def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path
     assert pending is not None
     assert pending.pending_redaction_cleanup_event_ids == ("$user_msg",)
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$user_msg",),
     )
@@ -1161,7 +1424,7 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
         ),
     )
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$second",),
     )
@@ -1176,6 +1439,75 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
     assert completed_sibling is not None
     assert completed_sibling.source_event_ids == ("$second",)
     assert completed_sibling.response_event_id == "$second-reply"
+
+
+def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_path: Path) -> None:
+    """Projecting a redacted physical source must retain the context needed to sanitize it."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    requester_user_id = "@alice:example.org"
+    target = MessageTarget.resolve("!room:example.org", "$thread", human_event_id)
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                session_id=target.session_id,
+                metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: human_event_id},
+            ),
+        ],
+        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+    )
+    update_scope_seen_event_ids(session, scope, [human_event_id])
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_pending_turn(
+        TurnRecord.create(
+            [relay_event_id, human_event_id],
+            completed=False,
+            source_event_metadata={
+                relay_event_id: SourceEventMetadata(
+                    sender="@bob:example.org",
+                    discovery_event_id=human_event_id,
+                ),
+                human_event_id: SourceEventMetadata(sender=requester_user_id),
+            },
+            requester_id=requester_user_id,
+            response_owner="agent",
+            history_scope=scope,
+            conversation_target=target,
+        ),
+    )
+    store.record_turn(
+        TurnRecord.create(
+            [relay_event_id],
+            response_event_id="$relay-reply",
+            requester_id="@bob:example.org",
+        ),
+    )
+
+    projected = store.mark_source_redacted(human_event_id)
+
+    assert projected is not None
+    assert projected.source_event_ids == (human_event_id,)
+    assert projected.source_event_metadata == {}
+    assert projected.requester_id == requester_user_id
+    assert projected.requester_id_for_source(human_event_id) is None
+    assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
+
+    should_suppress = store._prepare_response_for_redactions(
+        target=target,
+        source_event_ids=("$later",),
+    )
+
+    assert should_suppress is False
+    assert storage.upserted_session is session
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+    cleaned = store.get_turn_record(human_event_id)
+    assert cleaned is not None
+    assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
 def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
@@ -1219,7 +1551,7 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
     store.mark_source_redacted("$user_msg")
     store.record_turn(replace(response_record, response_event_id="$reply"))
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1332,11 +1664,11 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
     assert unrelated_marked.redacted_source_event_ids == ("$user_msg",)
     assert unrelated_marked.pending_redaction_cleanup_event_ids == ()
 
-    owner_store.prepare_response_for_redactions(
+    owner_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
-    should_suppress = unrelated_store.prepare_response_for_redactions(
+    should_suppress = unrelated_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1446,7 +1778,7 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
     assert restarted_record.redacted_source_event_ids == ("$user_msg",)
     assert restarted_record.pending_redaction_cleanup_event_ids == ("$user_msg",)
     assert (
-        restarted_store.prepare_response_for_redactions(
+        restarted_store._prepare_response_for_redactions(
             target=target,
             source_event_ids=("$later",),
         )
@@ -1471,7 +1803,7 @@ def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
     store.record_turn(_owned_turn_record(target))
     store.mark_source_redacted("$user_msg")
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1518,6 +1850,106 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     assert metadata[constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == ["$selection"]
     assert metadata[constants.MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY] == ["$first"]
     assert parsed == turn_record
+
+
+def test_turn_record_codec_preserves_physical_source_ownership_when_alias_id_collides() -> None:
+    """A physical source must outrank another source's discovery alias with the same ID."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = human_event_id
+    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert recovered is not None
+    assert recovered.prompt_source_event_id(human_event_id) == human_event_id
+    assert recovered.requester_id_for_source(human_event_id) == "@alice:example.org"
+    assert recovered.requester_id_for_source(relay_event_id) == "@bob:example.org"
+
+
+def test_physical_source_membership_outranks_alias_when_metadata_is_partial() -> None:
+    """A missing physical metadata row must fail closed instead of resolving through a relay alias."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.requester_id_for_source(human_event_id) is None
+
+
+def test_redacted_physical_source_does_not_tombstone_colliding_relay_alias() -> None:
+    """Redacting a physical source must retain the sibling relay and its prompt."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        redacted_source_event_ids=[human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.replay_source_event_ids == (relay_event_id,)
+    assert turn_record.source_event_prompts == {relay_event_id: "routed prompt"}
+
+
+def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None:
+    """An explicit empty source map must survive persistence and disable singleton fallback."""
+    event_id = "$source"
+    turn_record = TurnRecord.create(
+        [event_id],
+        source_event_metadata={},
+        requester_id="@stale:example.org",
+    )
+
+    ledger_recovered = TurnRecordCodec._from_ledger_record(
+        event_id,
+        TurnRecordCodec._to_ledger_record(turn_record),
+    )
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = event_id
+    run_recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert turn_record.source_event_metadata == {}
+    assert ledger_recovered is not None
+    assert ledger_recovered.source_event_metadata == {}
+    assert run_recovered is not None
+    assert run_recovered.source_event_metadata == {}
+    assert run_recovered.requester_id_for_source(event_id) is None
 
 
 def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None:
@@ -1749,6 +2181,39 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
     assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
 
 
+def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) -> None:
+    """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$event"],
+            response_event_id="$old-response",
+            source_event_metadata={
+                "$event": SourceEventMetadata(sender="@stale:example.org"),
+            },
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$new-response",
+        source_event_metadata={},
+        requester_id="@current:example.org",
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$new-response"
+    assert loaded.source_event_metadata == {}
+    assert loaded.requester_id_for_source("$event") is None
+
+
 def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:
     """Under-lock redaction checks must recognize a physical relay tombstoned by its alias."""
     store = _store(tmp_path)
@@ -1769,7 +2234,7 @@ def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) ->
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
-    assert store.any_source_redacted(("$relay",)) is True
+    assert store._any_source_redacted(("$relay",)) is True
 
 
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
@@ -1925,6 +2390,76 @@ def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path)
     assert first_record.visible_echo_event_id == "$echo"
 
 
+def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_path: Path) -> None:
+    """A posted placeholder should not become a terminal router outcome before its edit succeeds."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+
+    assert store.finalized_visible_echo_for_sources(("$event",)) is None
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert not record.completed
+    assert record.response_event_id == "$echo"
+    assert store.finalized_visible_echo_for_sources(("$event",)) == "$echo"
+    finalized = store.finalized_visible_echo("$event")
+    assert finalized is not None
+    assert finalized.event_id == "$echo"
+    assert finalized.is_fallback is False
+
+
+def test_visible_echo_finalization_requires_tracked_placeholder(tmp_path: Path) -> None:
+    """An acknowledgement alone must not create a finalized visible echo."""
+    store = _store(tmp_path)
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    assert store.get_turn_record("$event") is None
+
+
+def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: Path) -> None:
+    """A late edit acknowledgement should preserve a concurrently completed turn."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+    store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id == "$response"
+    finalized = store.finalized_visible_echo("$event")
+    assert finalized is not None
+    assert finalized.event_id == "$echo"
+    assert finalized.is_fallback is False
+
+
+def test_finalized_visible_echo_keeps_transcript_over_fallback(tmp_path: Path) -> None:
+    """Transcript replacement should upgrade fallback and reject later downgrade."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    fallback = store.finalized_visible_echo("$event")
+    assert fallback is not None
+    assert fallback.is_fallback is True
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    transcript = store.finalized_visible_echo("$event")
+    assert transcript is not None
+    assert transcript.is_fallback is False
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    assert store.finalized_visible_echo("$event") == transcript
+
+    store._ledger.flush()
+    _reset_handled_turn_ledger_runtime()
+    assert _store(tmp_path).finalized_visible_echo("$event") == transcript
+
+
 def test_terminal_turn_rejects_conflicting_completed_canonical_source(tmp_path: Path) -> None:
     """A completed source cannot be reassigned into a different canonical turn."""
     store = _store(tmp_path)
@@ -2071,7 +2606,7 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
         ),
     )
 
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$second-response"))
+    store.record_turn(TurnRecord(source_event_ids=("$event",), response_event_id="$second-response"))
 
     record = store.get_turn_record("$event")
     assert record is not None
@@ -2090,8 +2625,13 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     terminal_finished = threading.Event()
     create_turn_record = TurnRecord.create
 
-    def blocking_create(source_event_ids: list[str], *, completed: bool = True) -> TurnRecord:
-        turn_record = create_turn_record(source_event_ids, completed=completed)
+    def blocking_create(
+        source_event_ids: list[str],
+        *,
+        completed: bool = True,
+        **kwargs: object,
+    ) -> TurnRecord:
+        turn_record = create_turn_record(source_event_ids, completed=completed, **kwargs)
         if not completed:
             echo_record_built.set()
             assert release_echo_record.wait(timeout=2)
@@ -2126,6 +2666,15 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     assert record.completed
     assert record.response_event_id == "$response"
     assert record.visible_echo_event_id == "$echo"
+
+
+def test_record_responded_turn_rejects_empty_response_event_id(tmp_path: Path) -> None:
+    """The durable response boundary should reject a noncanonical empty event ID."""
+    store = _store(tmp_path)
+    noncanonical_record = TurnRecord(source_event_ids=("$source",), response_event_id="")
+
+    with pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"):
+        store.record_responded_turn(noncanonical_record)
 
 
 @pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])

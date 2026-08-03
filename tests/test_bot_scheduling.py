@@ -110,7 +110,6 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     install_runtime_cache_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.visible_echo_for_sources = MagicMock(return_value=None)
     turn_store.record_turn = MagicMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -133,13 +132,20 @@ async def _execute_command(
         event.event_id,
         thread_start_root_event_id=None if thread_id else event.event_id,
     )
-    await bot._turn_controller._execute_command(room, event, requester_user_id, command, target=target)
+    await unwrap_extracted_collaborator(bot._command_turn_executor).execute(
+        room,
+        event,
+        requester_user_id,
+        command,
+        target=target,
+        handled_turn=TurnRecord.create([event.event_id]),
+    )
 
 
 @pytest.fixture
 def send_response_mock() -> AsyncMock:
     """Delivery seam mock installed on mock_agent_bot."""
-    return AsyncMock()
+    return AsyncMock(return_value="$command-response")
 
 
 @pytest.fixture
@@ -163,6 +169,8 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
+    bot.client.add_event_admission_callback = MagicMock()
+    bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
     install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
@@ -446,12 +454,13 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.HELP, args={}, raw_text=event.body)
 
-        await mock_agent_bot._turn_controller._execute_command(
+        await unwrap_extracted_collaborator(mock_agent_bot._command_turn_executor).execute(
             room,
             event,
             "@user:server",
             command,
             target=stable_target,
+            handled_turn=TurnRecord.create([event.event_id]),
         )
 
         send_response_mock.assert_called_once()
@@ -491,6 +500,7 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id
@@ -544,6 +554,7 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id
@@ -584,7 +595,7 @@ class TestCommandHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_ignores_commands(self) -> None:
+    async def test_non_router_agent_ignores_commands(self, tmp_path: Path) -> None:
         """Test that non-router agents ignore command messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -597,14 +608,13 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
@@ -613,7 +623,15 @@ class TestCommandHandling:
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, generate_response)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock()
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(
+                _message_context(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                ),
+            ),
+        )
 
         # Create a room and event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -660,7 +678,7 @@ class TestCommandHandling:
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
-            bot._turn_controller._execute_command = AsyncMock()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
             bot._conversation_cache.get_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),
             )
@@ -691,7 +709,7 @@ class TestCommandHandling:
                 await drain_coalescing(bot)
 
             # Verify the command was handled
-            bot._turn_controller._execute_command.assert_called_once()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
             bot.logger.info.assert_any_call(
                 "Received message",
                 event_id="$event123",
@@ -725,7 +743,7 @@ class TestCommandHandling:
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
-            bot._turn_controller._execute_command = AsyncMock()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
             bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
             bot._conversation_cache.get_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),
@@ -755,7 +773,7 @@ class TestCommandHandling:
                 await bot._on_message(room, event)
                 await drain_coalescing(bot)
 
-            bot._turn_controller._execute_command.assert_called_once()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
             bot.logger.info.assert_any_call(
                 "Received message",
                 event_id="$event123",
@@ -798,7 +816,7 @@ class TestCommandHandling:
             bot.logger = MagicMock()
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
-            bot._turn_controller._execute_command = AsyncMock()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(
@@ -816,7 +834,7 @@ class TestCommandHandling:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-            bot._turn_controller._execute_command.assert_not_called()
+            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_removed_skill_command_returns_unknown_response(self) -> None:
@@ -1037,6 +1055,7 @@ class TestCommandHandling:
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
+            bot._turn_store.record_turn.assert_not_called()
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
             assert "ignore_unmentioned_agent_event" in debug_calls
@@ -1973,6 +1992,7 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
+        replace_turn_controller_deps(bot, settle_ignored_sources=AsyncMock())
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 
@@ -2062,7 +2082,7 @@ class TestRouterSkipsSingleAgent:
         _sync_turn_policy_runtime(bot)
         send_response = AsyncMock()
         install_send_response_mock(bot, send_response)
-        bot._turn_controller._execute_command = AsyncMock()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2095,7 +2115,7 @@ class TestRouterSkipsSingleAgent:
 
         # Router should handle the command even with a single agent
         # This ensures commands work properly in single-responder rooms.
-        bot._turn_controller._execute_command.assert_called_once()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
         # Router should not send a response for unknown commands (handled by _handle_command)
         send_response.assert_not_called()
 
@@ -2131,7 +2151,7 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_command = AsyncMock()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2164,8 +2184,8 @@ class TestRouterSkipsSingleAgent:
 
         # Router MUST handle schedule commands even with a single agent
         # This is a regression test to ensure commands work in single-responder rooms.
-        bot._turn_controller._execute_command.assert_called_once()
-        kwargs = bot._turn_controller._execute_command.call_args.kwargs
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
+        kwargs = unwrap_extracted_collaborator(bot._command_turn_executor).execute.call_args.kwargs
         assert kwargs["command"].type.value == "schedule", "Router should handle schedule command"
 
     @pytest.mark.asyncio
@@ -2291,9 +2311,8 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_command = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_command = AsyncMock()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
 
         # Room with router + two agents + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2328,4 +2347,4 @@ class TestRouterSkipsSingleAgent:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-        bot._turn_controller._execute_command.assert_called_once()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()

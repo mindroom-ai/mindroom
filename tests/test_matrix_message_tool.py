@@ -17,10 +17,13 @@ from mindroom import interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.matrix.client import RoomThreadsPageError
+from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.message_target import MessageTarget
@@ -29,6 +32,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_event,
     delivered_matrix_side_effect,
     make_conversation_cache_mock,
     make_event_cache_mock,
@@ -69,6 +73,9 @@ def _make_context(
     *,
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
+    requester_id: str = "@user:localhost",
+    bot_accounts: list[str] | None = None,
+    mindroom_user: MindRoomUserConfig | None = None,
     resolved_thread_id: object = _DEFAULT_RESOLVED_THREAD_ID,
     reply_to_event_id: str | None = "$reply:localhost",
     storage_path: Path | None = None,
@@ -93,6 +100,8 @@ def _make_context(
                     thread_mode=agent_thread_mode,
                 ),
             },
+            bot_accounts=bot_accounts or [],
+            mindroom_user=mindroom_user,
         ),
         test_runtime_paths(runtime_root),
     )
@@ -118,7 +127,7 @@ def _make_context(
                 thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
             ),
         ),
-        requester_id="@user:localhost",
+        requester_id=requester_id,
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -255,6 +264,115 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+    assert sent_content[SKIP_MENTIONS_KEY] is True
+    assert ORIGINAL_SENDER_KEY not in sent_content
+    assert SOURCE_KIND_KEY not in sent_content
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
+    """Intentional mention dispatch should preserve a trusted human requester."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="@general continue work",
+                ignore_mentions=False,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.mentions"] == {"user_ids": [ctx.client.user_id]}
+    assert SKIP_MENTIONS_KEY not in sent_content
+    assert sent_content[ORIGINAL_SENDER_KEY] == ctx.requester_id
+    assert sent_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_active_mentions_do_not_promote_managed_requester() -> None:
+    """Intentional mention dispatch should not classify managed requesters as humans."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(
+        thread_id=None,
+        requester_id="@mindroom_router:localhost",
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="@general continue work",
+                ignore_mentions=False,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.mentions"] == {"user_ids": [ctx.client.user_id]}
+    assert SKIP_MENTIONS_KEY not in sent_content
+    assert ORIGINAL_SENDER_KEY not in sent_content
+    assert SOURCE_KIND_KEY not in sent_content
+
+
+@pytest.mark.parametrize(
+    ("requester_id", "bot_accounts", "mindroom_user"),
+    [
+        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None),
+        ("@mindroom_user:localhost", [], MindRoomUserConfig()),
+    ],
+)
+@pytest.mark.asyncio
+async def test_matrix_message_active_mentions_do_not_promote_non_human_requester(
+    requester_id: str,
+    bot_accounts: list[str],
+    mindroom_user: MindRoomUserConfig | None,
+) -> None:
+    """Trusted relay provenance should require a human requester."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(
+        thread_id=None,
+        requester_id=requester_id,
+        bot_accounts=bot_accounts,
+        mindroom_user=mindroom_user,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="@general continue work",
+                ignore_mentions=False,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.mentions"] == {"user_ids": [ctx.client.user_id]}
+    assert SKIP_MENTIONS_KEY not in sent_content
+    assert ORIGINAL_SENDER_KEY not in sent_content
+    assert SOURCE_KIND_KEY not in sent_content
 
 
 @pytest.mark.asyncio
@@ -2629,12 +2747,22 @@ async def test_matrix_message_edit_happy_path() -> None:
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
+    sent_content: dict[str, object] = {}
+
+    async def _deliver_edit(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        **_kwargs: object,
+    ) -> DeliveredMatrixEvent:
+        sent_content.update(content)
+        return delivered_matrix_event("$edit_evt", content)
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ) as mock_edit,
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(side_effect=_deliver_edit),
+        ),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
@@ -2643,21 +2771,13 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert payload["action"] == "edit"
     assert payload["target"] == "$target"
     assert payload["event_id"] == "$edit_evt"
-    mock_edit.assert_awaited_once()
-    args = mock_edit.await_args.args
-    assert args[1] == ctx.room_id
-    assert args[2] == "$target"
-    assert args[4] == "updated text"
-    assert args[3]["body"] == "updated text"
-    assert args[3]["m.relates_to"]["rel_type"] == "m.thread"
-    assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
-    assert args[3]["m.relates_to"]["is_falling_back"] is True
-    assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        "$ctx-thread:localhost",
-        caller_label="matrix_message_tool_edit",
-    )
+    relation = sent_content["m.relates_to"]
+    assert relation == {"rel_type": "m.replace", "event_id": "$target"}
+    replacement = sent_content["m.new_content"]
+    assert isinstance(replacement, dict)
+    assert replacement["body"] == "updated text"
+    assert "m.relates_to" not in replacement
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
     ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 

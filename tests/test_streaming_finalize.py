@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
@@ -115,7 +116,7 @@ def _envelope() -> MessageEnvelope:
 def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(
+        _apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="final answer",
                 response_kind="ai",
@@ -125,7 +126,7 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
                 suppress=False,
             ),
         ),
-        apply_final_response_transform=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -318,6 +319,31 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
     sleep_mock.assert_not_awaited()
     assert outcome.terminal_status == "cancelled"
     assert outcome.failure_reason == "sync_restart_cancelled"
+    assert outcome.terminal_update_committed is False
+
+
+@pytest.mark.asyncio
+async def test_transport_restart_interrupted_terminal_update_reports_committed(tmp_path: Path) -> None:
+    """A landed restart interruption must carry explicit terminal-update proof."""
+    streaming = _streaming_response(_config(tmp_path))
+    streaming.event_id = "$placeholder"
+    streaming.accumulated_text = "partial answer"
+
+    with patch(
+        "mindroom.streaming.edit_message_result",
+        new=AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$terminal-edit",
+                content_sent={"body": "partial answer\n\n**[Response interrupted by service restart]**"},
+            ),
+        ),
+    ):
+        outcome = await streaming.finalize(_client(), restart_interrupted=True)
+
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.terminal_update_committed is True
+    assert outcome.rendered_body is not None
+    assert outcome.rendered_body.endswith("**[Response interrupted by service restart]**")
 
 
 @pytest.mark.asyncio
@@ -391,8 +417,8 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         transport_outcome = await streaming.finalize(_client(), restart_interrupted=True)
 
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -436,8 +462,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -618,8 +644,8 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
     """If Matrix rejects the failure update too, finalization still returns a failed visible outcome."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -792,8 +818,8 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
 
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=raw_interactive,
                 response_kind="ai",
@@ -924,8 +950,8 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     )
 
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=stream_outcome.canonical_final_body_candidate,
                 response_kind="ai",
@@ -978,7 +1004,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     config = _config(tmp_path)
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(
+        _apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="chunk",
                 response_kind="ai",
@@ -988,7 +1014,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
                 suppress=False,
             ),
         ),
-        apply_final_response_transform=AsyncMock(
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="updated text",
                 response_kind="ai",
@@ -1034,8 +1060,8 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     assert outcome.terminal_status == "completed"
     assert outcome.final_visible_event_id == "$streaming"
     assert outcome.final_visible_body == "chunk"
-    response_hooks.apply_before_response.assert_not_awaited()
-    response_hooks.apply_final_response_transform.assert_awaited_once()
+    response_hooks._apply_before_response.assert_not_awaited()
+    response_hooks._apply_final_response_transform.assert_awaited_once()
     gateway.edit_text.assert_awaited_once()
     lifecycle = ResponseLifecycle(
         ResponseLifecycleDeps(
@@ -1070,8 +1096,8 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     config = _config(tmp_path)
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -1095,6 +1121,7 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
                 terminal_status="cancelled",
                 rendered_body="partial answer\n\n**[Response interrupted by service restart]**",
                 visible_body_state="visible_body",
+                terminal_update_committed=True,
                 failure_reason="sync_restart_cancelled",
             ),
             initial_delivery_kind="edited",
@@ -1111,5 +1138,57 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     assert outcome.terminal_status == "cancelled"
     assert outcome.final_visible_event_id == "$streaming"
     assert outcome.mark_handled is True
+    assert outcome.delivery_kind == "edited"
     response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_cancelled_placeholder_cleanup_preserves_cancel_source(tmp_path: Path) -> None:
+    """A failed cancellation edit and redaction must retain the original restart provenance."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.redact_message_event.return_value = False
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)):
+        outcome = await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+                event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                cancel_source="sync_restart",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-cancel-cleanup-failure",
+                ),
+            ),
+        )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.cancel_source == "sync_restart"
+
+
+@pytest.mark.asyncio
+async def test_hook_failure_cleanup_propagates_restart_cancellation(tmp_path: Path) -> None:
+    """Cancellation during cleanup of an ordinary hook failure must reach source settlement."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.response_hooks._apply_before_response.side_effect = RuntimeError("hook failed")
+    gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_text="answer",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-hook-failure-cleanup-cancel",
+                ),
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )

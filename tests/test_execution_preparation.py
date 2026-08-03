@@ -853,8 +853,82 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: 
     assert [image.id for image in (messages[0].images or [])] == [attachment_id]
 
 
-def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_path: Path) -> None:
-    """Assistant-authored attachments surface as text only; providers reject assistant media."""
+def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) -> None:
+    """An agent audio caption must not merge into its preceding assistant reply."""
+    voice_path = tmp_path / "voice.ogg"
+    voice_path.write_bytes(b"OggS")
+    record = register_local_attachment(
+        tmp_path,
+        voice_path,
+        kind="audio",
+        attachment_id="att_voice",
+        filename="voice.ogg",
+        mime_type="audio/ogg",
+        room_id="!room:localhost",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="The lab closes at 7:41 PM",
+                event_id="$reply",
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body='Lab results "timing"',
+                event_id="$voice",
+                content={
+                    "msgtype": "m.audio",
+                    "body": 'Lab results "timing"',
+                    ATTACHMENT_IDS_KEY: ["att_voice"],
+                },
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    )
+
+    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
+    assert messages[0].content == "\n\nThe lab closes at 7:41 PM"
+    assert messages[1].content == (
+        '\n\n[audio message: Lab results "timing"]\n[attachments: att_voice (audio, "voice.ogg")]'
+    )
+
+
+def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment() -> None:
+    """An agent audio caption remains labeled when no local attachment record exists."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="The lab closes at 7:41 PM",
+                event_id="$reply",
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="Lab turnaround",
+                event_id="$voice",
+                content={"msgtype": "m.audio", "body": "Lab turnaround"},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+    )
+
+    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
+    assert [message.content for message in messages[:2]] == [
+        "\n\nThe lab closes at 7:41 PM",
+        "\n\n[audio message: Lab turnaround]",
+    ]
+
+
+def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_path: Path) -> None:
+    """Unmapped assistant media keeps its caption bare while remaining self-delimiting."""
     file_path = tmp_path / "report.pdf"
     file_path.write_bytes(b"%PDF-1.4")
     record = register_local_attachment(
@@ -874,7 +948,7 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
                 sender="@mindroom_team:localhost",
                 body="here is the report",
                 event_id="$agent-file",
-                content={ATTACHMENT_IDS_KEY: ["att_report"]},
+                content={"msgtype": "m.file", ATTACHMENT_IDS_KEY: ["att_report"]},
             ),
         ],
         response_sender_id="@mindroom_team:localhost",
@@ -883,7 +957,7 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
+    assert messages[0].content == '\n\nhere is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
 
 
@@ -1034,7 +1108,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == "Checking status.\n\n\nStill checking.\n\n\nDone."
+    assert messages[0].content == "\n\nChecking status.\n\n\nStill checking.\n\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1174,7 +1248,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "assistant"
-    assert messages[0].content == "@mindroom_missing_agent Please investigate this"
+    assert messages[0].content == "\n\n@mindroom_missing_agent Please investigate this"
 
 
 def test_unseen_context_keeps_other_agent_message_tagged() -> None:

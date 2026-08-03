@@ -8,13 +8,15 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.custom_tools.attachments import (
     resolve_send_attachments,
     send_context_attachments,
     send_resolved_attachments,
 )
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.entity_resolution import is_human_requester_id
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -87,8 +89,13 @@ class MatrixMessageOperations:
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
             extra_content[SKIP_MENTIONS_KEY] = True
-        elif context.requester_id != context.client.user_id:
+        elif context.requester_id != context.client.user_id and is_human_requester_id(
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        ):
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
+            extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         if message_extras:
             extra_content.update(build_message_extras_content(message_extras))
         content = format_message_with_mentions(
@@ -634,16 +641,6 @@ class MatrixMessageOperations:
         if new_text is None:
             return self._result("error", action="edit", message="message is required for edit.")
 
-        latest_thread_event_id: str | None = None
-        if thread_id is not None:
-            latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-                room_id,
-                thread_id,
-                caller_label="matrix_message_tool_edit",
-            )
-            if latest_thread_event_id is None:
-                latest_thread_event_id = target
-
         clear_interactive_question(target)
         interactive_response = parse_and_format_interactive(new_text, extract_mapping=True)
         formatted_text = interactive_response.formatted_text
@@ -652,8 +649,6 @@ class MatrixMessageOperations:
             context.config,
             context.runtime_paths,
             formatted_text,
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
             extra_content=extras_content,
         )
         delivered = await edit_message_result(

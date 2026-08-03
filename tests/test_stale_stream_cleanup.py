@@ -52,7 +52,6 @@ from mindroom.matrix.stale_stream_cleanup import (
     _StaleStreamRecoveryResult as StaleStreamRecoveryResult,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_generation_lease import runtime_generation_owner_stopped
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
@@ -335,7 +334,7 @@ def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> Asy
             ],
         )
 
-    conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+    conversation_cache.refresh_startup_thread_history_from_source = AsyncMock(
         side_effect=history_for_thread,
     )
     conversation_cache.notify_outbound_message = Mock()
@@ -348,47 +347,6 @@ def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: di
     for key, value in expected_keys.items():
         assert content[key] == value
         assert new_content[key] == value
-
-
-def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descendant() -> None:
-    """Same-timestamp descendants should win the cleanup thread tail order."""
-    same_timestamp = NOW_MS - 1_000
-    root = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="root",
-        event_id="$thread-root",
-        timestamp=NOW_MS - 2_000,
-        content={"body": "root", "msgtype": "m.text"},
-        thread_id="$thread-root",
-    )
-    parent = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="parent",
-        event_id="$zzz_parent",
-        timestamp=same_timestamp,
-        content={
-            "body": "parent",
-            "msgtype": "m.text",
-            "m.relates_to": _thread_reply_relation("$thread-root", "$thread-root"),
-        },
-        thread_id="$thread-root",
-    )
-    child = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="child",
-        event_id="$aaa_child",
-        timestamp=same_timestamp,
-        content={
-            "body": "child",
-            "msgtype": "m.text",
-            "m.relates_to": {"m.in_reply_to": {"event_id": "$zzz_parent"}},
-        },
-        thread_id="$thread-root",
-    )
-
-    assert latest_visible_thread_event_id_by_thread([root, parent, child]) == {
-        "$thread-root": "$aaa_child",
-    }
 
 
 @pytest.mark.asyncio
@@ -515,6 +473,37 @@ async def test_relations_lookup_uses_original_event_id_not_latest_edit(tmp_path:
     assert interrupted == []
     assert client.room_get_event_relations.call_args.args[1] == "$original"
     assert mock_edit.await_args.args[2] == "$original"
+
+
+@pytest.mark.asyncio
+async def test_recent_edit_keeps_old_stream_within_cleanup_window(tmp_path: Path) -> None:
+    """Cleanup should age an edited stream from its latest edit, not its original message."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$old-original",
+        body="Initial answer",
+        timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+    )
+    recent_edit = _make_message_event(
+        event_id="$recent-edit",
+        body="* Still working",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$old-original"},
+        new_content={"body": "Still working", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, recent_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_args.args[2] == "$old-original"
 
 
 @pytest.mark.asyncio
@@ -832,8 +821,8 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target", timestamp=100),
         _history_message("$newer", sender=newer_sender, timestamp=100, content=newer_content),
     )
@@ -870,8 +859,8 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
         _history_message(
             "$prior-resume",
@@ -924,36 +913,36 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     ]
     conversation_cache = None if history_case == "missing" else _auto_resume_conversation_cache(interrupted)
     if conversation_cache is not None and history_case == "failed":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = RuntimeError("history failed")
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = RuntimeError("history failed")
     elif conversation_cache is not None and history_case == "incomplete":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=False,
             diagnostics={"thread_read_source": "homeserver"},
         )
     elif conversation_cache is not None and history_case == "degraded":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=True,
             diagnostics={"thread_read_source": "homeserver", "thread_read_degraded": True},
         )
     elif conversation_cache is not None and history_case == "opaque":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = OpaqueEncryptedThreadHistoryError(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = OpaqueEncryptedThreadHistoryError(
             "opaque history",
         )
     elif conversation_cache is not None and history_case == "missing_target":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$other"),
         )
     elif conversation_cache is not None and history_case == "untrusted_sender":
         state = MatrixState.load(runtime_paths_for(config))
         state.accounts.pop(managed_account_key("other"))
         state.save(runtime_paths_for(config))
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$target"),
             _history_message("$later", sender=OTHER_BOT_USER_ID),
         )
@@ -970,7 +959,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     assert resumed_count == 0
     mock_send.assert_not_awaited()
     if conversation_cache is not None:
-        conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+        conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once_with(
             ROOM_ID,
             "$thread",
             caller_label="startup_auto_resume_freshness",
@@ -993,7 +982,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = asyncio.CancelledError
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = asyncio.CancelledError
 
     with (
         patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send,
@@ -1008,7 +997,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
         )
 
     mock_send.assert_not_awaited()
-    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1027,8 +1016,8 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
         _history_message("$newer-human", sender=USER_ID),
     )
@@ -1043,7 +1032,7 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         )
 
     assert resumed_count == 0
-    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+    conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once_with(
         ROOM_ID,
         "$thread",
         caller_label="startup_auto_resume_freshness",
@@ -1087,7 +1076,7 @@ async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp
             messages.append(_history_message("$human-later", sender=USER_ID))
         return _authoritative_history(*messages)
 
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = history_for_call
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = history_for_call
 
     with (
         patch(
@@ -1319,8 +1308,6 @@ async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path
             target_event_id="$target",
             new_text="cleanup",
             preserved_content=None,
-            thread_id="$thread-root",
-            latest_thread_event_id="$reply-latest",
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
@@ -1430,161 +1417,6 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
         ),
     ]
     client.room_get_event.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_uses_latest_thread_event_for_threaded_edit_fallback(tmp_path: Path) -> None:
-    """Cleanup edits should target the latest event in the thread for MSC3440 fallback semantics."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Start here",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$original",
-            body="Needs cleanup",
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-            extra_content={STREAM_STATUS_KEY: "streaming"},
-        ),
-        _make_message_event(
-            event_id="$latest-edit",
-            body="* Needs cleanup",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to={"rel_type": "m.replace", "event_id": "$original"},
-            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
-        ),
-        _make_message_event(
-            event_id="$later-user-message",
-            body="Later thread message",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS - 1_000),
-            relates_to=_thread_reply_relation("$thread-root", "$original"),
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
-            return_value={"body": "cleanup", "msgtype": "m.text"},
-        ) as mock_format,
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-        ),
-    ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 1
-    assert len(interrupted) == 1
-    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$later-user-message"
-
-
-@pytest.mark.asyncio
-async def test_cleanup_uses_same_timestamp_descendant_for_threaded_edit_fallback(tmp_path: Path) -> None:
-    """Cleanup should treat a same-timestamp descendant as later than its parent."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    same_timestamp = NOW_MS - (STALE_AGE_MS - 1_000)
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Start here",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$original",
-            body="Needs cleanup",
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-            extra_content={STREAM_STATUS_KEY: "streaming"},
-        ),
-        _make_message_event(
-            event_id="$zzz_parent",
-            body="Parent thread message",
-            sender=USER_ID,
-            timestamp_ms=same_timestamp,
-            relates_to=_thread_reply_relation("$thread-root", "$original"),
-        ),
-        _make_message_event(
-            event_id="$aaa_child",
-            body="Child plain reply",
-            sender=USER_ID,
-            timestamp_ms=same_timestamp,
-            relates_to={"m.in_reply_to": {"event_id": "$zzz_parent"}},
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
-            return_value={"body": "cleanup", "msgtype": "m.text"},
-        ) as mock_format,
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-        ),
-    ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 1
-    assert len(interrupted) == 1
-    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$aaa_child"
-
-
-@pytest.mark.asyncio
-async def test_cleanup_uses_bot_promoted_plain_reply_as_latest_thread_event(tmp_path: Path) -> None:
-    """Cleanup should prefer the threaded scanned copy when the stale bot message is itself a promoted plain reply."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Start here",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$zzz_parent",
-            body="Explicit parent",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-        ),
-        _make_message_event(
-            event_id="$aaa_child",
-            body="Interrupted bot reply",
-            sender=BOT_USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS - 1_000),
-            relates_to={"m.in_reply_to": {"event_id": "$zzz_parent"}},
-            extra_content={STREAM_STATUS_KEY: "streaming"},
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.format_message_with_mentions",
-            return_value={"body": "cleanup", "msgtype": "m.text"},
-        ) as mock_format,
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-        ),
-    ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 1
-    assert len(interrupted) == 1
-    assert interrupted[0].target_event_id == "$aaa_child"
-    assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$aaa_child"
 
 
 @pytest.mark.asyncio
@@ -2094,7 +1926,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             ),
         )
     conversation_cache = AsyncMock()
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         *history_messages,
     )
     conversation_cache.notify_outbound_message = Mock()

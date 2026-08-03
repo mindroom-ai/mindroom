@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -12,14 +12,15 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
-from urllib.parse import quote, urlparse, urlunparse
+from functools import partial
+from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
+from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
+from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.errors import NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -29,7 +30,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
@@ -42,8 +42,27 @@ from mindroom.knowledge.candidate_checkpoint import (
     FileSignature,
     append_candidate_journal,
     delete_candidate_checkpoint,
+    file_signature_from_fields,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
+)
+from mindroom.knowledge.collections import (
+    SOURCE_DIGEST_KEY,
+    SOURCE_MTIME_NS_KEY,
+    SOURCE_PATH_KEY,
+    SOURCE_SIZE_KEY,
+    VECTOR_VERIFY_BATCH,
+    CollectionSpace,
+    build_knowledge,
+    build_vector_db,
+    candidate_collection_name,
+    cleanup_superseded_collections,
+    collection_has_source_path,
+    delete_collection,
+    delete_source_path_vectors,
+    paths_with_vectors,
+    require_chroma_vector_db,
+    reset_vector_db,
 )
 from mindroom.knowledge.embedding_batch import (
     DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
@@ -52,16 +71,16 @@ from mindroom.knowledge.embedding_batch import (
     plan_embedding_batches,
 )
 from mindroom.knowledge.file_listing import (
-    git_checkout_present,
     git_tracked_relative_paths_from_checkout,
-    include_knowledge_relative_path,
     knowledge_files_from_relative_paths,
     list_knowledge_files,
 )
+from mindroom.knowledge.git_source import GitKnowledgeSource
 from mindroom.knowledge.index_metadata import (
-    load_index_metadata_payload,
-    parse_index_metadata_fields,
-    write_index_metadata_payload,
+    PublishedIndexState,
+    load_published_index_state,
+    save_published_index_state,
+    state_for_publication,
 )
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.indexing_config import (
@@ -70,42 +89,69 @@ from mindroom.knowledge.indexing_config import (
     indexing_settings_key,
     storage_key_for_base,
 )
-from mindroom.knowledge.redaction import (
-    credential_free_repo_url,
-    embedded_http_userinfo,
-    redact_credentials_in_text,
-    redact_url_credentials,
-)
+from mindroom.knowledge.redaction import redact_credentials_in_text
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
+    from chromadb.api.types import Embeddings, Metadata
 
-    from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
-_COLLECTION_PREFIX = "mindroom_knowledge"
-_SOURCE_PATH_KEY = "source_path"
-_SOURCE_MTIME_NS_KEY = "source_mtime_ns"
-_SOURCE_SIZE_KEY = "source_size"
-_SOURCE_DIGEST_KEY = "source_digest"
+
+class _MalformedJSONSourceError(Exception):
+    """A JSON parser failure carrying the already-read source text."""
+
+    def __init__(self, source_text: str, *, line: int, column: int) -> None:
+        super().__init__("Malformed JSON knowledge source")
+        self.source_text = source_text
+        self.line = line
+        self.column = column
+
+
+class _FallbackAwareJSONReader(JSONReader):
+    """Tag only JSON decoding failures raised inside the source reader."""
+
+    def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
+        try:
+            return super().read(path, name=name)
+        except json.JSONDecodeError as error:
+            raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
+
+
+class _InMemoryTextReader(TextReader):
+    """Read the malformed JSON text already retained by its parse error.
+
+    Only ``read`` is overridden, because indexing goes through the synchronous
+    ``Knowledge.insert`` path. ``TextReader.async_read`` does not delegate to
+    ``read``, so anything switching this to ``Knowledge.ainsert`` must override
+    it too or it will re-read the source instead of serving the retained text.
+    """
+
+    def __init__(self, source_text: str) -> None:
+        super().__init__()
+        self._source_text = source_text
+
+    def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
+        document = Document(
+            name=name or str(file),
+            id=str(uuid.uuid4()),
+            content=self._source_text,
+        )
+        if not self.chunk:
+            return [document]
+        return self.chunk_document(document)
+
+
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
-_INDEXING_STATUS_RESETTING = "resetting"
-_INDEXING_STATUS_INDEXING = "indexing"
-_INDEXING_STATUS_COMPLETE = "complete"
-_INDEXING_STATUSES = {
-    _INDEXING_STATUS_RESETTING,
-    _INDEXING_STATUS_INDEXING,
-    _INDEXING_STATUS_COMPLETE,
-}
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
@@ -117,8 +163,11 @@ _MAX_PREFETCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
-#: Completed candidate entries whose vectors are confirmed in one Chroma query.
-_VECTOR_VERIFY_BATCH = 128
+#: Published chunk rows read in one copy query. Chroma binds one SQL variable
+#: per *returned* row and SQLite caps a statement at 32,766, so nothing about
+#: the file or path count bounds a copy query -- only the rows it may return.
+#: The page also bounds how much vector data the copy holds in memory at once.
+_PUBLISHED_VECTOR_COPY_PAGE_ROWS = 500
 #: Reconciliation passes before a refresh gives up for now. A source that keeps
 #: changing keeps its candidate and converges over successive refreshes instead
 #: of thrashing inside one.
@@ -131,6 +180,7 @@ _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 #: taken as proof the fault is global rather than specific to a few files.
 _GLOBAL_EMBEDDER_FAILURE_STREAK = 20
 _EMBEDDING_RETRY_POLICY = EmbeddingRetryPolicy()
+_ShieldedResult = TypeVar("_ShieldedResult")
 #: Indirection point so fault-injection tests can drive backoff without waiting.
 _EMBEDDING_RETRY_SLEEP: Callable[[float], Awaitable[None]] = asyncio.sleep
 
@@ -152,33 +202,6 @@ def _max_concurrent_knowledge_file_indexes() -> int:
         )
         raise ValueError(msg)
     return value
-
-
-@runtime_checkable
-class _CollectionListingClient(Protocol):
-    """Vector client surface needed for best-effort collection cleanup."""
-
-    def list_collections(self) -> list[object]:
-        """Return collection names or collection objects."""
-        ...
-
-
-@runtime_checkable
-class _NamedCollection(Protocol):
-    """Collection object shape returned by Chroma clients."""
-
-    name: str
-
-
-@dataclass(frozen=True)
-class _PersistedIndexState:
-    settings: IndexingSettings
-    status: Literal["resetting", "indexing", "complete"]
-    collection: str | None = None
-    last_published_at: str | None = None
-    published_revision: str | None = None
-    indexed_count: int | None = None
-    source_signature: str | None = None
 
 
 @dataclass
@@ -208,6 +231,17 @@ class _CandidateRun:
     journal_appends: int = 0
     resumed: bool = False
     published: bool = False
+
+
+@dataclass(frozen=True)
+class _OpenedCandidate:
+    """One candidate collection made ready for a refresh to advance."""
+
+    checkpoint: CandidateCheckpoint
+    knowledge: Knowledge
+    vector_db: ChromaDb
+    reused: dict[str, FileSignature] = field(default_factory=dict)
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -272,12 +306,12 @@ class _CandidateProgress:
         self._last_logged_completed = self.completed
         logger.info("knowledge_candidate_progress", **self._fields())
 
-    def log_summary(self, *, published: bool, error: str | None) -> None:
+    def log_summary(self, outcome: RefreshOutcome) -> None:
         """Emit the single terminal summary for this refresh."""
         logger.info(
             "knowledge_candidate_finished",
-            published=published,
-            error=error,
+            published=outcome.published,
+            error=outcome.error,
             **self._fields(),
         )
 
@@ -294,19 +328,49 @@ def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
 
 
+async def _drain_owned_task_after_cancellation(
+    task: asyncio.Task[_ShieldedResult],
+    *,
+    suppress_errors: bool,
+) -> None:
+    """Drain one owned task despite repeated cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if suppress_errors:
+        with suppress(Exception):
+            task.result()
+        return
+    task.result()
+
+
+async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _ShieldedResult:
+    """Run one durable write to completion even if the caller is cancelled.
+
+    ``asyncio.shield`` only detaches the wait: the shielded task keeps running
+    either way, so a cancelled caller that does not drain it leaves the write
+    racing process exit. Draining swallows the write's own failure so that
+    cancellation, not the failure, is what the caller sees -- every user of
+    this treats a lost write as recoverable and cancellation as authoritative.
+    The shared drain also defers repeated cancellation until the write finishes.
+    """
+    task = asyncio.create_task(write)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await _drain_owned_task_after_cancellation(task, suppress_errors=True)
+        raise
+
+
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
     """Yield bounded slices so a huge corpus never becomes one huge fan-out."""
     size = max(batch_size, 1)
     for start in range(0, len(files), size):
         yield list(files[start : start + size])
-
-
-def _require_chroma_vector_db(knowledge: Knowledge) -> ChromaDb:
-    vector_db = knowledge.vector_db
-    if not isinstance(vector_db, ChromaDb):
-        msg = "Knowledge reindex candidate collection requires a ChromaDb vector database"
-        raise TypeError(msg)
-    return vector_db
 
 
 def _resolve_knowledge_path(
@@ -323,130 +387,8 @@ def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
     knowledge_path.mkdir(parents=True, exist_ok=True)
 
 
-def _collection_name(base_id: str, knowledge_path: Path) -> str:
-    return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
-
-
 def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
-
-
-def _authenticated_repo_url(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Inject HTTPS credentials from CredentialsManager into a repository URL."""
-    if not credentials_service:
-        return repo_url
-
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-    username = credentials.get("username")
-    token = credentials.get("token") or credentials.get("api_key")
-    password = credentials.get("password")
-
-    if not isinstance(username, str) and token and not password:
-        username = "x-access-token"
-
-    if not isinstance(username, str) or not username:
-        return repo_url
-
-    secret: str | None
-    if isinstance(password, str) and password:
-        secret = password
-    elif isinstance(token, str) and token:
-        secret = token
-    else:
-        secret = None
-
-    if secret is None:
-        return repo_url
-
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in {"http", "https"}:
-        return repo_url
-
-    hostname = parsed.netloc.split("@")[-1]
-    auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
-    return urlunparse(parsed._replace(netloc=auth_netloc))
-
-
-def _credentials_service_http_userinfo(
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> tuple[str, str] | None:
-    if not credentials_service:
-        return None
-
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-    username = credentials.get("username")
-    token = credentials.get("token") or credentials.get("api_key")
-    password = credentials.get("password")
-
-    if not isinstance(username, str) and token and not password:
-        username = "x-access-token"
-
-    if not isinstance(username, str) or not username:
-        return None
-
-    if isinstance(password, str) and password:
-        return username, password
-    if isinstance(token, str) and token:
-        return username, token
-    return None
-
-
-def _git_http_basic_auth_env(clean_url: str, username: str, secret: str) -> dict[str, str]:
-    encoded = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"http.{clean_url}.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
-    }
-
-
-def _git_auth_env(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> dict[str, str] | None:
-    """Return process-local Git config that injects credentials without persisting them."""
-    clean_url = credential_free_repo_url(repo_url)
-    parsed_clean_url = urlparse(clean_url)
-
-    embedded_userinfo = embedded_http_userinfo(repo_url)
-    if embedded_userinfo is not None:
-        return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
-
-    credentials_userinfo = (
-        _credentials_service_http_userinfo(credentials_service, runtime_paths)
-        if parsed_clean_url.scheme in {"http", "https"}
-        else None
-    )
-    if credentials_userinfo is not None:
-        return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
-
-    authenticated_url = (
-        repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
-    )
-    if authenticated_url == clean_url:
-        return None
-    parsed_authenticated_url = urlparse(authenticated_url)
-    if parsed_authenticated_url.netloc and "@" in parsed_authenticated_url.netloc:
-        return None
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
-        "GIT_CONFIG_VALUE_0": clean_url,
-    }
-
-
-def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
-    merged: dict[str, str] = {}
-    for env in envs:
-        if env:
-            merged.update(env)
-    return merged or None
 
 
 def _file_content_digest(file_path: Path) -> str:
@@ -457,7 +399,7 @@ def _file_content_digest(file_path: Path) -> str:
     return digest.hexdigest()
 
 
-def knowledge_source_signature(
+def _knowledge_source_signature(
     config: Config,
     base_id: str,
     knowledge_root: Path,
@@ -495,6 +437,24 @@ def knowledge_source_signature(
     return digest.hexdigest()
 
 
+def _reusable_row_signature(
+    metadata: Metadata,
+    managed_paths: frozenset[str],
+) -> tuple[str, FileSignature] | None:
+    """Return the managed source path and signature one published chunk carries."""
+    source_path = metadata.get(SOURCE_PATH_KEY)
+    if not isinstance(source_path, str) or source_path not in managed_paths:
+        return None
+    signature = file_signature_from_fields(
+        metadata.get(SOURCE_MTIME_NS_KEY),
+        metadata.get(SOURCE_SIZE_KEY),
+        metadata.get(SOURCE_DIGEST_KEY),
+    )
+    if signature is None:
+        return None
+    return source_path, signature
+
+
 def _source_signature_from_file_signatures(file_signatures: Mapping[str, FileSignature]) -> str:
     """Return the same corpus signature from already-indexed relative path signatures."""
     digest = hashlib.sha256()
@@ -519,22 +479,17 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
+    #: Collaborator that owns the Git checkout this base indexes, when one is
+    #: configured. Always present: it answers ``is_configured()`` for itself.
+    git_source: GitKnowledgeSource = field(init=False)
     _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
-    _git_lfs_hydrated_head_path: Path = field(init=False)
+    _collections: CollectionSpace = field(init=False, repr=False)
     _knowledge: Knowledge = field(init=False)
-    _indexed_files: set[str] = field(default_factory=set, init=False)
-    _indexed_signatures: dict[str, FileSignature] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_last_successful_commit: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
     _last_file_index_error: str | None = field(default=None, init=False)
-    _git_lfs_checked: bool = field(default=False, init=False)
-    _git_lfs_repository_ready: bool = field(default=False, init=False)
-    _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
@@ -562,8 +517,25 @@ class KnowledgeManager:
         ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
-        self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
-        persisted_state = self._load_persisted_index_state()
+        self.git_source = GitKnowledgeSource(
+            base_id=self.base_id,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            source_path=self.knowledge_path,
+            lfs_hydrated_head_path=self._base_storage_path / "git_lfs_hydrated_head.txt",
+        )
+        self._collections = CollectionSpace(
+            base_id=self.base_id,
+            knowledge_path=self.knowledge_path,
+            storage_path=self._base_storage_path,
+            # A factory, not an embedder: this runs for every base, including
+            # non-semantic ones that never open a collection, and a status read
+            # must construct no embedder at all. Deferring puts the cost only
+            # where a handle is really built -- for a cleanup sweep, once per
+            # collection it actually deletes, and nothing when it deletes none.
+            embedder_factory=lambda: create_configured_embedder(self.config, self.runtime_paths),
+        )
+        persisted_state = load_published_index_state(self._indexing_settings_path)
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._persisted_collection_missing_on_init = False
             self._knowledge = Knowledge()
@@ -576,9 +548,9 @@ class KnowledgeManager:
                 and persisted_state.collection is not None
                 and not self._persisted_collection_missing_on_init
             )
-            else self._default_collection_name()
+            else self._collections.default_collection
         )
-        self._knowledge = self._build_knowledge(collection_name)
+        self._knowledge = build_knowledge(self._collections, collection_name)
 
     def _set_settings(
         self,
@@ -605,10 +577,10 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def _persisted_collection_missing(self, persisted_state: _PersistedIndexState | None) -> bool:
-        if persisted_state is None or persisted_state.status != _INDEXING_STATUS_COMPLETE:
+    def _persisted_collection_missing(self, persisted_state: PublishedIndexState | None) -> bool:
+        if persisted_state is None or persisted_state.status != "complete":
             return False
-        collection_name = persisted_state.collection or self._default_collection_name()
+        collection_name = persisted_state.collection or self._collections.default_collection
         try:
             return not chroma_collection_exists(self._base_storage_path, collection_name)
         except Exception:
@@ -620,328 +592,47 @@ class KnowledgeManager:
             )
             return True
 
-    def _load_persisted_index_state(self) -> _PersistedIndexState | None:
-        payload = load_index_metadata_payload(self._indexing_settings_path)
-        if payload is None:
-            return None
-        fields = parse_index_metadata_fields(
-            payload,
-            allowed_statuses=_INDEXING_STATUSES,
-            require_complete_fields_for_all_statuses=True,
-        )
-        if fields is None:
-            return None
-        (
-            settings,
-            status,
-            collection,
-            last_published_at,
-            published_revision,
-            indexed_count,
-            source_signature,
-        ) = fields
-        indexing_settings = IndexingSettings.from_metadata(settings)
-        if indexing_settings is None:
-            return None
-        return _PersistedIndexState(
-            indexing_settings,
-            cast('Literal["resetting", "indexing", "complete"]', status),
-            collection=collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
-
-    def _save_persisted_index_state(
-        self,
-        status: Literal["resetting", "indexing", "complete"],
-        *,
-        settings: IndexingSettings | None = None,
-        collection: str | None = None,
-        last_published_at: str | None = None,
-        published_revision: str | None = None,
-        indexed_count: int | None = None,
-        source_signature: str | None = None,
-    ) -> None:
-        write_index_metadata_payload(
-            self._indexing_settings_path,
-            settings=(settings or self._indexing_settings).to_metadata(),
-            status=status,
-            collection=collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
-
-    def _load_git_lfs_hydrated_head(self) -> str | None:
-        try:
-            hydrated_head = self._git_lfs_hydrated_head_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-        return hydrated_head or None
-
-    def _save_git_lfs_hydrated_head(self, head: str) -> None:
-        self._git_lfs_hydrated_head_path.write_text(head, encoding="utf-8")
-
-    def _clear_git_lfs_hydrated_head(self) -> None:
-        self._git_lfs_hydrated_head_path.unlink(missing_ok=True)
-
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
         return isinstance(vector_db, ChromaDb) and vector_db.exists()
 
-    def _needs_full_reindex_on_create(self) -> bool:
+    def needs_full_reindex_on_create(self) -> bool:
+        """Return whether persisted metadata forces a full rebuild for this base."""
         if self._persisted_collection_missing_on_init:
             return True
-        persisted_state = self._load_persisted_index_state()
+        persisted_state = load_published_index_state(self._indexing_settings_path)
         if persisted_state is None:
             return self._indexing_settings_path.exists() and self._has_existing_index()
-        return (
-            persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING
-        )
-
-    def _git_config(self) -> KnowledgeGitConfig | None:
-        return self.config.get_knowledge_base_config(self.base_id).git
-
-    def _git_uses_lfs(self) -> bool:
-        git_config = self._git_config()
-        return bool(git_config and git_config.lfs)
-
-    def _git_sync_timeout_seconds(self) -> float | None:
-        git_config = self._git_config()
-        if git_config is None:
-            return None
-        return float(git_config.sync_timeout_seconds)
-
-    async def _git_checkout_present(self) -> bool:
-        return await asyncio.to_thread(
-            git_checkout_present,
-            self._knowledge_source_path(),
-            timeout_seconds=self._git_sync_timeout_seconds(),
-        )
-
-    def _include_active_relative_path(self, relative_path: str) -> bool:
-        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
-
-    async def _run_git(
-        self,
-        args: list[str],
-        *,
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
-    ) -> str:
-        repo_root = cwd or self._knowledge_source_path()
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=str(repo_root),
-            env=None if env is None else {**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            timeout_seconds = self._git_sync_timeout_seconds()
-            if timeout_seconds is None:
-                stdout, stderr = await process.communicate()
-            else:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-        except asyncio.CancelledError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            raise
-        except TimeoutError as exc:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
-            msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
-            raise RuntimeError(msg) from exc
-
-        if process.returncode == 0:
-            return stdout.decode("utf-8", errors="replace")
-
-        stdout_text = stdout.decode("utf-8", errors="replace").strip()
-        stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        details = redact_credentials_in_text(stderr_text or stdout_text)
-        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
-        msg = f"Git command failed with exit code {process.returncode}: {command}"
-        if details:
-            msg = f"{msg}\n{details}"
-        raise RuntimeError(msg)
-
-    async def _ensure_git_lfs_available(self, *, cwd: Path) -> None:
-        if not self._git_uses_lfs() or self._git_lfs_checked:
-            return
-        try:
-            await self._run_git(["lfs", "version"], cwd=cwd)
-        except RuntimeError as exc:
-            msg = "Git LFS is required for this knowledge base but is not available in the runtime image"
-            raise RuntimeError(msg) from exc
-        self._git_lfs_checked = True
-
-    async def _ensure_git_lfs_repository_ready(self, repo_root: Path) -> None:
-        if not self._git_uses_lfs() or self._git_lfs_repository_ready:
-            return
-        await self._ensure_git_lfs_available(cwd=repo_root)
-        await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
-        self._git_lfs_repository_ready = True
-
-    def _git_lfs_skip_smudge_env(self, git_config: KnowledgeGitConfig) -> dict[str, str] | None:
-        if not git_config.lfs:
-            return None
-        return {"GIT_LFS_SKIP_SMUDGE": "1"}
-
-    def _git_lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
-        return ["lfs", "pull", "origin", git_config.branch]
-
-    async def _hydrate_git_lfs_worktree(
-        self,
-        git_config: KnowledgeGitConfig,
-        *,
-        repo_root: Path | None = None,
-        current_head: str | None = None,
-    ) -> None:
-        if not git_config.lfs:
-            return
-        resolved_head = current_head or await self._git_rev_parse("HEAD")
-        if resolved_head is not None:
-            hydrated_head = await asyncio.to_thread(self._load_git_lfs_hydrated_head)
-            if hydrated_head == resolved_head:
-                return
-        await self._run_git(
-            self._git_lfs_pull_args(git_config),
-            cwd=repo_root or self._knowledge_source_path(),
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
-        )
-        if resolved_head is None:
-            resolved_head = await self._git_rev_parse("HEAD")
-        if resolved_head is not None:
-            await asyncio.to_thread(self._save_git_lfs_hydrated_head, resolved_head)
-
-    async def _git_rev_parse(self, ref: str) -> str | None:
-        try:
-            output = await self._run_git(["rev-parse", ref])
-        except RuntimeError:
-            return None
-        return output.strip() or None
-
-    async def _git_list_tracked_files(self) -> set[str]:
-        output = await self._run_git(["ls-files", "-z"])
-        raw_paths = [entry for entry in output.split("\x00") if entry]
-        tracked_files = {path for path in raw_paths if self._include_active_relative_path(path)}
-        self._git_tracked_relative_paths = set(tracked_files)
-        return tracked_files
-
-    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
-        runtime_paths = self.runtime_paths
-        knowledge_root = self._knowledge_source_path()
-        if await self._git_checkout_present():
-            await self._ensure_git_lfs_repository_ready(knowledge_root)
-            current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = credential_free_repo_url(git_config.repo_url)
-            if current_remote != expected_remote:
-                await self._run_git(["remote", "set-url", "origin", expected_remote])
-            return False
-
-        if knowledge_root.exists() and any(knowledge_root.iterdir()):
-            msg = (
-                f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. "
-                "Clear the folder or use a dedicated path."
-            )
-            raise RuntimeError(msg)
-
-        knowledge_root.parent.mkdir(parents=True, exist_ok=True)
-        if git_config.lfs:
-            await self._ensure_git_lfs_available(cwd=knowledge_root.parent)
-        clone_url = credential_free_repo_url(git_config.repo_url)
-        await self._run_git(
-            [
-                "clone",
-                "--single-branch",
-                "--branch",
-                git_config.branch,
-                clone_url,
-                str(knowledge_root),
-            ],
-            cwd=knowledge_root.parent,
-            env=_merge_git_env(
-                _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
-                self._git_lfs_skip_smudge_env(git_config),
-            ),
-        )
-        await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
-        await asyncio.to_thread(self._clear_git_lfs_hydrated_head)
-        await self._ensure_git_lfs_repository_ready(knowledge_root)
-        await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
-        return True
-
-    async def _sync_git_source_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        cloned = await self._ensure_git_repository(git_config)
-        if cloned:
-            return await self._git_list_tracked_files(), set(), True
-
-        before_head = await self._git_rev_parse("HEAD")
-
-        remote_ref = f"origin/{git_config.branch}"
-        await self._run_git(
-            ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
-        )
-        remote_head = await self._git_rev_parse(remote_ref)
-        if remote_head is None:
-            msg = f"Could not resolve remote ref '{remote_ref}' for knowledge base '{self.base_id}'"
-            raise RuntimeError(msg)
-
-        if before_head == remote_head:
-            await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-            return set(), set(), False
-
-        before_files = await self._git_list_tracked_files()
-
-        await self._run_git(
-            ["checkout", "--force", "-B", git_config.branch, remote_ref],
-            env=self._git_lfs_skip_smudge_env(git_config),
-        )
-        # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
-        # intentional way to realign it with the configured remote state.
-        await self._run_git(["reset", "--hard", remote_ref], env=self._git_lfs_skip_smudge_env(git_config))
-        await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-
-        after_files = await self._git_list_tracked_files()
-        if before_head is None:
-            changed_paths = after_files
-        else:
-            diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_active_relative_path(path)}
-
-        removed_files = before_files - after_files
-        changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
-        return changed_files, removed_files, True
+        return persisted_state.settings != self._indexing_settings or persisted_state.status == "resetting"
 
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
         knowledge_root = self._knowledge_source_path()
-        if self._git_config() is not None:
-            if self._git_tracked_relative_paths is None:
-                if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
-                    return []
-                self._git_tracked_relative_paths = git_tracked_relative_paths_from_checkout(
-                    self.config,
-                    self.base_id,
-                    knowledge_root,
-                )
+        if self.git_source.is_configured():
+            tracked_relative_paths = self.git_source.tracked_relative_paths()
+            if tracked_relative_paths is None:
+                return []
             return knowledge_files_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,
-                self._git_tracked_relative_paths,
+                tracked_relative_paths,
             )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
+
+    async def source_signature(self) -> str:
+        """Return the signature of the corpus this base currently manages.
+
+        Git-backed bases hand over the tracked paths this process already
+        listed, so an unchanged checkout is not re-listed just to hash it.
+        """
+        return await asyncio.to_thread(
+            _knowledge_source_signature,
+            self.config,
+            self.base_id,
+            self._knowledge_source_path(),
+            tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
+        )
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
@@ -954,29 +645,22 @@ class KnowledgeManager:
         self,
         relative_path: str,
         *,
-        knowledge: Knowledge | None = None,
+        knowledge: Knowledge,
     ) -> bool:
-        target_knowledge = knowledge or self._knowledge
-        vector_db = target_knowledge.vector_db
+        vector_db = knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
             return True
         if not vector_db.exists():
             return False
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(
-            where={_SOURCE_PATH_KEY: relative_path},
-            limit=1,
-            include=[],
-        )
-        ids = result.get("ids", []) or []
-        return bool(ids)
+        return collection_has_source_path(collection, relative_path)
 
     async def _wait_for_source_vectors(
         self,
         relative_path: str,
         *,
-        knowledge: Knowledge | None = None,
+        knowledge: Knowledge,
     ) -> bool:
         """Retry post-insert visibility checks to tolerate brief vector-store lag."""
         for attempt, delay_seconds in enumerate(_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS):
@@ -999,111 +683,60 @@ class KnowledgeManager:
             overlap=base_config.chunk_overlap,
         )
 
+    def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
+        """Apply this base's text chunking policy to ``reader`` in place."""
+        chunking_strategy = self._chunking_strategy()
+        reader.chunk = True
+        reader.chunk_size = chunking_strategy.chunk_size
+        reader.chunking_strategy = chunking_strategy
+        return reader
+
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
+
+        # ReaderFactory hands out cached shared instances, so any branch that
+        # configures a reader copies it first instead of mutating the cache.
+        if isinstance(reader, JSONReader):
+            # Carry the factory reader's configuration (encoding, chunking) onto
+            # the subclass that tags its own decode failures for the text fallback.
+            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        chunking_strategy = self._chunking_strategy()
-        configured_reader = deepcopy(reader)
-        configured_reader.chunk = True
-        configured_reader.chunk_size = chunking_strategy.chunk_size
-        configured_reader.chunking_strategy = chunking_strategy
-        return configured_reader
+        return self._configure_text_reader(deepcopy(reader))
 
-    def _default_collection_name(self) -> str:
-        return _collection_name(self.base_id, self._knowledge_source_path())
-
-    def _candidate_collection_name(self) -> str:
-        return f"{self._default_collection_name()}_candidate_{uuid.uuid4().hex[:16]}"
-
-    def _build_vector_db(self, collection_name: str, *, embedder: Embedder | None = None) -> ChromaDb:
-        return ChromaDb(
-            collection=collection_name,
-            path=str(self._base_storage_path),
-            persistent_client=True,
-            embedder=embedder if embedder is not None else create_configured_embedder(self.config, self.runtime_paths),
-        )
-
-    def _build_knowledge(self, collection_name: str, *, embedder: Embedder | None = None) -> Knowledge:
-        return Knowledge(vector_db=self._build_vector_db(collection_name, embedder=embedder))
-
-    def _cleanup_superseded_collections(
+    async def _insert_with_malformed_json_fallback(
         self,
+        insert: Callable[[Reader], Awaitable[None]],
         *,
-        preserved: frozenset[str],
-        candidates_only: bool = False,
+        relative_path: str,
+        reader: Reader,
     ) -> None:
-        """Delete this base's superseded collections, preserving proven-live ones.
+        """Insert through the selected reader, falling back only for malformed source JSON."""
 
-        Ownership is proven by name: both the default collection and the
-        candidate prefix embed this base's identity and resolved source path,
-        and both live in this base's own private storage directory. Anything
-        else in that directory is left alone and reported rather than deleted,
-        because nothing here can prove who owns it.
-        """
-        vector_db = self._knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return
-        client = vector_db.client
-        if client is None or not isinstance(client, _CollectionListingClient):
-            return
-
-        default_collection = self._default_collection_name()
-        candidate_prefix = f"{default_collection}_candidate_"
+        async def _insert_with_retry(selected_reader: Reader) -> None:
+            await run_with_embedding_retry(
+                partial(insert, selected_reader),
+                policy=_EMBEDDING_RETRY_POLICY,
+                sleep=_EMBEDDING_RETRY_SLEEP,
+                on_retry=self._record_embedding_retry,
+            )
 
         try:
-            collection_names = self._listed_collection_names(client)
-        except Exception:
+            await _insert_with_retry(reader)
+        except _MalformedJSONSourceError as error:
             logger.warning(
-                "Failed to list superseded knowledge collections for cleanup",
+                "Malformed JSON knowledge file; indexing as text",
                 base_id=self.base_id,
-                exc_info=True,
+                path=relative_path,
+                line=error.line,
+                column=error.column,
             )
-            return
-
-        unowned: list[str] = []
-        for collection_name in collection_names:
-            if collection_name in preserved:
-                continue
-            is_candidate = collection_name.startswith(candidate_prefix)
-            if not is_candidate and (candidates_only or collection_name != default_collection):
-                # Reclaiming abandoned candidates must never race a legacy
-                # published collection whose metadata predates this layout.
-                if collection_name != default_collection:
-                    unowned.append(collection_name)
-                continue
-            try:
-                self._build_vector_db(collection_name).delete()
-            except Exception:
-                logger.warning(
-                    "Failed to clean superseded knowledge collection",
-                    base_id=self.base_id,
-                    collection=collection_name,
-                    exc_info=True,
-                )
-        if unowned:
-            logger.info(
-                "Preserved knowledge collections with unprovable ownership",
-                base_id=self.base_id,
-                collections=sorted(unowned),
-            )
-
-    def _listed_collection_names(self, client: _CollectionListingClient) -> tuple[str, ...]:
-        names: list[str] = []
-        for collection in client.list_collections():
-            if isinstance(collection, str):
-                names.append(collection)
-            elif isinstance(collection, _NamedCollection):
-                names.append(collection.name)
-        return tuple(dict.fromkeys(names))
-
-    def _reset_vector_db(self, vector_db: ChromaDb) -> None:
-        vector_db.delete()
-        vector_db.create()
+            fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
+            await _insert_with_retry(fallback_reader)
 
     async def _save_candidate_publish_metadata(
         self,
@@ -1112,42 +745,30 @@ class KnowledgeManager:
         indexed_count: int,
         source_signature: str,
     ) -> bool:
+        state = state_for_publication(
+            settings=self._indexing_settings,
+            collection=candidate_vector_db.collection_name,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            published_revision=self.git_source.last_synced_head,
+        )
         save_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._save_persisted_index_state,
-                _INDEXING_STATUS_COMPLETE,
-                collection=candidate_vector_db.collection_name,
-                last_published_at=datetime.now(tz=UTC).isoformat(),
-                published_revision=self._git_last_successful_commit,
-                indexed_count=indexed_count,
-                source_signature=source_signature,
-            ),
+            asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
         )
         try:
             await asyncio.shield(save_task)
         except asyncio.CancelledError:
-            await save_task
+            # Use the shared repeated-cancellation drain without suppressing
+            # task errors: the caller marks the index published on a
+            # cancelled-but-saved outcome, so a failed write must surface.
+            await _drain_owned_task_after_cancellation(save_task, suppress_errors=False)
             return True
         return False
-
-    async def _adopt_candidate_vector_db(
-        self,
-        *,
-        candidate_vector_db: ChromaDb,
-        indexed_files: set[str],
-        indexed_signatures: dict[str, FileSignature],
-    ) -> None:
-        self._knowledge.vector_db = candidate_vector_db
-        async with self._state_lock:
-            self._indexed_files = indexed_files
-            self._indexed_signatures = indexed_signatures
 
     async def _publish_candidate_after_metadata_save(
         self,
         *,
         candidate_vector_db: ChromaDb,
-        indexed_files: set[str],
-        indexed_signatures: dict[str, FileSignature],
         indexed_count: int,
         source_signature: str,
         publish_state: _CandidatePublishState,
@@ -1158,58 +779,30 @@ class KnowledgeManager:
             source_signature=source_signature,
         )
         publish_state.index_published = True
-        await self._adopt_candidate_vector_db(
-            candidate_vector_db=candidate_vector_db,
-            indexed_files=indexed_files,
-            indexed_signatures=indexed_signatures,
-        )
+        # Adopt the candidate as this manager's live vector database:
+        # `cleanup_superseded_collections` runs right after publish and is handed
+        # `self._knowledge.vector_db` as the Chroma client it lists with, so the
+        # adoption has to land before that call reads the attribute.
+        self._knowledge.vector_db = candidate_vector_db
         if publish_cancelled:
             _raise_cancelled()
-
-    async def sync_git_source(self) -> dict[str, Any]:
-        """Fetch and force-align one configured Git repository checkout."""
-        git_config = self._git_config()
-        if git_config is None:
-            return {"updated": False, "changed_count": 0, "removed_count": 0}
-
-        async with self._git_sync_lock:
-            changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
-            current_head = await self._git_rev_parse("HEAD")
-            self._git_last_successful_commit = current_head
-
-        if updated:
-            logger.info(
-                "Knowledge Git repository synchronized",
-                base_id=self.base_id,
-                repo_url=redact_url_credentials(git_config.repo_url),
-                branch=git_config.branch,
-                changed_count=len(changed_files),
-                removed_count=len(removed_files),
-                commit=current_head,
-            )
-        return {
-            "updated": updated,
-            "changed_count": len(changed_files),
-            "removed_count": len(removed_files),
-        }
 
     async def _index_file_locked(
         self,
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: Knowledge | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, FileSignature] | None = None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
         source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
         metadata = {
-            _SOURCE_PATH_KEY: relative_path,
-            _SOURCE_MTIME_NS_KEY: source_mtime_ns,
-            _SOURCE_SIZE_KEY: source_size,
-            _SOURCE_DIGEST_KEY: source_digest,
+            SOURCE_PATH_KEY: relative_path,
+            SOURCE_MTIME_NS_KEY: source_mtime_ns,
+            SOURCE_SIZE_KEY: source_size,
+            SOURCE_DIGEST_KEY: source_digest,
         }
         try:
             reader = self._build_reader(resolved_path)
@@ -1222,13 +815,12 @@ class KnowledgeManager:
                 error=str(exc),
             )
             return False
-        target_knowledge = knowledge or self._knowledge
 
-        async def _insert_once() -> None:
+        async def _insert_once(selected_reader: Reader) -> None:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(target_knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
+                await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {SOURCE_PATH_KEY: relative_path})
             # Knowledge.ainsert is async by name only: it eventually calls into the
             # vector database's synchronous batch upsert (e.g. ChromaDB's Rust
             # _upsert) on the running event loop, blocking every other coroutine
@@ -1237,21 +829,20 @@ class KnowledgeManager:
             # worker thread and the loop stays responsive to Matrix sync, tool
             # calls, and cache writes.
             await asyncio.to_thread(
-                target_knowledge.insert,
+                knowledge.insert,
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
-                reader=reader,
+                reader=selected_reader,
             )
 
         try:
             # Remove-then-insert is idempotent, so a transient embedding fault
             # costs one retry of this file instead of the whole refresh.
-            await run_with_embedding_retry(
+            await self._insert_with_malformed_json_fallback(
                 _insert_once,
-                policy=_EMBEDDING_RETRY_POLICY,
-                sleep=_EMBEDDING_RETRY_SLEEP,
-                on_retry=self._record_embedding_retry,
+                relative_path=relative_path,
+                reader=reader,
             )
         except Exception as exc:
             classified = classified_embedder_error(exc)
@@ -1265,24 +856,16 @@ class KnowledgeManager:
 
         has_vectors = await self._wait_for_source_vectors(
             relative_path,
-            knowledge=target_knowledge,
+            knowledge=knowledge,
         )
         if not has_vectors:
-            return await self._handle_vectorless_file(
+            return self._handle_vectorless_file(
                 relative_path,
                 (source_mtime_ns, source_size, source_digest),
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
             )
 
-        if indexed_signatures is not None:
-            if indexed_files is not None:
-                indexed_files.add(relative_path)
-            indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-        else:
-            async with self._state_lock:
-                self._indexed_files.add(relative_path)
-                self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+        indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         self._file_index_errors.pop(relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
@@ -1290,37 +873,22 @@ class KnowledgeManager:
         logger.debug("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
-    async def _handle_vectorless_file(
+    def _handle_vectorless_file(
         self,
         relative_path: str,
         signature: FileSignature,
         *,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
+        indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Record one insert that produced no vectors; success only for empty sources."""
         source_size = signature[1]
         if source_size == 0:
-            if indexed_signatures is not None:
-                if indexed_files is not None:
-                    indexed_files.add(relative_path)
-                indexed_signatures[relative_path] = signature
-            else:
-                async with self._state_lock:
-                    self._indexed_files.add(relative_path)
-                    self._indexed_signatures[relative_path] = signature
+            indexed_signatures[relative_path] = signature
             logger.debug("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
             return True
 
         logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-        if indexed_signatures is not None:
-            if indexed_files is not None:
-                indexed_files.discard(relative_path)
-            indexed_signatures.pop(relative_path, None)
-        else:
-            async with self._state_lock:
-                self._indexed_files.discard(relative_path)
-                self._indexed_signatures.pop(relative_path, None)
+        indexed_signatures.pop(relative_path, None)
         return False
 
     def _record_embedding_retry(self) -> None:
@@ -1476,10 +1044,9 @@ class KnowledgeManager:
         self,
         files: list[Path],
         *,
-        knowledge: Knowledge | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, FileSignature] | None = None,
-        vanished_files: set[str] | None = None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
         embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
         on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
@@ -1504,7 +1071,6 @@ class KnowledgeManager:
             indexed_count += await self._index_file_batch(
                 batch,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
                 on_file_result=on_file_result,
@@ -1528,17 +1094,15 @@ class KnowledgeManager:
         self,
         file_path: Path,
         *,
-        knowledge: Knowledge | None,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
-        vanished_files: set[str] | None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
     ) -> bool:
         try:
             return await self._index_file_locked(
                 file_path,
                 upsert=True,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
             )
         except FileNotFoundError:
@@ -1554,18 +1118,16 @@ class KnowledgeManager:
                 base_id=self.base_id,
                 path=relative_path,
             )
-            if vanished_files is not None:
-                vanished_files.add(relative_path)
+            vanished_files.add(relative_path)
             return False
 
     async def _index_file_batch(
         self,
         batch: Sequence[Path],
         *,
-        knowledge: Knowledge | None,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
-        vanished_files: set[str] | None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
     ) -> int:
         """Index one bounded batch, capping live tasks at the concurrency limit."""
@@ -1576,7 +1138,6 @@ class KnowledgeManager:
             indexed = await self._index_file_or_skip_vanished(
                 file_path,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
             )
@@ -1612,25 +1173,6 @@ class KnowledgeManager:
             raise first_error
         return sum(1 for result in results if result is True)
 
-    def _candidate_paths_with_vectors(
-        self,
-        vector_db: ChromaDb,
-        relative_paths: Sequence[str],
-    ) -> set[str]:
-        """Return which of the given source paths actually have candidate vectors."""
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(
-            where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}},
-            include=["metadatas"],
-        )
-        metadatas = result.get("metadatas") or []
-        found: set[str] = set()
-        for metadata in metadatas:
-            source_path = metadata.get(_SOURCE_PATH_KEY) if isinstance(metadata, dict) else None
-            if isinstance(source_path, str):
-                found.add(source_path)
-        return found
-
     async def _candidate_paths_missing_vectors(self, run: _CandidateRun, relative_paths: Sequence[str]) -> set[str]:
         """Return completed entries the candidate cannot actually serve.
 
@@ -1646,28 +1188,259 @@ class KnowledgeManager:
         ]
         run.verified.update(set(relative_paths) - set(verifiable))
         missing: set[str] = set()
-        for start in range(0, len(verifiable), _VECTOR_VERIFY_BATCH):
-            batch = verifiable[start : start + _VECTOR_VERIFY_BATCH]
-            found = await asyncio.to_thread(self._candidate_paths_with_vectors, run.vector_db, batch)
+        for start in range(0, len(verifiable), VECTOR_VERIFY_BATCH):
+            batch = verifiable[start : start + VECTOR_VERIFY_BATCH]
+            found = await asyncio.to_thread(paths_with_vectors, run.vector_db, batch)
             missing.update(set(batch) - found)
             run.verified.update(found)
         return missing
 
-    async def _open_candidate_run(self) -> _CandidateRun:
+    def _copy_published_vectors(
+        self,
+        *,
+        published_collection: str,
+        candidate_vector_db: ChromaDb,
+        managed_paths: frozenset[str],
+    ) -> dict[str, FileSignature]:
+        """Copy stored chunks for currently-managed paths into the candidate.
+
+        Every published chunk carries the signature of the file it came from,
+        so the published collection is already an index from source path to
+        vectors. Chunks are copied verbatim -- ids, embeddings, documents and
+        metadata -- because ids key content in the vector store and
+        regenerating them would corrupt the candidate.
+
+        Reads are paged because Chroma binds one SQL variable per *returned*
+        row and SQLite caps a statement at 32,766 of them. Neither the file
+        count nor the path count bounds that, so a single large file can refuse
+        an unpaged read on its own; only bounding the returned rows escapes.
+
+        Returns the signature published for each path that actually received
+        rows, so a path the published index cannot serve is never claimed.
+        """
+        client = candidate_vector_db.client
+        published = client.get_collection(name=published_collection)
+        candidate = client.get_collection(name=candidate_vector_db.collection_name)
+        reused: dict[str, FileSignature] = {}
+        offset = 0
+        while True:
+            page = published.get(
+                limit=_PUBLISHED_VECTOR_COPY_PAGE_ROWS,
+                offset=offset,
+                include=["embeddings", "documents", "metadatas"],
+            )
+            ids = page["ids"]
+            if not ids:
+                return reused
+            offset += len(ids)
+            # Chroma types every one of these optional because the caller may
+            # not have asked for it; this one did, in the ``include`` above.
+            # The annotation keeps the TYPE_CHECKING-only Embeddings import
+            # visible to vulture; the string cast avoids a runtime import.
+            embeddings: Embeddings = cast("Embeddings", page["embeddings"])
+            documents = cast("list[str]", page["documents"])
+            metadatas = cast("list[Metadata]", page["metadatas"])
+            kept: list[int] = []
+            for index, metadata in enumerate(metadatas):
+                entry = _reusable_row_signature(metadata, managed_paths)
+                if entry is None:
+                    continue
+                relative_path, signature = entry
+                reused[relative_path] = signature
+                kept.append(index)
+            if kept:
+                candidate.add(
+                    ids=[ids[index] for index in kept],
+                    embeddings=[embeddings[index] for index in kept],
+                    documents=[documents[index] for index in kept],
+                    metadatas=[dict(metadatas[index]) for index in kept],
+                )
+
+    def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
+        """Return the published collection a fresh candidate may copy, if any.
+
+        Matching ``IndexingSettings`` is what makes a copy sound. They pin the
+        chunker, the embedder identity and every corpus filter, so identical
+        bytes under identical settings produce identical chunks and identical
+        vectors. Whether the bytes are still identical is not assumed here:
+        each copied path is recorded with the signature the published index
+        stored for it, and reconciliation compares that against the file on
+        disk, dropping and re-indexing whatever moved. Reuse is therefore an
+        optimization on top of the existing correctness check, not a new one.
+
+        Only a collection the metadata calls published is provably finished:
+        the rest of the candidate lifecycle treats any other collection as an
+        abandoned candidate it may reclaim.
+        """
+        if (
+            persisted_state is None
+            or persisted_state.status != "complete"
+            or persisted_state.collection is None
+            or persisted_state.settings != self._indexing_settings
+        ):
+            return None
+        return persisted_state.collection
+
+    async def _seed_candidate_from_published(
+        self,
+        *,
+        candidate_vector_db: ChromaDb,
+        published_collection: str,
+    ) -> dict[str, FileSignature]:
+        """Start a fresh candidate from the published index instead of from zero.
+
+        Publication retires the candidate checkpoint, so without this the next
+        refresh mints an empty candidate and re-embeds the whole corpus to
+        reproduce chunks byte-identical to ones already stored: every refresh
+        costs O(corpus) provider requests where the change was one file.
+
+        The published collection is only ever read. Publication stays an atomic
+        swap into a separate collection.
+        """
+        managed_paths = frozenset(
+            self._relative_path(file_path) for file_path in await asyncio.to_thread(self.list_files)
+        )
+        try:
+            reused = await _shielded_write(
+                asyncio.to_thread(
+                    self._copy_published_vectors,
+                    published_collection=published_collection,
+                    candidate_vector_db=candidate_vector_db,
+                    managed_paths=managed_paths,
+                ),
+            )
+        except Exception:
+            # Reuse is an optimization, so a vector store that cannot serve the
+            # copy must cost a full rebuild rather than a failed refresh. The
+            # partially filled candidate is reset so the rebuild starts clean.
+            logger.warning(
+                "Falling back to a full knowledge rebuild after the published index could not be copied",
+                base_id=self.base_id,
+                collection=published_collection,
+                exc_info=True,
+            )
+            await asyncio.to_thread(reset_vector_db, candidate_vector_db)
+            return {}
+        logger.info(
+            "Reused published knowledge vectors in a new candidate",
+            base_id=self.base_id,
+            collection=candidate_vector_db.collection_name,
+            reused_files=len(reused),
+            managed_files=len(managed_paths),
+        )
+        return reused
+
+    def _candidate_holds_unclaimed_rows(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: Embedder,
+    ) -> bool:
+        """Return whether an interrupted bulk copy is visible from candidate shape.
+
+        The published-vector copy writes many paths before recording any claim,
+        then records every copied path in one write after the last row lands.
+        Its interrupted shape is therefore no claims and a non-empty collection,
+        which one bounded query answers. Ordinary indexing records each file
+        immediately after its rows land, so its pre-existing unclaimed window is
+        bounded by the in-flight file rather than the whole copied corpus.
+        """
+        if checkpoint.completed:
+            return False
+        vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
+        if not vector_db.exists():
+            return False
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        return bool(collection.get(limit=1, include=[])["ids"])
+
+    async def _rebuild_candidate_collection(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: BatchPrefetchEmbedder,
+        published_collection: str | None,
+    ) -> _OpenedCandidate:
+        """Empty one candidate collection, seeding it when a copy source is given.
+
+        Two orderings are load-bearing. The checkpoint names the collection
+        before ``Knowledge`` is built, because Agno creates a missing collection
+        on construction and a crash must never strand a collection nothing
+        references. And the copy's claims are recorded in one write after the
+        last row lands, never per page, because a file's chunks can span pages
+        and a claim covering only some of them would publish a silently
+        truncated file.
+
+        An interrupted published copy can leave rows the checkpoint does not
+        account for. That copy-specific state is recoverable rather than
+        prevented: it leaves ``completed`` empty with a non-empty collection,
+        which ``_candidate_holds_unclaimed_rows`` detects on the next open.
+        """
+        checkpoint = await asyncio.to_thread(
+            save_candidate_checkpoint,
+            self._base_storage_path,
+            replace(checkpoint, completed={}, failed={}),
+        )
+        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
+        vector_db = require_chroma_vector_db(knowledge)
+        await asyncio.to_thread(reset_vector_db, vector_db)
+        if published_collection is None:
+            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
+        reused = await self._seed_candidate_from_published(
+            candidate_vector_db=vector_db,
+            published_collection=published_collection,
+        )
+        if reused:
+            checkpoint = await _shielded_write(
+                asyncio.to_thread(
+                    save_candidate_checkpoint,
+                    self._base_storage_path,
+                    replace(checkpoint, completed=reused),
+                ),
+            )
+        return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, reused=reused)
+
+    async def _resume_candidate_collection(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: BatchPrefetchEmbedder,
+    ) -> _OpenedCandidate:
+        """Continue a candidate whose recorded work is still backed by its collection.
+
+        Probe before building ``Knowledge`` because Agno creates a missing
+        collection on construction, after which an existence check always
+        answers yes.
+        """
+        if not await asyncio.to_thread(
+            chroma_collection_exists,
+            self._base_storage_path,
+            checkpoint.collection,
+        ):
+            logger.warning(
+                "Knowledge candidate collection is missing; rebuilding it from scratch",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+            )
+            # Rebuilt without a copy: whatever lost this collection may equally
+            # have damaged the published one, and a full rebuild is the safe repair.
+            return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
+        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
+        return _OpenedCandidate(
+            checkpoint=checkpoint,
+            knowledge=knowledge,
+            vector_db=require_chroma_vector_db(knowledge),
+            resumed=True,
+        )
+
+    async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
-        persisted_state = await asyncio.to_thread(self._load_persisted_index_state)
-        published_collection = (
-            persisted_state.collection
-            if persisted_state is not None and persisted_state.status == _INDEXING_STATUS_COMPLETE
-            else None
-        )
-        live_collection, cleanup_is_safe = await asyncio.to_thread(self._published_collection_for_cleanup)
-        # Both names matter: the strict parser drops the collection when any
-        # required field is missing, while the raw payload still records it.
-        # Trusting only the strict one would let a surviving checkpoint reopen
+        persisted_state, cleanup_is_safe = await asyncio.to_thread(self._published_state_and_cleanup_safety)
+        # A collection name is only ever recorded by a publication, so whatever
+        # the state names is the live index whatever its current status says.
+        # Trusting a narrower reading would let a surviving checkpoint reopen
         # the published collection, or delete it as an incompatible candidate.
-        published_collections = {name for name in (published_collection, live_collection) if name is not None}
+        published_collection = None if persisted_state is None else persisted_state.collection
 
         if checkpoint is not None and not cleanup_is_safe:
             # The checkpoint may name the live collection whose identity was
@@ -1679,7 +1452,7 @@ class KnowledgeManager:
                 collection=checkpoint.collection,
             )
             checkpoint = None
-        if checkpoint is not None and checkpoint.collection in published_collections:
+        if checkpoint is not None and checkpoint.collection == published_collection:
             # The candidate already became the published index and the process
             # died before its checkpoint was cleaned up. Writing into it again
             # would mutate a live queryable index.
@@ -1694,54 +1467,70 @@ class KnowledgeManager:
             # A failed delete must not block indexing: an incompatible candidate
             # is never published or resumed, and the superseded-collection sweep
             # below reclaims it on this same run, or on a later one.
-            await self._delete_candidate_collection(checkpoint.collection)
+            await delete_collection(self._collections, checkpoint.collection)
+            await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            checkpoint = None
+        if checkpoint is not None and force_reindex:
+            # A refresh that never published leaves its candidate behind, and
+            # that candidate's claims are exactly the vectors a forced rebuild
+            # was asked to stop trusting. Suppressing the copy alone would keep
+            # every file the interrupted build had already embedded.
+            logger.info(
+                "Discarding knowledge candidate because a rebuild was forced",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+                completed=len(checkpoint.completed),
+            )
+            await delete_collection(self._collections, checkpoint.collection)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
-        resumed = False
+        rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
-                collection=self._candidate_collection_name(),
+                collection=candidate_collection_name(self._collections),
                 settings=self._indexing_settings,
             )
-            # Persist the candidate's identity before its collection exists, so
-            # a crash can never strand a collection nothing references.
-            checkpoint = await asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint)
-            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-            vector_db = _require_chroma_vector_db(knowledge)
-            await asyncio.to_thread(self._reset_vector_db, vector_db)
+        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
+            logger.warning(
+                "Rebuilding a knowledge candidate holding vectors it never claimed",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+            )
+            rebuild = True
+
+        if rebuild:
+            opened = await self._rebuild_candidate_collection(
+                checkpoint,
+                embedder=embedder,
+                published_collection=None if force_reindex else self._reusable_published_collection(persisted_state),
+            )
         else:
-            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-            vector_db = _require_chroma_vector_db(knowledge)
-            if await asyncio.to_thread(vector_db.exists):
-                resumed = True
-            else:
-                logger.warning(
-                    "Knowledge candidate collection is missing; rebuilding it from scratch",
-                    base_id=self.base_id,
-                    collection=checkpoint.collection,
-                )
-                checkpoint = replace(checkpoint, completed={}, failed={})
-                checkpoint = await asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint)
-                await asyncio.to_thread(self._reset_vector_db, vector_db)
+            opened = await self._resume_candidate_collection(checkpoint, embedder=embedder)
+        checkpoint = opened.checkpoint
 
         run = _CandidateRun(
             checkpoint=checkpoint,
-            knowledge=knowledge,
-            vector_db=vector_db,
+            knowledge=opened.knowledge,
+            vector_db=opened.vector_db,
             embedder=embedder,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
+            # Rows this process just copied need no vector-existence probe: the
+            # copy already reported which paths actually received them.
+            verified=set(opened.reused),
             journal_appends=checkpoint.replayed_journal_entries,
-            resumed=resumed,
+            resumed=opened.resumed,
         )
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
         if cleanup_is_safe:
-            preserved = {checkpoint.collection, *published_collections}
+            preserved = {name for name in (checkpoint.collection, published_collection) if name is not None}
             await asyncio.to_thread(
-                self._cleanup_superseded_collections,
+                cleanup_superseded_collections,
+                self._collections,
+                vector_db=self._knowledge.vector_db,
                 preserved=frozenset(preserved),
                 candidates_only=True,
             )
@@ -1752,22 +1541,21 @@ class KnowledgeManager:
             )
         return run
 
-    def _published_collection_for_cleanup(self) -> tuple[str | None, bool]:
-        """Return the live collection to protect, and whether cleanup may run at all.
+    def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
+        """Return the persisted state, and whether candidate cleanup may run at all.
 
         A published collection is itself candidate-named, so the only proof of
-        which candidate-prefixed collections are superseded is the published
-        metadata. The strict state parser rejects metadata that is merely
-        incomplete, which would silently drop that proof, so the collection
-        name is read straight from the payload. If the file exists but yields
-        no payload at all, nothing can be proven and cleanup is skipped rather
-        than risking the last good index.
+        which candidate-prefixed collections are superseded is this state file.
+        If it exists but yields no state, nothing about the live index can be
+        proven, and cleanup is skipped rather than guessing from a rawer read
+        of the same bytes and risking the last good index.
+
+        One read answers both questions: an in-progress or failed record still
+        parses and still names whatever collection the last publication left
+        live, so protecting it never needs a second, looser look.
         """
-        payload = load_index_metadata_payload(self._indexing_settings_path)
-        if payload is None:
-            return None, not self._indexing_settings_path.exists()
-        collection = payload.get("collection")
-        return (collection if isinstance(collection, str) and collection else None), True
+        state = load_published_index_state(self._indexing_settings_path)
+        return state, state is not None or not self._indexing_settings_path.exists()
 
     async def discard_superseded_candidate(self, *, published_collection: str | None) -> None:
         """Drop candidate state that publishing an unchanged index made obsolete.
@@ -1783,7 +1571,8 @@ class KnowledgeManager:
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         if checkpoint is None:
             return
-        if checkpoint.collection != published_collection and not await self._delete_candidate_collection(
+        if checkpoint.collection != published_collection and not await delete_collection(
+            self._collections,
             checkpoint.collection,
         ):
             return
@@ -1794,45 +1583,6 @@ class KnowledgeManager:
             collection=checkpoint.collection,
             completed=len(checkpoint.completed),
         )
-
-    async def _delete_candidate_collection(self, collection_name: str) -> bool:
-        """Delete one candidate collection, reporting whether it is really gone.
-
-        Agno's ``ChromaDb.delete`` swallows the provider error and returns
-        ``False`` rather than raising, so catching exceptions alone would
-        report every real failure as a success. A ``False`` result is also
-        returned when the collection simply was not there, which is the
-        outcome we want, so the two are told apart by probing existence.
-        """
-        try:
-            deleted = await asyncio.to_thread(self._delete_candidate_collection_sync, collection_name)
-        except Exception:
-            logger.warning(
-                "Failed to delete knowledge candidate collection",
-                base_id=self.base_id,
-                collection=collection_name,
-                exc_info=True,
-            )
-            return False
-        if deleted:
-            return True
-        logger.warning(
-            "Knowledge candidate collection still exists after deletion failed",
-            base_id=self.base_id,
-            collection=collection_name,
-        )
-        return False
-
-    def _delete_candidate_collection_sync(self, collection_name: str) -> bool:
-        """Delete one candidate, treating an already-absent collection as success."""
-        vector_db = self._build_vector_db(collection_name)
-        if vector_db.delete():
-            return True
-        try:
-            vector_db.client.get_collection(name=vector_db.collection_name)
-        except NotFoundError:
-            return True
-        return False
 
     async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
@@ -1857,24 +1607,11 @@ class KnowledgeManager:
                 signatures[relative_path] = (signature, file_path)
         return signatures
 
-    def _delete_candidate_vectors(self, vector_db: ChromaDb, relative_paths: Sequence[str]) -> None:
-        """Delete vectors for many source paths in one vector-store round trip.
-
-        Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
-        take one path per call, which turns a large source update into one
-        thread hop and one get+delete per file. The collection accepts ``$in``
-        directly, the same seam the vector verification query already uses.
-        """
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        for start in range(0, len(relative_paths), _VECTOR_VERIFY_BATCH):
-            batch = list(relative_paths[start : start + _VECTOR_VERIFY_BATCH])
-            collection.delete(where={_SOURCE_PATH_KEY: {"$in": batch}})
-
     async def _drop_candidate_paths(self, run: _CandidateRun, relative_paths: Sequence[str]) -> None:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
         if not relative_paths:
             return
-        await asyncio.to_thread(self._delete_candidate_vectors, run.vector_db, relative_paths)
+        await asyncio.to_thread(delete_source_path_vectors, run.vector_db, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
             run.failed.pop(relative_path, None)
@@ -2005,7 +1742,7 @@ class KnowledgeManager:
                 failed=dict(run.failed),
                 # The target revision advances only once the reconciled state
                 # it describes is about to be durable.
-                target_revision=self._git_last_successful_commit,
+                target_revision=self.git_source.last_synced_head,
                 # The corpus this candidate targets, not a high-water mark of
                 # completed files: status subtracts completed from this to
                 # report how much work is still outstanding.
@@ -2014,11 +1751,30 @@ class KnowledgeManager:
         )
         run.journal_appends = 0
 
-    async def reindex_all(self) -> int:
-        """Advance the durable candidate index and publish it when it matches the source."""
+    def _record_refresh_error(self, detail: str) -> None:
+        """Store why this refresh failed, redacted once at the point of record.
+
+        Redacting here rather than when the outcome is built keeps the stored
+        string and the reported one identical, so an operator reading the
+        attribute in a debugger sees exactly what was logged and persisted. It
+        also keeps redaction out of the ``finally`` that owns checkpoint
+        compaction, where a raise would both mask the real failure and skip
+        durability work. ``redact_credentials_in_text`` is total, so that second
+        reason is defence in depth rather than load-bearing -- but only for as
+        long as it stays total, which is why that property has its own tests.
+        """
+        self._last_refresh_error = redact_credentials_in_text(detail)
+
+    async def reindex_all(self, *, force_reindex: bool = False) -> RefreshOutcome:
+        """Advance the durable candidate index and publish it when it matches the source.
+
+        ``force_reindex`` is the operator asking for vectors to be rebuilt
+        rather than trusted, so it suppresses copying them from the published
+        index. Every other reason a rebuild is forced -- changed settings, a
+        missing collection -- the reuse gates already reject on their own.
+        """
         if not _semantic_indexing_enabled(self.config, self.base_id):
-            self._last_refresh_error = None
-            return 0
+            return RefreshOutcome(indexed_count=0, published=False, error=None)
 
         async with self._lock:
             self._last_refresh_error = None
@@ -2027,7 +1783,7 @@ class KnowledgeManager:
             self._file_index_errors.clear()
             self._embedder_failure_streak = 0
             self._global_embedder_failure = None
-            run = await self._open_candidate_run()
+            run = await self._open_candidate_run(force_reindex=force_reindex)
             progress = _CandidateProgress(
                 base_id=self.base_id,
                 resumed=run.resumed,
@@ -2039,13 +1795,18 @@ class KnowledgeManager:
                 await self._advance_candidate(run, progress)
             except Exception as exc:
                 if self._last_refresh_error is None:
-                    self._last_refresh_error = redact_credentials_in_text(str(exc))
+                    self._record_refresh_error(str(exc))
                 raise
             finally:
                 progress.retrying = self._embedding_retry_count
-                progress.log_summary(published=run.published, error=self._last_refresh_error)
+                outcome = RefreshOutcome(
+                    indexed_count=progress.indexed_this_run,
+                    published=run.published,
+                    error=self._last_refresh_error,
+                )
+                progress.log_summary(outcome)
                 await self._finalize_candidate_checkpoint(run)
-            return progress.indexed_this_run
+            return outcome
 
     async def _finalize_candidate_checkpoint(self, run: _CandidateRun) -> None:
         """Compact the candidate snapshot even when the refresh is being cancelled.
@@ -2053,13 +1814,8 @@ class KnowledgeManager:
         Per-batch journal appends already made progress durable, so this is a
         compaction, not the write that protects the work.
         """
-        compact_task = asyncio.create_task(self._compact_candidate_checkpoint(run, force=True))
         try:
-            await asyncio.shield(compact_task)
-        except asyncio.CancelledError:
-            with suppress(Exception):
-                await compact_task
-            raise
+            await _shielded_write(self._compact_candidate_checkpoint(run, force=True))
         except Exception:
             logger.warning(
                 "Failed to compact knowledge candidate checkpoint",
@@ -2068,9 +1824,45 @@ class KnowledgeManager:
                 exc_info=True,
             )
 
+    async def _source_revision(self) -> str | None:
+        """Return the current Git revision, or None when the source is not Git-backed."""
+        if not self.git_source.is_configured():
+            return None
+        return await self.git_source.head()
+
+    async def _candidate_matches_source(
+        self,
+        round_revision: str | None,
+        candidate_signatures: Mapping[str, FileSignature],
+        candidate_source_signature: str,
+    ) -> bool:
+        """Return whether the candidate still matches the source after one pass.
+
+        Two independent things must hold. The source must not have moved while the
+        pass ran, and the candidate must cover every managed file: a file whose
+        signature scan or read failed is dropped from the pass's own completeness
+        accounting (``_file_signatures_for``, ``run.vanished``), so without a
+        coverage check a transient I/O error would publish a silently truncated
+        index -- and the unchanged fast path would then republish it at the same
+        revision forever.
+
+        Hashing the corpus proves both at once, but reads every byte. For a Git
+        checkout the revision proves content, because the checkout is
+        program-owned and realigned with a hard reset, and re-listing proves
+        coverage. Neither reads file contents.
+        """
+        if round_revision is None:
+            return await self.source_signature() == candidate_source_signature
+
+        if await self.git_source.head() != round_revision:
+            return False
+        current_files = await asyncio.to_thread(self.list_files)
+        return {self._relative_path(path) for path in current_files} == set(candidate_signatures)
+
     async def _advance_candidate(self, run: _CandidateRun, progress: _CandidateProgress) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
         for _round in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
+            round_revision = await self._source_revision()
             files = await asyncio.to_thread(self.list_files)
             plan = await self._reconcile_candidate(run, files)
             progress.total = len(plan.expected)
@@ -2097,7 +1889,6 @@ class KnowledgeManager:
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
                     knowledge=run.knowledge,
-                    indexed_files=None,
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
                     embedder=run.embedder,
@@ -2113,7 +1904,7 @@ class KnowledgeManager:
                 summary = f"Indexed {len(run.completed)} of {len(plan.expected)} managed knowledge files"
                 if self._last_file_index_error is not None:
                     summary = f"{summary} (first error: {self._last_file_index_error})"
-                self._last_refresh_error = summary
+                self._record_refresh_error(summary)
                 return
 
             candidate_signatures = {
@@ -2122,20 +1913,17 @@ class KnowledgeManager:
                 if relative_path in expected_paths
             }
             if set(candidate_signatures) != expected_paths:
-                self._last_refresh_error = (
-                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files"
+                self._record_refresh_error(
+                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files",
                 )
                 return
 
             candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            live_source_signature = await asyncio.to_thread(
-                knowledge_source_signature,
-                self.config,
-                self.base_id,
-                self._knowledge_source_path(),
-                tracked_relative_paths=self._git_tracked_relative_paths,
-            )
-            if live_source_signature != candidate_source_signature:
+            if not await self._candidate_matches_source(
+                round_revision,
+                candidate_signatures,
+                candidate_source_signature,
+            ):
                 # The source moved while this pass ran. Keep every unchanged
                 # vector and reconcile the delta instead of discarding the
                 # candidate; only the changed files are re-embedded.
@@ -2149,8 +1937,8 @@ class KnowledgeManager:
             await self._publish_candidate(run, candidate_source_signature)
             return
 
-        self._last_refresh_error = (
-            "Knowledge source kept changing during refresh; candidate progress was kept for the next refresh"
+        self._record_refresh_error(
+            "Knowledge source kept changing during refresh; candidate progress was kept for the next refresh",
         )
 
     async def _publish_candidate(self, run: _CandidateRun, source_signature: str) -> None:
@@ -2161,8 +1949,6 @@ class KnowledgeManager:
         try:
             await self._publish_candidate_after_metadata_save(
                 candidate_vector_db=run.vector_db,
-                indexed_files=set(run.completed),
-                indexed_signatures=dict(run.completed),
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
                 publish_state=publish_state,
@@ -2174,6 +1960,8 @@ class KnowledgeManager:
             run.published = publish_state.index_published
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
         await asyncio.to_thread(
-            self._cleanup_superseded_collections,
+            cleanup_superseded_collections,
+            self._collections,
+            vector_db=self._knowledge.vector_db,
             preserved=frozenset({run.vector_db.collection_name}),
         )

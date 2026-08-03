@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, MutableMapping
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -34,6 +35,21 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     THREAD_TAGS_EVENT_TYPE: 0,
     _CALL_MEMBER_EVENT_TYPE: 0,
 }
+_TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
+    {
+        "M_BAD_STATE",
+        "M_GUEST_ACCESS_FORBIDDEN",
+        "M_UNRECOGNIZED",
+    },
+)
+
+
+class RoomJoinOutcome(StrEnum):
+    """Typed outcome for one Matrix room join attempt."""
+
+    JOINED = "joined"
+    RETRYABLE_FAILURE = "retryable_failure"
+    TERMINAL_FAILURE = "terminal_failure"
 
 
 async def invite_to_room(
@@ -598,8 +614,8 @@ async def add_room_to_space(
     return False
 
 
-async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """Join a Matrix room."""
+async def join_room(client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
+    """Join a Matrix room and classify explicit terminal server rejections."""
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
         rooms = client.rooms
@@ -609,9 +625,19 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
                 own_user_id=client.user_id or "",
             )
         logger.info("matrix_room_joined", room_id=room_id)
-        return True
-    logger.warning("matrix_room_join_failed", room_id=room_id, error=str(response))
-    return False
+        return RoomJoinOutcome.JOINED
+    outcome = (
+        RoomJoinOutcome.TERMINAL_FAILURE
+        if isinstance(response, nio.JoinError) and response.status_code in _TERMINAL_ROOM_JOIN_ERROR_CODES
+        else RoomJoinOutcome.RETRYABLE_FAILURE
+    )
+    logger.warning(
+        "matrix_room_join_failed",
+        room_id=room_id,
+        error=str(response),
+        outcome=outcome.value,
+    )
+    return outcome
 
 
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str] | None:
@@ -672,6 +698,7 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 
 
 __all__ = [
+    "RoomJoinOutcome",
     "add_room_to_space",
     "create_room",
     "create_space",

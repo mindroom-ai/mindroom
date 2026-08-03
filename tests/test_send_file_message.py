@@ -21,6 +21,7 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
     send_runtime_encrypted_media_message,
 )
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
@@ -1105,8 +1106,54 @@ class TestJoinRoom:
 
         joined = await join_room(client, "!room:localhost")
 
-        assert joined is True
+        assert joined is RoomJoinOutcome.JOINED
         client.join.assert_awaited_once_with("!room:localhost")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            (
+                nio.JoinError("forbidden", "M_FORBIDDEN"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+            (
+                nio.JoinError("not found", "M_NOT_FOUND"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+            (
+                nio.JoinError("bad state", "M_BAD_STATE"),
+                RoomJoinOutcome.TERMINAL_FAILURE,
+            ),
+            (
+                nio.JoinError("busy", "M_LIMIT_EXCEEDED"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+            (
+                nio.RoomInviteError("forbidden", "M_FORBIDDEN"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+        ],
+        ids=[
+            "ambiguous-forbidden-join-error",
+            "ambiguous-not-found-join-error",
+            "terminal-join-error",
+            "retryable-join-error",
+            "non-join-error",
+        ],
+    )
+    async def test_classifies_join_failures(
+        self,
+        response: nio.Response,
+        expected: RoomJoinOutcome,
+    ) -> None:
+        """Only explicit terminal JoinError codes may suppress later retries."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.join.return_value = response
+
+        outcome = await join_room(client, "!room:localhost")
+
+        assert outcome is expected
 
 
 class TestSendFileMessageMsgtype:

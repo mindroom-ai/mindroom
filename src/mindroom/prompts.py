@@ -13,6 +13,7 @@ __all__ = [
     "AVATAR_TEAM_SYSTEM_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
+    "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
     "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
@@ -20,7 +21,8 @@ __all__ = [
     "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
     "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
-    "FILE_MEMORY_ENTRYPOINT_HEADER",
+    "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
+    "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
     "INLINE_MEDIA_FALLBACK_PROMPT",
     "INTERACTIVE_QUESTION_PROMPT",
@@ -31,6 +33,7 @@ __all__ = [
     "MEMORY_EXISTING_SNIPPETS_TEMPLATE",
     "MEMORY_NO_EXISTING_SNIPPETS",
     "MIXED_PARTIAL_REPLY_HEADER",
+    "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
     "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
     "OUTPUT_REDIRECT_PROMPT",
@@ -160,10 +163,16 @@ Timezone: {timezone_str} ({timezone_abbrev})
 
 """
 
-PERSONALITY_CONTEXT_SECTION_HEADING = "## Personality Context"
-CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
-    "[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
+PERSONALITY_CONTEXT_SECTION_HEADING = (
+    "## Personality Context\n"
+    "Each section below is headed by the path of the file it was read from, inlined here automatically every turn. "
+    "Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted."
 )
+CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
+    "[Context files exceeded the preload budget - {omitted_chars} chars omitted in total. "
+    "Read the paths marked above for the omitted parts.]"
+)
+CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE = "[Truncated - {omitted_chars} chars omitted. Read {title} for the rest.]"
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Dynamic Tools
 Deferred tools are available by exact name and can be loaded for this session.
@@ -174,6 +183,10 @@ Use load_tool(tool_name) to load one by exact name.
 Use tool_search(query) for keyword lookup across deferred tools.
 A loaded tool becomes callable once it appears in your available tools; do not call it in the same parallel tool-call batch as load_tool.
 In team conversations, each member manages its own dynamic tool state."""
+
+NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
+Deferred capability domains available through native tool search: {tool_domains}.
+When a request may need one of these domains, search the deferred tool catalog before concluding that the capability is unavailable."""
 
 PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
@@ -195,13 +208,12 @@ MIXED_PARTIAL_REPLY_HEADER = (
     "Continue from where you left off if appropriate."
 )
 QUEUED_MESSAGE_NOTICE_TEXT = (
-    "[SYSTEM NOTICE - NEWER USER MESSAGE WAITING] The user posted another message in this thread "
-    "while you were mid-turn. Treat that message as the start of the next turn, not part of this "
-    "one. Finish now with a final text response based on what you have already done - do not "
-    "address the newer message; the next turn will, and may continue, adjust, or redirect this "
-    "work. Do not start new tool calls. Only complete a tool call already in flight this turn if "
-    "stopping would leave broken or unsafe state. Write your final text as a normal response to "
-    "the original request; do not mention this notice or the queued message."
+    "[SYSTEM NOTICE — PAUSE FOR A NEWER USER MESSAGE] A newer user message arrived in this thread "
+    "while you were working. This is a PAUSE, not a cancellation of the current task. Do not make "
+    "any new tool calls. End this turn now with a final text response that explicitly says a newer "
+    "message arrived and states: (1) what you completed, (2) what remains unfinished, and (3) the "
+    "next step. You cannot see the newer message's contents yet. If work remains, state that you "
+    "intend to resume it on the next turn, subject to the newer message's instructions."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model rejected inline attachments for this turn. "
@@ -246,7 +258,16 @@ Return the mode and a one-sentence reason why."""
 MEMORY_CONTEXT_PROMPT_TEMPLATE = """[Automatically extracted {context_type} memories - may not be relevant to current context]
 Previous {context_type} memories that might be related:
 {memory_lines}"""
-FILE_MEMORY_ENTRYPOINT_HEADER = "[File memory entrypoint (agent)]"
+FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
+    "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
+    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
+    "or when a marker says lines were omitted."
+)
+FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
+    "[Memory entrypoint truncated - showing the first {included_lines} of {total_lines} lines "
+    "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines}). "
+    "Read `{memory_path}` directly for the omitted lines.]"
+)
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
 MEMORY_NO_EXISTING_SNIPPETS = "Existing memory snippets: (none)\n"
 MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE = """Extract only durable memories from this conversation excerpt.
@@ -497,10 +518,16 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
                 "openai_compat_history_guidance",
             },
         ),
+        "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE": frozenset({"title", "omitted_chars"}),
         "CONTEXT_TRUNCATION_MARKER_TEMPLATE": frozenset({"omitted_chars"}),
         "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
+        "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE": frozenset({"memory_path"}),
+        "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
+            {"included_lines", "total_lines", "max_entrypoint_lines", "memory_path"},
+        ),
+        "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),

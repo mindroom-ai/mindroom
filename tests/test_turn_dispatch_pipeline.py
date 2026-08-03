@@ -33,7 +33,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -62,7 +62,7 @@ from mindroom.response_runner import (
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -113,6 +113,95 @@ def mock_agent_user() -> AgentMatrixUser:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_voice_normalization_fallback_obeys_echo_publication_barrier(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A normalization failure must not let a responder fallback overtake the router echo."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        room = _matrix_room(user_ids=("@user:localhost",))
+        voice_event = _room_audio_event(
+            sender="@user:localhost",
+            event_id="$voice-fallback-barrier",
+            room_id=room.room_id,
+        )
+        target = MessageTarget.resolve(
+            room_id=room.room_id,
+            thread_id="$thread-root",
+            reply_to_event_id=voice_event.event_id,
+        )
+        fallback_event = PreparedTextEvent(
+            sender=voice_event.sender,
+            event_id=voice_event.event_id,
+            body="🎤 [Attached voice message]",
+            source=voice_event.source,
+        )
+        fallback_cleanup = MagicMock()
+        fallback = _ReadyVoiceFallback(
+            event=fallback_event,
+            ready=ReadyPendingEvent(
+                pending_event=PendingEvent(
+                    event=fallback_event,
+                    room=room,
+                    source_kind=VOICE_SOURCE_KIND,
+                    requester_user_id=voice_event.sender,
+                    dispatch_metadata=(
+                        PendingDispatchMetadata(
+                            kind="fallback_cleanup",
+                            payload=None,
+                            close=fallback_cleanup,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
+        assert controller.deps.turn_store.try_claim_turn(turn_claim)
+
+        with (
+            patch.object(
+                controller,
+                "_normalize_voice_event_or_fallback",
+                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
+            ),
+            patch.object(
+                controller,
+                "_ready_voice_fallback_event",
+                new=AsyncMock(return_value=fallback),
+            ),
+            patch.object(
+                controller.deps.visible_voice_echo,
+                "await_publication",
+                new=AsyncMock(return_value=False),
+            ) as await_publication,
+        ):
+            result = await controller._ready_voice_event(
+                room=room,
+                prechecked_event=_PrecheckedEvent(
+                    event=voice_event,
+                    requester_user_id=voice_event.sender,
+                ),
+                voice_target=target,
+                dispatch_timing=None,
+                turn_claim=turn_claim,
+            )
+
+        assert result is None
+        await_publication.assert_awaited_once_with(
+            room=room,
+            source_event_id=voice_event.event_id,
+            requester_user_id=voice_event.sender,
+        )
+        fallback_cleanup.assert_called_once_with()
+        assert fallback.ready.pending_event.dispatch_metadata == ()
+        assert controller.deps.turn_store.try_claim_turn(turn_claim)
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -263,7 +352,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)):
+        with (
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
+        ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -275,9 +367,7 @@ class TestAgentBot(AgentBotTestBase):
                 handled_turn=TurnRecord.create([event.event_id]),
             )
 
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create([event.event_id]),
-        )
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_bounded_full_thread_history(
@@ -408,7 +498,7 @@ class TestAgentBot(AgentBotTestBase):
             trusted_sender_ids=trusted_sender_ids,
             caller_label="dispatch_context",
             coordinator_queue_wait_ms=ANY,
-            resolution_reuse=ANY,
+            post_coordinator_read_started=ANY,
             refill=ANY,
         )
 
@@ -543,7 +633,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_build_payload,
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -558,7 +648,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
@@ -718,7 +808,11 @@ class TestAgentBot(AgentBotTestBase):
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -782,7 +876,11 @@ class TestAgentBot(AgentBotTestBase):
                 "get_dispatch_thread_snapshot",
                 new=AsyncMock(return_value=snapshot_history),
             ) as mock_snapshot,
-            patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
+            patch.object(
+                bot._command_turn_executor,
+                "execute_if_owned",
+                new=AsyncMock(return_value=True),
+            ) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -816,14 +914,13 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.visible_echo_event_id_for_sources.side_effect = lambda source_event_ids: (
-            "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
-        )
         tracker.get_turn_record.side_effect = lambda source_event_id: (
             TurnRecord.create(
                 ["$voice", "$text"],
+                response_event_id="$voice_echo",
                 completed=False,
                 visible_echo_event_id="$voice_echo",
+                visible_echo_is_fallback=False,
             )
             if source_event_id in {"$voice", "$text"}
             else None
@@ -886,6 +983,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_event_id="$voice_echo",
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                     visible_echo_event_id="$voice_echo",
+                    visible_echo_is_fallback=False,
                     requester_id="@user:localhost",
                     correlation_id="corr-visible-echo",
                 ),
@@ -966,7 +1064,7 @@ class TestAgentBot(AgentBotTestBase):
             assert media_events is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            bot._turn_controller._mark_source_events_responded(replace(handled_turn, response_event_id="$route"))
+            bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
@@ -1048,7 +1146,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
                 event,
                 room,
@@ -1592,6 +1690,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {"@user:localhost": MagicMock()}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedTextEvent(
@@ -1612,7 +1711,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
                 bot._response_runner,
                 "active_thread_ids_for_room",
@@ -1630,13 +1728,16 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
+            assert bot._turn_store.try_claim_turn(turn_claim)
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
                 event_info=EventInfo.from_event(voice_event.source),
                 dispatch_timing=None,
                 reservation_owner=reservation_owner,
+                turn_claim=turn_claim,
             )
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
@@ -1645,7 +1746,6 @@ class TestAgentBot(AgentBotTestBase):
             ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
-        mock_echo.assert_awaited_once()
         mock_reserve_waiting_human_message.assert_called_once()
         reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert reserved_target.resolved_thread_id == "$thread_root"
@@ -1657,11 +1757,14 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
+        assert len(pending_event.dispatch_metadata) == 2
+        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
         assert metadata.requires_solo_batch is False
+        claim_metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "pending_turn_claim")
+        assert claim_metadata.payload == turn_claim
+        claim_metadata.close()
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
@@ -1736,7 +1839,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
@@ -1846,7 +1949,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
@@ -2337,6 +2440,36 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_records_fallback_before_return(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A replacement error must be durable before dispatch finalization resumes."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$fallback-error")
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+        persisted_event_ids: list[str] = []
+
+        async def record_visible_response(event_id: str) -> None:
+            persisted_event_ids.append(event_id)
+
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+            error=RuntimeError("boom"),
+            existing_event_id="$placeholder",
+            on_visible_response=record_visible_response,
+        )
+
+        assert persisted_event_ids == ["$fallback-error"]
+        assert resolution == "$fallback-error"
+
+    @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_uses_system_response_kind_for_team_bot(
         self,
         tmp_path: Path,
@@ -2521,6 +2654,7 @@ class TestAgentBot(AgentBotTestBase):
                     return_value=None,
                 ),
             ),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,
@@ -2768,7 +2902,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="ignored",
                         response_kind="ai",
@@ -2820,7 +2954,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Updated answer",
                         response_kind="ai",
@@ -2872,7 +3006,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
+                _apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),
@@ -2917,7 +3051,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
+                _apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),

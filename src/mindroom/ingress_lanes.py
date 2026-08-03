@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import TYPE_CHECKING
 
 from .coalescing_cleanup import ReadyPendingEvent, close_ready_task_result_metadata
@@ -36,6 +38,7 @@ class LaneDelivery:
     ready_result: ReadyPendingEvent | None
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     received_at: float
+    callback_source_kind: str | None = None
     busy_at_submit: bool = False
 
 
@@ -61,6 +64,14 @@ class _LaneAbandonOutcome:
     dropped_ready_count: int = 0
 
 
+class _LaneDeliveryOutcome(enum.Enum):
+    """Terminal ownership result for one resolved lane slot."""
+
+    DELIVERED = "delivered"
+    RETRY = "retry"
+    INTENTIONALLY_IGNORED = "intentionally_ignored"
+
+
 class IngressLanes:
     """Own receipt-order delivery of resolving ingress per (room, sender) lane.
 
@@ -74,10 +85,15 @@ class IngressLanes:
         self,
         *,
         deliver: Callable[[LaneSlot, LaneDelivery, ReadyPendingEvent], Awaitable[None]],
+        on_undelivered_source: Callable[[str, str], None] | None = None,
+        on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._deliver = deliver
+        self._on_undelivered_source = on_undelivered_source
+        self._on_intentionally_ignored_source = on_intentionally_ignored_source
         self._lanes: dict[_LaneKey, deque[LaneSlot]] = {}
         self._workers: dict[_LaneKey, asyncio.Task[None]] = {}
+        self._settling_slots: dict[int, LaneSlot] = {}
 
     @staticmethod
     def closed_slot(*, room_id: str, sender_id: str, receipt_time: float | None = None) -> LaneSlot:
@@ -112,6 +128,7 @@ class IngressLanes:
         key: CoalescingKey,
         source_event_id: str | None,
         source_kind: str,
+        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
@@ -131,6 +148,7 @@ class IngressLanes:
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at if received_at is not None else time.time(),
+            callback_source_kind=callback_source_kind,
             busy_at_submit=busy_at_submit,
         )
         slot.loaded.set()
@@ -164,7 +182,27 @@ class IngressLanes:
 
     def unsettled_slots(self) -> list[LaneSlot]:
         """Return every slot that has not delivered or released yet."""
-        return [slot for lane in self._lanes.values() for slot in lane if not slot.settled.is_set()]
+        lane_slots = [slot for lane in self._lanes.values() for slot in lane if not slot.settled.is_set()]
+        return [*lane_slots, *self._settling_slots.values()]
+
+    def has_pending_source_event(self, source_event_id: str) -> bool:
+        """Return whether an active lane still owns one exact source before settlement."""
+        return self._has_pending_source_event(source_event_id)
+
+    def _has_pending_source_event(
+        self,
+        source_event_id: str,
+        *,
+        exclude_slot: LaneSlot | None = None,
+    ) -> bool:
+        """Return whether any live lane owner except one optional slot owns a source."""
+        return any(
+            slot is not exclude_slot and slot.delivery is not None and slot.delivery.source_event_id == source_event_id
+            for slot in chain(
+                chain.from_iterable(self._lanes.values()),
+                self._settling_slots.values(),
+            )
+        )
 
     def all_settled(self) -> bool:
         """Return whether no lane holds undelivered ingress."""
@@ -245,14 +283,21 @@ class IngressLanes:
             # loaded wait: a head slot that never settles poisons its sender's
             # lane and hangs unbounded drains.
             completed = False
+            undelivered: LaneDelivery | None = None
+            intentionally_ignored: LaneDelivery | None = None
             try:
                 await slot.loaded.wait()
                 if not slot.released:
-                    await self._deliver_slot(slot)
+                    delivery_outcome = await self._deliver_slot(slot)
+                    undelivered, intentionally_ignored = self._completion_sources(
+                        delivery_outcome,
+                        slot.delivery,
+                    )
                 completed = True
             except asyncio.CancelledError:
                 raise
             except Exception:
+                undelivered = slot.delivery
                 logger.exception(
                     "ingress_lane_slot_failed",
                     room_id=slot.room_id,
@@ -263,12 +308,81 @@ class IngressLanes:
                     slot.released = True
                 if lane and lane[0] is slot:
                     lane.popleft()
+                if intentionally_ignored is None:
+                    slot.settled.set()
+                else:
+                    self._settling_slots[id(slot)] = slot
+            await self._finish_delivery_notifications(
+                slot,
+                undelivered=undelivered,
+                intentionally_ignored=intentionally_ignored,
+            )
+
+    async def _finish_delivery_notifications(
+        self,
+        slot: LaneSlot,
+        *,
+        undelivered: LaneDelivery | None,
+        intentionally_ignored: LaneDelivery | None,
+    ) -> None:
+        if undelivered is not None:
+            self._notify_undelivered_source(undelivered)
+        if intentionally_ignored is not None:
+            try:
+                await self._notify_intentionally_ignored_source(slot, intentionally_ignored)
+            finally:
+                self._settling_slots.pop(id(slot), None)
                 slot.settled.set()
 
-    async def _deliver_slot(self, slot: LaneSlot) -> None:
-        delivery = slot.delivery
-        if delivery is None:
+    @staticmethod
+    def _completion_sources(
+        outcome: _LaneDeliveryOutcome,
+        delivery: LaneDelivery | None,
+    ) -> tuple[LaneDelivery | None, LaneDelivery | None]:
+        if outcome is _LaneDeliveryOutcome.RETRY:
+            return delivery, None
+        if outcome is _LaneDeliveryOutcome.INTENTIONALLY_IGNORED:
+            return None, delivery
+        return None, None
+
+    def _notify_undelivered_source(self, delivery: LaneDelivery) -> None:
+        callback = self._on_undelivered_source
+        if callback is None or delivery.source_event_id is None:
             return
+        try:
+            callback(delivery.source_event_id, delivery.callback_source_kind or delivery.source_kind)
+        except Exception:
+            logger.exception(
+                "ingress_lane_undelivered_source_notification_failed",
+                source_event_id=delivery.source_event_id,
+                room_id=delivery.key.room_id,
+            )
+
+    async def _notify_intentionally_ignored_source(self, slot: LaneSlot, delivery: LaneDelivery) -> None:
+        callback = self._on_intentionally_ignored_source
+        if callback is None or delivery.source_event_id is None:
+            return
+        if self._has_pending_source_event(delivery.source_event_id, exclude_slot=slot):
+            return
+        try:
+            await callback(
+                delivery.source_event_id,
+                delivery.callback_source_kind or delivery.source_kind,
+            )
+        except Exception:
+            logger.exception(
+                "ingress_lane_ignored_source_settlement_failed",
+                source_event_id=delivery.source_event_id,
+                room_id=delivery.key.room_id,
+            )
+            # The fallback retry is synchronous, so drop only this owner before
+            # its ordinary duplicate-suppression check runs.
+            self._settling_slots.pop(id(slot), None)
+            self._notify_undelivered_source(delivery)
+
+    async def _deliver_slot(self, slot: LaneSlot) -> _LaneDeliveryOutcome:
+        delivery = slot.delivery
+        assert delivery is not None
         ready = delivery.ready_result
         if ready is None:
             assert delivery.ready_task is not None
@@ -288,7 +402,7 @@ class IngressLanes:
                         sender_id=slot.sender_id,
                         age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
                     )
-                    return
+                    return _LaneDeliveryOutcome.RETRY
                 raise
             except Exception as error:
                 logger.exception(
@@ -300,17 +414,17 @@ class IngressLanes:
                     exception_type=error.__class__.__name__,
                     error_message=str(error),
                 )
-                return
-        # Only after the exception split: a None result is a normalization skip
-        # (for example voice STT producing nothing), settled without delivery.
+                return _LaneDeliveryOutcome.RETRY
+        # Only after the exception split: a successful None result intentionally
+        # consumed this source without entering the gate.
         if ready is None:
-            return
+            return _LaneDeliveryOutcome.INTENTIONALLY_IGNORED
         if slot.released:
             # A bounded drain abandoned this slot while its readiness resolved;
             # the drain already counted it dropped and closed its metadata, so
             # delivering now would dispatch work the drain reported as dropped.
             close_ready_task_result_metadata(ready)
-            return
+            return _LaneDeliveryOutcome.DELIVERED
         ready.pending_event.enqueue_time = delivery.received_at
         try:
             await self._deliver(slot, delivery, ready)
@@ -322,6 +436,8 @@ class IngressLanes:
                 room_id=slot.room_id,
                 sender_id=slot.sender_id,
             )
+            return _LaneDeliveryOutcome.RETRY
+        return _LaneDeliveryOutcome.DELIVERED
 
 
 def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:

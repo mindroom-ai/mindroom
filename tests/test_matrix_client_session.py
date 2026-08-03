@@ -6,13 +6,18 @@ import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
 
-from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths
+from mindroom.constants import (
+    CONFIG_CONFIRMATION_REACTION_KEY,
+    STREAM_STATUS_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    RuntimePaths,
+)
 from mindroom.matrix import client_session
 from mindroom.matrix.client_session import (
     PermanentMatrixStartupError,
@@ -23,8 +28,8 @@ from mindroom.matrix.client_session import (
 )
 
 
-def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Encrypted stream events expose status but no private message fields."""
+def test_encryption_exposes_only_mindroom_recovery_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Encrypted events expose recovery markers but no private message fields."""
     relation = {"event_id": "$original:example.org", "rel_type": "m.replace"}
 
     def fake_encrypt(
@@ -50,6 +55,8 @@ def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.Monk
             "m.mentions": {"user_ids": ["@private:example.org"]},
             "msgtype": "m.notice",
             STREAM_STATUS_KEY: "streaming",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            CONFIG_CONFIRMATION_REACTION_KEY: "$reaction",
         },
     )
 
@@ -59,6 +66,8 @@ def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.Monk
         "ciphertext": "encrypted payload",
         "m.relates_to": relation,
         STREAM_STATUS_KEY: "streaming",
+        VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        CONFIG_CONFIRMATION_REACTION_KEY: "$reaction",
     }
 
 
@@ -127,7 +136,75 @@ def test_matrix_client_config_copies_custom_http_headers() -> None:
 
 def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     """MindRoom clients must recover events omitted by limited sync windows."""
-    assert matrix_client_config().backfill_limited_timelines is True
+    config = matrix_client_config()
+
+    assert config.backfill_limited_timelines is True
+    assert config.backfill_persist_recovery is True
+    assert config.store_sync_tokens is False
+
+
+@pytest.mark.asyncio
+async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) -> None:
+    """Nio must durably retain a gap when MindRoom advances its own sync token."""
+    room_id = "!room:example.org"
+    user_id = "@mindroom_agent:example.org"
+    device_id = "AGENTDEVICE"
+    config = matrix_client_config()
+
+    def sync_response(next_batch: str, *, limited: bool) -> nio.SyncResponse:
+        joined_rooms = (
+            {
+                room_id: nio.RoomInfo(
+                    nio.Timeline([], limited=True, prev_batch="p_before_gap"),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            }
+            if limited
+            else {}
+        )
+        return nio.SyncResponse(
+            next_batch,
+            nio.Rooms(invite={}, join=joined_rooms, leave={}),
+            nio.DeviceOneTimeKeyCount(None, None),
+            nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        )
+
+    def load_client() -> _MindRoomAsyncClient:
+        client = _MindRoomAsyncClient(
+            "https://example.org",
+            user_id,
+            device_id=device_id,
+            store_path=str(tmp_path),
+            config=config,
+        )
+        client.restore_login(user_id, device_id, "access-token")
+        client.load_store()
+        return client
+
+    client = load_client()
+    client.next_batch = "s_before_gap"
+    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
+
+    limited_response = sync_response("s_limited", limited=True)
+    await client.receive_response(limited_response)
+    later_response = sync_response("s_later", limited=False)
+    await client.receive_response(later_response)
+    await client.close()
+
+    assert limited_response.unrecovered_room_ids == {room_id}
+    assert later_response.unrecovered_room_ids == {room_id}
+
+    restarted = load_client()
+    try:
+        recovery = cast("Any", restarted)._recovery
+        assert tuple(recovery.gaps) == (room_id,)
+        assert recovery.gaps[room_id][0].cursor_token == "s_before_gap"  # noqa: S105
+    finally:
+        await restarted.close()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")

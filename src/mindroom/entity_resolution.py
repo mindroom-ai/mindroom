@@ -266,7 +266,7 @@ class EntityIdentityRegistry:
         return self.current_entity_name_for_user_id(user_id, include_router=include_router) is not None
 
     @property
-    def internal_sender_ids(self) -> frozenset[str]:
+    def _internal_sender_ids(self) -> frozenset[str]:
         """Return current Matrix IDs trusted as managed internal senders."""
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
@@ -348,9 +348,22 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     )
 
 
+def is_human_requester_id(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one Matrix user ID represents a human requester."""
+    if entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id):
+        return False
+    if user_id in config.bot_accounts:
+        return False
+    return user_id != mindroom_user_id(config, runtime_paths)
+
+
 def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return current runtime-owned Matrix IDs trusted as internal senders."""
-    sender_ids = set(entity_identity_registry(config, runtime_paths).internal_sender_ids)
+    sender_ids = set(entity_identity_registry(config, runtime_paths)._internal_sender_ids)
     if internal_user_id := mindroom_user_id(config, runtime_paths):
         sender_ids.add(internal_user_id)
     return frozenset(sender_ids)

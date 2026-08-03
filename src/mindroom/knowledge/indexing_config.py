@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb.chroma import ChromaDb
 
 from mindroom.embeddings import effective_knowledge_embedder_signature
 from mindroom.knowledge.redaction import credential_free_url_identity
@@ -59,6 +58,7 @@ class _CorpusCompatibilityKey(NamedTuple):
     exclude_extensions: str
     extra_extensions: str
     skip_hidden: str
+    require_content_before_publish: str
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,10 @@ class IndexingSettings:
     #: persisted metadata so pre-existing indexes (built while hidden paths
     #: were still indexed) parse but no longer match the corpus key.
     skip_hidden: str = ""
+    #: Runtime file-memory bases use this to invalidate cold empty indexes
+    #: created before content-aware publication existed. False stays empty so
+    #: ordinary authored knowledge indexes retain their existing identity.
+    require_content_before_publish: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -115,7 +119,13 @@ class IndexingSettings:
             "include_extensions",
             "exclude_extensions",
         }
-        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions", "skip_hidden"}
+        optional_keys = {
+            "include_patterns",
+            "exclude_patterns",
+            "extra_extensions",
+            "skip_hidden",
+            "require_content_before_publish",
+        }
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
         mode = settings["mode"]
@@ -152,6 +162,7 @@ class IndexingSettings:
             # a filter key, and absent metadata must keep failing the corpus match
             # so pre-skip_hidden indexes are rebuilt (see the field docstring).
             skip_hidden=settings.get("skip_hidden", ""),
+            require_content_before_publish=settings.get("require_content_before_publish", ""),
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -179,6 +190,7 @@ class IndexingSettings:
             "exclude_extensions": self.exclude_extensions,
             "extra_extensions": self.extra_extensions,
             "skip_hidden": self.skip_hidden,
+            "require_content_before_publish": self.require_content_before_publish,
         }
 
     def query_compatibility_key(self) -> _QueryCompatibilityKey:
@@ -213,6 +225,7 @@ class IndexingSettings:
             exclude_extensions=self.exclude_extensions,
             extra_extensions=self.extra_extensions,
             skip_hidden=self.skip_hidden,
+            require_content_before_publish=self.require_content_before_publish,
         )
 
 
@@ -242,6 +255,8 @@ class _CollectionExistenceEmbedder(Embedder):
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
+    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+
     vector_db = ChromaDb(
         collection=collection_name,
         path=str(storage_path),
@@ -337,4 +352,5 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         exclude_extensions=exclude_extensions,
         extra_extensions=extra_extensions,
         skip_hidden=str(base_config.skip_hidden) if git_config is None else "",
+        require_content_before_publish="True" if base_config.require_content_before_publish else "",
     )

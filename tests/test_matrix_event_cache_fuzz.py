@@ -122,6 +122,39 @@ async def test_seeded_concurrent_trace_matches_every_cache_backend(
 
 
 @pytest.mark.asyncio
+async def test_fuzz_seed_allows_newer_replacement_and_rejects_stale_replacement(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The seed watermark must leave both replacement-ordering branches reachable."""
+    state = await run_scenario(
+        event_cache_factory,
+        FuzzScenario(
+            batches=(
+                (FuzzOperation(OperationKind.REPLACE_THREAD, 0, 0, 0, 0, 4),),
+                (FuzzOperation(OperationKind.STALE_REPLACE_THREAD, 0, 0, 0, 0, 1),),
+            ),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_restart=False,
+    )
+
+    assert state.threads == (
+        (
+            "!fuzz-room-0:localhost",
+            "$fuzz-r0-t0-root",
+            (
+                "$fuzz-r0-t0-root",
+                "$fuzz-r0-t0-message-0",
+                "$fuzz-r0-t0-message-1",
+                "$fuzz-r0-t0-message-2",
+                "$fuzz-r0-t0-message-3",
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
 async def test_forty_five_thread_fanout_matches_every_cache_backend(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -155,4 +188,29 @@ def test_fuzz_trace_json_round_trip_is_exact() -> None:
             max_batch_size=5,
         )
         == scenario
+    )
+
+
+def test_fuzz_trace_json_accepts_legacy_room_gap_operation() -> None:
+    """Version-one traces using the former room-gap name remain replayable."""
+    scenario = FuzzScenario.from_json(
+        """
+        {
+          "version": 1,
+          "batches": [[
+            {
+              "kind": "mark_room_stale",
+              "room": 0,
+              "thread": 1,
+              "slot": 2,
+              "target": 3,
+              "variant": 4
+            }
+          ]]
+        }
+        """,
+    )
+
+    assert scenario == FuzzScenario(
+        batches=((FuzzOperation(OperationKind.MARK_ROOM_GAP, 0, 1, 2, 3, 4),),),
     )
