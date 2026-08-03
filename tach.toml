@@ -257,6 +257,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_approval",
     "mindroom.tools",
+    "mindroom.workers.runtime",
     "mindroom.workspaces",
 ]
 
