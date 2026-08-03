@@ -63,7 +63,9 @@ class SyncCacheTrust:
         self._saved_checkpoint = None if record is None else record.checkpoint
         self._unsettled_recovery_room_ids = frozenset() if record is None else record.unsettled_recovery_room_ids
         loaded = self._load_valid_checkpoint(self._saved_checkpoint)
-        if loaded is None and await self.invalidate_for_cache_scope_cleanup():
+        if loaded is None and await self.invalidate_for_cache_scope_cleanup(
+            preserve_durable_recovery_debt=record is None,
+        ):
             try:
                 await cache.purge_principal()
             except Exception as exc:
@@ -145,7 +147,7 @@ class SyncCacheTrust:
         """Clear durable checkpoint while the mutation lock owns publication order."""
         self._saved_checkpoint = None
         try:
-            await run_blocking_until_complete(
+            record = await run_blocking_until_complete(
                 partial(
                     self.continuity_store.clear_checkpoint,
                     unsettled_recovery_room_ids=unsettled_recovery_room_ids,
@@ -154,9 +156,14 @@ class SyncCacheTrust:
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
             return False
+        self._unsettled_recovery_room_ids = record.unsettled_recovery_room_ids
         return True
 
-    async def invalidate_for_cache_scope_cleanup(self) -> bool:
+    async def invalidate_for_cache_scope_cleanup(
+        self,
+        *,
+        preserve_durable_recovery_debt: bool = False,
+    ) -> bool:
         """Invalidate continuity before principal- or room-owned rows are removed."""
 
         async def invalidate() -> bool:
@@ -165,7 +172,9 @@ class SyncCacheTrust:
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
                 if await self._clear_saved_locked(
-                    unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
+                    unsettled_recovery_room_ids=(
+                        None if preserve_durable_recovery_debt else self._unsettled_recovery_room_ids
+                    ),
                 ):
                     return True
                 self.runtime.event_cache.disable("sync_checkpoint_clear_failed")

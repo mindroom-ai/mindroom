@@ -851,6 +851,35 @@ async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_startup_load_failure_preserves_recovery_debt_during_fresh_clear(tmp_path: Path) -> None:
+    """A transient first read cannot turn unknown durable recovery debt into no debt."""
+    trust, cache, _runtime = _trust(tmp_path)
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_before_gap", cache_generation=_GENERATION),
+        unsettled_recovery_room_ids={"!gap:localhost"},
+    )
+
+    with patch.object(
+        trust.continuity_store,
+        "load",
+        side_effect=OSError("checkpoint temporarily unreadable"),
+    ):
+        assert await trust.prepare_startup() is None
+
+    decision = trust.plan_response(
+        next_batch="s_after_failed_load",
+        cache_result=SyncCacheWriteResult(complete=False, errors=("cache failed",)),
+    )
+
+    assert decision.unsettled_recovery_room_ids == frozenset({"!gap:localhost"})
+    assert trust.continuity_store.load() == SyncContinuityRecord(
+        revision=2,
+        unsettled_recovery_room_ids=frozenset({"!gap:localhost"}),
+    )
+    cache.purge_principal.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_response_clear_failure_disables_cache(tmp_path: Path) -> None:
     """A failed unknown-position clear must make stale cache rows unusable."""
     trust, cache, _runtime = _trust(tmp_path)
