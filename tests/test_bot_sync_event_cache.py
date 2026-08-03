@@ -348,12 +348,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         cache_started = asyncio.Event()
         allow_cache_finish = asyncio.Event()
 
-        async def delayed_cache_result(
-            _response: nio.SyncResponse,
-            *,
-            no_recovery_needed_room_ids: frozenset[str],
-        ) -> SyncCacheWriteResult:
-            assert no_recovery_needed_room_ids == frozenset()
+        async def delayed_cache_result(_response: nio.SyncResponse) -> SyncCacheWriteResult:
             cache_started.set()
             await allow_cache_finish.wait()
             return SyncCacheWriteResult(complete=True)
@@ -442,10 +437,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert bot.sync_cache_write_progress() is None
         mark_room_joined.assert_awaited_once_with(joined_room_id)
-        cache_timeline.assert_awaited_once_with(
-            response,
-            no_recovery_needed_room_ids=frozenset({departed_room_id}),
-        )
+        cache_timeline.assert_awaited_once_with(response)
 
     @pytest.mark.asyncio
     async def test_long_successful_cache_write_refreshes_health_on_completion(self, bot: AgentBot) -> None:
@@ -503,6 +495,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         sync_response = self._sync_response(
             {"!test:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
         )
+        sync_response.unrecovered_room_ids = frozenset({"!test:localhost"})
 
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
@@ -557,7 +550,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 return_value=SyncCacheWriteResult(
                     complete=True,
                     limited_room_ids=(room_id,),
-                    no_recovery_needed_room_ids=frozenset({room_id}),
                 ),
             ),
         ):
@@ -589,7 +581,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result.certified is True
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
@@ -729,7 +721,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await _close_bound_runtime_support(bot, support)
 
-        assert result.certified is False
+        assert result.certified is True
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         assert cached_event is not None

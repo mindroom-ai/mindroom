@@ -60,7 +60,6 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
-from mindroom.matrix.sync_recovery_classification import classic_no_recovery_needed_room_ids
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -1473,10 +1472,6 @@ class AgentBot:
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
-        no_recovery_needed_room_ids = classic_no_recovery_needed_room_ids(
-            response,
-            user_id=self.matrix_id.full_id,
-        )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
                 await self._apply_own_room_membership_from_sync(response)
@@ -1493,10 +1488,7 @@ class AgentBot:
                 first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
             )
             try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(
-                    response,
-                    no_recovery_needed_room_ids=no_recovery_needed_room_ids,
-                )
+                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(response)
             except asyncio.CancelledError as exc:
                 limited_room_ids, validation_errors = self._conversation_cache.limited_sync_timeline_room_ids(
                     response,
@@ -1505,7 +1497,6 @@ class AgentBot:
                     response,
                     complete=False,
                     limited_room_ids=limited_room_ids,
-                    no_recovery_needed_room_ids=no_recovery_needed_room_ids,
                     errors=(*validation_errors, exc),
                 )
                 await self._certify_sync_response(

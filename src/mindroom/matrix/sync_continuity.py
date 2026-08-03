@@ -1,4 +1,4 @@
-"""Atomic persistence for Matrix checkpoints, recovery debt, and join fences."""
+"""Atomic persistence for Matrix checkpoints and pending join fences."""
 
 from __future__ import annotations
 
@@ -15,17 +15,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
-_RECORD_VERSION = "mindroom-sync-continuity-v3"
+_RECORD_VERSION = "mindroom-sync-continuity-v2"
 
 
 @dataclass(frozen=True)
 class SyncContinuityRecord:
-    """One crash-atomic Matrix checkpoint, recovery-debt, and join-fence snapshot."""
+    """One crash-atomic Matrix checkpoint and join-fence snapshot."""
 
     revision: int = 0
     checkpoint: SyncCheckpoint | None = None
     pending_join_decrypt_fences: frozenset[str] = frozenset()
-    unsettled_recovery_room_ids: frozenset[str] = frozenset()
 
 
 class SyncContinuityStore:
@@ -40,54 +39,16 @@ class SyncContinuityStore:
         with advisory_file_lock(self._lock_path, exclusive=False):
             return self._load_locked()
 
-    def replace_checkpoint(
-        self,
-        checkpoint: SyncCheckpoint,
-        *,
-        unsettled_recovery_room_ids: Iterable[str] | None = None,
-    ) -> SyncContinuityRecord:
-        """Replace the checkpoint and optionally exact debt from fresh durable state."""
+    def replace_checkpoint(self, checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
+        """Replace only the checkpoint from fresh durable state."""
         normalized = _normalize_checkpoint(checkpoint)
-        recovery_room_ids = _normalize_optional_recovery_room_ids(unsettled_recovery_room_ids)
-        return self._update(
-            lambda current: replace(
-                current,
-                checkpoint=normalized,
-                unsettled_recovery_room_ids=(
-                    current.unsettled_recovery_room_ids if recovery_room_ids is None else recovery_room_ids
-                ),
-            ),
-        )
+        return self._update(lambda current: replace(current, checkpoint=normalized))
 
-    def clear_checkpoint(
-        self,
-        *,
-        unsettled_recovery_room_ids: Iterable[str] | None = None,
-    ) -> SyncContinuityRecord:
-        """Clear checkpoint trust while preserving or explicitly replacing exact debt."""
-        recovery_room_ids = _normalize_optional_recovery_room_ids(unsettled_recovery_room_ids)
+    def clear_checkpoint(self) -> SyncContinuityRecord:
+        """Clear checkpoint trust and repair an invalid record to cold state."""
         return self._update(
-            lambda current: replace(
-                current,
-                checkpoint=None,
-                unsettled_recovery_room_ids=(
-                    current.unsettled_recovery_room_ids if recovery_room_ids is None else recovery_room_ids
-                ),
-            ),
+            lambda current: replace(current, checkpoint=None),
             recover_invalid=True,
-        )
-
-    def replace_recovery_debt(
-        self,
-        unsettled_recovery_room_ids: Iterable[str],
-    ) -> SyncContinuityRecord:
-        """Replace exact recovery debt while preserving checkpoint and join fences."""
-        recovery_room_ids = _normalize_recovery_room_ids(unsettled_recovery_room_ids)
-        return self._update(
-            lambda current: replace(
-                current,
-                unsettled_recovery_room_ids=recovery_room_ids,
-            ),
         )
 
     def update_join_fences(
@@ -115,20 +76,15 @@ class SyncContinuityStore:
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: Iterable[str],
-        unsettled_recovery_room_ids: Iterable[str] | None = None,
     ) -> SyncContinuityRecord:
-        """Atomically advance Classic continuity, debt, and observed join fences."""
+        """Atomically advance Classic continuity and settle observed join fences."""
         normalized_checkpoint = _normalize_checkpoint(checkpoint)
         joined = frozenset(_normalize_room_id(room_id) for room_id in joined_room_ids)
-        recovery_room_ids = _normalize_optional_recovery_room_ids(unsettled_recovery_room_ids)
         return self._update(
             lambda current: SyncContinuityRecord(
                 revision=current.revision,
                 checkpoint=normalized_checkpoint,
                 pending_join_decrypt_fences=current.pending_join_decrypt_fences - joined,
-                unsettled_recovery_room_ids=(
-                    current.unsettled_recovery_room_ids if recovery_room_ids is None else recovery_room_ids
-                ),
             ),
         )
 
@@ -193,29 +149,23 @@ class SyncContinuityStore:
             raise _format_error(self._path, "invalid checkpoint")
 
         raw_fences = payload.get("pending_join_decrypt_fences")
-        raw_recovery_room_ids = payload.get("unsettled_recovery_room_ids")
         if (
             not isinstance(raw_fences, list)
             or any(not isinstance(room_id, str) or not room_id for room_id in raw_fences)
             or len(set(cast("list[str]", raw_fences))) != len(raw_fences)
-            or not isinstance(raw_recovery_room_ids, list)
-            or any(not isinstance(room_id, str) or not room_id for room_id in raw_recovery_room_ids)
-            or len(set(cast("list[str]", raw_recovery_room_ids))) != len(raw_recovery_room_ids)
             or set(payload)
             != {
                 "checkpoint",
                 "pending_join_decrypt_fences",
                 "revision",
-                "unsettled_recovery_room_ids",
                 "version",
             }
         ):
-            raise _format_error(self._path, "invalid room continuity")
+            raise _format_error(self._path, "invalid join fences")
         return SyncContinuityRecord(
             revision=revision,
             checkpoint=checkpoint,
             pending_join_decrypt_fences=frozenset(cast("list[str]", raw_fences)),
-            unsettled_recovery_room_ids=frozenset(cast("list[str]", raw_recovery_room_ids)),
         )
 
 
@@ -233,7 +183,6 @@ def _record_payload(record: SyncContinuityRecord) -> dict[str, object]:
         "checkpoint": checkpoint_payload,
         "pending_join_decrypt_fences": sorted(record.pending_join_decrypt_fences),
         "revision": record.revision,
-        "unsettled_recovery_room_ids": sorted(record.unsettled_recovery_room_ids),
         "version": _RECORD_VERSION,
     }
 
@@ -252,20 +201,6 @@ def _normalize_room_id(room_id: str) -> str:
         msg = "Pending join decrypt fences require a non-empty room ID"
         raise ValueError(msg)
     return room_id
-
-
-def _normalize_recovery_room_ids(room_ids: Iterable[str]) -> frozenset[str]:
-    normalized = frozenset(room_ids)
-    if any(not room_id for room_id in normalized):
-        msg = "Recovery debt requires non-empty room IDs"
-        raise ValueError(msg)
-    return normalized
-
-
-def _normalize_optional_recovery_room_ids(
-    room_ids: Iterable[str] | None,
-) -> frozenset[str] | None:
-    return None if room_ids is None else _normalize_recovery_room_ids(room_ids)
 
 
 def _format_error(path: Path, detail: str) -> RuntimeError:

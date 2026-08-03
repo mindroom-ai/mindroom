@@ -571,7 +571,7 @@ class CacheFuzzRunner:
             cast("nio.SyncResponse", _sync_response(events, room=room, limited=limited)),
         )
         assert result.complete is True
-        assert result.certified is not limited
+        assert result.certified is True
         assert result.limited_room_ids == ((room_id(room),) if limited else ())
         assert result.errors == ()
 

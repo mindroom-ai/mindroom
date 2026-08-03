@@ -85,12 +85,10 @@ Deleting an unrecoverable pending row is a last resort that accepts losing that 
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
-The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
+The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
-Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` rewinds locally incomplete, failed, or unclassified responses to the retained pre-gap checkpoint.
-Nio-reported recovery debt keeps the live sync cursor moving while recovery remains pending, but `SyncCacheTrust` withholds durable checkpoints until a complete response reports recovery, authoritatively stops reporting the room, or clears actual debt at a membership boundary.
-An authoritative membership boundary that clears actual debt still requires a following clean delta, while a normal zero-debt join or leave certifies without an artificial delay.
-`SyncContinuityStore` persists that exact room debt crash-atomically with checkpoint and join-fence state, so restart, cache-scope invalidation, stale certification plans, and `M_UNKNOWN_POS` cannot silently discard it.
+`SyncCacheTrust` certifies a complete recovered response, rewinds every locally incomplete, failed, or nio-unrecovered response to the retained pre-gap checkpoint, and relies on nio's persisted aggregate gap state instead of duplicating it.
+A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 When no generation-safe checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
 Classic receive-loop exit also reconciles nio's live cursor with the last certified checkpoint, covering cancellation after nio applies a response but before its response callback starts.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.

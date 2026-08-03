@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.matrix.sync_token_values import normalize_sync_token
 
@@ -37,7 +37,6 @@ class SyncCacheWriteResult:
     limited_room_ids: tuple[str, ...] = ()
     recovered_room_ids: frozenset[str] = frozenset()
     unrecovered_room_ids: frozenset[str] = frozenset()
-    no_recovery_needed_room_ids: frozenset[str] = frozenset()
     errors: tuple[BaseException, ...] = ()
     runtime_available: bool | None = None
     task_count: int | None = None
@@ -50,7 +49,6 @@ class SyncCacheWriteResult:
         *,
         complete: bool,
         limited_room_ids: tuple[str, ...] = (),
-        no_recovery_needed_room_ids: frozenset[str] = frozenset(),
         errors: tuple[BaseException, ...] = (),
         runtime_available: bool | None = None,
         task_count: int | None = None,
@@ -62,7 +60,6 @@ class SyncCacheWriteResult:
             limited_room_ids=limited_room_ids,
             recovered_room_ids=response.recovered_room_ids,
             unrecovered_room_ids=response.unrecovered_room_ids,
-            no_recovery_needed_room_ids=no_recovery_needed_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=task_count,
@@ -71,14 +68,14 @@ class SyncCacheWriteResult:
 
     @property
     def _unclassified_limited_room_ids(self) -> tuple[str, ...]:
-        """Return current limited rooms missing an authoritative recovery outcome."""
-        classified_room_ids = self.recovered_room_ids | self.unrecovered_room_ids | self.no_recovery_needed_room_ids
+        """Return limited rooms for which nio found no real recovery gap."""
+        classified_room_ids = self.recovered_room_ids | self.unrecovered_room_ids
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
     def _has_certification_blocker(self) -> bool:
-        """Return whether recovery state requires withholding this response's checkpoint."""
-        return bool(self._unclassified_limited_room_ids or self.unrecovered_room_ids)
+        """Return whether nio still reports an open or abandoned recovery gap."""
+        return bool(self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
@@ -95,7 +92,6 @@ class SyncCertificationDecision:
     clear_saved_token: bool = False
     reset_client_token: bool = False
     advanced_tokenless_baseline: bool = False
-    unsettled_recovery_room_ids: frozenset[str] = frozenset()
     reason: str | None = None
     cache_scope_epoch: int | None = None
 
@@ -106,7 +102,6 @@ def _uncertain_decision(
     clear_saved_token: bool = False,
     reset_client_token: bool = False,
     advanced_tokenless_baseline: bool = False,
-    unsettled_recovery_room_ids: frozenset[str] = frozenset(),
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
@@ -114,7 +109,6 @@ def _uncertain_decision(
         clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
         advanced_tokenless_baseline=advanced_tokenless_baseline,
-        unsettled_recovery_room_ids=unsettled_recovery_room_ids,
         reason=reason,
     )
 
@@ -122,23 +116,20 @@ def _uncertain_decision(
 def _uncertain_reason(
     cache_result: SyncCacheWriteResult,
     *,
-    next_batch: str | None,
-    unsettled_recovery_room_ids: frozenset[str],
-    boundary_settled_recovery_room_ids: frozenset[str],
+    token: str | None,
+    tokenless_baseline_pending: bool,
 ) -> str | None:
     """Return why one sync response cannot certify a checkpoint."""
-    if normalize_sync_token(next_batch) is None:
+    if token is None:
         reason = "missing_next_batch"
     elif cache_result.errors:
         reason = "cache_write_failed"
-    elif cache_result._unclassified_limited_room_ids:
-        reason = "limited_sync_timeline"
     elif not cache_result.complete:
         reason = "cache_write_incomplete"
-    elif cache_result.unrecovered_room_ids & unsettled_recovery_room_ids:
+    elif cache_result.unrecovered_room_ids:
         reason = "sync_recovery_incomplete"
-    elif boundary_settled_recovery_room_ids:
-        reason = "sync_recovery_boundary"
+    elif tokenless_baseline_pending and cache_result._unclassified_limited_room_ids:
+        reason = "limited_sync_timeline"
     else:
         reason = None
     return reason
@@ -149,58 +140,29 @@ def certify_sync_response(
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
     tokenless_baseline_pending: bool = False,
-    unsettled_recovery_room_ids: frozenset[str] = frozenset(),
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
-    recovery_debt_before_settlement = unsettled_recovery_room_ids | cache_result.unrecovered_room_ids
-    recovery_outcomes_are_usable = (
-        normalize_sync_token(next_batch) is not None
-        and not cache_result.errors
-        and not cache_result._unclassified_limited_room_ids
-        and cache_result.complete
-    )
-    if recovery_outcomes_are_usable:
-        boundary_settled_recovery_room_ids = recovery_debt_before_settlement & cache_result.no_recovery_needed_room_ids
-        unsettled_recovery_room_ids = cache_result.unrecovered_room_ids - (
-            cache_result.recovered_room_ids | cache_result.no_recovery_needed_room_ids
-        )
-    else:
-        boundary_settled_recovery_room_ids = frozenset()
-        unsettled_recovery_room_ids = recovery_debt_before_settlement
+    token = normalize_sync_token(next_batch)
     reason = _uncertain_reason(
         cache_result,
-        next_batch=next_batch,
-        unsettled_recovery_room_ids=unsettled_recovery_room_ids,
-        boundary_settled_recovery_room_ids=boundary_settled_recovery_room_ids,
+        token=token,
+        tokenless_baseline_pending=tokenless_baseline_pending,
     )
     if reason is not None:
         tokenless_limited_baseline = (
             tokenless_baseline_pending and cache_result.complete and reason == "limited_sync_timeline"
         )
-        reset_client_token = (
-            reason
-            not in {
-                "sync_recovery_boundary",
-                "sync_recovery_incomplete",
-            }
-            and not tokenless_limited_baseline
-        )
+        reset_client_token = not tokenless_limited_baseline
         return _uncertain_decision(
             reason=reason,
             reset_client_token=reset_client_token,
             advanced_tokenless_baseline=tokenless_baseline_pending and not reset_client_token,
-            unsettled_recovery_room_ids=unsettled_recovery_room_ids,
         )
 
-    token = normalize_sync_token(next_batch)
-    if token is None:
-        return _uncertain_decision(reason="missing_next_batch")
-
-    checkpoint = SyncCheckpoint(token=token)
+    checkpoint = SyncCheckpoint(token=cast("str", token))
     return SyncCertificationDecision(
         state=SyncTrustState.CERTIFIED,
         checkpoint_to_save=checkpoint,
-        unsettled_recovery_room_ids=unsettled_recovery_room_ids,
     )
 
 
@@ -240,7 +202,6 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         "cache_limited_room_count": len(cache_result.limited_room_ids),
         "cache_recovered_room_count": len(cache_result.recovered_room_ids),
         "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
-        "cache_no_recovery_needed_room_count": len(cache_result.no_recovery_needed_room_ids),
         "cache_unclassified_limited_room_count": len(unclassified_limited_room_ids),
     }
     if cache_result.limited_room_ids:
@@ -249,8 +210,6 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         diagnostics["cache_recovered_room_ids"] = tuple(sorted(cache_result.recovered_room_ids))[:5]
     if cache_result.unrecovered_room_ids:
         diagnostics["cache_unrecovered_room_ids"] = tuple(sorted(cache_result.unrecovered_room_ids))[:5]
-    if cache_result.no_recovery_needed_room_ids:
-        diagnostics["cache_no_recovery_needed_room_ids"] = tuple(sorted(cache_result.no_recovery_needed_room_ids))[:5]
     if unclassified_limited_room_ids:
         diagnostics["cache_unclassified_limited_room_ids"] = unclassified_limited_room_ids[:5]
     return diagnostics

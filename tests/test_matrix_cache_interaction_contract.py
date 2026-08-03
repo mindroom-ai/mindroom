@@ -1110,7 +1110,7 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
     )
 
     assert result.complete is True
-    assert result.certified is False
+    assert result.certified is True
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.errors == ()
     assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child

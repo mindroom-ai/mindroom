@@ -429,7 +429,7 @@ async def test_classic_unrecovered_gap_rejects_checkpoint(
         await bot._on_sync_response(response)
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-    assert bot.client.next_batch == "s_with_gap"
+    assert bot.client.next_batch is None
 
 
 @pytest.mark.asyncio
@@ -907,8 +907,7 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         },
         "pending_join_decrypt_fences": [],
         "revision": 1,
-        "unsettled_recovery_room_ids": [],
-        "version": "mindroom-sync-continuity-v3",
+        "version": "mindroom-sync-continuity-v2",
     }
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     checkpoint = load_sync_checkpoint(tmp_path, "code")
@@ -3229,15 +3228,10 @@ async def test_continuity_acceptance_runs_off_event_loop(tmp_path: Path) -> None
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: Iterable[str],
-        unsettled_recovery_room_ids: Iterable[str],
     ) -> SyncContinuityRecord:
         nonlocal write_thread
         write_thread = threading.current_thread()
-        return accept_response(
-            checkpoint,
-            joined_room_ids=joined_room_ids,
-            unsettled_recovery_room_ids=unsettled_recovery_room_ids,
-        )
+        return accept_response(checkpoint, joined_room_ids=joined_room_ids)
 
     with (
         patch.object(

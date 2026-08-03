@@ -14,7 +14,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
-from mindroom.matrix.sync_recovery_classification import classic_no_recovery_needed_room_ids
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
@@ -139,11 +138,11 @@ def _membership_boundary_response(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["invite", "nonlimited-own-join"])
-async def test_real_nio_membership_reset_settles_its_final_unrecovered_outcome(
+async def test_real_nio_membership_reset_rewinds_before_clean_replay(
     tmp_path: Path,
     boundary: str,
 ) -> None:
-    """Every authoritative NIO membership reset must settle the gap it clears."""
+    """A reset outcome rewinds once before nio's clean replay may certify."""
     room_id = "!reset:localhost"
     client = nio.AsyncClient(
         "https://localhost",
@@ -176,23 +175,26 @@ async def test_real_nio_membership_reset_settles_its_final_unrecovered_outcome(
         next_batch=gap_response.next_batch,
         cache_result=_cache_result(gap_response, limited_room_ids=(room_id,), complete=True),
     )
-    assert gap_decision.unsettled_recovery_room_ids == frozenset({room_id})
     boundary_result = _cache_result(
         boundary_response,
         limited_room_ids=(),
         complete=True,
-        no_recovery_needed_room_ids=classic_no_recovery_needed_room_ids(
-            boundary_response,
-            user_id="@code:localhost",
-        ),
     )
     decision = await trust.certify_response(
         next_batch=boundary_response.next_batch,
         cache_result=boundary_result,
     )
 
-    assert boundary_result.no_recovery_needed_room_ids == frozenset({room_id})
-    assert decision.unsettled_recovery_room_ids == frozenset()
+    clean = await trust.certify_response(
+        next_batch="s_clean",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert gap_decision.state is SyncTrustState.UNCERTAIN
+    assert gap_decision.reset_client_token is True
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reset_client_token is True
+    assert clean.state is SyncTrustState.CERTIFIED
 
 
 @pytest.mark.asyncio
@@ -221,10 +223,6 @@ async def test_authoritative_departure_settles_prior_gap_before_clean_certificat
         departure_response,
         limited_room_ids=(),
         complete=True,
-        no_recovery_needed_room_ids=classic_no_recovery_needed_room_ids(
-            departure_response,
-            user_id="@code:localhost",
-        ),
     )
     departure = await trust.certify_response(
         next_batch=departure_response.next_batch,
@@ -241,16 +239,16 @@ async def test_authoritative_departure_settles_prior_gap_before_clean_certificat
         cache_result=_cache_result(clean_response, limited_room_ids=(), complete=True),
     )
 
-    assert gap.unsettled_recovery_room_ids == frozenset({room_id})
+    assert gap.reset_client_token is True
     assert departure.state is SyncTrustState.UNCERTAIN
-    assert departure.unsettled_recovery_room_ids == frozenset()
+    assert departure.reset_client_token is True
     assert clean.state is SyncTrustState.CERTIFIED
     assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
 
 
 @pytest.mark.asyncio
-async def test_real_nio_terminal_gap_allows_later_clean_checkpoint(tmp_path: Path) -> None:
-    """NIO omitting an abandoned gap on a later response is terminal settlement."""
+async def test_real_nio_terminal_gap_retries_from_safe_checkpoint(tmp_path: Path) -> None:
+    """An abandoned gap must be replanned after MindRoom rewinds the cursor."""
     room_id = "!forbidden-history:localhost"
     client = nio.AsyncClient(
         "https://localhost",
@@ -267,11 +265,11 @@ async def test_real_nio_terminal_gap_allows_later_clean_checkpoint(tmp_path: Pat
         unrecovered_room_ids=frozenset(),
         next_batch="s_gap",
     )
-    clean_response = _sync_response(
-        limited_room_ids=(),
+    retry_response = _sync_response(
+        limited_room_ids=(room_id,),
         recovered_room_ids=frozenset(),
         unrecovered_room_ids=frozenset(),
-        next_batch="s_clean",
+        next_batch="s_retry",
     )
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
 
@@ -282,30 +280,28 @@ async def test_real_nio_terminal_gap_allows_later_clean_checkpoint(tmp_path: Pat
             AsyncMock(return_value=nio.RoomMessagesError("denied", room_id=room_id)),
         ):
             await client.receive_response(gap_response)
-            await client.receive_response(clean_response)
+            client.next_batch = "s_before_gap"
+            await client.receive_response(retry_response)
     finally:
         await client.close()
 
     assert gap_response.unrecovered_room_ids == frozenset({room_id})
-    assert clean_response.recovered_room_ids == frozenset()
-    assert clean_response.unrecovered_room_ids == frozenset()
+    assert retry_response.recovered_room_ids == frozenset()
+    assert retry_response.unrecovered_room_ids == frozenset({room_id})
     gap = await trust.certify_response(
         next_batch=gap_response.next_batch,
         cache_result=_cache_result(gap_response, limited_room_ids=(room_id,), complete=True),
     )
-    clean = await trust.certify_response(
-        next_batch=clean_response.next_batch,
-        cache_result=_cache_result(clean_response, limited_room_ids=(), complete=True),
+    retry = await trust.certify_response(
+        next_batch=retry_response.next_batch,
+        cache_result=_cache_result(retry_response, limited_room_ids=(room_id,), complete=True),
     )
 
     assert gap.state is SyncTrustState.UNCERTAIN
-    assert gap.unsettled_recovery_room_ids == frozenset({room_id})
-    assert clean.state is SyncTrustState.CERTIFIED
-    assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
-    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        "s_clean",
-        cache_generation=_CACHE_GENERATION,
-    )
+    assert gap.reset_client_token is True
+    assert retry.state is SyncTrustState.UNCERTAIN
+    assert retry.reset_client_token is True
+    assert load_sync_checkpoint(tmp_path, "code") is None
 
 
 def _cache_result(
@@ -313,7 +309,6 @@ def _cache_result(
     *,
     limited_room_ids: tuple[str, ...],
     complete: bool,
-    no_recovery_needed_room_ids: frozenset[str] = frozenset(),
     errors: tuple[BaseException, ...] = (),
 ) -> SyncCacheWriteResult:
     """Build the cache result from the exact typed upstream response."""
@@ -321,7 +316,6 @@ def _cache_result(
         response,
         complete=complete,
         limited_room_ids=limited_room_ids,
-        no_recovery_needed_room_ids=no_recovery_needed_room_ids,
         errors=errors,
     )
 
@@ -443,7 +437,7 @@ async def test_unknown_position_baseline_advances_then_unrecovered_gap_blocks_ch
     assert baseline.state is SyncTrustState.UNCERTAIN
     assert baseline.reset_client_token is False
     assert positioned.state is SyncTrustState.UNCERTAIN
-    assert positioned.reset_client_token is False
+    assert positioned.reset_client_token is True
 
 
 @pytest.mark.asyncio
@@ -631,7 +625,7 @@ async def test_mixed_recovered_and_unrecovered_rooms_withhold_continuity(tmp_pat
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
 
 
 @pytest.mark.asyncio
@@ -656,12 +650,12 @@ async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tm
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
 
 
 @pytest.mark.asyncio
-async def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
-    """An enabled or disabled recovery path may never turn missing classification into success."""
+async def test_positioned_limited_room_without_nio_gap_certifies(tmp_path: Path) -> None:
+    """Aggregate outcome absence proves nio planned no gap for a positioned window."""
     response = _sync_response(
         limited_room_ids=(_UNRECOVERED_ROOM,),
         recovered_room_ids=frozenset(),
@@ -679,6 +673,6 @@ async def test_unclassified_limited_room_fails_closed(tmp_path: Path) -> None:
         cache_result=result,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint(response.next_batch)
+    assert decision.reset_client_token is False
