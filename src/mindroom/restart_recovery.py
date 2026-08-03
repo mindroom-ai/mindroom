@@ -191,14 +191,11 @@ class RestartRecoveryCoordinator:
         if self._stopped:
             return
         self._settle_finished_attempts()
-        owner = self._current_owners().get(owner_user_id)
+        owners = self._current_owners()
+        owner = owners.get(owner_user_id)
         if owner is not None:
             self._operations.discard_owner(owner_user_id)
-            self._target_watermarks = {
-                key: watermark
-                for key, watermark in self._target_watermarks.items()
-                if key[0] != owner_user_id or watermark.generation is owner.generation
-            }
+            self._prune_target_watermarks(owners)
             self._refresh_owner_jobs(owner, grant_fresh_budget=True)
             self._enqueue_desired_rooms(owner)
             if not self._paused:
@@ -256,11 +253,12 @@ class RestartRecoveryCoordinator:
             self._room_jobs = {
                 key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
             }
-        owners = tuple(self._current_owners().values()) if self._startup_cutoff_ms is not None else ()
-        for owner in owners:
+        owners = dict(self._current_owners()) if self._startup_cutoff_ms is not None else {}
+        self._prune_target_watermarks(owners)
+        for owner in owners.values():
             self._refresh_owner_jobs(owner, grant_fresh_budget=True)
         self._paused = False
-        for owner in owners:
+        for owner in owners.values():
             self._operations.discard_owner(owner.user_id)
             self._start_owner_room_discovery(owner)
         self._ensure_worker()
@@ -306,6 +304,14 @@ class RestartRecoveryCoordinator:
                     due_at=now,
                 )
         self._wake.set()
+
+    def _prune_target_watermarks(self, owners: Mapping[str, RecoveryOwner]) -> None:
+        """Release settlements that belong to superseded owner generations."""
+        self._target_watermarks = {
+            key: watermark
+            for key, watermark in self._target_watermarks.items()
+            if (owner := owners.get(key[0])) is not None and watermark.generation is owner.generation
+        }
 
     def _enqueue_desired_rooms(self, owner: RecoveryOwner) -> None:
         if self._startup_cutoff_ms is None:
@@ -710,8 +716,14 @@ class RestartRecoveryCoordinator:
             owner = ready.get(work.owner_user_id)
             if owner is None:
                 continue
+            recovered_targets = tuple(recovered_by_owner[work.owner_user_id])
+            retained_targets = tuple(
+                target
+                for target in work.targets
+                if (owner.user_id, target.target_event_id) not in recovered.auto_resume_target_keys
+            )
             targets = _newest_targets(
-                (*work.targets, *recovered_by_owner[work.owner_user_id]),
+                (*retained_targets, *recovered_targets),
             )
             if (task := asyncio.current_task()) is not None and task.cancelling():
                 outcomes[work.owner_user_id] = _OwnerAttemptResult(

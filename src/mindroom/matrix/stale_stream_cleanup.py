@@ -104,7 +104,7 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
-    delivery_proof: RoomDeliveryHydrationProof | None = None
+    delivery_proof: RoomDeliveryHydrationProof | None
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,7 @@ class StaleStreamCleanupResult:
     cleaned_count: int
     interrupted_threads: tuple[InterruptedThread, ...]
     retry_required: bool = False
+    auto_resume_target_event_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,7 @@ async def cleanup_stale_streaming_room(
             cleaned_count=0,
             interrupted_threads=(),
             retry_required=scanned_state.retry_required,
+            auto_resume_target_event_ids=frozenset(scanned_state.auto_resume_target_event_ids),
         )
 
     cleaned_count = 0
@@ -388,6 +390,7 @@ async def cleanup_stale_streaming_room(
         cleaned_count=cleaned_count,
         interrupted_threads=tuple(interrupted_threads),
         retry_required=retry_required,
+        auto_resume_target_event_ids=frozenset(scanned_state.auto_resume_target_event_ids),
     )
 
 

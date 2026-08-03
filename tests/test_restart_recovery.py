@@ -182,6 +182,7 @@ def _operations(
         results = [await recover_room(owner, request, owner_user_ids, config) for owner in owners]
         return RoomRecoveryResult(
             interrupted_threads=tuple(target for result in results for target in result.interrupted_threads),
+            auto_resume_target_keys=frozenset(key for result in results for key in result.auto_resume_target_keys),
             retry_owner_user_ids=frozenset(
                 owner_user_id for result in results for owner_user_id in result.retry_owner_user_ids
             ),
@@ -1423,6 +1424,35 @@ async def test_matrix_target_delivery_propagates_cache_notification_failure(
             _target("$target", timestamp_ms=10),
             _config(tmp_path),
         )
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_records_successful_outbound_message(
+    tmp_path: Path,
+) -> None:
+    """A delivered relay must immediately enter the owner's conversation cache."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
+        ),
+    ):
+        outcome = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert outcome is RestartDeliveryOutcome.DELIVERED
+    owner.conversation_cache.notify_outbound_message.assert_called_once()
+    room_id, event_id, content = owner.conversation_cache.notify_outbound_message.call_args.args
+    assert room_id == target.room_id
+    assert event_id == "$resume"
+    assert content["body"]
 
 
 @pytest.mark.asyncio
@@ -2862,6 +2892,94 @@ async def test_owner_ready_during_delivery_preserves_closed_watermark(
     watermark = watermarks[(owner.user_id, target.room_id, target.thread_id)]
     assert watermark.generation is owner.generation
     assert watermark.closed
+
+
+@pytest.mark.asyncio
+async def test_resume_releases_superseded_generation_watermarks(tmp_path: Path) -> None:
+    """Resuming after config mutation must not retain stopped bot generations."""
+    old_owner = _owner(generation=object(), rooms=frozenset())
+    owner = _owner(generation=object(), rooms=frozenset())
+    owners = {owner.user_id: owner}
+    stale_target = _target("$stale", timestamp_ms=10, thread_id="$stale-thread")
+    current_target = _target("$current", timestamp_ms=20, thread_id="$current-thread")
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator._advance_watermark(old_owner, TargetSettlement(stale_target, closed=True))
+    coordinator._advance_watermark(owner, TargetSettlement(current_target, closed=True))
+    coordinator._startup_cutoff_ms = 123
+
+    coordinator.resume()
+    try:
+        watermarks = dict(coordinator._target_watermarks)
+    finally:
+        await coordinator.stop()
+
+    assert (owner.user_id, stale_target.room_id, stale_target.thread_id) not in watermarks
+    current_key = (owner.user_id, current_target.room_id, current_target.thread_id)
+    assert watermarks[current_key].generation is owner.generation
+
+
+@pytest.mark.asyncio
+async def test_successful_rescan_discards_retained_ambiguous_delivery_target(
+    tmp_path: Path,
+) -> None:
+    """History dedupe must win over a target retained after an ambiguous send."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    scan_attempts = 0
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_attempts
+        scan_attempts += 1
+        if scan_attempts == 1:
+            return RoomRecoveryResult(interrupted_threads=(target,))
+        return RoomRecoveryResult(
+            auto_resume_target_keys=frozenset({(owner.user_id, target.target_event_id)}),
+        )
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        delivered_target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(delivered_target.target_event_id)
+        return False
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await _wait_until(
+            lambda: scan_attempts >= 2 and not coordinator._room_jobs and not coordinator._active_attempts,
+        )
+    finally:
+        await coordinator.stop()
+
+    assert scan_attempts == 2
+    assert delivered_targets == [target.target_event_id]
 
 
 @pytest.mark.asyncio

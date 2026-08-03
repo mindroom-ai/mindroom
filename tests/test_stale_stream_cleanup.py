@@ -242,7 +242,7 @@ async def _run_cleanup(
     assert joined_rooms == [ROOM_ID]
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         result = await cleanup_stale_streaming_room(
-            StaleStreamCleanupActor(client, None),
+            StaleStreamCleanupActor(client, None, None),
             owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
@@ -2337,7 +2337,7 @@ async def test_owner_room_cleanup_ignores_messages_from_other_bots(tmp_path: Pat
     """One owner history scan must repair only that exact owner's messages."""
     config = _make_config(tmp_path)
     first_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actor = StaleStreamCleanupActor(first_client, MagicMock())
+    actor = StaleStreamCleanupActor(first_client, MagicMock(), None)
     scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
         message_states={
             "$first": stale_stream_cleanup_module._MessageState(
@@ -2396,7 +2396,7 @@ async def test_room_cleanup_continues_after_failed_edit_and_requests_retry(
     """One failed edit must not starve later candidates, but must keep the room retryable."""
     config = _make_config(tmp_path)
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actor = StaleStreamCleanupActor(client, MagicMock())
+    actor = StaleStreamCleanupActor(client, MagicMock(), None)
     scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
         message_states={
             "$failed": stale_stream_cleanup_module._MessageState(
@@ -2508,7 +2508,7 @@ async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_p
         ),
     ):
         result = await cleanup_stale_streaming_room(
-            StaleStreamCleanupActor(client, None),
+            StaleStreamCleanupActor(client, None, None),
             owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
             bot_user_ids={BOT_USER_ID},
@@ -2567,7 +2567,7 @@ async def test_requester_resolution_response_classifies_retry_after_cleanup(
         ),
     ):
         result = await cleanup_stale_streaming_room(
-            StaleStreamCleanupActor(client, None),
+            StaleStreamCleanupActor(client, None, None),
             owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
             bot_user_ids={BOT_USER_ID},
@@ -2667,7 +2667,7 @@ async def test_room_messages_error_requests_typed_room_retry(tmp_path: Path) -> 
     )
 
     result = await cleanup_stale_streaming_room(
-        StaleStreamCleanupActor(client, MagicMock()),
+        StaleStreamCleanupActor(client, MagicMock(), None),
         owner_user_id=BOT_USER_ID,
         room_id=ROOM_ID,
         bot_user_ids={BOT_USER_ID},

@@ -7,7 +7,7 @@ import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -22,6 +22,8 @@ from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
+    from aiohttp import ClientResponse
+
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
@@ -195,6 +197,11 @@ async def _remote_room_encrypted(client: nio.AsyncClient, room_id: str) -> bool 
     """Return authoritative room encryption state when readable."""
     response = await client.room_get_state_event(room_id, "m.room.encryption")
     if isinstance(response, nio.RoomGetStateEventResponse):
+        # nio success-types every non-404 response for this endpoint, including
+        # transport failures. AsyncClient always attaches the aiohttp response.
+        transport: ClientResponse | None = cast("Any", response.transport_response)
+        if transport is not None and transport.status not in range(200, 300):
+            return None
         return True
     if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         return False
@@ -217,7 +224,6 @@ def _room_from_remote_state(
             room.handle_event(event)
     for member in members.members:
         room.add_member(member.user_id, member.display_name, member.avatar_url)
-    room.encrypted = True
     room.members_synced = True
     return room
 
@@ -254,7 +260,7 @@ async def _encrypted_room_for_hydration(
 ) -> _EncryptedRoomHydration | None:
     """Return a complete candidate or an authoritative encrypted sync room."""
     joined_user_ids = frozenset(member.user_id for member in members.members)
-    room = client.rooms.get(room_id)
+    room = cached_room(client, room_id)
     if room is not None:
         if not _room_covers_joined_members(room, joined_user_ids):
             return None
@@ -264,9 +270,13 @@ async def _encrypted_room_for_hydration(
     if not isinstance(state, nio.RoomGetStateResponse):
         return None
     candidate = _room_from_remote_state(client, room_id, members, state)
-    room = client.rooms.get(room_id)
+    room = cached_room(client, room_id)
     if room is None:
-        return _EncryptedRoomHydration(candidate, joined_user_ids, unpublished_candidate=True)
+        return (
+            _EncryptedRoomHydration(candidate, joined_user_ids, unpublished_candidate=True)
+            if _room_covers_joined_members(candidate, joined_user_ids)
+            else None
+        )
     if not _room_covers_joined_members(room, joined_user_ids):
         return None
     return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
@@ -306,7 +316,7 @@ def _current_encrypted_room_after_hydration(
     hydration: _EncryptedRoomHydration,
 ) -> nio.MatrixRoom | None:
     """Adopt a concurrent sync room only when it covers the hydrated membership."""
-    current_room = client.rooms.get(room_id)
+    current_room = cached_room(client, room_id)
     if current_room is None:
         return hydration.room if hydration.unpublished_candidate else None
     if not _room_covers_joined_members(current_room, hydration.joined_user_ids):
@@ -370,8 +380,7 @@ async def hydrate_joined_room_for_delivery(
     room_id: str,
 ) -> RoomDeliveryHydrationProof | None:
     """Seed nio's delivery state for one remotely confirmed joined room."""
-    rooms = client.rooms
-    room = rooms.get(room_id)
+    room = cached_room(client, room_id)
     if room is not None:
         if not room.encrypted:
             return RoomDeliveryHydrationProof(encrypted=False)
@@ -500,7 +509,11 @@ async def send_message_result(
     rooms = client.rooms
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
     cache_bypass = isinstance(rooms, Mapping) and room is None
-    if cache_bypass and not await _cache_bypass_has_plaintext_room(client, room_id, operation=operation):
+    if (
+        cache_bypass
+        and delivery_proof is None
+        and not await _cache_bypass_has_plaintext_room(client, room_id, operation=operation)
+    ):
         return None
 
     message_type = "m.room.message"

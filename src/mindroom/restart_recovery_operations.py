@@ -103,6 +103,7 @@ class _RoomRecoveryResult:
     """Result of one shared room recovery attempt."""
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
+    auto_resume_target_keys: frozenset[tuple[str, str]] = frozenset()
     retry_owner_user_ids: frozenset[str] = frozenset()
     unjoined_owner_user_ids: frozenset[str] = frozenset()
 
@@ -306,7 +307,12 @@ async def _recover_room(
             unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
-    cleaned_count, interrupted_threads, retry_cleanup_owner_user_ids = await _cleanup_joined_owners(
+    (
+        cleaned_count,
+        interrupted_threads,
+        auto_resume_target_keys,
+        retry_cleanup_owner_user_ids,
+    ) = await _cleanup_joined_owners(
         hydrated_owners,
         request=request,
         owner_user_ids=owner_user_ids,
@@ -323,6 +329,7 @@ async def _recover_room(
     )
     return _RoomRecoveryResult(
         interrupted_threads=interrupted_threads,
+        auto_resume_target_keys=frozenset(auto_resume_target_keys),
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
         unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
     )
@@ -336,10 +343,11 @@ async def _cleanup_joined_owners(
     config: Config,
     runtime_paths: RuntimePaths,
     retry_owner_user_ids: set[str],
-) -> tuple[int, tuple[InterruptedThread, ...], set[str]]:
+) -> tuple[int, tuple[InterruptedThread, ...], set[tuple[str, str]], set[str]]:
     """Scan each ready owner's Matrix-visible history for its own messages."""
     cleaned_count = 0
     interrupted_threads: list[InterruptedThread] = []
+    auto_resume_target_keys: set[tuple[str, str]] = set()
     retry_cleanup_owner_user_ids = set(retry_owner_user_ids)
     for hydrated_owner in hydrated_owners:
         owner = hydrated_owner.owner
@@ -369,9 +377,17 @@ async def _cleanup_joined_owners(
             continue
         cleaned_count += cleanup_result.cleaned_count
         interrupted_threads.extend(cleanup_result.interrupted_threads)
+        auto_resume_target_keys.update(
+            (owner.user_id, target_event_id) for target_event_id in cleanup_result.auto_resume_target_event_ids
+        )
         if cleanup_result.retry_required:
             retry_cleanup_owner_user_ids.add(owner.user_id)
-    return cleaned_count, tuple(interrupted_threads), retry_cleanup_owner_user_ids
+    return (
+        cleaned_count,
+        tuple(interrupted_threads),
+        auto_resume_target_keys,
+        retry_cleanup_owner_user_ids,
+    )
 
 
 async def _hydrate_joined_owners(

@@ -10,6 +10,7 @@ import pytest
 from mindroom.matrix.client_delivery import (
     RoomDeliveryHydrationProof,
     build_edit_event_content,
+    hydrate_joined_room_for_delivery,
     send_message_result,
 )
 from tests.conftest import TEST_ACCESS_TOKEN
@@ -100,20 +101,13 @@ async def test_send_message_result_rechecks_plaintext_proof_authoritatively(
     room_id = "!room:localhost"
     client.access_token = TEST_ACCESS_TOKEN
     client.rooms = {room_id: nio.MatrixRoom(room_id, "@bot:localhost")} if cached_plaintext else {}
-    plaintext_response = nio.RoomGetStateEventError(
-        "No encryption state",
-        "M_NOT_FOUND",
-        room_id=room_id,
-    )
     encrypted_response = nio.RoomGetStateEventResponse(
         content={"algorithm": "m.megolm.v1.aes-sha2"},
         event_type="m.room.encryption",
         state_key="",
         room_id=room_id,
     )
-    client.room_get_state_event = AsyncMock(
-        side_effect=([encrypted_response] if cached_plaintext else [plaintext_response, encrypted_response]),
-    )
+    client.room_get_state_event = AsyncMock(return_value=encrypted_response)
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id=room_id)
     client._send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id=room_id)
 
@@ -125,7 +119,7 @@ async def test_send_message_result_rechecks_plaintext_proof_authoritatively(
     )
 
     assert delivered is None
-    assert client.room_get_state_event.await_count == (1 if cached_plaintext else 2)
+    assert client.room_get_state_event.await_count == 1
     client.room_send.assert_not_awaited()
     client._send.assert_not_awaited()
 
@@ -147,7 +141,7 @@ async def test_plaintext_proof_rechecks_cache_after_final_remote_query() -> None
     async def remote_encryption_state(*_args: object, **_kwargs: object) -> nio.RoomGetStateEventError:
         nonlocal remote_reads
         remote_reads += 1
-        if remote_reads == 2:
+        if remote_reads == 1:
             concurrent_room = nio.MatrixRoom(room_id, "@bot:localhost")
             concurrent_room.encrypted = True
             client.rooms[room_id] = concurrent_room
@@ -164,8 +158,70 @@ async def test_plaintext_proof_rechecks_cache_after_final_remote_query() -> None
     )
 
     assert delivered is None
-    assert remote_reads == 2
+    assert remote_reads == 1
     client._send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hydration_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx state-event response must not poison persistent encryption state."""
+    client = MagicMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    response = nio.RoomGetStateEventResponse(
+        content={"errcode": "M_UNKNOWN", "error": "upstream unavailable"},
+        event_type="m.room.encryption",
+        state_key="",
+        room_id=room_id,
+    )
+    transport = MagicMock()
+    transport.status = 502
+    response.transport_response = transport
+    client.rooms = {}
+    client.encrypted_rooms = set()
+    client.store = MagicMock()
+    client.room_get_state_event = AsyncMock(return_value=response)
+    client.joined_members = AsyncMock()
+
+    proof = await hydrate_joined_room_for_delivery(client, room_id)
+
+    assert proof is None
+    assert room_id not in client.rooms
+    assert room_id not in client.encrypted_rooms
+    client.store.save_encrypted_rooms.assert_not_called()
+    client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hydration_requires_encryption_in_authoritative_full_state() -> None:
+    """A positive state-event probe must agree with the full room state before persistence."""
+    client = MagicMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    client.user_id = "@bot:localhost"
+    client.rooms = {}
+    client.encrypted_rooms = set()
+    client.store = MagicMock()
+    client.olm = None
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            content={"algorithm": "m.megolm.v1.aes-sha2"},
+            event_type="m.room.encryption",
+            state_key="",
+            room_id=room_id,
+        ),
+    )
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(members=[], room_id=room_id),
+    )
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(events=[], room_id=room_id),
+    )
+
+    proof = await hydrate_joined_room_for_delivery(client, room_id)
+
+    assert proof is None
+    assert room_id not in client.rooms
+    assert room_id not in client.encrypted_rooms
+    client.store.save_encrypted_rooms.assert_not_called()
 
 
 @pytest.mark.asyncio
