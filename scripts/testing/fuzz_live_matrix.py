@@ -2812,7 +2812,13 @@ class LiveMatrixClient:
         timeout_ms: int,
         allow_limited: bool = False,
     ) -> int:
-        """Advance this client's private sync cursor and retain room events."""
+        """Advance this client's private sync cursor and retain room events.
+
+        Strict consumers repair a limited timeline from canonical room history
+        before advancing the cursor.  Callers that explicitly allow limited
+        timelines accept only the returned suffix because they do not use this
+        client as an exact audit source.
+        """
         data = await self.sync(self.next_batch, timeout_ms=timeout_ms)
         next_batch = data.get("next_batch")
         if not isinstance(next_batch, str):
@@ -2823,13 +2829,12 @@ class LiveMatrixClient:
         for room_id in self.room_ids:
             room = joined.get(room_id, {}) if isinstance(joined, dict) else {}
             timeline = room.get("timeline", {}) if isinstance(room, dict) else {}
-            if timeline.get("limited") is True and not allow_limited:
-                msg = "incremental Matrix fuzz sync unexpectedly returned a limited timeline"
-                raise AssertionError(msg)
             events = timeline.get("events", [])
             if not isinstance(events, list):
                 msg = "Matrix sync room timeline events must be a list"
                 raise TypeError(msg)
+            if timeline.get("limited") is True and not allow_limited:
+                events = await self.paginate_room(room_id)
             for raw_event in events:
                 if not isinstance(raw_event, dict):
                     continue
@@ -4821,8 +4826,9 @@ class LiveFuzzRunner:
             deadline_seconds=self.reply_timeout,
             settle_seconds=self.settle_seconds,
         )
-        # Every sender must observe a complete, non-limited sync stream through
-        # one full quiet window before the canonical `/messages` audit runs.
+        # Every sender must observe a complete sync stream through one full
+        # quiet window before the canonical `/messages` audit runs. A limited
+        # window is repaired from room history before its cursor advances.
         await asyncio.gather(
             *(
                 client.wait_until_quiet(

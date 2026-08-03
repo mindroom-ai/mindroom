@@ -4228,8 +4228,8 @@ async def test_duplicate_canonical_reply_inside_edit_window_is_detected() -> Non
 
 
 @pytest.mark.asyncio
-async def test_matrix_quiet_window_rejects_limited_sync_without_advancing_cursor() -> None:
-    """A truncated saturation window fails instead of silently skipping events."""
+async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor() -> None:
+    """A truncated saturation window is backfilled before its cursor advances."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
 
     async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
@@ -4248,11 +4248,52 @@ async def test_matrix_quiet_window_rejects_limited_sync_without_advancing_cursor
             },
         }
 
+    async def paginate_room(room_id: str) -> list[dict[str, Any]]:
+        assert room_id == "!room:example"
+        return [{"event_id": "$recovered"}]
+
     client.sync = limited_sync  # type: ignore[method-assign]
+    client.paginate_room = paginate_room  # type: ignore[method-assign]
     try:
-        with pytest.raises(AssertionError, match="limited timeline"):
-            await client.wait_until_quiet(deadline_seconds=1.0, quiet_seconds=0.0)
+        await client.wait_until_quiet(deadline_seconds=1.0, quiet_seconds=0.0)
+        assert client.next_batch == "truncated"
+        assert client.seen_events == {"$recovered": {"event_id": "$recovered"}}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_matrix_limited_sync_does_not_advance_cursor_when_repair_fails() -> None:
+    """A failed exact backfill leaves the sync cursor at its last complete token."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+
+    async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms > 0
+        return {
+            "next_batch": "truncated",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def paginate_room(_room_id: str) -> list[dict[str, Any]]:
+        msg = "backfill failed"
+        raise RuntimeError(msg)
+
+    client.sync = limited_sync  # type: ignore[method-assign]
+    client.paginate_room = paginate_room  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="backfill failed"):
+            await client.sync_incremental(timeout_ms=1)
         assert client.next_batch is None
+        assert client.seen_events == {}
     finally:
         await client.close()
 
