@@ -3198,6 +3198,54 @@ async def test_all_reply_body_oracles_use_same_total_replacement_order() -> None
         await client.close()
 
 
+def test_response_view_diagnostic_exposes_order_status_and_body_tail() -> None:
+    """Timeout evidence identifies which Matrix replacement actually wins."""
+    original = _agent_reply_event("$source", "$reply", "original")
+    original["origin_server_ts"] = 99
+    original["content"]["io.mindroom.stream_status"] = "pending"
+    partial = _agent_edit_event("$reply", "$partial", "PARTIAL", ts=100)
+    partial["content"]["m.new_content"]["io.mindroom.stream_status"] = "streaming"
+    complete = _agent_edit_event("$reply", "$complete", "FINAL END call=1", ts=101)
+    complete["content"]["m.new_content"]["io.mindroom.stream_status"] = "completed"
+
+    diagnostic = live_fuzz._response_view_diagnostic(
+        (complete, original, partial),
+        "$reply",
+    )
+
+    assert diagnostic == {
+        "original_present": True,
+        "ordered_candidates": [
+            {
+                "event_id": "$reply",
+                "origin_server_ts": 99,
+                "source": "original",
+                "stream_status": "pending",
+                "body_length": 8,
+                "body_tail": "original",
+            },
+            {
+                "event_id": "$partial",
+                "origin_server_ts": 100,
+                "source": "standalone",
+                "stream_status": "streaming",
+                "body_length": 7,
+                "body_tail": "PARTIAL",
+            },
+            {
+                "event_id": "$complete",
+                "origin_server_ts": 101,
+                "source": "standalone",
+                "stream_status": "completed",
+                "body_length": 16,
+                "body_tail": "FINAL END call=1",
+            },
+        ],
+        "latest_body_length": 16,
+        "latest_body_tail": "FINAL END call=1",
+    }
+
+
 @pytest.mark.asyncio
 async def test_all_reply_body_oracles_read_server_bundled_replacement() -> None:
     """Compacted history exposes its latest edit through bundled relations."""

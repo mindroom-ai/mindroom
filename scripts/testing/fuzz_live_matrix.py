@@ -49,7 +49,7 @@ import nio
 import yaml
 
 import mindroom
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import SOURCE_KIND_KEY, STREAM_STATUS_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -3612,8 +3612,7 @@ def _response_view_diagnostic(
     response_event_id: str,
 ) -> dict[str, object]:
     """Summarize one response view without dumping progressive body contents."""
-    standalone_edit_ids: list[str] = []
-    bundled_edit_ids: list[str] = []
+    candidates: dict[str, tuple[Mapping[str, Any], bool, str]] = {}
     original_present = False
     for event in events:
         event_id = event.get("event_id")
@@ -3622,24 +3621,47 @@ def _response_view_diagnostic(
             continue
         if event_id == response_event_id:
             original_present = True
-            bundled_edit_ids.extend(
-                replacement["event_id"]
-                for replacement in _bundled_replacement_events(event)
-                if isinstance(replacement["event_id"], str)
-            )
+            candidates[event_id] = (event, False, "original")
+            for replacement in _bundled_replacement_events(event):
+                replacement_id = replacement["event_id"]
+                if isinstance(replacement_id, str):
+                    candidates[replacement_id] = (replacement, True, "bundled")
         relation = content.get("m.relates_to")
         if (
             isinstance(relation, Mapping)
             and relation.get("rel_type") == "m.replace"
             and relation.get("event_id") == response_event_id
         ):
-            standalone_edit_ids.append(event_id)
+            candidates[event_id] = (event, True, "standalone")
+
+    ordered_candidates: list[dict[str, object]] = []
+    for event_id, (event, is_edit, source) in sorted(
+        candidates.items(),
+        key=lambda item: _replacement_order(
+            item[0],
+            item[1][0].get("origin_server_ts"),
+            is_edit=item[1][1],
+        ),
+    ):
+        content = event.get("content")
+        assert isinstance(content, Mapping)
+        body_source = content.get("m.new_content") if is_edit else content
+        normalized_body_source = body_source if isinstance(body_source, Mapping) else {}
+        body = _canonical_message_body(content, is_edit=is_edit) or ""
+        ordered_candidates.append(
+            {
+                "event_id": event_id,
+                "origin_server_ts": event.get("origin_server_ts"),
+                "source": source,
+                "stream_status": normalized_body_source.get(STREAM_STATUS_KEY),
+                "body_length": len(body),
+                "body_tail": body[-160:],
+            },
+        )
     body = _latest_response_body(events, response_event_id)
     return {
         "original_present": original_present,
-        "standalone_edit_count": len(standalone_edit_ids),
-        "standalone_edit_ids_tail": sorted(standalone_edit_ids)[-5:],
-        "bundled_edit_ids": sorted(set(bundled_edit_ids)),
+        "ordered_candidates": ordered_candidates,
         "latest_body_length": len(body),
         "latest_body_tail": body[-160:],
     }
