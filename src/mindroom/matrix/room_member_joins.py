@@ -291,8 +291,11 @@ def room_member_sync_state_plan(
     """Classify state events into durable hook dispatches and baseline markers."""
     dispatch_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
     record_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
+    limited_room_ids = frozenset(
+        room_id for room_id, join_info in response.rooms.join.items() if join_info.timeline.limited
+    )
     for room, event in _room_member_events_from_sync_state(response, rooms=rooms):
-        if record_only:
+        if record_only or room.room_id in limited_room_ids:
             record_events.append((room, event))
             continue
         if (

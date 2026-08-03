@@ -229,6 +229,20 @@ class DispatchObligationRunner:
             source_event_ids,
         )
 
+    async def unsettled_room_lifecycle_member_ids(self) -> frozenset[tuple[str, str]]:
+        """Return room/member identities still owned by lifecycle obligations."""
+        obligations = await asyncio.to_thread(self.store.pending)
+        members: set[tuple[str, str]] = set()
+        for obligation in obligations:
+            if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
+                continue
+            event = parse_recovery_event(obligation)
+            if not isinstance(event, nio.RoomMemberEvent):
+                msg = f"Room lifecycle obligation {obligation.source_event_id!r} is not a member event"
+                raise DispatchObligationCorruptionError(msg)
+            members.add((obligation.room_id, event.state_key))
+        return frozenset(members)
+
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
         client.add_event_admission_callback(self._admit_source_event)

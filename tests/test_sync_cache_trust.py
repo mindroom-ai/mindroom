@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import (
+    SyncCacheWriteResult,
+    SyncCheckpoint,
+    SyncTrustState,
+    handle_unknown_pos,
+)
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
@@ -59,6 +64,50 @@ async def test_matching_checkpoint_restores_without_cold_cleanup(tmp_path: Path)
     assert trust.checkpoint is None
     cache.initialize.assert_awaited_once()
     cache.purge_principal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safe_token", ["s_safe", None], ids=["warm", "cold"])
+async def test_startup_resumes_nio_transport_then_requires_safe_replay(
+    tmp_path: Path,
+    safe_token: str | None,
+) -> None:
+    """A newer NIO cursor may drain persisted gaps but cannot certify cache state."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    if safe_token is not None:
+        save_sync_token(tmp_path, "code", safe_token, cache_generation=_GENERATION)
+
+    token = await trust.prepare_startup(
+        transport_resume_token="s_nio_live",  # noqa: S106
+    )
+    replay = await trust.certify_response(
+        next_batch="s_after_recovery",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert token == "s_nio_live"  # noqa: S105
+    assert replay.reason == "sync_cache_replay_required"
+    assert replay.reset_client_token is True
+    assert trust.retry_token() == safe_token
+
+
+@pytest.mark.asyncio
+async def test_startup_matching_nio_and_safe_tokens_need_no_replay(tmp_path: Path) -> None:
+    """An already certified NIO transport position remains ordinary warm startup."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_safe", cache_generation=_GENERATION)
+
+    token = await trust.prepare_startup(
+        transport_resume_token="s_safe",  # noqa: S106
+    )
+    decision = await trust.certify_response(
+        next_batch="s_after",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert token == "s_safe"  # noqa: S105
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.asyncio
@@ -151,7 +200,6 @@ async def test_complete_cache_delta_certifies_raw_sync_continuity(tmp_path: Path
     decision = await trust.certify_response(
         next_batch="s_complete",
         cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=False,
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -171,7 +219,6 @@ async def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_pa
     decision = trust.plan_response(
         next_batch="s_planned",
         cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=False,
     )
 
     assert decision.checkpoint_to_save == SyncCheckpoint("s_planned")
@@ -227,7 +274,6 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
     decision = trust.plan_response(
         next_batch="s_stale_after_cleanup",
         cache_result=cache_result,
-        first_sync=False,
     )
 
     assert await trust.invalidate_for_cache_scope_cleanup()
@@ -243,6 +289,70 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cache_scope_invalidation_preserves_pending_nio_recovery(tmp_path: Path) -> None:
+    """Room cleanup clears the checkpoint but not NIO's in-flight recovery handoff."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    gap = await trust.certify_response(
+        next_batch="s_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            unrecovered_room_ids=frozenset({"!gap:localhost"}),
+        ),
+    )
+    assert gap.reset_client_token is False
+
+    assert await trust.invalidate_for_cache_scope_cleanup()
+
+    assert trust.rewind_is_deferred_until_recovery()
+    assert trust.retry_token() is None
+    recovery = await trust.certify_response(
+        next_batch="s_recovered",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            recovered_room_ids=frozenset({"!gap:localhost"}),
+        ),
+    )
+
+    assert recovery.reason == "sync_cache_replay_required"
+    assert recovery.reset_client_token is True
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_gap_plan_keeps_recovery_handoff_after_cache_invalidation(
+    tmp_path: Path,
+) -> None:
+    """A cleanup racing plan application cannot rewind beneath NIO's open gap."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    cache_result = SyncCacheWriteResult(
+        complete=False,
+        unrecovered_room_ids=frozenset({"!gap:localhost"}),
+    )
+    decision = trust.plan_response(
+        next_batch="s_gap",
+        cache_result=cache_result,
+    )
+
+    assert await trust.invalidate_for_cache_scope_cleanup()
+    applied, _record = await trust.apply_response(
+        decision,
+        cache_result=cache_result,
+    )
+
+    assert applied.reason == "cache_scope_invalidated"
+    assert applied.clear_saved_token is True
+    assert applied.reset_client_token is False
+    assert applied.unresolved_recovery_room_ids == frozenset({"!gap:localhost"})
+    assert applied.replay_required_after_recovery is True
+    assert trust.rewind_is_deferred_until_recovery()
+    assert trust.retry_token() is None
+
+
+@pytest.mark.asyncio
 async def test_cache_scope_invalidation_serializes_after_inflight_certification(
     tmp_path: Path,
 ) -> None:
@@ -252,7 +362,6 @@ async def test_cache_scope_invalidation_serializes_after_inflight_certification(
     decision = trust.plan_response(
         next_batch="s_stale",
         cache_result=cache_result,
-        first_sync=False,
     )
     write_started = threading.Event()
     release_write = threading.Event()
@@ -354,13 +463,11 @@ async def test_shutdown_persist_without_cache_generation_clears_saved_checkpoint
 
 
 @pytest.mark.asyncio
-async def test_positioned_limited_response_preserves_sync_continuity(tmp_path: Path) -> None:
-    """A limited response after a position must retain the last safe checkpoint."""
+async def test_positioned_limited_response_resets_live_cursor_and_preserves_checkpoint(tmp_path: Path) -> None:
+    """A limited response must replay from the last durable checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
-    trust.state = SyncTrustState.CERTIFIED
-    trust.continuity_store.replace_checkpoint(
-        SyncCheckpoint("s_before_gap", cache_generation=_GENERATION),
-    )
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
 
     decision = await trust.certify_response(
         next_batch="s_partial",
@@ -368,15 +475,174 @@ async def test_positioned_limited_response_preserves_sync_continuity(tmp_path: P
             complete=False,
             limited_room_ids=("!room:localhost",),
         ),
-        first_sync=False,
     )
 
-    assert decision.reset_client_token is False
-    assert decision.reason == "limited_sync_timeline"
+    assert decision.reset_client_token is True
+    assert decision.reason == "cache_write_incomplete"
     assert trust.state is SyncTrustState.UNCERTAIN
     assert trust.checkpoint is None
+    assert trust.retry_token() == "s_before_gap"
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_before_gap",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_positioned_outcomes_drain_gap_then_replay_unresolved_window(tmp_path: Path) -> None:
+    """Outcome disappearance rewinds only after nio had a chance to drain the gap."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+
+    unrecovered = await trust.certify_response(
+        next_batch="s_unrecovered",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({"!room:localhost"}),
+        ),
+    )
+    unresolved = await trust.certify_response(
+        next_batch="s_unclassified",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!room:localhost",),
+        ),
+    )
+    replayed = await trust.certify_response(
+        next_batch="s_replayed",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!room:localhost",),
+        ),
+    )
+
+    assert unrecovered.reset_client_token is False
+    assert unresolved.reason == "sync_recovery_unresolved"
+    assert unresolved.reset_client_token is True
+    assert replayed.reset_client_token is False
+    assert trust.retry_token() == "s_replayed"
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_replayed",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_unrecovered_gap_rewinds_after_outcome_disappears(
+    tmp_path: Path,
+) -> None:
+    """NIO ending an abandoned gap must replay from safe continuity once."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    gap_result = SyncCacheWriteResult(
+        complete=True,
+        unrecovered_room_ids=frozenset({"!room:localhost"}),
+    )
+
+    first = await trust.certify_response(
+        next_batch="s_after_gap_1",
+        cache_result=gap_result,
+    )
+    second = await trust.certify_response(
+        next_batch="s_after_gap_2",
+        cache_result=gap_result,
+    )
+    unresolved = await trust.certify_response(
+        next_batch="s_after_clean_delta",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+    clean = await trust.certify_response(
+        next_batch="s_after_clean_replay",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert first.reset_client_token is False
+    assert second.reset_client_token is False
+    assert unresolved.reason == "sync_recovery_unresolved"
+    assert unresolved.reset_client_token is True
+    assert clean.reset_client_token is False
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.reason is None
+    assert trust.retry_token() == "s_after_clean_replay"
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_after_clean_replay",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovered_outcome_settles_prior_gap_and_certifies(tmp_path: Path) -> None:
+    """A later positive NIO outcome must settle exact recovery debt."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    room_id = "!room:localhost"
+    await trust.certify_response(
+        next_batch="s_after_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    recovered = await trust.certify_response(
+        next_batch="s_after_recovery",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            recovered_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    assert recovered.state is SyncTrustState.CERTIFIED
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_after_recovery",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_consecutive_cache_failures_keep_rewinding_until_certified(tmp_path: Path) -> None:
+    """Each uncached response must be replayed before a later checkpoint can certify."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_failure", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_failure"
+
+    first_failure = await trust.certify_response(
+        next_batch="s1",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            errors=(RuntimeError("first cache write failed"),),
+        ),
+    )
+    second_failure = await trust.certify_response(
+        next_batch="s2",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            errors=(RuntimeError("second cache write failed"),),
+        ),
+    )
+
+    assert first_failure.reset_client_token is True
+    assert second_failure.reset_client_token is True
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert trust.retry_token() == "s_before_failure"
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_before_failure",
+        cache_generation=_GENERATION,
+    )
+
+    success = await trust.certify_response(
+        next_batch="s3",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert success.reset_client_token is False
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s3",  # noqa: S106
         cache_generation=_GENERATION,
     )
 
@@ -402,11 +668,7 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
         return clear_checkpoint()
 
     cache_result = SyncCacheWriteResult(complete=False)
-    decision = trust.plan_response(
-        next_batch=None,
-        cache_result=cache_result,
-        first_sync=False,
-    )
+    decision = handle_unknown_pos()
     with patch.object(
         trust.continuity_store,
         "clear_checkpoint",
@@ -443,7 +705,6 @@ async def test_cancelled_certification_publishes_committed_checkpoint_before_esc
     decision = trust.plan_response(
         next_batch="s_committed",
         cache_result=cache_result,
-        first_sync=False,
     )
     write_started = threading.Event()
     release_write = threading.Event()
@@ -496,11 +757,7 @@ async def test_clear_transforms_fresh_store_state_when_cached_checkpoint_is_abse
         SyncCheckpoint("s_concurrent", cache_generation=_GENERATION),
     )
     cache_result = SyncCacheWriteResult(complete=False)
-    decision = trust.plan_response(
-        next_batch=None,
-        cache_result=cache_result,
-        first_sync=False,
-    )
+    decision = handle_unknown_pos()
 
     await trust.apply_response(decision, cache_result=cache_result)
 
@@ -508,8 +765,8 @@ async def test_clear_transforms_fresh_store_state_when_cached_checkpoint_is_abse
 
 
 @pytest.mark.asyncio
-async def test_limited_windows_preserve_cursor_until_complete_delta_certifies(tmp_path: Path) -> None:
-    """Cache gaps retain continuity until a complete delta supersedes it."""
+async def test_limited_recovery_keeps_rewinding_until_complete_delta_certifies(tmp_path: Path) -> None:
+    """Each unresolved recovery window must replay until a complete delta certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -519,7 +776,6 @@ async def test_limited_windows_preserve_cursor_until_complete_delta_certifies(tm
             complete=False,
             limited_room_ids=("!room:localhost",),
         ),
-        first_sync=False,
     )
     initial = await trust.certify_response(
         next_batch="s_initial",
@@ -527,16 +783,14 @@ async def test_limited_windows_preserve_cursor_until_complete_delta_certifies(tm
             complete=False,
             limited_room_ids=("!room:localhost",),
         ),
-        first_sync=False,
     )
     complete = await trust.certify_response(
         next_batch="s_complete",
         cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=False,
     )
 
-    assert positioned.reset_client_token is False
-    assert initial.reset_client_token is False
+    assert positioned.reset_client_token is True
+    assert initial.reset_client_token is True
     assert initial.state is SyncTrustState.UNCERTAIN
     assert complete.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
@@ -546,8 +800,8 @@ async def test_limited_windows_preserve_cursor_until_complete_delta_certifies(tm
 
 
 @pytest.mark.asyncio
-async def test_sustained_limited_responses_never_reset_live_cursor(tmp_path: Path) -> None:
-    """Back-to-back cache gaps must retain the live cursor."""
+async def test_sustained_limited_responses_keep_rewinding_until_a_delta_certifies(tmp_path: Path) -> None:
+    """Back-to-back unresolved gaps must not donate an incremental cursor."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -558,17 +812,16 @@ async def test_sustained_limited_responses_never_reset_live_cursor(tmp_path: Pat
                 complete=False,
                 limited_room_ids=("!room:localhost",),
             ),
-            first_sync=False,
         )
         for index in range(4)
     ]
 
-    assert not any(decision.reset_client_token for decision in decisions)
+    assert all(decision.reset_client_token for decision in decisions)
 
 
 @pytest.mark.asyncio
-async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
-    """A since-less startup window may be limited without replaying itself forever."""
+async def test_cold_limited_initial_window_rewinds_until_certified(tmp_path: Path) -> None:
+    """A cold response cannot donate a cursor until its cache result certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     assert await trust.prepare_startup() is None
@@ -578,16 +831,15 @@ async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) 
             complete=False,
             limited_room_ids=("!room:localhost",),
         ),
-        first_sync=True,
     )
 
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
     assert trust.state is SyncTrustState.UNCERTAIN
 
 
 @pytest.mark.asyncio
-async def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -> None:
-    """M_UNKNOWN_POS recovery consumes the next since-less limited window."""
+async def test_unknown_position_limited_window_keeps_rewinding_until_certified(tmp_path: Path) -> None:
+    """M_UNKNOWN_POS recovery cannot advance past an uncertified window."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     unknown = await trust.reject_unknown_pos()
@@ -597,11 +849,10 @@ async def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: P
             complete=False,
             limited_room_ids=("!room:localhost",),
         ),
-        first_sync=False,
     )
 
     assert unknown.reset_client_token is True
-    assert initial.reset_client_token is False
+    assert initial.reset_client_token is True
 
 
 @pytest.mark.asyncio
@@ -632,28 +883,18 @@ async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_response_clear_failure_disables_cache(tmp_path: Path) -> None:
-    """A failed uncertain-response clear must make stale cache rows unusable."""
+    """A failed unknown-position clear must make stale cache rows unusable."""
     trust, cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_preserved", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_preserved"
-    decision = trust.plan_response(
-        next_batch="s_uncertain",
-        cache_result=SyncCacheWriteResult(complete=False),
-        first_sync=True,
-    )
-
     with patch.object(
         trust.continuity_store,
         "clear_checkpoint",
         side_effect=OSError("checkpoint cannot be removed"),
     ):
-        applied, record = await trust.apply_response(
-            decision,
-            cache_result=SyncCacheWriteResult(complete=False),
-        )
+        applied = await trust.reject_unknown_pos()
 
     assert applied.state is SyncTrustState.UNCERTAIN
-    assert record is None
     assert trust.checkpoint is None
     assert load_sync_checkpoint(tmp_path, "code") is not None
     cache.disable.assert_called_once_with("sync_checkpoint_clear_failed")
