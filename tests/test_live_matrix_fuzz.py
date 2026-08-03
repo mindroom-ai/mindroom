@@ -25,6 +25,7 @@ from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from scripts.testing.fuzz_live_matrix import (
+    ORDERLY_SHUTDOWN_MARKER,
     PROJECT_ROOT,
     RESTART_SHUTDOWN_FAILURE_MARKER,
     ExactReplyOracle,
@@ -35,9 +36,11 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperationKind,
     ManagedTuwunelStack,
     RestartRegressionObservation,
+    _log_count,
     _ModelHandler,
     _require_python_313,
     _restart_prompt_observation,
+    _semantic_ingress_markers,
     evaluate_restart_regression,
     live_scenario_from_seed,
     restart_regression_scenario,
@@ -95,8 +98,8 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         if markers == (
             "Received message",
             "agent=general",
-            "!restart:example",
-            "$restart-fresh",
+            "room_id=!restart:example",
+            "event_id=$restart-fresh",
         ):
             self.order.append("durable-callback")
         return True
@@ -143,7 +146,8 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         self.order.append("sync-checkpoint")
         return self.checkpoint_ready
 
-    def restart_mindroom_for_recovery(self) -> None:
+    def restart_mindroom_for_recovery(self, *, timeout: float) -> None:
+        assert timeout == 1
         self.order.append("hard-restart")
 
     def log_count(self, *markers: str) -> int:
@@ -201,7 +205,8 @@ async def test_restart_room_exposes_prejoin_history(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(client, "_request", record_request)
     try:
-        assert await client.create_public_room() == "!restart:example"
+        await client.create_public_room()
+        assert client.room_id == "!restart:example"
         assert request == (
             "POST",
             "/_matrix/client/v3/createRoom",
@@ -244,8 +249,8 @@ def _restart_response(
 
 
 _RESTART_OBSERVATION_LOG = (
-    "Received message agent=general !restart:example $fresh\n"
-    "Received message agent=general !restart:example $fresh\n"
+    "Received message agent=general event_id=$fresh room_id=!restart:example\n"
+    "Received message agent=general event_id=$fresh room_id=!restart:example\n"
     "Preparing agent and prompt agent=general $fresh\n"
 )
 
@@ -406,16 +411,29 @@ def test_restart_regression_scenario_has_fixed_empty_shape() -> None:
     scenario.validate()
 
 
-@pytest.mark.parametrize("profile", ["fuzz", "saturation", "restart-regression"])
-def test_python_313_requirement_applies_to_every_live_profile(
-    monkeypatch: pytest.MonkeyPatch,
-    profile: str,
-) -> None:
-    """Every live profile must match the production Python runtime."""
+def test_semantic_ingress_count_excludes_restart_relay_thread_reference() -> None:
+    """A relay referring to the fresh thread must not count as fresh event ingress."""
+    markers = _semantic_ingress_markers(
+        agent="general",
+        room_id="!restart:example",
+        event_id="$fresh",
+    )
+    log = (
+        "Received message agent=general event_id=$fresh room_id=!restart:example thread_id=None\n"
+        "Received message agent=general event_id=$relay room_id=!restart:example thread_id=$fresh\n"
+    )
+
+    assert _log_count(log, *markers) == 1
+
+
+def test_python_313_requirement_is_scoped_to_restart_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing live profiles may run from supported Python while their child stays pinned."""
     monkeypatch.setattr(sys, "version_info", (3, 12))
 
-    with pytest.raises(RuntimeError, match=rf"{profile} requires Python 3\.13"):
-        _require_python_313(profile)
+    _require_python_313("fuzz")
+    _require_python_313("saturation")
+    with pytest.raises(RuntimeError, match=r"restart-regression requires Python 3\.13"):
+        _require_python_313("restart-regression")
 
 
 def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
@@ -455,6 +473,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
+            cached_event_pair_count=0,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_response_complete=False,
@@ -468,6 +487,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
+    assert any("invariant=historical_event_pairs_cached" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
@@ -926,7 +946,7 @@ def test_restart_recovery_hard_kills_and_boots_new_model_generation(
 
         @staticmethod
         def wait(*, timeout: float) -> int:
-            assert timeout == 10
+            assert 0 < timeout <= 7
             return -9
 
     stack = ManagedTuwunelStack()
@@ -940,10 +960,18 @@ def test_restart_recovery_hard_kills_and_boots_new_model_generation(
         )
         stack._mindroom_process = cast("Any", old_process)
         monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
-        monkeypatch.setattr(stack, "_start_mindroom", lambda: setattr(stack, "_mindroom_process", new_process))
+        startup_timeouts: list[float] = []
 
-        assert stack.restart_mindroom_for_recovery() is None
+        def record_start(*, timeout: float) -> None:
+            startup_timeouts.append(timeout)
+            stack._mindroom_process = cast("Any", new_process)
+
+        monkeypatch.setattr(stack, "_start_mindroom", record_start)
+
+        assert stack.restart_mindroom_for_recovery(timeout=7) is None
         assert signals == [(10, signal.SIGKILL)]
+        assert len(startup_timeouts) == 1
+        assert 0 < startup_timeouts[0] <= 7
         assert "mindroom-live-fuzz-recovered" in stack.config_path.read_text(encoding="utf-8")
     finally:
         stack._mindroom_process = None
@@ -1071,6 +1099,56 @@ def test_managed_runtime_overrides_inherited_logging(monkeypatch: pytest.MonkeyP
         stack.close()
 
 
+def test_managed_runtime_pins_child_to_python_313(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every managed MindRoom child must match the production Python runtime."""
+
+    class Process:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    stack = ManagedTuwunelStack()
+    commands: list[list[str]] = []
+    try:
+        stack.storage_path.mkdir()
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            "rooms:\n  lobby:\n    room_id: '!room:example'\n",
+            encoding="utf-8",
+        )
+        stack._log_handle = stack.log_path.open("a", encoding="utf-8")
+        stack._env = stack._mindroom_environment()
+
+        def record_popen(command: list[str], **_kwargs: object) -> Process:
+            commands.append(command)
+            return Process()
+
+        def complete_url_wait(_url: str, *, timeout: float) -> None:
+            assert 0 < timeout <= 7
+
+        monkeypatch.setattr(subprocess, "Popen", record_popen)
+        monkeypatch.setattr(stack, "_wait_for_url", complete_url_wait)
+
+        stack._start_mindroom(timeout=7)
+
+        assert commands == [
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.13",
+                "mindroom",
+                "run",
+                "--api-port",
+                str(stack.api_port),
+                "--log-level",
+                "INFO",
+            ],
+        ]
+    finally:
+        stack._mindroom_process = None
+        stack.close()
+
+
 def test_restart_shutdown_rejects_nonzero_process_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A bounded process exit is graceful only when shutdown succeeds."""
 
@@ -1097,6 +1175,69 @@ def test_restart_shutdown_rejects_nonzero_process_exit(monkeypatch: pytest.Monke
         assert not stack.stop_mindroom(timeout=1)
         assert signals == [(10, signal.SIGINT)]
         assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize("returncode", [-signal.SIGINT, 128 + signal.SIGINT])
+def test_restart_shutdown_accepts_uv_sigint_after_child_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    """The uv wrapper's SIGINT status is clean only after the child drain marker."""
+
+    class WrapperProcess:
+        pid = 10
+
+        def __init__(self) -> None:
+            self.returncode = returncode
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == 1
+            stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
+            return self.returncode
+
+    stack = ManagedTuwunelStack()
+    signals: list[tuple[int, int]] = []
+    try:
+        stack._mindroom_process = cast("Any", WrapperProcess())
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
+
+        assert stack.stop_mindroom(timeout=1)
+        assert signals == [(10, signal.SIGINT)]
+        assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+def test_restart_shutdown_rejects_uv_sigint_without_child_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper signal alone must not prove that the managed child drained."""
+
+    class WrapperProcess:
+        pid = 10
+        returncode = 128 + signal.SIGINT
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 1
+            return 128 + signal.SIGINT
+
+    stack = ManagedTuwunelStack()
+    try:
+        stack._mindroom_process = cast("Any", WrapperProcess())
+        monkeypatch.setattr(os, "killpg", lambda _pid, _signum: None)
+
+        assert not stack.stop_mindroom(timeout=1)
     finally:
         stack.close()
 
@@ -1194,7 +1335,7 @@ async def test_restart_observation_rejects_nonqualifying_evidence(
     event_id = "$agent-response"
     body = "LIVE-FUZZ runtime-generation=recovered END call=1"
     if case == "historical-callback":
-        log = "matrix_event_callback_started !restart:example $old-media\n" + log
+        log = "matrix_event_callback_started event_id=$old-media room_id=!restart:example\n" + log
     elif case == "router-response":
         sender = stack.router_id
         event_id = "$router-response"
@@ -1254,9 +1395,10 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
     observation = await _collect_seeded_restart_observation(
         stack,
         log=(
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
-            "matrix_event_callback_started agent_name=general !restart:example $fresh\n" + _RESTART_OBSERVATION_LOG
+            "matrix_event_callback_started agent_name=general event_id=$fresh room_id=!restart:example\n"
+            "matrix_event_callback_started agent_name=general event_id=$fresh room_id=!restart:example\n"
+            "matrix_event_callback_started agent_name=general event_id=$fresh room_id=!restart:example\n"
+            + _RESTART_OBSERVATION_LOG
         ),
         events=(_restart_response("$agent-response", stack.agent_id, "$fresh"),),
         reply_timeout=0,
@@ -1387,8 +1529,8 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "Received message agent=general !restart:example $fresh\n"
-            "Received message agent=general !restart:example $fresh\n"
+            "Received message agent=general event_id=$fresh room_id=!restart:example\n"
+            "Received message agent=general event_id=$fresh room_id=!restart:example\n"
             "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
