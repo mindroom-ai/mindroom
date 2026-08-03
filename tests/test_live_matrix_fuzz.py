@@ -2065,6 +2065,47 @@ async def test_restart_observation_reports_incomplete_fresh_response(
 
 
 @pytest.mark.asyncio
+async def test_restart_observation_attributes_auto_resumed_response_to_original_source(
+    seeded_restart_observation_stack: tuple[ManagedTuwunelStack, list[float]],
+) -> None:
+    """A completed auto-resume chain is the final response for its interrupted source."""
+    stack, stop_calls = seeded_restart_observation_stack
+    interrupted = _restart_response(
+        "$interrupted",
+        stack.agent_id,
+        "$fresh",
+        body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
+    )
+    relay = {
+        "event_id": "$relay",
+        "sender": stack.router_id,
+        "type": "m.room.message",
+        "content": {
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            "body": f"@agent {AUTO_RESUME_MESSAGE}",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$fresh",
+                "m.in_reply_to": {"event_id": "$interrupted"},
+            },
+        },
+    }
+    recovered = _restart_response("$recovered", stack.agent_id, "$relay")
+    recovered["content"]["m.relates_to"]["event_id"] = "$fresh"
+
+    observation = await _collect_seeded_restart_observation(
+        stack,
+        log=_RESTART_OBSERVATION_LOG,
+        events=(interrupted, relay, recovered),
+    )
+
+    assert stop_calls == [0.05]
+    assert observation.fresh_agent_output_count == 1
+    assert observation.fresh_response_complete
+    assert observation.recovered_generation_response_observed
+
+
+@pytest.mark.asyncio
 async def test_restart_response_index_honors_sender_override() -> None:
     """Agent and router observations must use their explicitly selected sender."""
     stack = ManagedTuwunelStack()

@@ -4665,7 +4665,11 @@ class LiveFuzzRunner:
             fresh_event_id,
             historical_event_ids,
         )
-        fresh_agent_response_ids = agent.get(fresh_event_id, set())
+        fresh_agent_response_ids = self._restart_response_ids(
+            events,
+            agent,
+            fresh_event_id,
+        )
         fresh_router_response_ids = router.get(fresh_event_id, set())
         fresh_response_bodies = tuple(
             self._latest_event_body(events, response_id) for response_id in sorted(fresh_agent_response_ids)
@@ -4978,6 +4982,36 @@ class LiveFuzzRunner:
     def _combined_response_count(source_event_id: str, *response_indexes: Mapping[str, set[str]]) -> int:
         """Count canonical bot responses across every configured sender."""
         return sum(len(response_ids.get(source_event_id, set())) for response_ids in response_indexes)
+
+    def _restart_response_ids(
+        self,
+        events: Collection[Mapping[str, Any]],
+        agent_responses: Mapping[str, set[str]],
+        source_event_id: str,
+    ) -> set[str]:
+        """Return direct or auto-resumed final responses for one restart source."""
+        direct_response_ids = set(agent_responses.get(source_event_id, set()))
+        relay_response_ids: set[str] = set()
+        for event in events:
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str):
+                continue
+            relay_target = _auto_resume_relay_target(
+                event,
+                relay_senders=(self.stack.router_id,),
+            )
+            if relay_target is not None and relay_target[1] == source_event_id:
+                relay_response_ids.update(agent_responses.get(event_id, set()))
+        if not relay_response_ids:
+            return direct_response_ids
+        uninterrupted_direct_ids = {
+            response_id
+            for response_id in direct_response_ids
+            if not self._latest_event_body(events, response_id).endswith(
+                (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
+            )
+        }
+        return uninterrupted_direct_ids | relay_response_ids
 
     @staticmethod
     def _latest_event_body(
