@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -112,6 +113,12 @@ class _MindRoomAsyncClient(nio.AsyncClient):
                             membership="leave",
                         )
                         for room_id in sorted(recovery_room_ids)
+                    )
+                    # The fresh tokenless response is the new room-state
+                    # authority; retained events preserve callbacks only.
+                    plan = replace(
+                        plan,
+                        events=tuple(replace(event, apply_room_state=False) for event in plan.events),
                     )
                     persist_response_plan(
                         self._recovery,

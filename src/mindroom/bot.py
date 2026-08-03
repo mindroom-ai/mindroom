@@ -1261,6 +1261,10 @@ class AgentBot:
             return
         _, has_retry_token = self._rewind_client_to_retry_token()
         self._room_member_hook_lifecycle.rewound(has_retry_token=has_retry_token)
+        if self.config.matrix_sync.mode == "classic" and self._room_member_hook_lifecycle.baseline_capture_pending:
+            client = self.client
+            assert client is not None
+            client.stop_sync_forever()
 
     def _rewind_client_to_retry_token(self) -> tuple[bool, bool]:
         """Move the Matrix client to the exact generation-safe retry cursor."""
@@ -1393,10 +1397,6 @@ class AgentBot:
         room_member_plan: RoomMemberResponsePlan,
     ) -> None:
         """Finish source-backed lifecycle work before certifying its sync position."""
-        if room_member_plan.baseline_record_events is not None:
-            await self._record_room_member_joined_events(
-                room_member_plan.baseline_record_events,
-            )
         if room_member_plan.drain_captured_timeline:
             await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
         if room_member_plan.baseline_record_events is not None:

@@ -1406,6 +1406,7 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
+    bot.client.stop_sync_forever.assert_called_once_with()
     assert (
         bot._dispatch_obligation_runner._admission_kind(
             _room_member_event(event_id="$timeline-snapshot"),
