@@ -1241,6 +1241,54 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_full_state_request_restarts_before_incremental_sync() -> None:
+    """A first-request SyncError must not let an incremental response become the baseline."""
+    full_state_values: list[bool] = []
+    incremental_sync_attempted = False
+    sync_calls = 0
+
+    class FakeClient:
+        stop_requested = False
+
+        def stop_sync_forever(self) -> None:
+            self.stop_requested = True
+
+        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
+            nonlocal incremental_sync_attempted, sync_calls
+            sync_calls += 1
+            full_state_values.append(full_state)
+            if sync_calls == 1:
+                error = MagicMock(spec=nio.SyncError)
+                error.status_code = "M_LIMIT_EXCEEDED"
+                await AgentBot._on_sync_error(bot, error)
+                incremental_sync_attempted = not self.stop_requested
+            self.stop_requested = False
+
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot.logger = MagicMock()
+    bot._first_sync_done = True
+    bot._last_sync_monotonic = None
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
+    bot._room_member_hook_lifecycle.prepare_startup(
+        transport="classic",
+        resuming_position=True,
+    )
+    bot._sync_shutting_down = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
+    bot.client = FakeClient()
+
+    bot._room_member_hook_lifecycle.begin_sync_loop()
+    await AgentBot.sync_forever(bot)
+    bot._room_member_hook_lifecycle.begin_sync_loop()
+    await AgentBot.sync_forever(bot)
+
+    assert not incremental_sync_attempted
+    assert full_state_values == [True, True]
+
+
+@pytest.mark.asyncio
 async def test_full_state_only_after_successful_first_sync() -> None:
     """sync_forever should stop requesting full state after a successful first sync."""
     full_state_values: list[bool] = []

@@ -1020,7 +1020,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
 
     bot = _router_bot(tmp_path)
     room = _room()
-    gap_room_id = "!gap:localhost"
+    gap_room_id = room.room_id
     bot._first_sync_done = False
     bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot.client.rooms = {room.room_id: room}
@@ -1053,7 +1053,13 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     catchup = _sync_response_with_state(
         room.room_id,
         [_room_member_event(event_id="$existing-member", user_id="@bob:localhost")],
-        timeline_events=[_room_member_event(event_id="$catchup-before-recovery", prev_membership=None)],
+        timeline_events=[
+            _room_member_event(
+                event_id="$catchup-before-recovery",
+                user_id="@bob:localhost",
+                prev_membership=None,
+            ),
+        ],
     )
     catchup.unrecovered_room_ids = frozenset({gap_room_id})
     await bot._dispatch_obligation_runner._admit_source_event(
@@ -1064,6 +1070,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     await bot._on_sync_response(catchup)
 
     assert seen == []
+    assert bot._room_member_hook_lifecycle._baseline_record_pending
     assert bot._room_member_hook_lifecycle.full_state_required
     assert bot._first_sync_done
 
@@ -1083,6 +1090,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
 
     assert seen == []
     assert bot.client.next_batch == "s_restored"
+    assert bot._room_member_hook_lifecycle._baseline_record_pending
     assert bot._room_member_hook_lifecycle.full_state_required
     assert bot._first_sync_done
 
@@ -1090,7 +1098,11 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
         room.room_id,
         [],
         timeline_events=[
-            _room_member_event(event_id="$catchup-before-recovery", prev_membership=None),
+            _room_member_event(
+                event_id="$catchup-before-recovery",
+                user_id="@bob:localhost",
+                prev_membership=None,
+            ),
             _room_member_event(
                 event_id="$join-during-recovery",
                 user_id="@carol:localhost",

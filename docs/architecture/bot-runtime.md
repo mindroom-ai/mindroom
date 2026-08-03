@@ -102,6 +102,8 @@ Malformed or future continuity records are durably repaired to an empty cold rec
 Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 `RoomMemberHookLifecycle` owns Classic baseline and catch-up authority while keeping Sliding Sync history fenced.
+It retains the full-state baseline in memory across uncertain responses and records it only at a certifiable response, after exact admitted lifecycle obligations can fence their room/member markers.
+If the one-shot Classic full-state request fails, the receive iteration exits so its replacement requests full state again before capturing a baseline.
 Classic and Sliding response handlers drain admitted room-member lifecycle obligations before checkpoint certification or response readiness, so generic startup recovery cannot race onboarding work.
 Malformed room-member lifecycle obligations fence snapshot-marker writes for their entire room and remain durable for operator repair.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.

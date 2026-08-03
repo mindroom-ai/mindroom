@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import nio
+import pytest
 
 from mindroom.matrix.room_member_hook_lifecycle import (
     RoomMemberHookLifecycle,
@@ -26,10 +27,35 @@ def test_tokenless_baseline_transitions_to_catchup_until_certified() -> None:
     lifecycle = RoomMemberHookLifecycle(enabled=True)
     lifecycle.prepare_startup(transport="classic", resuming_position=False)
 
-    assert lifecycle.baseline_record_pending
+    assert lifecycle._baseline_record_pending
     assert lifecycle.full_state_required
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
+    assert lifecycle.baseline_capture_pending
+
+    lifecycle.capture_baseline(())
+
+    uncertain_baseline = lifecycle.plan_response(
+        _decision(SyncTrustState.UNCERTAIN),
+        first_sync_response=False,
+    )
+    certifiable_baseline = lifecycle.plan_response(
+        _decision(SyncTrustState.CERTIFIED),
+        first_sync_response=False,
+    )
+
+    assert uncertain_baseline.baseline_record_events is None
+    assert certifiable_baseline.baseline_record_events == ()
+
+    lifecycle.rewound(has_retry_token=True)
+    assert not lifecycle.baseline_capture_pending
+    assert (
+        lifecycle.plan_response(
+            _decision(SyncTrustState.CERTIFIED),
+            first_sync_response=False,
+        ).baseline_record_events
+        == ()
+    )
 
     lifecycle.baseline_recorded()
     plan = lifecycle.plan_response(
@@ -37,7 +63,7 @@ def test_tokenless_baseline_transitions_to_catchup_until_certified() -> None:
         first_sync_response=False,
     )
 
-    assert not lifecycle.baseline_record_pending
+    assert not lifecycle._baseline_record_pending
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
     assert not plan.drain_captured_timeline
 
@@ -52,23 +78,43 @@ def test_tokenless_baseline_transitions_to_catchup_until_certified() -> None:
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
 
 
+def test_tokenless_rewind_discards_stale_baseline_and_rearms_capture() -> None:
+    """A tokenless reset must replace rather than certify the rejected snapshot."""
+    lifecycle = RoomMemberHookLifecycle(enabled=True)
+    lifecycle.prepare_startup(transport="classic", resuming_position=True)
+    lifecycle.capture_baseline(())
+
+    lifecycle.rewound(has_retry_token=False)
+
+    assert lifecycle._baseline_record_pending
+    assert lifecycle.baseline_capture_pending
+    with pytest.raises(RuntimeError, match="without a captured full-state baseline"):
+        lifecycle.plan_response(
+            _decision(SyncTrustState.CERTIFIED),
+            first_sync_response=False,
+        )
+
+
 def test_safe_rewind_and_loop_replacement_require_full_state_catchup() -> None:
     """A safe rewind must capture replay joins and reacquire a replacement baseline."""
     lifecycle = RoomMemberHookLifecycle(enabled=True)
     lifecycle.prepare_startup(transport="classic", resuming_position=False)
+    lifecycle.capture_baseline(())
     lifecycle.baseline_recorded()
     lifecycle.certified()
 
     lifecycle.rewound(has_retry_token=True)
     assert lifecycle.full_state_required
-    assert not lifecycle.baseline_record_pending
+    assert not lifecycle._baseline_record_pending
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
 
     lifecycle.begin_sync_loop()
-    assert lifecycle.baseline_record_pending
+    assert lifecycle._baseline_record_pending
+    assert lifecycle.baseline_capture_pending
 
+    lifecycle.capture_baseline(())
     lifecycle.baseline_recorded()
-    assert not lifecycle.baseline_record_pending
+    assert not lifecycle._baseline_record_pending
 
 
 def test_unknown_position_and_stop_reset_phase_boundaries() -> None:
@@ -77,7 +123,7 @@ def test_unknown_position_and_stop_reset_phase_boundaries() -> None:
     lifecycle.prepare_startup(transport="classic", resuming_position=True)
     lifecycle.unknown_position()
 
-    assert lifecycle.baseline_record_pending
+    assert lifecycle._baseline_record_pending
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
 
@@ -90,6 +136,7 @@ def test_live_response_drains_admitted_timeline_before_dispatching_state() -> No
     """Normal responses drain response-owned live work and dispatch state deltas."""
     lifecycle = RoomMemberHookLifecycle(enabled=True)
     lifecycle.prepare_startup(transport="classic", resuming_position=False)
+    lifecycle.capture_baseline(())
     lifecycle.baseline_recorded()
     lifecycle.certified()
 
@@ -108,7 +155,7 @@ def test_sliding_startup_admits_only_live_events_without_classic_baseline() -> N
 
     lifecycle.prepare_startup(transport="sliding", resuming_position=True)
 
-    assert not lifecycle.baseline_record_pending
+    assert not lifecycle._baseline_record_pending
     assert not lifecycle.full_state_required
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)

@@ -1392,6 +1392,11 @@ class AgentBot:
         room_member_plan: RoomMemberResponsePlan,
     ) -> None:
         """Finish source-backed lifecycle work before certifying its sync position."""
+        if room_member_plan.baseline_record_events is not None:
+            await self._record_room_member_joined_events(
+                room_member_plan.baseline_record_events,
+            )
+            self._room_member_hook_lifecycle.baseline_recorded()
         if room_member_plan.drain_captured_timeline:
             await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
         if room_member_plan.dispatch_state:
@@ -1430,9 +1435,19 @@ class AgentBot:
         )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
-                if self._room_member_hook_lifecycle.baseline_record_pending:
-                    await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-                    self._room_member_hook_lifecycle.baseline_recorded()
+                if self._room_member_hook_lifecycle.baseline_capture_pending:
+                    client = self.client
+                    assert client is not None
+                    baseline_plan = room_member_sync_state_plan(
+                        response,
+                        rooms=client.rooms,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                        record_only=True,
+                    )
+                    self._room_member_hook_lifecycle.capture_baseline(
+                        baseline_plan.record_events,
+                    )
                 await self._apply_own_room_membership_from_sync(response)
                 await cache_fenced_world_readable_join_history(
                     cast("nio.AsyncClient", self.client),
@@ -1556,6 +1571,14 @@ class AgentBot:
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
+        if self._room_member_hook_lifecycle.baseline_capture_pending:
+            client = self.client
+            assert client is not None
+            client.stop_sync_forever()
+            self.logger.warning(
+                "matrix_sync_full_state_request_failed_restarting",
+                status_code=_response.status_code,
+            )
         if _response.status_code == "M_UNKNOWN_POS":
             client = self.client
             cleanup_succeeded = False
@@ -2271,15 +2294,22 @@ class AgentBot:
                 event,
                 DispatchCallbackKind.ROOM_LIFECYCLE,
             )
-        if plan.record_events:
-            fenced_members, corrupt_room_ids = await self._dispatch_obligation_runner.room_lifecycle_marker_fence()
-            record_events = tuple(
-                (room, event)
-                for room, event in plan.record_events
-                if room.room_id not in corrupt_room_ids and (room.room_id, event.state_key) not in fenced_members
-            )
-        else:
-            record_events = ()
+        await self._record_room_member_joined_events(plan.record_events)
+
+    async def _record_room_member_joined_events(
+        self,
+        events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
+    ) -> None:
+        """Persist snapshot markers that are not fenced by exact lifecycle work."""
+        candidate_events = tuple(events)
+        if not candidate_events:
+            return
+        fenced_members, corrupt_room_ids = await self._dispatch_obligation_runner.room_lifecycle_marker_fence()
+        record_events = tuple(
+            (room, event)
+            for room, event in candidate_events
+            if room.room_id not in corrupt_room_ids and (room.room_id, event.state_key) not in fenced_members
+        )
         if record_events:
             async with self._room_member_join_lock:
                 await asyncio.to_thread(
