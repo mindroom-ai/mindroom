@@ -40,6 +40,7 @@ class RoomMemberHookLifecycle:
 
     enabled: bool
     _phase: _RoomMemberHookPhase = field(init=False)
+    _transport: Literal["classic", "sliding"] = field(init=False, default="classic")
     _baseline_record_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] | None = field(
         init=False,
         default=None,
@@ -81,7 +82,7 @@ class RoomMemberHookLifecycle:
         return self._phase in {
             _RoomMemberHookPhase.FULL_STATE_CATCHUP,
             _RoomMemberHookPhase.CATCHUP,
-        }
+        } or (self._phase is _RoomMemberHookPhase.LIVE and self._transport == "classic")
 
     def prepare_startup(
         self,
@@ -90,6 +91,7 @@ class RoomMemberHookLifecycle:
         resuming_position: bool,
     ) -> None:
         """Initialize startup without carrying Classic history authority into Sliding."""
+        self._transport = transport
         if not self.enabled:
             self._phase = _RoomMemberHookPhase.DISABLED
             self._discard_baseline()

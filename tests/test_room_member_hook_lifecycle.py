@@ -75,7 +75,7 @@ def test_tokenless_baseline_transitions_to_catchup_until_certified() -> None:
 
     lifecycle.certified()
     assert not lifecycle.full_state_required
-    assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
+    assert lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
 
 
 def test_tokenless_rewind_discards_stale_baseline_and_rearms_capture() -> None:
@@ -159,3 +159,6 @@ def test_sliding_startup_admits_only_live_events_without_classic_baseline() -> N
     assert not lifecycle.full_state_required
     assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)
     assert lifecycle.admission_enabled(nio.TimelineEventProvenance.LIVE)
+
+    lifecycle.certified()
+    assert not lifecycle.admission_enabled(nio.TimelineEventProvenance.HISTORY)

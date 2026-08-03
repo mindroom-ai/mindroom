@@ -806,6 +806,96 @@ async def test_router_ignores_limited_sync_state_member_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_classic_live_gap_recovers_member_join_before_snapshot_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic live-gap history must retain the exact join before state is marked."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room_id = "!limited:localhost"
+    history_join = _room_member_event(event_id="$history-join")
+    state_member = _room_member_event(event_id="$limited-state", prev_membership=None)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.next_batch = "s_before_gap"
+    client._recovery_room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_join],
+            start="s_before_gap",
+            end="p_gap_start",
+        ),
+    )
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._dispatch_obligation_runner.register_source_callbacks(
+        client,
+        owner=bot._runtime_view,
+    )
+    await bot._conversation_cache.mark_room_joined(room_id)
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_after_gap",
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    room_id: {
+                        "timeline": {
+                            "events": [],
+                            "limited": True,
+                            "prev_batch": "p_gap_start",
+                        },
+                        "state": {"events": [state_member.source]},
+                        "ephemeral": {"events": []},
+                        "account_data": {"events": []},
+                    },
+                },
+            },
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult.from_sync_response(response, complete=True)),
+    )
+
+    try:
+        await client.receive_response(response)
+        await bot._on_sync_response(response)
+
+        assert response.recovered_room_ids == frozenset({room_id})
+        assert seen == [history_join.event_id]
+
+        await bot._on_room_member(
+            client.rooms[room_id],
+            _room_member_event(event_id="$profile-update", prev_membership=None),
+        )
+
+        assert seen == [history_join.event_id]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
