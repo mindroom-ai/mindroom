@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
@@ -140,8 +140,10 @@ def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
     return cast("dict[str, object]", content)
 
 
-def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEvent]:
-    """Return whether one dispatch event is image, file, or video media."""
+def is_media_dispatch_event(event: DispatchEvent) -> bool:
+    """Return whether one dispatch event is image, file, or video media, direct or wrapped."""
+    if isinstance(event, PreparedIngress):
+        return event.raw_event is not None
     return is_matrix_media_dispatch_event(event)
 
 
