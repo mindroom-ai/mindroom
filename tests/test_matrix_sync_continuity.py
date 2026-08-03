@@ -907,7 +907,8 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         },
         "pending_join_decrypt_fences": [],
         "revision": 1,
-        "version": "mindroom-sync-continuity-v2",
+        "unsettled_recovery_room_ids": [],
+        "version": "mindroom-sync-continuity-v3",
     }
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     checkpoint = load_sync_checkpoint(tmp_path, "code")
@@ -2842,21 +2843,12 @@ async def test_new_world_readable_join_caches_prejoin_history_before_fence_opens
         )
         assert response.unrecovered_room_ids == frozenset()
         assert cached_while_fenced == [True, True]
-        assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+        assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
         assert bot._dispatch_obligation_store.pending() == ()
         turn_callback.assert_not_awaited()
 
-        complete_response = _newly_joined_world_readable_response(
-            room_id,
-            bot.matrix_id.full_id,
-            limited=False,
-            next_batch="s_after_open",
-        )
-        await client.receive_response(complete_response)
-        await client.run_response_callbacks([complete_response])
-        assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
     finally:
         await client.close()
         await cache_root.close()
@@ -3237,10 +3229,15 @@ async def test_continuity_acceptance_runs_off_event_loop(tmp_path: Path) -> None
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: Iterable[str],
+        unsettled_recovery_room_ids: Iterable[str],
     ) -> SyncContinuityRecord:
         nonlocal write_thread
         write_thread = threading.current_thread()
-        return accept_response(checkpoint, joined_room_ids=joined_room_ids)
+        return accept_response(
+            checkpoint,
+            joined_room_ids=joined_room_ids,
+            unsettled_recovery_room_ids=unsettled_recovery_room_ids,
+        )
 
     with (
         patch.object(

@@ -1227,6 +1227,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def cache_sync_timeline_for_certification(
         self,
         response: nio.SyncResponse,
+        *,
+        no_recovery_needed_room_ids: frozenset[str] = frozenset(),
     ) -> SyncCacheWriteResult:
         """Durably persist sync timeline events and report cache-certification status."""
-        return await self._sync.cache_sync_timeline_for_certification(response)
+        return await self._sync.cache_sync_timeline_for_certification(
+            response,
+            no_recovery_needed_room_ids=no_recovery_needed_room_ids,
+        )

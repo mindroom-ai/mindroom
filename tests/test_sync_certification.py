@@ -55,12 +55,12 @@ def test_recovered_limited_room_certifies_after_nio_callback_success() -> None:
     )
 
     assert cache_result._unclassified_limited_room_ids == ()
-    assert cache_result.has_certification_blocker is False
+    assert cache_result._has_certification_blocker is False
     assert cache_result.certified is True
 
 
-def test_own_join_boundary_advances_without_certifying_limited_checkpoint() -> None:
-    """NIO's own-join classification permits progress but waits for a clean delta."""
+def test_own_join_boundary_without_recovery_debt_certifies_checkpoint() -> None:
+    """A normal own-join boundary must not suppress an otherwise safe checkpoint."""
     room_id = "!joined:localhost"
     cache_result = SyncCacheWriteResult(
         complete=True,
@@ -74,10 +74,27 @@ def test_own_join_boundary_advances_without_certifying_limited_checkpoint() -> N
     )
 
     assert cache_result._unclassified_limited_room_ids == ()
-    assert cache_result.certified is False
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.reason == "sync_recovery_boundary"
+    assert cache_result.certified is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint("s_after_join")
+    assert decision.reason is None
     assert decision.reset_client_token is False
+
+
+def test_leave_boundary_without_recovery_debt_certifies_checkpoint() -> None:
+    """A normal leave boundary must not suppress an otherwise safe checkpoint."""
+    room_id = "!left:localhost"
+
+    decision = certify_sync_response(
+        next_batch="s_after_leave",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            no_recovery_needed_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint("s_after_leave")
 
 
 def test_own_join_boundary_settles_prior_gap_before_clean_certification() -> None:
@@ -142,7 +159,7 @@ def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() 
     )
 
     assert cache_result._unclassified_limited_room_ids == (unclassified_room,)
-    assert cache_result.has_certification_blocker is True
+    assert cache_result._has_certification_blocker is True
     assert cache_result.certified is False
 
 
@@ -187,6 +204,21 @@ def test_earlier_unrecovered_room_reports_incomplete_recovery() -> None:
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "sync_recovery_incomplete"
+
+
+def test_incomplete_response_cannot_silently_settle_prior_recovery_debt() -> None:
+    """Only a complete response may prove that nio authoritatively ended a gap."""
+    room_id = "!earlier:localhost"
+
+    decision = certify_sync_response(
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(complete=False),
+        unsettled_recovery_room_ids=frozenset({room_id}),
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "cache_write_incomplete"
+    assert decision.unsettled_recovery_room_ids == frozenset({room_id})
 
 
 def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:

@@ -1382,6 +1382,8 @@ class ThreadSyncWritePolicy:
     async def cache_sync_timeline_for_certification(
         self,
         response: nio.SyncResponse,
+        *,
+        no_recovery_needed_room_ids: frozenset[str] = frozenset(),
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
         limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
@@ -1389,6 +1391,7 @@ class ThreadSyncWritePolicy:
             return SyncCacheWriteResult.from_sync_response(
                 response,
                 complete=False,
+                no_recovery_needed_room_ids=no_recovery_needed_room_ids,
                 errors=validation_errors,
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1398,6 +1401,7 @@ class ThreadSyncWritePolicy:
                 response,
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                no_recovery_needed_room_ids=no_recovery_needed_room_ids,
                 runtime_available=False,
                 task_count=0,
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1415,6 +1419,7 @@ class ThreadSyncWritePolicy:
                 response,
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                no_recovery_needed_room_ids=no_recovery_needed_room_ids,
                 errors=(exc,),
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1431,6 +1436,7 @@ class ThreadSyncWritePolicy:
             response,
             complete=complete,
             limited_room_ids=limited_room_ids,
+            no_recovery_needed_room_ids=no_recovery_needed_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),

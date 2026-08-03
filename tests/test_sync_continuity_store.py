@@ -28,18 +28,23 @@ def test_classic_acceptance_atomically_advances_checkpoint_and_clears_join_fence
 ) -> None:
     """One durable record must contain both sides of accepted Classic continuity."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store.replace_checkpoint(
+        _checkpoint("s_before"),
+        unsettled_recovery_room_ids={"!old-gap:localhost"},
+    )
     store.update_join_fences(add={"!joined:localhost", "!pending:localhost"})
 
     record = store.accept_classic_response(
         _checkpoint("s_after"),
         joined_room_ids={"!joined:localhost"},
+        unsettled_recovery_room_ids={"!new-gap:localhost"},
     )
 
     expected = SyncContinuityRecord(
         revision=3,
         checkpoint=_checkpoint("s_after"),
         pending_join_decrypt_fences=frozenset({"!pending:localhost"}),
+        unsettled_recovery_room_ids=frozenset({"!new-gap:localhost"}),
     )
     assert record == expected
     assert SyncContinuityStore(tmp_path, "code").load() == expected
@@ -50,7 +55,10 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
 ) -> None:
     """A failed pre-replace write cannot expose either half of new continuity."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store.replace_checkpoint(
+        _checkpoint("s_before"),
+        unsettled_recovery_room_ids={"!old-gap:localhost"},
+    )
     store.update_join_fences(add={"!joined:localhost"})
     before = store.load()
 
@@ -64,6 +72,7 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
         store.accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
+            unsettled_recovery_room_ids={"!new-gap:localhost"},
         )
 
     assert SyncContinuityStore(tmp_path, "code").load() == before
@@ -72,7 +81,10 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
 def test_rename_failure_never_falls_back_to_a_tearing_copy(tmp_path: Path) -> None:
     """A failed atomic rename must leave the complete old continuity record."""
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store.replace_checkpoint(
+        _checkpoint("s_before"),
+        unsettled_recovery_room_ids={"!old-gap:localhost"},
+    )
     store.update_join_fences(add={"!joined:localhost"})
     before = store.load()
 
@@ -84,6 +96,7 @@ def test_rename_failure_never_falls_back_to_a_tearing_copy(tmp_path: Path) -> No
         store.accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
+            unsettled_recovery_room_ids={"!new-gap:localhost"},
         )
 
     safe_replace.assert_not_called()
@@ -99,7 +112,10 @@ def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
         pass
 
     store = SyncContinuityStore(tmp_path, "code")
-    store.replace_checkpoint(_checkpoint("s_before"))
+    store.replace_checkpoint(
+        _checkpoint("s_before"),
+        unsettled_recovery_room_ids={"!old-gap:localhost"},
+    )
     store.update_join_fences(add={"!joined:localhost"})
 
     def replace_then_crash(*args: object, **kwargs: object) -> None:
@@ -116,11 +132,13 @@ def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
         store.accept_classic_response(
             _checkpoint("s_after"),
             joined_room_ids={"!joined:localhost"},
+            unsettled_recovery_room_ids={"!new-gap:localhost"},
         )
 
     assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord(
         revision=3,
         checkpoint=_checkpoint("s_after"),
+        unsettled_recovery_room_ids=frozenset({"!new-gap:localhost"}),
     )
 
 
@@ -204,6 +222,11 @@ def test_each_changed_record_gets_monotonic_revision_under_store_lock(
         (
             '{"version":"mindroom-sync-continuity-v2","revision":0,'
             '"checkpoint":null,"pending_join_decrypt_fences":[],"extra":true}'
+        ),
+        (
+            '{"version":"mindroom-sync-continuity-v3","revision":0,'
+            '"checkpoint":null,"pending_join_decrypt_fences":[],'
+            '"unsettled_recovery_room_ids":["!room:localhost","!room:localhost"]}'
         ),
     ],
 )

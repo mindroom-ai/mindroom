@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, cast, get_type_hints
 from unittest.mock import AsyncMock, patch
 
@@ -98,6 +98,103 @@ def _sync_response(
     )
 
 
+def _membership_boundary_response(
+    room_id: str,
+    *,
+    boundary: str,
+) -> nio.SyncResponse:
+    """Build one real Classic response carrying an authoritative membership reset."""
+    invited_rooms: dict[str, nio.InviteInfo] = {}
+    joined_rooms: dict[str, nio.RoomInfo] = {}
+    if boundary == "invite":
+        invited_rooms[room_id] = nio.InviteInfo(invite_state=[])
+    else:
+        own_join = nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$own-rejoin",
+                "sender": "@code:localhost",
+                "state_key": "@code:localhost",
+                "origin_server_ts": 1,
+                "content": {"membership": "join"},
+                "unsigned": {"prev_content": {"membership": "leave"}},
+            },
+        )
+        assert isinstance(own_join, nio.RoomMemberEvent)
+        joined_rooms[room_id] = nio.RoomInfo(
+            timeline=nio.Timeline(events=[own_join], limited=False, prev_batch=None),
+            state=[],
+            ephemeral=[],
+            account_data=[],
+        )
+    return nio.SyncResponse(
+        next_batch=f"s_{boundary}",
+        rooms=nio.Rooms(invite=invited_rooms, join=joined_rooms, leave={}),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["invite", "nonlimited-own-join"])
+async def test_real_nio_membership_reset_settles_its_final_unrecovered_outcome(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    """Every authoritative NIO membership reset must settle the gap it clears."""
+    room_id = "!reset:localhost"
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    client.next_batch = "s_before_gap"
+    gap_response = _sync_response(
+        limited_room_ids=(room_id,),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset(),
+        next_batch="s_gap",
+    )
+    boundary_response = _membership_boundary_response(room_id, boundary=boundary)
+    trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
+
+    try:
+        with patch.object(client, "_recovery_room_messages", AsyncMock(side_effect=asyncio.TimeoutError)):
+            await client.receive_response(gap_response)
+            await client.receive_response(boundary_response)
+    finally:
+        await client.close()
+
+    assert gap_response.unrecovered_room_ids == frozenset({room_id})
+    assert boundary_response.unrecovered_room_ids == frozenset({room_id})
+    gap_decision = await trust.certify_response(
+        next_batch=gap_response.next_batch,
+        cache_result=_cache_result(gap_response, limited_room_ids=(room_id,), complete=True),
+    )
+    assert gap_decision.unsettled_recovery_room_ids == frozenset({room_id})
+    boundary_result = _cache_result(
+        boundary_response,
+        limited_room_ids=(),
+        complete=True,
+        no_recovery_needed_room_ids=classic_no_recovery_needed_room_ids(
+            boundary_response,
+            user_id="@code:localhost",
+        ),
+    )
+    decision = await trust.certify_response(
+        next_batch=boundary_response.next_batch,
+        cache_result=boundary_result,
+    )
+
+    assert boundary_result.no_recovery_needed_room_ids == frozenset({room_id})
+    assert decision.unsettled_recovery_room_ids == frozenset()
+
+
 @pytest.mark.asyncio
 async def test_authoritative_departure_settles_prior_gap_before_clean_certification(tmp_path: Path) -> None:
     """A purged leave room must not retain nio's reset outcome as permanent debt."""
@@ -120,9 +217,10 @@ async def test_authoritative_departure_settles_prior_gap_before_clean_certificat
         next_batch="s_leave",
         leave_room_ids=(room_id,),
     )
-    departure_result = _cache_result(departure_response, limited_room_ids=(), complete=True)
-    departure_result = replace(
-        departure_result,
+    departure_result = _cache_result(
+        departure_response,
+        limited_room_ids=(),
+        complete=True,
         no_recovery_needed_room_ids=classic_no_recovery_needed_room_ids(
             departure_response,
             user_id="@code:localhost",
@@ -150,11 +248,72 @@ async def test_authoritative_departure_settles_prior_gap_before_clean_certificat
     assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
 
 
+@pytest.mark.asyncio
+async def test_real_nio_terminal_gap_allows_later_clean_checkpoint(tmp_path: Path) -> None:
+    """NIO omitting an abandoned gap on a later response is terminal settlement."""
+    room_id = "!forbidden-history:localhost"
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    client.next_batch = "s_before_gap"
+    gap_response = _sync_response(
+        limited_room_ids=(room_id,),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset(),
+        next_batch="s_gap",
+    )
+    clean_response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset(),
+        next_batch="s_clean",
+    )
+    trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
+
+    try:
+        with patch.object(
+            client,
+            "_recovery_room_messages",
+            AsyncMock(return_value=nio.RoomMessagesError("denied", room_id=room_id)),
+        ):
+            await client.receive_response(gap_response)
+            await client.receive_response(clean_response)
+    finally:
+        await client.close()
+
+    assert gap_response.unrecovered_room_ids == frozenset({room_id})
+    assert clean_response.recovered_room_ids == frozenset()
+    assert clean_response.unrecovered_room_ids == frozenset()
+    gap = await trust.certify_response(
+        next_batch=gap_response.next_batch,
+        cache_result=_cache_result(gap_response, limited_room_ids=(room_id,), complete=True),
+    )
+    clean = await trust.certify_response(
+        next_batch=clean_response.next_batch,
+        cache_result=_cache_result(clean_response, limited_room_ids=(), complete=True),
+    )
+
+    assert gap.state is SyncTrustState.UNCERTAIN
+    assert gap.unsettled_recovery_room_ids == frozenset({room_id})
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_clean",
+        cache_generation=_CACHE_GENERATION,
+    )
+
+
 def _cache_result(
     response: nio.SyncResponse,
     *,
     limited_room_ids: tuple[str, ...],
     complete: bool,
+    no_recovery_needed_room_ids: frozenset[str] = frozenset(),
     errors: tuple[BaseException, ...] = (),
 ) -> SyncCacheWriteResult:
     """Build the cache result from the exact typed upstream response."""
@@ -162,6 +321,7 @@ def _cache_result(
         response,
         complete=complete,
         limited_room_ids=limited_room_ids,
+        no_recovery_needed_room_ids=no_recovery_needed_room_ids,
         errors=errors,
     )
 

@@ -263,12 +263,14 @@ async def test_cache_scope_invalidation_serializes_after_inflight_certification(
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: object,
+        unsettled_recovery_room_ids: object,
     ) -> SyncContinuityRecord:
         write_started.set()
         assert release_write.wait(timeout=2)
         return accept_classic_response(
             checkpoint,
             joined_room_ids=joined_room_ids,  # type: ignore[arg-type]
+            unsettled_recovery_room_ids=unsettled_recovery_room_ids,  # type: ignore[arg-type]
         )
 
     with patch.object(
@@ -308,10 +310,17 @@ async def test_cache_scope_invalidation_serializes_after_inflight_shutdown_persi
     release_write = threading.Event()
     replace_checkpoint = trust.continuity_store.replace_checkpoint
 
-    def blocking_replace(checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
+    def blocking_replace(
+        checkpoint: SyncCheckpoint,
+        *,
+        unsettled_recovery_room_ids: object,
+    ) -> SyncContinuityRecord:
         write_started.set()
         assert release_write.wait(timeout=2)
-        return replace_checkpoint(checkpoint)
+        return replace_checkpoint(
+            checkpoint,
+            unsettled_recovery_room_ids=unsettled_recovery_room_ids,  # type: ignore[arg-type]
+        )
 
     with patch.object(
         trust.continuity_store,
@@ -413,10 +422,10 @@ async def test_positioned_gap_never_opens_tokenless_baseline(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_unrecovered_gap_advances_live_cursor_but_blocks_later_checkpoint(
+async def test_terminal_unrecovered_gap_settles_on_later_clean_response(
     tmp_path: Path,
 ) -> None:
-    """An abandoned gap must not livelock live sync or license a later checkpoint."""
+    """NIO ending an abandoned gap must let a later complete response checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -441,13 +450,91 @@ async def test_unrecovered_gap_advances_live_cursor_but_blocks_later_checkpoint(
     assert first.reset_client_token is False
     assert second.reset_client_token is False
     assert clean.reset_client_token is False
-    assert clean.state is SyncTrustState.UNCERTAIN
-    assert clean.reason == "sync_recovery_pending"
-    assert trust.retry_token() == "s_before_gap"
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.reason is None
+    assert trust.continuity_store.load().unsettled_recovery_room_ids == frozenset()
+    assert trust.retry_token() == "s_after_clean_delta"
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        "s_before_gap",
+        "s_after_clean_delta",
         cache_generation=_GENERATION,
     )
+
+
+@pytest.mark.asyncio
+async def test_unrecovered_recovery_debt_survives_restart_until_clean_response(tmp_path: Path) -> None:
+    """A restart must retain debt until a complete response proves nio ended the gap."""
+    room_id = "!room:localhost"
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    await trust.certify_response(
+        next_batch="s_after_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    restarted, _restarted_cache, _restarted_runtime = _trust(tmp_path)
+    assert await restarted.prepare_startup() == "s_before_gap"
+    clean = await restarted.certify_response(
+        next_batch="s_after_restart",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert restarted.continuity_store.load().unsettled_recovery_room_ids == frozenset()
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.reason is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_after_restart",
+        cache_generation=_GENERATION,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidation", ["unknown-pos", "cache-scope", "stale-plan"])
+async def test_checkpoint_invalidation_preserves_recovery_debt(
+    tmp_path: Path,
+    invalidation: str,
+) -> None:
+    """Clearing checkpoint trust must preserve exact room debt across a cold restart."""
+    room_id = "!room:localhost"
+    trust, _cache, _runtime = _trust(tmp_path)
+    save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
+    assert await trust.prepare_startup() == "s_before_gap"
+    await trust.certify_response(
+        next_batch="s_after_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+    )
+
+    if invalidation == "unknown-pos":
+        await trust.reject_unknown_pos()
+    elif invalidation == "cache-scope":
+        assert await trust.invalidate_for_cache_scope_cleanup()
+    else:
+        stale = trust.plan_response(
+            next_batch="s_stale",
+            cache_result=SyncCacheWriteResult(complete=True),
+        )
+        assert await trust.invalidate_for_cache_scope_cleanup()
+        await trust.apply_response(stale, cache_result=SyncCacheWriteResult(complete=True))
+
+    record = trust.continuity_store.load()
+    assert record.checkpoint is None
+    assert record.unsettled_recovery_room_ids == frozenset({room_id})
+    restarted, _restarted_cache, _restarted_runtime = _trust(tmp_path)
+    assert await restarted.prepare_startup() is None
+    clean = await restarted.certify_response(
+        next_batch="s_after_restart",
+        cache_result=SyncCacheWriteResult(complete=True),
+    )
+
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.reason is None
+    assert trust.continuity_store.load().unsettled_recovery_room_ids == frozenset()
 
 
 @pytest.mark.asyncio
@@ -540,10 +627,12 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
     release_clear = threading.Event()
     clear_checkpoint = trust.continuity_store.clear_checkpoint
 
-    def blocking_clear() -> SyncContinuityRecord:
+    def blocking_clear(*, unsettled_recovery_room_ids: object) -> SyncContinuityRecord:
         clear_started.set()
         assert release_clear.wait(timeout=2)
-        return clear_checkpoint()
+        return clear_checkpoint(
+            unsettled_recovery_room_ids=unsettled_recovery_room_ids,  # type: ignore[arg-type]
+        )
 
     cache_result = SyncCacheWriteResult(complete=False)
     decision = handle_unknown_pos()
@@ -592,12 +681,14 @@ async def test_cancelled_certification_publishes_committed_checkpoint_before_esc
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: object,
+        unsettled_recovery_room_ids: object,
     ) -> SyncContinuityRecord:
         write_started.set()
         assert release_write.wait(timeout=2)
         return accept_classic_response(
             checkpoint,
             joined_room_ids=joined_room_ids,  # type: ignore[arg-type]
+            unsettled_recovery_room_ids=unsettled_recovery_room_ids,  # type: ignore[arg-type]
         )
 
     with patch.object(

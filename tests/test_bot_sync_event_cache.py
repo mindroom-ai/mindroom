@@ -348,7 +348,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         cache_started = asyncio.Event()
         allow_cache_finish = asyncio.Event()
 
-        async def delayed_cache_result(_response: nio.SyncResponse) -> SyncCacheWriteResult:
+        async def delayed_cache_result(
+            _response: nio.SyncResponse,
+            *,
+            no_recovery_needed_room_ids: frozenset[str],
+        ) -> SyncCacheWriteResult:
+            assert no_recovery_needed_room_ids == frozenset()
             cache_started.set()
             await allow_cache_finish.wait()
             return SyncCacheWriteResult(complete=True)
@@ -437,7 +442,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert bot.sync_cache_write_progress() is None
         mark_room_joined.assert_awaited_once_with(joined_room_id)
-        cache_timeline.assert_awaited_once_with(response)
+        cache_timeline.assert_awaited_once_with(
+            response,
+            no_recovery_needed_room_ids=frozenset({departed_room_id}),
+        )
 
     @pytest.mark.asyncio
     async def test_long_successful_cache_write_refreshes_health_on_completion(self, bot: AgentBot) -> None:
@@ -507,8 +515,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_limited_own_join_advances_then_next_delta_certifies(self, bot: AgentBot) -> None:
-        """NIO's own-join boundary must advance without licensing its limited checkpoint."""
+    async def test_limited_own_join_without_recovery_debt_certifies(self, bot: AgentBot) -> None:
+        """A normal own-join boundary must not suppress a complete limited checkpoint."""
         room_id = "!test:localhost"
         _save_certified_sync_token(bot, "s_before_join")
         bot._runtime_view.mark_runtime_started()
@@ -549,25 +557,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 return_value=SyncCacheWriteResult(
                     complete=True,
                     limited_room_ids=(room_id,),
+                    no_recovery_needed_room_ids=frozenset({room_id}),
                 ),
             ),
         ):
             await self._run_sync_response_without_startup_side_effects(bot, response)
 
-        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch == "s_after_join"
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_join"
-
-        bot.client.next_batch = "s_after_open"
-        with patch.object(
-            bot._conversation_cache,
-            "cache_sync_timeline_for_certification",
-            AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-        ):
-            await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
-
         assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_open"
+        assert bot.client.next_batch == "s_after_join"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_join"
 
     @pytest.mark.asyncio
     async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:

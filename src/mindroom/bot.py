@@ -1493,7 +1493,10 @@ class AgentBot:
                 first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
             )
             try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(response)
+                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(
+                    response,
+                    no_recovery_needed_room_ids=no_recovery_needed_room_ids,
+                )
             except asyncio.CancelledError as exc:
                 limited_room_ids, validation_errors = self._conversation_cache.limited_sync_timeline_room_ids(
                     response,
@@ -1502,6 +1505,7 @@ class AgentBot:
                     response,
                     complete=False,
                     limited_room_ids=limited_room_ids,
+                    no_recovery_needed_room_ids=no_recovery_needed_room_ids,
                     errors=(*validation_errors, exc),
                 )
                 await self._certify_sync_response(
@@ -1509,10 +1513,6 @@ class AgentBot:
                     cache_result=cache_result,
                 )
                 raise
-            cache_result = replace(
-                cache_result,
-                no_recovery_needed_room_ids=no_recovery_needed_room_ids,
-            )
             decision = self._sync_cache_trust.plan_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,

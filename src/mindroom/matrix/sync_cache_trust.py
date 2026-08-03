@@ -61,6 +61,7 @@ class SyncCacheTrust:
             self.logger.warning("matrix_sync_continuity_invalid", error=str(exc))
             record = None
         self._saved_checkpoint = None if record is None else record.checkpoint
+        self._unsettled_recovery_room_ids = frozenset() if record is None else record.unsettled_recovery_room_ids
         loaded = self._load_valid_checkpoint(self._saved_checkpoint)
         if loaded is None and await self.invalidate_for_cache_scope_cleanup():
             try:
@@ -71,7 +72,6 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
-        self._unsettled_recovery_room_ids = frozenset()
         self._tokenless_baseline_pending = loaded is None
         return loaded.token if loaded is not None else None
 
@@ -95,6 +95,7 @@ class SyncCacheTrust:
         checkpoint: SyncCheckpoint,
         *,
         joined_room_ids: Iterable[str] | None = None,
+        unsettled_recovery_room_ids: frozenset[str],
     ) -> SyncContinuityRecord | None:
         """Persist one checkpoint while the mutation lock owns publication order."""
         cache_generation = self.runtime.event_cache.cache_generation
@@ -106,7 +107,10 @@ class SyncCacheTrust:
         )
         if joined_room_ids is None:
             record = await run_blocking_until_complete(
-                self.continuity_store.replace_checkpoint,
+                partial(
+                    self.continuity_store.replace_checkpoint,
+                    unsettled_recovery_room_ids=unsettled_recovery_room_ids,
+                ),
                 durable_checkpoint,
             )
         else:
@@ -114,17 +118,39 @@ class SyncCacheTrust:
                 partial(
                     self.continuity_store.accept_classic_response,
                     joined_room_ids=joined_room_ids,
+                    unsettled_recovery_room_ids=unsettled_recovery_room_ids,
                 ),
                 durable_checkpoint,
             )
         self._saved_checkpoint = record.checkpoint
         return record
 
-    async def _clear_saved_locked(self) -> bool:
+    async def _persist_recovery_debt_locked(
+        self,
+        unsettled_recovery_room_ids: frozenset[str],
+    ) -> SyncContinuityRecord:
+        """Persist exact recovery debt while retaining the durable retry cursor."""
+        record = await run_blocking_until_complete(
+            self.continuity_store.replace_recovery_debt,
+            unsettled_recovery_room_ids,
+        )
+        self._saved_checkpoint = record.checkpoint
+        return record
+
+    async def _clear_saved_locked(
+        self,
+        *,
+        unsettled_recovery_room_ids: frozenset[str] | None = None,
+    ) -> bool:
         """Clear durable checkpoint while the mutation lock owns publication order."""
         self._saved_checkpoint = None
         try:
-            await run_blocking_until_complete(self.continuity_store.clear_checkpoint)
+            await run_blocking_until_complete(
+                partial(
+                    self.continuity_store.clear_checkpoint,
+                    unsettled_recovery_room_ids=unsettled_recovery_room_ids,
+                ),
+            )
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
             return False
@@ -138,8 +164,9 @@ class SyncCacheTrust:
                 self._cache_scope_epoch += 1
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
-                self._unsettled_recovery_room_ids = frozenset()
-                if await self._clear_saved_locked():
+                if await self._clear_saved_locked(
+                    unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
+                ):
                     return True
                 self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
                 self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
@@ -223,6 +250,7 @@ class SyncCacheTrust:
                         state=SyncTrustState.UNCERTAIN,
                         clear_saved_token=True,
                         reset_client_token=True,
+                        unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
                         reason="cache_scope_invalidated",
                         cache_scope_epoch=self._cache_scope_epoch,
                     )
@@ -244,7 +272,10 @@ class SyncCacheTrust:
 
         async def reject() -> SyncCertificationDecision:
             async with self._mutation_lock:
-                decision = handle_unknown_pos()
+                decision = replace(
+                    handle_unknown_pos(),
+                    unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
+                )
                 await self._apply_decision_locked(decision)
                 self._refresh_tokenless_baseline_pending()
                 return decision
@@ -263,6 +294,7 @@ class SyncCacheTrust:
             record = await self._persist_checkpoint_locked(
                 decision.checkpoint_to_save,
                 joined_room_ids=joined_room_ids,
+                unsettled_recovery_room_ids=decision.unsettled_recovery_room_ids,
             )
             if record is None:
                 msg = "Cannot certify Matrix sync continuity without a cache generation"
@@ -274,11 +306,19 @@ class SyncCacheTrust:
             self.state = decision.state
             self.checkpoint = None
             self._saved_checkpoint = None
-            if not await self._clear_saved_locked():
+            if not await self._clear_saved_locked(
+                unsettled_recovery_room_ids=decision.unsettled_recovery_room_ids,
+            ):
                 self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
             record = None
         else:
-            record = None
+            record = (
+                None
+                if decision.unsettled_recovery_room_ids == self._unsettled_recovery_room_ids
+                else await self._persist_recovery_debt_locked(
+                    decision.unsettled_recovery_room_ids,
+                )
+            )
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
         self._unsettled_recovery_room_ids = decision.unsettled_recovery_room_ids
@@ -294,13 +334,18 @@ class SyncCacheTrust:
             async with self._mutation_lock:
                 if self.state is not SyncTrustState.CERTIFIED or self.checkpoint is None:
                     return
-                record = await self._persist_checkpoint_locked(self.checkpoint)
+                record = await self._persist_checkpoint_locked(
+                    self.checkpoint,
+                    unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
+                )
                 if record is not None:
                     return
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
                 self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
-                await self._clear_saved_locked()
+                await self._clear_saved_locked(
+                    unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
+                )
 
         await run_coroutine_until_complete(persist())
 

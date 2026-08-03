@@ -50,6 +50,7 @@ class SyncCacheWriteResult:
         *,
         complete: bool,
         limited_room_ids: tuple[str, ...] = (),
+        no_recovery_needed_room_ids: frozenset[str] = frozenset(),
         errors: tuple[BaseException, ...] = (),
         runtime_available: bool | None = None,
         task_count: int | None = None,
@@ -61,6 +62,7 @@ class SyncCacheWriteResult:
             limited_room_ids=limited_room_ids,
             recovered_room_ids=response.recovered_room_ids,
             unrecovered_room_ids=response.unrecovered_room_ids,
+            no_recovery_needed_room_ids=no_recovery_needed_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=task_count,
@@ -74,16 +76,14 @@ class SyncCacheWriteResult:
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def has_certification_blocker(self) -> bool:
+    def _has_certification_blocker(self) -> bool:
         """Return whether recovery state requires withholding this response's checkpoint."""
-        return bool(
-            self._unclassified_limited_room_ids or self.unrecovered_room_ids or self.no_recovery_needed_room_ids,
-        )
+        return bool(self._unclassified_limited_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
         """Return whether local cache work and recovery state permit a checkpoint."""
-        return self.complete and not self.errors and not self.has_certification_blocker
+        return self.complete and not self.errors and not self._has_certification_blocker
 
 
 @dataclass(frozen=True)
@@ -124,6 +124,7 @@ def _uncertain_reason(
     *,
     next_batch: str | None,
     unsettled_recovery_room_ids: frozenset[str],
+    boundary_settled_recovery_room_ids: frozenset[str],
 ) -> str | None:
     """Return why one sync response cannot certify a checkpoint."""
     if normalize_sync_token(next_batch) is None:
@@ -136,9 +137,7 @@ def _uncertain_reason(
         reason = "cache_write_incomplete"
     elif cache_result.unrecovered_room_ids & unsettled_recovery_room_ids:
         reason = "sync_recovery_incomplete"
-    elif unsettled_recovery_room_ids:
-        reason = "sync_recovery_pending"
-    elif cache_result.no_recovery_needed_room_ids:
+    elif boundary_settled_recovery_room_ids:
         reason = "sync_recovery_boundary"
     else:
         reason = None
@@ -153,12 +152,26 @@ def certify_sync_response(
     unsettled_recovery_room_ids: frozenset[str] = frozenset(),
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
-    settled_room_ids = cache_result.recovered_room_ids | cache_result.no_recovery_needed_room_ids
-    unsettled_recovery_room_ids = (unsettled_recovery_room_ids | cache_result.unrecovered_room_ids) - settled_room_ids
+    recovery_debt_before_settlement = unsettled_recovery_room_ids | cache_result.unrecovered_room_ids
+    recovery_outcomes_are_usable = (
+        normalize_sync_token(next_batch) is not None
+        and not cache_result.errors
+        and not cache_result._unclassified_limited_room_ids
+        and cache_result.complete
+    )
+    if recovery_outcomes_are_usable:
+        boundary_settled_recovery_room_ids = recovery_debt_before_settlement & cache_result.no_recovery_needed_room_ids
+        unsettled_recovery_room_ids = cache_result.unrecovered_room_ids - (
+            cache_result.recovered_room_ids | cache_result.no_recovery_needed_room_ids
+        )
+    else:
+        boundary_settled_recovery_room_ids = frozenset()
+        unsettled_recovery_room_ids = recovery_debt_before_settlement
     reason = _uncertain_reason(
         cache_result,
         next_batch=next_batch,
         unsettled_recovery_room_ids=unsettled_recovery_room_ids,
+        boundary_settled_recovery_room_ids=boundary_settled_recovery_room_ids,
     )
     if reason is not None:
         tokenless_limited_baseline = (
@@ -169,7 +182,6 @@ def certify_sync_response(
             not in {
                 "sync_recovery_boundary",
                 "sync_recovery_incomplete",
-                "sync_recovery_pending",
             }
             and not tokenless_limited_baseline
         )
