@@ -32,7 +32,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result
+from mindroom.matrix.client_delivery import RoomDeliveryHydrationProof, edit_message_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -104,6 +104,7 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    delivery_proof: RoomDeliveryHydrationProof | None = None
 
 
 @dataclass(frozen=True)
@@ -429,6 +430,7 @@ async def _process_stale_room_candidate(
             conversation_cache=actor.conversation_cache,
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
+            delivery_proof=actor.delivery_proof,
         )
     if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
         return _CandidateCleanupResult()
@@ -446,6 +448,7 @@ async def _process_stale_room_candidate(
         conversation_cache=actor.conversation_cache,
         agent_name=agent_name,
         prior_edit_succeeded=prior_edit_succeeded,
+        delivery_proof=actor.delivery_proof,
     )
 
 
@@ -464,6 +467,7 @@ async def _handle_interrupted_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
+    delivery_proof: RoomDeliveryHydrationProof | None,
 ) -> _CandidateCleanupResult:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
     interrupted = None
@@ -484,6 +488,7 @@ async def _handle_interrupted_message(
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
         prior_edit_succeeded=prior_edit_succeeded,
+        delivery_proof=delivery_proof,
     )
     await _redact_stop_reactions(
         client,
@@ -509,6 +514,7 @@ async def _repair_restart_marked_message_metadata(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
+    delivery_proof: RoomDeliveryHydrationProof | None,
 ) -> tuple[bool, bool]:
     """Repair non-terminal stream metadata on already restart-marked messages."""
     assert state.latest_body is not None
@@ -527,6 +533,7 @@ async def _repair_restart_marked_message_metadata(
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
+            delivery_proof=delivery_proof,
         )
     except Exception as exc:
         logger.warning(
@@ -552,6 +559,7 @@ async def _cleanup_one_stale_message(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
+    delivery_proof: RoomDeliveryHydrationProof | None,
 ) -> tuple[bool, InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
     assert state.latest_body is not None
@@ -564,6 +572,7 @@ async def _cleanup_one_stale_message(
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
+        delivery_proof=delivery_proof,
     )
     if not edit_succeeded:
         return False, None
@@ -603,6 +612,7 @@ async def _cleanup_candidate_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
+    delivery_proof: RoomDeliveryHydrationProof | None,
 ) -> _CandidateCleanupResult:
     """Best-effort cleanup of one stale candidate message."""
     try:
@@ -619,6 +629,7 @@ async def _cleanup_candidate_message(
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
             agent_name=agent_name,
+            delivery_proof=delivery_proof,
         )
         return _CandidateCleanupResult(
             edited=edited,
@@ -1339,6 +1350,7 @@ async def _edit_stale_message(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
+    delivery_proof: RoomDeliveryHydrationProof | None = None,
 ) -> bool:
     """Edit a stale message.
 
@@ -1370,6 +1382,7 @@ async def _edit_stale_message(
         content,
         new_text,
         extra_content=extra_content,
+        delivery_proof=delivery_proof,
     )
     if delivered is not None:
         if conversation_cache is not None:

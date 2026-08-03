@@ -223,6 +223,14 @@ def _room_from_remote_state(
 
 
 @dataclass(frozen=True, slots=True)
+class RoomDeliveryHydrationProof:
+    """Immutable room state that must still hold at an exact delivery boundary."""
+
+    encrypted: bool
+    joined_user_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class _EncryptedRoomHydration:
     """One validated room selected for encrypted delivery hydration."""
 
@@ -274,13 +282,20 @@ def _pending_room_key_query_user_ids(
     return set(room.users).intersection(client.users_for_key_query)
 
 
-def encrypted_room_ready_for_delivery(client: nio.AsyncClient, room_id: str) -> bool:
-    """Return whether the current encrypted room can be sent to without another key query."""
+def delivery_hydration_is_current(
+    client: nio.AsyncClient,
+    room_id: str,
+    proof: RoomDeliveryHydrationProof,
+) -> bool:
+    """Return whether the current cache still satisfies one hydration proof."""
     room = cached_room(client, room_id)
+    if not proof.encrypted:
+        return room is None or not room.encrypted
     return (
         room is not None
         and room.encrypted
         and room.members_synced
+        and proof.joined_user_ids.issubset(room.users)
         and not _pending_room_key_query_user_ids(client, room)
     )
 
@@ -310,26 +325,26 @@ def _current_encrypted_room_after_hydration(
 async def _hydrate_encrypted_joined_room(
     client: nio.AsyncClient,
     room_id: str,
-) -> bool:
+) -> RoomDeliveryHydrationProof | None:
     """Hydrate encrypted send state before publishing an owned room candidate."""
     members = await client.joined_members(room_id)
     if not isinstance(members, nio.JoinedMembersResponse):
-        return False
+        return None
 
     hydration = await _encrypted_room_for_hydration(client, room_id, members)
     if hydration is None:
-        return False
+        return None
     room = hydration.room
     if client.olm is not None:
         client.olm.update_tracked_users(room)
     if client.should_query_keys:
         key_query = await client.keys_query()
         if not isinstance(key_query, nio.KeysQueryResponse):
-            return False
+            return None
 
     room = _current_encrypted_room_after_hydration(client, room_id, hydration)
     if room is None:
-        return False
+        return None
 
     pending_room_members = _pending_room_key_query_user_ids(client, room)
     if pending_room_members:
@@ -338,27 +353,28 @@ async def _hydrate_encrypted_joined_room(
             room_id=room_id,
             pending_member_count=len(pending_room_members),
         )
-        return False
+        return None
 
     if client.store is not None:
         client.store.save_encrypted_rooms({room_id})
     client.encrypted_rooms.add(room_id)
     client.rooms.setdefault(room_id, room)
-    return True
+    return RoomDeliveryHydrationProof(
+        encrypted=True,
+        joined_user_ids=hydration.joined_user_ids,
+    )
 
 
 async def hydrate_joined_room_for_delivery(
     client: nio.AsyncClient,
     room_id: str,
-) -> bool:
+) -> RoomDeliveryHydrationProof | None:
     """Seed nio's delivery state for one remotely confirmed joined room."""
     rooms = client.rooms
     room = rooms.get(room_id)
     if room is not None:
-        if not room.encrypted or client.olm is None:
-            return True
-        if room.members_synced and not _pending_room_key_query_user_ids(client, room):
-            return True
+        if not room.encrypted:
+            return RoomDeliveryHydrationProof(encrypted=False)
         return await _hydrate_encrypted_joined_room(client, room_id)
 
     encrypted = await _remote_room_encrypted(client, room_id)
@@ -368,10 +384,10 @@ async def hydrate_joined_room_for_delivery(
             room_id=room_id,
             hint="Unable to determine room encryption state before delivery.",
         )
-        return False
+        return None
 
     if not encrypted:
-        return True
+        return RoomDeliveryHydrationProof(encrypted=False)
 
     return await _hydrate_encrypted_joined_room(client, room_id)
 
@@ -427,6 +443,33 @@ def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operati
     return _can_send_to_encrypted_room(client, room_id, operation=operation)
 
 
+async def _cache_bypass_has_plaintext_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    operation: str,
+) -> bool:
+    """Return whether an uncached target is authoritatively plaintext."""
+    encrypted = await _remote_room_encrypted(client, room_id)
+    if encrypted is True:
+        logger.error(
+            "matrix_encrypted_room_send_requires_synced_room_cache",
+            room_id=room_id,
+            operation=operation,
+            hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
+        )
+        return False
+    if encrypted is None:
+        logger.error(
+            "matrix_room_send_requires_known_encryption_state",
+            room_id=room_id,
+            operation=operation,
+            hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
+        )
+        return False
+    return True
+
+
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -435,6 +478,7 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
+    delivery_proof: RoomDeliveryHydrationProof | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -443,24 +487,8 @@ async def send_message_result(
     rooms = client.rooms
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
     cache_bypass = isinstance(rooms, Mapping) and room is None
-    if cache_bypass:
-        encrypted = await _remote_room_encrypted(client, room_id)
-        if encrypted is True:
-            logger.error(
-                "matrix_encrypted_room_send_requires_synced_room_cache",
-                room_id=room_id,
-                operation=operation,
-                hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
-            )
-            return None
-        if encrypted is None:
-            logger.error(
-                "matrix_room_send_requires_known_encryption_state",
-                room_id=room_id,
-                operation=operation,
-                hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
-            )
-            return None
+    if cache_bypass and not await _cache_bypass_has_plaintext_room(client, room_id, operation=operation):
+        return None
 
     message_type = "m.room.message"
     emit_timing_event(
@@ -470,6 +498,14 @@ async def send_message_result(
         message_type=message_type,
     )
     content_sent = await prepare_large_message(client, room_id, content)
+    if delivery_proof is not None and not delivery_hydration_is_current(client, room_id, delivery_proof):
+        logger.warning(
+            "matrix_room_delivery_hydration_stale",
+            room_id=room_id,
+            operation=operation,
+            expected_encrypted=delivery_proof.encrypted,
+        )
+        return None
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",
@@ -867,6 +903,7 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     retry_sync_recovery: bool = False,
+    delivery_proof: RoomDeliveryHydrationProof | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
     edit_content = build_edit_event_content(
@@ -882,16 +919,18 @@ async def edit_message_result(
         edit_content,
         operation="edit_message",
         retry_sync_recovery=retry_sync_recovery,
+        delivery_proof=delivery_proof,
     )
 
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "RoomDeliveryHydrationProof",
     "build_edit_event_content",
     "cached_room",
     "can_send_to_encrypted_room",
+    "delivery_hydration_is_current",
     "edit_message_result",
-    "encrypted_room_ready_for_delivery",
     "hydrate_joined_room_for_delivery",
     "send_audio_message",
     "send_file_message",

@@ -4342,12 +4342,13 @@ from = ["mindroom.matrix.to_device"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "RoomDeliveryHydrationProof",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
-    "encrypted_room_ready_for_delivery",
+    "delivery_hydration_is_current",
     "hydrate_joined_room_for_delivery",
     "send_audio_message",
     "send_file_message",

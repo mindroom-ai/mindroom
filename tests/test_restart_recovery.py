@@ -809,7 +809,8 @@ async def test_plaintext_delivery_hydration_does_not_publish_empty_room() -> Non
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is True
+    assert hydrated is not None
+    assert hydrated.encrypted is False
     assert room_id not in owner.client.rooms
 
 
@@ -856,7 +857,7 @@ async def test_encrypted_room_hydration_does_not_publish_after_failed_state_quer
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     assert room_id not in owner.client.rooms
     assert room_id not in owner.client.encrypted_rooms
 
@@ -892,7 +893,7 @@ async def test_encrypted_room_hydration_rejects_partial_room_from_state_query_ra
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     assert owner.client.rooms[room_id] is concurrent_room
     assert remote_member_id not in concurrent_room.users
     assert room_id not in owner.client.encrypted_rooms
@@ -973,7 +974,8 @@ async def test_encrypted_room_hydration_queries_new_member_device_keys() -> None
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is True
+    assert hydrated is not None
+    assert hydrated.encrypted is True
     owner.client.keys_query.assert_awaited_once_with()
 
 
@@ -1005,7 +1007,7 @@ async def test_cached_encrypted_room_hydration_retries_pending_member_device_key
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     owner.client.keys_query.assert_awaited_once_with()
 
 
@@ -1037,7 +1039,7 @@ async def test_encrypted_room_hydration_rejects_concurrent_partial_sync_room() -
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     assert owner.client.rooms[room_id] is concurrent_room
     assert concurrent_room.encrypted is False
     assert room_id not in owner.client.encrypted_rooms
@@ -1092,7 +1094,8 @@ async def test_encrypted_room_hydration_publishes_complete_room_state() -> None:
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is True
+    assert hydrated is not None
+    assert hydrated.encrypted is True
     room = owner.client.rooms[room_id]
     assert room.encrypted is True
     assert room.name == "Recovery Room"
@@ -1117,7 +1120,7 @@ async def test_encrypted_room_hydration_does_not_mutate_unencrypted_sync_room() 
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     assert owner.client.rooms[room_id] is sync_room
     assert sync_room.encrypted is False
     assert room_id not in owner.client.encrypted_rooms
@@ -1139,7 +1142,7 @@ async def test_encrypted_room_hydration_does_not_publish_after_failed_device_key
 
     hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
 
-    assert hydrated is False
+    assert hydrated is None
     assert room_id not in owner.client.rooms
     assert room_id not in owner.client.encrypted_rooms
 
@@ -1199,6 +1202,91 @@ async def test_encrypted_delivery_retries_when_freshness_adds_pending_member_key
         *_args: object,
         **_kwargs: object,
     ) -> InterruptedTargetFreshness:
+        room.add_member(remote_member_id, "Human", None)
+        owner.client.users_for_key_query = {remote_member_id}
+        return InterruptedTargetFreshness.CURRENT
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(side_effect=freshness_after_hydration),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=send_message,
+        ),
+    ):
+        delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.RETRY
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_delivery_retries_when_freshness_replaces_authoritative_members(tmp_path: Path) -> None:
+    """A replacement room must retain every member confirmed during hydration."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    remote_member_id = "@human:remote.example.org"
+    room = owner.client.rooms[target.room_id]
+    room.encrypted = True
+    room.members_synced = True
+    room.add_member(remote_member_id, "Human", None)
+    owner.client.olm = MagicMock()
+    owner.client.users_for_key_query = set()
+    owner.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(remote_member_id, "Human", None)],
+            room_id=target.room_id,
+        ),
+    )
+    replacement_room = nio.MatrixRoom(room_id=target.room_id, own_user_id=owner.user_id)
+    replacement_room.encrypted = True
+    replacement_room.members_synced = True
+    send_message = AsyncMock(side_effect=delivered_matrix_side_effect("$resume"))
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def freshness_after_hydration(
+        *_args: object,
+        **_kwargs: object,
+    ) -> InterruptedTargetFreshness:
+        owner.client.rooms[target.room_id] = replacement_room
+        return InterruptedTargetFreshness.CURRENT
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(side_effect=freshness_after_hydration),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=send_message,
+        ),
+    ):
+        delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.RETRY
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_plaintext_delivery_retries_when_freshness_observes_encryption(tmp_path: Path) -> None:
+    """A room becoming encrypted after hydration must restart encrypted hydration."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    room = owner.client.rooms[target.room_id]
+    room.members_synced = True
+    owner.client.olm = MagicMock()
+    owner.client.users_for_key_query = set()
+    remote_member_id = "@human:remote.example.org"
+    send_message = AsyncMock(side_effect=delivered_matrix_side_effect("$resume"))
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def freshness_after_hydration(
+        *_args: object,
+        **_kwargs: object,
+    ) -> InterruptedTargetFreshness:
+        room.encrypted = True
         room.add_member(remote_member_id, "Human", None)
         owner.client.users_for_key_query = {remote_member_id}
         return InterruptedTargetFreshness.CURRENT

@@ -24,6 +24,7 @@ from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_delivery import RoomDeliveryHydrationProof
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
     InterruptedThread,
@@ -488,6 +489,44 @@ async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: 
         "$history-stop",
         "$relations-stop",
     }
+
+
+@pytest.mark.asyncio
+async def test_restart_cleanup_retries_when_room_changes_from_plaintext_to_encrypted(tmp_path: Path) -> None:
+    """Cleanup edits must validate the pre-scan hydration proof at the send boundary."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    room = nio.MatrixRoom(ROOM_ID, BOT_USER_ID)
+    room.encrypted = True
+    room.members_synced = True
+    client.rooms = {ROOM_ID: room}
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000):
+        result = await cleanup_stale_streaming_room(
+            StaleStreamCleanupActor(
+                client,
+                None,
+                delivery_proof=RoomDeliveryHydrationProof(encrypted=False),
+            ),
+            owner_user_id=BOT_USER_ID,
+            room_id=ROOM_ID,
+            bot_user_ids={BOT_USER_ID},
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+    assert result.cleaned_count == 0
+    assert result.retry_required is True
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

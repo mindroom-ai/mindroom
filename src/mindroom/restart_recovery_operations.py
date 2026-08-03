@@ -11,7 +11,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
-    encrypted_room_ready_for_delivery,
+    RoomDeliveryHydrationProof,
+    delivery_hydration_is_current,
     hydrate_joined_room_for_delivery,
     send_message_result,
 )
@@ -52,6 +53,14 @@ class RecoveryOwner:
     conversation_cache: ConversationCacheProtocol
     desired_room_ids: frozenset[str]
     first_sync_complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _HydratedRecoveryOwner:
+    """One recovery owner plus room state proven before its awaited scan."""
+
+    owner: RecoveryOwner
+    delivery_proof: RoomDeliveryHydrationProof
 
 
 def build_restart_recovery_owners(
@@ -286,19 +295,19 @@ async def _recover_room(
             unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
-    joined_owners, hydration_retry_owner_user_ids = await _hydrate_joined_owners(
+    hydrated_owners, hydration_retry_owner_user_ids = await _hydrate_joined_owners(
         tuple(joined_owners),
         request.room_id,
     )
     retry_owner_user_ids.update(hydration_retry_owner_user_ids)
-    if not joined_owners:
+    if not hydrated_owners:
         return _RoomRecoveryResult(
             retry_owner_user_ids=frozenset(retry_owner_user_ids),
             unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
     cleaned_count, interrupted_threads, retry_cleanup_owner_user_ids = await _cleanup_joined_owners(
-        joined_owners,
+        hydrated_owners,
         request=request,
         owner_user_ids=owner_user_ids,
         config=config,
@@ -320,7 +329,7 @@ async def _recover_room(
 
 
 async def _cleanup_joined_owners(
-    joined_owners: list[RecoveryOwner],
+    hydrated_owners: list[_HydratedRecoveryOwner],
     *,
     request: RoomRecoveryRequest,
     owner_user_ids: frozenset[str],
@@ -332,12 +341,14 @@ async def _cleanup_joined_owners(
     cleaned_count = 0
     interrupted_threads: list[InterruptedThread] = []
     retry_cleanup_owner_user_ids = set(retry_owner_user_ids)
-    for owner in joined_owners:
+    for hydrated_owner in hydrated_owners:
+        owner = hydrated_owner.owner
         try:
             cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
                 StaleStreamCleanupActor(
                     client=owner.client,
                     conversation_cache=owner.conversation_cache,
+                    delivery_proof=hydrated_owner.delivery_proof,
                 ),
                 owner_user_id=owner.user_id,
                 room_id=request.room_id,
@@ -366,13 +377,13 @@ async def _cleanup_joined_owners(
 async def _hydrate_joined_owners(
     owners: tuple[RecoveryOwner, ...],
     room_id: str,
-) -> tuple[list[RecoveryOwner], set[str]]:
+) -> tuple[list[_HydratedRecoveryOwner], set[str]]:
     """Hydrate independent owner clients concurrently before room cleanup."""
     results = await asyncio.gather(
         *(hydrate_joined_room_for_delivery(owner.client, room_id) for owner in owners),
         return_exceptions=True,
     )
-    ready_owners: list[RecoveryOwner] = []
+    ready_owners: list[_HydratedRecoveryOwner] = []
     retry_owner_user_ids: set[str] = set()
     for owner, result in zip(owners, results):
         if isinstance(result, asyncio.CancelledError):
@@ -385,8 +396,8 @@ async def _hydrate_joined_owners(
                 exc_info=(type(result), result, result.__traceback__),
             )
             retry_owner_user_ids.add(owner.user_id)
-        elif result:
-            ready_owners.append(owner)
+        elif isinstance(result, RoomDeliveryHydrationProof):
+            ready_owners.append(_HydratedRecoveryOwner(owner, result))
         else:
             retry_owner_user_ids.add(owner.user_id)
     return ready_owners, retry_owner_user_ids
@@ -439,16 +450,15 @@ def build_matrix_restart_recovery_operations(
         delay = next_delivery_at - asyncio.get_running_loop().time()
         if delay > 0:
             await asyncio.sleep(delay)
-        if not await hydrate_joined_room_for_delivery(owner.client, target.room_id):
+        delivery_proof = await hydrate_joined_room_for_delivery(owner.client, target.room_id)
+        if delivery_proof is None:
             return RestartDeliveryOutcome.RETRY
-        hydrated_room = owner.client.rooms.get(target.room_id)
-        encrypted_delivery = hydrated_room is not None and hydrated_room.encrypted
         freshness = await target_freshness(owner, target, config)
         if freshness is InterruptedTargetFreshness.RETRY:
             return RestartDeliveryOutcome.RETRY
         if freshness is not InterruptedTargetFreshness.CURRENT:
             return RestartDeliveryOutcome.TERMINAL
-        if encrypted_delivery and not encrypted_room_ready_for_delivery(owner.client, target.room_id):
+        if not delivery_hydration_is_current(owner.client, target.room_id, delivery_proof):
             return RestartDeliveryOutcome.RETRY
         content = build_auto_resume_content(
             target,
@@ -468,6 +478,7 @@ def build_matrix_restart_recovery_operations(
                 target.room_id,
                 content,
                 transaction_id=transaction_id,
+                delivery_proof=delivery_proof,
             )
         finally:
             next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
