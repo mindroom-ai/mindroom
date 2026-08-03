@@ -3607,6 +3607,44 @@ def _latest_response_body(
     return max(candidates, default=((0, 0, ""), ""))[1]
 
 
+def _response_view_diagnostic(
+    events: Collection[Mapping[str, Any]],
+    response_event_id: str,
+) -> dict[str, object]:
+    """Summarize one response view without dumping progressive body contents."""
+    standalone_edit_ids: list[str] = []
+    bundled_edit_ids: list[str] = []
+    original_present = False
+    for event in events:
+        event_id = event.get("event_id")
+        content = event.get("content")
+        if not isinstance(event_id, str) or not isinstance(content, Mapping):
+            continue
+        if event_id == response_event_id:
+            original_present = True
+            bundled_edit_ids.extend(
+                replacement["event_id"]
+                for replacement in _bundled_replacement_events(event)
+                if isinstance(replacement["event_id"], str)
+            )
+        relation = content.get("m.relates_to")
+        if (
+            isinstance(relation, Mapping)
+            and relation.get("rel_type") == "m.replace"
+            and relation.get("event_id") == response_event_id
+        ):
+            standalone_edit_ids.append(event_id)
+    body = _latest_response_body(events, response_event_id)
+    return {
+        "original_present": original_present,
+        "standalone_edit_count": len(standalone_edit_ids),
+        "standalone_edit_ids_tail": sorted(standalone_edit_ids)[-5:],
+        "bundled_edit_ids": sorted(set(bundled_edit_ids)),
+        "latest_body_length": len(body),
+        "latest_body_tail": body[-160:],
+    }
+
+
 def _auto_resume_relay_target(
     event: Mapping[str, Any],
     *,
@@ -5013,6 +5051,7 @@ class LiveFuzzRunner:
     ) -> str:
         """Wait until one source has exactly one fully streamed response."""
         deadline = time.monotonic() + self.reply_timeout
+        response_ids: set[str] = set()
         while time.monotonic() < deadline:
             # Keep the independent oracle cursor current during saturation
             # instead of risking one limited final sync after the entire burst.
@@ -5029,7 +5068,28 @@ class LiveFuzzRunner:
                 if "END call=" in self._latest_event_body(client.seen_events.values(), response_event_id):
                     return response_event_id
             await client.sync_incremental(timeout_ms=1000)
-        msg = f"agent response timeout for {source_event_id}"
+        incremental_events = tuple(client.seen_events.values())
+        diagnostic: dict[str, object] = {
+            "incremental_response_ids": sorted(response_ids),
+            "incremental_views": {
+                response_id: _response_view_diagnostic(incremental_events, response_id)
+                for response_id in sorted(response_ids)
+            },
+        }
+        try:
+            canonical_events = tuple(await client.paginate_room(client.room_id))
+            canonical_response_ids = self._canonical_response_ids(
+                canonical_events,
+                root_event_id=root_event_id,
+            ).get(source_event_id, set())
+            diagnostic["canonical_response_ids"] = sorted(canonical_response_ids)
+            diagnostic["canonical_views"] = {
+                response_id: _response_view_diagnostic(canonical_events, response_id)
+                for response_id in sorted(canonical_response_ids)
+            }
+        except Exception as exc:  # A diagnostic read must not replace the timeout.
+            diagnostic["canonical_read_error"] = f"{type(exc).__name__}: {exc}"
+        msg = f"agent response timeout for {source_event_id}: {json.dumps(diagnostic, sort_keys=True)}"
         raise TimeoutError(msg)
 
     def _canonical_response_ids(
