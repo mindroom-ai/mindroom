@@ -7,7 +7,6 @@ import os
 import signal
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 from contextlib import closing
@@ -38,7 +37,6 @@ from scripts.testing.fuzz_live_matrix import (
     RestartRegressionObservation,
     _log_count,
     _ModelHandler,
-    _require_python_313,
     _restart_prompt_observation,
     _semantic_ingress_markers,
     evaluate_restart_regression,
@@ -424,16 +422,6 @@ def test_semantic_ingress_count_excludes_restart_relay_thread_reference() -> Non
     )
 
     assert _log_count(log, *markers) == 1
-
-
-def test_python_313_requirement_is_scoped_to_restart_regression(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Existing live profiles may run from supported Python while their child stays pinned."""
-    monkeypatch.setattr(sys, "version_info", (3, 12))
-
-    _require_python_313("fuzz")
-    _require_python_313("saturation")
-    with pytest.raises(RuntimeError, match=r"restart-regression requires Python 3\.13"):
-        _require_python_313("restart-regression")
 
 
 def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
@@ -1361,7 +1349,7 @@ async def test_restart_observation_rejects_mixed_runtime_generations(
     """Any duplicate response from the old runtime must invalidate recovered-generation evidence."""
     stack, _stop_calls = seeded_restart_observation_stack
     response_ids = ("$agent-response-a", "$agent-response-b")
-    selected_first = next(iter(set(response_ids)))
+    selected_first = response_ids[0]
     events = tuple(
         _restart_response(
             response_id,

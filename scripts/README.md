@@ -67,7 +67,7 @@ Transport callback entry may repeat while Matrix sync and durable recovery race,
 Neither historical event may start a callback, reach the fresh prompt, or produce output.
 An orderly final shutdown must complete without the production durable-recovery drain-failure marker.
 
-The profile requires Docker, `just`, `uv`, Python 3.13, available local ports, and permission to create and remove an isolated Tuwunel instance.
+The profile requires Docker, `just`, `uv`, available local ports, permission to create and remove an isolated Tuwunel instance, and permission for `uv` to provision the managed MindRoom child on Python 3.13.
 It starts its own deterministic model stub and disposable Matrix stack, so no external model credential is required.
 
 ```bash

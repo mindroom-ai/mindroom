@@ -2472,18 +2472,10 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     )
 
 
-def _require_python_313(profile: str) -> None:
-    """Keep the deterministic restart controller aligned with production Python."""
-    if profile == "restart-regression" and sys.version_info[:2] != (3, 13):
-        msg = "restart-regression requires Python 3.13"
-        raise RuntimeError(msg)
-
-
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     args = _parse_args()
     scenario = _scenario_from_args(args)
-    _require_python_313(scenario.profile)
     if args.save_trace is not None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
     reply_timeout = args.reply_timeout
