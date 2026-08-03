@@ -468,7 +468,7 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock)
+    @patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock)
     async def test_router_turn_recovery_defers_only_selected_unready_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -701,7 +701,7 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
@@ -774,7 +774,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
@@ -876,7 +876,7 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -974,7 +974,7 @@ class TestRoutingRegression:
             pytest.param({ORIGINAL_SENDER_KEY: "@human:localhost"}, "@human:localhost", id="preserved"),
         ],
     )
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_does_not_stamp_managed_requester_as_original_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1052,7 +1052,7 @@ class TestRoutingRegression:
             assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_failure_does_not_stamp_original_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1200,7 +1200,7 @@ class TestRoutingRegression:
             )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_relay_filters_configured_room_candidates_by_live_state(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1462,7 +1462,7 @@ class TestRoutingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1549,7 +1549,7 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1627,7 +1627,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_responder: AsyncMock,

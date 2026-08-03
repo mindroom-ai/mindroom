@@ -20,6 +20,7 @@ src/mindroom/coalescing.py
 src/mindroom/coalescing_batch.py
 src/mindroom/text_ingress_dispatch.py
 src/mindroom/turn_policy.py
+src/mindroom/router_relay.py
 src/mindroom/dispatch_handoff.py
 src/mindroom/dispatch_replay_guard.py
 src/mindroom/command_turn_executor.py

@@ -1626,7 +1626,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     async def _route_to_general(*_args: object, **_kwargs: object) -> str:
         return "general"
 
-    monkeypatch.setattr("mindroom.turn_controller.suggest_responder_for_message", _route_to_general)
+    monkeypatch.setattr("mindroom.router_relay.suggest_responder_for_message", _route_to_general)
 
     await router_harness.deliver(room, scheduled_event)
 

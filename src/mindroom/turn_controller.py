@@ -9,7 +9,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
-from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
@@ -24,8 +23,6 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
-    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
-    PER_FIRE_THREAD_ROOT_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
@@ -59,7 +56,6 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     ScheduledHistoryBudget,
-    content_owns_per_fire_thread_root,
     scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
 )
@@ -97,7 +93,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
-from mindroom.routing import suggest_responder_for_message
+from mindroom.router_relay import RouterRelayDeps, execute_router_relay
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
@@ -117,7 +113,6 @@ from mindroom.timing import (
 from mindroom.turn_origin import (
     TurnIntent,
     classify_turn_origin,
-    original_sender_for_router_handoff,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
@@ -141,7 +136,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
-    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -150,112 +144,6 @@ if TYPE_CHECKING:
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
-_ROUTER_TARGET_STARTING_TEXT = "That agent is still starting. Please try again shortly."
-_ROUTER_TARGET_UNAVAILABLE_TEXT = (
-    "⚠️ I couldn't determine which agent or team should help with this. "
-    "Please try mentioning an agent or team directly with @ or rephrase your request."
-)
-
-
-def _gate_router_target_readiness(
-    orchestrator: OrchestratorRuntime | None,
-    suggested_entity: str | None,
-) -> tuple[str | None, bool]:
-    """Drop a known unready or stale router selection before relay delivery."""
-    if suggested_entity is None or orchestrator is None:
-        return suggested_entity, False
-    first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
-    return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
-
-
-@dataclass(frozen=True)
-class _RouterTargetResolution:
-    """One router target after its runtime readiness check."""
-
-    selected_entity: str | None
-    suggested_entity: str | None
-    response_text: str
-    target_unavailable: bool
-
-
-def _resolve_router_target(
-    orchestrator: OrchestratorRuntime | None,
-    suggested_entity: str | None,
-    scheduled_prompt: str | None,
-) -> _RouterTargetResolution | None:
-    """Resolve one target or retain recovered work until its runtime is ready."""
-    selected_entity = suggested_entity
-    suggested_entity, target_starting = _gate_router_target_readiness(
-        orchestrator,
-        suggested_entity,
-    )
-    if target_starting and turn_dispatch_recovery_active():
-        return None
-    if target_starting:
-        response_text = _ROUTER_TARGET_STARTING_TEXT
-    elif suggested_entity is None:
-        response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
-    else:
-        response_text = (
-            f"@{suggested_entity} {scheduled_prompt}"
-            if scheduled_prompt is not None
-            else f"@{suggested_entity} could you help with this?"
-        )
-    return _RouterTargetResolution(
-        selected_entity=selected_entity,
-        suggested_entity=suggested_entity,
-        response_text=response_text,
-        target_unavailable=not target_starting and suggested_entity is None,
-    )
-
-
-@dataclass(frozen=True)
-class _RouterRelayDelivery:
-    """One final router relay delivery decision."""
-
-    event_id: str | None
-    suggested_entity: str | None
-    deferred_for_recovery: bool = False
-
-
-async def _send_router_relay_after_readiness_recheck(
-    *,
-    orchestrator: OrchestratorRuntime | None,
-    delivery_gateway: DeliveryGateway,
-    selected_entity: str | None,
-    suggested_entity: str | None,
-    delivery_request: SendTextRequest,
-) -> _RouterRelayDelivery:
-    """Recheck one sampled target immediately before sending its relay."""
-    if selected_entity is None or orchestrator is None:
-        return _RouterRelayDelivery(
-            event_id=await delivery_gateway.send_text(delivery_request),
-            suggested_entity=suggested_entity,
-        )
-    final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
-    if final_readiness is True:
-        return _RouterRelayDelivery(
-            event_id=await delivery_gateway.send_text(delivery_request),
-            suggested_entity=suggested_entity,
-        )
-    if final_readiness is False and turn_dispatch_recovery_active():
-        return _RouterRelayDelivery(
-            event_id=None,
-            suggested_entity=suggested_entity,
-            deferred_for_recovery=True,
-        )
-    fallback_extra_content = dict(delivery_request.extra_content or {})
-    fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
-    fallback_extra_content.pop(SOURCE_KIND_KEY, None)
-    fallback_request = replace(
-        delivery_request,
-        response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
-        extra_content=fallback_extra_content or None,
-    )
-    return _RouterRelayDelivery(
-        event_id=await delivery_gateway.send_text(fallback_request),
-        suggested_entity=None,
-    )
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
@@ -1504,85 +1392,6 @@ class TurnController:
         """Return the shared retry signal for a selection without terminal truth."""
         return RuntimeError(f"Interactive selection {source_event_id} has no durable terminal outcome")
 
-    def _router_handoff_extra_content(
-        self,
-        *,
-        event: DispatchEvent,
-        extra_content: dict[str, Any] | None,
-        suggested_entity: str | None,
-        requester_user_id: str,
-        thread_event_id: str | None,
-    ) -> dict[str, Any]:
-        """Return router relay metadata normalized through the handoff origin policy."""
-        routed_extra_content = dict(extra_content) if extra_content is not None else {}
-        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY, None)
-        routed_extra_content.pop(PER_FIRE_THREAD_ROOT_KEY, None)
-        inherited_original_sender = routed_extra_content.get(ORIGINAL_SENDER_KEY)
-        inherited_original_sender = inherited_original_sender if isinstance(inherited_original_sender, str) else None
-        handoff_original_sender = original_sender_for_router_handoff(
-            target_entity_name=suggested_entity,
-            requester_id=requester_user_id,
-            requester_entity_name=self.deps.ingress.managed_entity_name_for_sender(requester_user_id),
-            inherited_original_sender=inherited_original_sender,
-            inherited_original_sender_entity_name=(
-                self.deps.ingress.managed_entity_name_for_sender(inherited_original_sender)
-                if inherited_original_sender is not None
-                else None
-            ),
-        )
-        routed_extra_content.pop(ORIGINAL_SENDER_KEY, None)
-        if handoff_original_sender is not None:
-            routed_extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-            routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
-        event_content = event.source.get("content") if isinstance(event.source, dict) else None
-        if (
-            self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
-            and isinstance(event_content, dict)
-            and content_owns_per_fire_thread_root(event_content)
-        ):
-            routed_extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
-            if thread_event_id is not None:
-                routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
-        return routed_extra_content
-
-    async def _router_handoff_with_attachments(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        event: DispatchEvent,
-        media_events: Sequence[MediaDispatchEvent],
-        extra_content: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Register routed media and return handoff metadata with attachment IDs."""
-        routed_media_events = list(media_events)
-        if not routed_media_events and is_matrix_media_dispatch_event(event):
-            routed_media_events.append(event)
-        if not routed_media_events:
-            return extra_content
-        routed_attachment_ids = merge_attachment_ids(
-            parse_attachment_ids_from_event_source({"content": extra_content}),
-            [
-                attachment_id
-                for attachment_id in await asyncio.gather(
-                    *(
-                        self.deps.normalizer.register_routed_attachment(
-                            room_id=room_id,
-                            thread_id=thread_id,
-                            event=media_event,
-                        )
-                        for media_event in routed_media_events
-                    ),
-                )
-                if attachment_id is not None
-            ],
-        )
-        if routed_attachment_ids:
-            extra_content[ATTACHMENT_IDS_KEY] = routed_attachment_ids
-        else:
-            extra_content.pop(ATTACHMENT_IDS_KEY, None)
-        return extra_content
-
     async def _execute_router_relay(
         self,
         room: nio.MatrixRoom,
@@ -1597,136 +1406,32 @@ class TurnController:
         handled_turn: TurnRecord | None = None,
         scheduled_prompt: str | None = None,
     ) -> None:
-        """Run one explicit router relay from the turn controller."""
-        assert self.deps.agent_name == ROUTER_AGENT_NAME
-
-        permission_sender_id = requester_user_id
-        responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(
+        """Run one explicit router relay through the router-relay executor."""
+        await execute_router_relay(
+            RouterRelayDeps(
+                runtime=self.deps.runtime,
+                runtime_paths=self.deps.runtime_paths,
+                logger=self.deps.logger,
+                agent_name=self.deps.agent_name,
+                turn_policy=self.deps.turn_policy,
+                ingress=self.deps.ingress,
+                resolver=self.deps.resolver,
+                turn_store=self.deps.turn_store,
+                visible_responses=self.deps.visible_responses,
+                delivery_gateway=self.deps.delivery_gateway,
+                normalizer=self.deps.normalizer,
+            ),
             room,
-            permission_sender_id,
-        )
-        if not responder_candidates:
-            self.deps.logger.debug(
-                "No responders to route to in this room for sender",
-                sender=permission_sender_id,
-            )
-            await self.deps.visible_responses.settle_source_events_ignored(
-                handled_turn or TurnRecord.create([event.event_id]),
-            )
-            return
-
-        with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-            if len(responder_candidates) == 1:
-                suggested_entity = self.deps.ingress.managed_entity_name_for_sender(responder_candidates[0].full_id)
-                self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
-            else:
-                self.deps.logger.info("Handling AI routing", event_id=event.event_id)
-
-                routing_text = message or event.body
-                suggested_entity = await suggest_responder_for_message(
-                    routing_text,
-                    responder_candidates,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                    thread_history,
-                )
-
-        target_resolution = _resolve_router_target(
-            self.deps.runtime.orchestrator,
-            suggested_entity,
-            scheduled_prompt,
-        )
-        if target_resolution is None:
-            return
-        selected_entity, suggested_entity, response_text = (
-            target_resolution.selected_entity,
-            target_resolution.suggested_entity,
-            target_resolution.response_text,
-        )
-        if target_resolution.target_unavailable:
-            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-                self.deps.logger.warning("Router failed to determine entity")
-
-        target_thread_mode = (
-            self.deps.runtime.config.get_entity_thread_mode(
-                suggested_entity,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            if suggested_entity
-            else None
-        )
-        resolved_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-            thread_mode_override=target_thread_mode,
-        )
-        thread_event_id = resolved_target.resolved_thread_id
-        routed_extra_content = self._router_handoff_extra_content(
-            event=event,
-            extra_content=extra_content,
-            suggested_entity=suggested_entity,
+            event,
+            thread_history,
+            thread_id,
+            message,
             requester_user_id=requester_user_id,
-            thread_event_id=thread_event_id,
+            extra_content=extra_content,
+            media_events=media_events,
+            handled_turn=handled_turn,
+            scheduled_prompt=scheduled_prompt,
         )
-        routed_extra_content = await self._router_handoff_with_attachments(
-            room_id=room.room_id,
-            thread_id=thread_event_id,
-            event=event,
-            media_events=media_events or (),
-            extra_content=routed_extra_content,
-        )
-
-        delivery_request = SendTextRequest(
-            target=resolved_target,
-            response_text=response_text,
-            extra_content=routed_extra_content or None,
-        )
-        source_turn = handled_turn or TurnRecord.create([event.event_id])
-        visible_echo_event_id = self.deps.turn_store.finalized_visible_echo_for_sources(
-            source_turn.source_event_ids,
-        )
-        (
-            tracked_handled_turn,
-            recovered_response_event_id,
-        ) = await self.deps.visible_responses.prepare_visible_delivery_turn(
-            source_turn,
-            requester_id=requester_user_id,
-            correlation_id=event.event_id,
-            target=resolved_target,
-            excluded_event_ids=(visible_echo_event_id,) if visible_echo_event_id is not None else (),
-        )
-        if tracked_handled_turn is None:
-            return
-        if recovered_response_event_id is not None:
-            self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
-            )
-            return
-        relay_delivery = await _send_router_relay_after_readiness_recheck(
-            orchestrator=self.deps.runtime.orchestrator,
-            delivery_gateway=self.deps.delivery_gateway,
-            selected_entity=selected_entity,
-            suggested_entity=suggested_entity,
-            delivery_request=delivery_request,
-        )
-        if relay_delivery.deferred_for_recovery:
-            return
-        event_id = relay_delivery.event_id
-        suggested_entity = relay_delivery.suggested_entity
-        with bound_log_context(**resolved_target.log_context):
-            if event_id:
-                self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-                await self.deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
-                self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
-                )
-            else:
-                self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
-                msg = f"Failed to route to entity {suggested_entity!r}"
-                raise RuntimeError(msg)
 
     def _router_handled_turn_outcome(
         self,
