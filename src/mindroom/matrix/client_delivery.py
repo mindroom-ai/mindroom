@@ -222,18 +222,35 @@ def _room_from_remote_state(
     return room
 
 
+@dataclass(frozen=True, slots=True)
+class _EncryptedRoomHydration:
+    """One validated room selected for encrypted delivery hydration."""
+
+    room: nio.MatrixRoom
+    joined_user_ids: frozenset[str]
+    unpublished_candidate: bool
+
+
+def _room_covers_joined_members(
+    room: nio.MatrixRoom,
+    joined_user_ids: frozenset[str],
+) -> bool:
+    """Return whether one encrypted sync room covers authoritative joined members."""
+    return room.encrypted and room.members_synced and joined_user_ids.issubset(room.users)
+
+
 async def _encrypted_room_for_hydration(
     client: nio.AsyncClient,
     room_id: str,
     members: nio.JoinedMembersResponse,
-) -> nio.MatrixRoom | None:
+) -> _EncryptedRoomHydration | None:
     """Return a complete candidate or an authoritative encrypted sync room."""
+    joined_user_ids = frozenset(member.user_id for member in members.members)
     room = client.rooms.get(room_id)
     if room is not None:
-        joined_user_ids = {member.user_id for member in members.members}
-        if room.encrypted and room.members_synced and joined_user_ids.issubset(room.users):
-            return room
-        return None
+        if not _room_covers_joined_members(room, joined_user_ids):
+            return None
+        return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
 
     state = await client.room_get_state(room_id)
     if not isinstance(state, nio.RoomGetStateResponse):
@@ -241,8 +258,10 @@ async def _encrypted_room_for_hydration(
     candidate = _room_from_remote_state(client, room_id, members, state)
     room = client.rooms.get(room_id)
     if room is None:
-        return candidate
-    return room if room.encrypted else None
+        return _EncryptedRoomHydration(candidate, joined_user_ids, unpublished_candidate=True)
+    if not _room_covers_joined_members(room, joined_user_ids):
+        return None
+    return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
 
 
 def _pending_room_key_query_user_ids(
@@ -258,17 +277,13 @@ def _pending_room_key_query_user_ids(
 def _current_encrypted_room_after_hydration(
     client: nio.AsyncClient,
     room_id: str,
-    hydrated_room: nio.MatrixRoom,
+    hydration: _EncryptedRoomHydration,
 ) -> nio.MatrixRoom | None:
     """Adopt a concurrent sync room only when it covers the hydrated membership."""
     current_room = client.rooms.get(room_id)
-    if current_room is None or current_room is hydrated_room:
-        return hydrated_room
-    if (
-        not current_room.encrypted
-        or not current_room.members_synced
-        or not set(hydrated_room.users).issubset(current_room.users)
-    ):
+    if current_room is None:
+        return hydration.room if hydration.unpublished_candidate else None
+    if not _room_covers_joined_members(current_room, hydration.joined_user_ids):
         logger.error(
             "matrix_encrypted_room_cache_changed_during_hydration",
             room_id=room_id,
@@ -290,9 +305,10 @@ async def _hydrate_encrypted_joined_room(
     if not isinstance(members, nio.JoinedMembersResponse):
         return False
 
-    room = await _encrypted_room_for_hydration(client, room_id, members)
-    if room is None:
+    hydration = await _encrypted_room_for_hydration(client, room_id, members)
+    if hydration is None:
         return False
+    room = hydration.room
     if client.olm is not None:
         client.olm.update_tracked_users(room)
     if client.should_query_keys:
@@ -300,7 +316,7 @@ async def _hydrate_encrypted_joined_room(
         if not isinstance(key_query, nio.KeysQueryResponse):
             return False
 
-    room = _current_encrypted_room_after_hydration(client, room_id, room)
+    room = _current_encrypted_room_after_hydration(client, room_id, hydration)
     if room is None:
         return False
 

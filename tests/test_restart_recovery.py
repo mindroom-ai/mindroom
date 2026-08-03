@@ -861,6 +861,43 @@ async def test_encrypted_room_hydration_does_not_publish_after_failed_state_quer
     assert room_id not in owner.client.encrypted_rooms
 
 
+@pytest.mark.parametrize("members_synced", [False, True])
+@pytest.mark.asyncio
+async def test_encrypted_room_hydration_rejects_partial_room_from_state_query_race(
+    *,
+    members_synced: bool,
+) -> None:
+    """A sync room racing full-state hydration must cover authoritative members."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    remote_member_id = "@human:remote.example.org"
+    _hide_encrypted_room(
+        owner,
+        room_id,
+        members=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(remote_member_id, "Human", None)],
+            room_id=room_id,
+        ),
+    )
+    state_response = owner.client.room_get_state.return_value
+    concurrent_room = nio.MatrixRoom(room_id=room_id, own_user_id=owner.user_id)
+    concurrent_room.encrypted = True
+    concurrent_room.members_synced = members_synced
+
+    async def room_get_state(_room_id: str) -> nio.RoomGetStateResponse:
+        owner.client.rooms[room_id] = concurrent_room
+        return state_response
+
+    owner.client.room_get_state = AsyncMock(side_effect=room_get_state)
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    assert owner.client.rooms[room_id] is concurrent_room
+    assert remote_member_id not in concurrent_room.users
+    assert room_id not in owner.client.encrypted_rooms
+
+
 @pytest.mark.asyncio
 async def test_cancelled_encrypted_room_hydration_stops_before_cache_publication() -> None:
     """Cancellation before hydration completes must not publish a room."""
