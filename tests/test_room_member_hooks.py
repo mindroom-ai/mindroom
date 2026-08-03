@@ -92,6 +92,7 @@ def _sync_response_with_state(
     events: list[object],
     *,
     timeline_events: list[object] | None = None,
+    timeline_limited: bool = False,
 ) -> nio.SyncResponse:
     response = MagicMock()
     response.__class__ = nio.SyncResponse
@@ -102,7 +103,7 @@ def _sync_response_with_state(
         join={
             room_id: SimpleNamespace(
                 state=events,
-                timeline=SimpleNamespace(events=timeline_events or [], limited=False),
+                timeline=SimpleNamespace(events=timeline_events or [], limited=timeline_limited),
             ),
         },
         leave={},
@@ -805,6 +806,7 @@ async def test_router_ignores_limited_sync_state_member_snapshot(
         _sync_response_with_state(
             room.room_id,
             [_room_member_event(event_id="$limited-state")],
+            timeline_limited=True,
         ),
     )
 
