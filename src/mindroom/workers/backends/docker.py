@@ -838,6 +838,8 @@ class DockerWorkerBackend:
             pulled_image.id,
             image_resolved=True,
         )
+        metadata.launch_config_hash = launch_config.launch_config_hash
+        self._save_metadata(paths, metadata)
         container = self._read_container(metadata.container_name)
         self._stop_container(container)
         self._remove_container(container)
