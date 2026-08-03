@@ -1089,6 +1089,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
+    "mindroom.turn_store",
 ]
 
 [[modules]]

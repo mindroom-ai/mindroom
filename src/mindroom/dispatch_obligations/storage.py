@@ -681,6 +681,28 @@ class DispatchObligationStore:
             ).fetchall()
         return frozenset(row["source_event_id"] for row in rows)
 
+    def quarantined(self) -> tuple[tuple[str, str], ...]:
+        """Return (source_event_id, callback_kind) pairs of retained corrupt rows for operator repair."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_event_id, callback_kind, room_id, event_source_json, semantic_consumer, state
+                FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND state IN ('pending', 'deferred')
+                ORDER BY created_at_ns, rowid
+                """,
+                (self.principal_id, self.entity_name),
+            ).fetchall()
+        quarantined_rows: list[tuple[str, str]] = []
+        for row in rows:
+            try:
+                self._pending_obligation_from_row(row)
+            except DispatchObligationCorruptionError:
+                quarantined_rows.append((row["source_event_id"], row["callback_kind"]))
+        return tuple(quarantined_rows)
+
     def pending_for(self, key: DispatchObligationKey) -> DispatchObligation | None:
         """Reload the first durable payload for one still-pending exact key."""
         self.validate_bound_key(key)

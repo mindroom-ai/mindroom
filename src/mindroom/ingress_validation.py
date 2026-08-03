@@ -294,14 +294,18 @@ class IngressValidator:
             room.room_id,
             self.deps.runtime_paths,
         ):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            self._record_ignored_turn(event.event_id)
             return None
 
         if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            self._record_ignored_turn(event.event_id)
             return None
 
         return requester_user_id
+
+    def _record_ignored_turn(self, event_id: str) -> None:
+        """Record one ignored inbound event as a terminal turn with no response."""
+        self.deps.turn_store.record_turn(TurnRecord.create([event_id]))
 
     def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""

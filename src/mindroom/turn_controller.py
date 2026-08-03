@@ -65,7 +65,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import TurnRecord, with_user_stop
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -121,6 +121,7 @@ from mindroom.turn_origin import (
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
@@ -1787,19 +1788,10 @@ class TurnController:
             self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
-            self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
-            )
+            record_deferred_outcome_response(self.deps.turn_store, handled_turn, response_event_id)
 
         def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
-            self.deps.turn_store.record_turn_durably(
-                with_user_stop(
-                    handled_turn,
-                    response_event_id,
-                    stop_receipt_order,
-                    delivery_settled=True,
-                ),
-            )
+            record_user_stop_terminal(self.deps.turn_store, handled_turn, response_event_id, stop_receipt_order)
 
         return record_interrupted_turn, record_deferred_outcome, record_user_stop
 

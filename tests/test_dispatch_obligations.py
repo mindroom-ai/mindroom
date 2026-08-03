@@ -286,13 +286,15 @@ async def test_aged_interrupted_command_journal_survives_pending_obligation_reco
     """Pending callback recovery must keep the command checkpoint it depends on."""
     event_id = "$interrupted-command"
     ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tmp_path / "tracking")
-    ledger.record_handled_turn(
-        TurnRecord.create(
-            [event_id],
-            completed=False,
-            command_execution_started=True,
-            timestamp=time.time() - (40 * 24 * 60 * 60),
-        ),
+    interrupted_record = TurnRecord.create(
+        [event_id],
+        completed=False,
+        command_execution_started=True,
+        timestamp=time.time() - (40 * 24 * 60 * 60),
+    )
+    ledger.update_handled_turn(
+        interrupted_record.indexed_event_ids,
+        lambda _existing_records: interrupted_record,
     )
     ledger.flush()
     store = _store(tmp_path)
@@ -321,12 +323,14 @@ async def test_startup_recovers_aged_completed_turn_before_cleanup(tmp_path: Pat
     event_id = "$completed-command"
     tracking_path = tmp_path / "tracking"
     ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tracking_path)
-    ledger.record_handled_turn(
-        TurnRecord.create(
-            [event_id],
-            response_event_id="$response",
-            timestamp=time.time() - (40 * 24 * 60 * 60),
-        ),
+    completed_record = TurnRecord.create(
+        [event_id],
+        response_event_id="$response",
+        timestamp=time.time() - (40 * 24 * 60 * 60),
+    )
+    ledger.update_handled_turn(
+        completed_record.indexed_event_ids,
+        lambda _existing_records: completed_record,
     )
     ledger.flush()
     store = _store(tmp_path)
@@ -1914,3 +1918,55 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
         ("$unknown", nio.TimelineEventProvenance.LIVE),
     ]
     assert not store.has_pending("$unknown", DispatchCallbackKind.APPROVAL)
+
+
+def test_quarantined_reports_corrupt_rows_and_preserves_cleanup_ownership(tmp_path: Path) -> None:
+    """Corrupt rows are reported as quarantined while still protecting cleanup ownership."""
+    store = _store(tmp_path)
+    broken = _message_obligation("$broken")
+    valid = _message_obligation("$valid")
+    store.create_pending(broken)
+    store.create_pending(valid)
+    with sqlite3.connect(_database_path(store)) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            ("{", "$broken"),
+        )
+
+    restarted = _store(tmp_path)
+
+    assert restarted.quarantined() == (("$broken", DispatchCallbackKind.MESSAGE.value),)
+    assert restarted.has_pending("$broken", DispatchCallbackKind.MESSAGE)
+    assert restarted.unsettled_source_event_ids() == frozenset({"$broken", "$valid"})
+
+
+@pytest.mark.asyncio
+async def test_recovery_reports_quarantine_summary_for_corrupt_rows(tmp_path: Path) -> None:
+    """Recovery surfaces retained corrupt rows as one operator-visible quarantine report."""
+    store = _store(tmp_path)
+    broken = _message_obligation("$broken-event")
+    valid = _message_obligation("$valid-event")
+    store.create_pending(broken)
+    store.create_pending(valid)
+    with sqlite3.connect(_database_path(store)) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            ("{", "$broken-event"),
+        )
+    recovered: list[str] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        recovered.append(event.event_id)
+        return DispatchCallbackResult.SUCCEEDED
+
+    with patch("mindroom.dispatch_obligations.runner.logger") as logger:
+        await _runner(store, callback).recover_pending()
+
+    assert recovered == ["$valid-event"]
+    logger.error.assert_called_once_with(
+        "dispatch_obligation_quarantined",
+        quarantined_count=1,
+        quarantined_sources=["$broken-event"],
+        hint="Corrupt dispatch obligation rows are retained for repair; stop MindRoom, back up the database, and restore a known-good copy before restarting.",
+    )
+    assert store.has_pending("$broken-event", DispatchCallbackKind.MESSAGE)

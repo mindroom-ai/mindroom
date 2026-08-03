@@ -10,13 +10,13 @@ from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import with_user_stop
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -362,21 +362,12 @@ class EditRegenerator:
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_responded_turn(
-                        canonicalize_turn_record(record, response_event_id=response_event_id),
-                    )
+                    record_deferred_outcome_response(self.deps.turn_store, record, response_event_id)
                     if applied
                     else None
                 ),
                 on_user_stop_handled=lambda response_event_id, stop_receipt_order: (
-                    self.deps.turn_store.record_turn_durably(
-                        with_user_stop(
-                            record,
-                            response_event_id,
-                            stop_receipt_order,
-                            delivery_settled=True,
-                        ),
-                    )
+                    record_user_stop_terminal(self.deps.turn_store, record, response_event_id, stop_receipt_order)
                     if applied
                     else None
                 ),

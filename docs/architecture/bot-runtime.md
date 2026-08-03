@@ -80,6 +80,7 @@ Router delivery failure raises back into that same retry path instead of complet
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
 Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
+Retained corrupt rows are operator-visible as quarantined state: `DispatchObligationStorage.quarantined()` lists them, and recovery emits one `dispatch_obligation_quarantined` summary with the retained source IDs.
 To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
@@ -175,6 +176,19 @@ dispatch obligation pending
 
 For those callback families only, `DispatchSemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+
+### Deferred result enums and the persisted deferred state
+
+Three similarly named concepts are distinct.
+
+| Concept | Home | Meaning |
+| --- | --- | --- |
+| `TurnDispatchOutcome` | `dispatch_callback_outcome.py` | The turn pipeline's ownership disposition for one message or media callback: `DEFERRED` (downstream owns the work) or `INTENTIONALLY_IGNORED` (settled without a response). |
+| `DispatchCallbackResult` | `dispatch_obligations/events.py` | The callback-visible outcome at the durable boundary: `SUCCEEDED`, `INTENTIONALLY_IGNORED`, or `DEFERRED` (the callback body completed and downstream turn work owns the source). |
+| Persisted `deferred` obligation state | `dispatch_obligations/storage.py` | The durable row state marking that downstream turn work owns the source; it settles only from terminal `TurnStore` truth, never from queue acceptance. |
+
+`TurnDispatchOutcome.DEFERRED` is translated into `DispatchCallbackResult.DEFERRED`, which the obligation runner persists as the `deferred` row state.
+A pending row whose callback body never ran must never be compacted by the terminal-settlement path.
 
 ## Completed Simplifications
 
