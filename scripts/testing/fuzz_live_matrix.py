@@ -6441,6 +6441,7 @@ class FailureBundle:
         exception: BaseException | None,
         log_path: Path,
         ledger_path: Path,
+        nio_recovery_snapshot: Mapping[str, object],
         oracle_snapshot: Mapping[str, object],
         model_observations: Mapping[object, object],
         diagnostics: Mapping[str, object],
@@ -6473,6 +6474,7 @@ class FailureBundle:
             )
         self._write_isolated("mindroom.log", copy_text(log_path))
         self._write_isolated("handled_turns.json", copy_text(ledger_path))
+        self._write_isolated("nio_recovery.json", write_json(dict(nio_recovery_snapshot)))
         self._write_isolated("oracle_snapshot.json", write_json(dict(oracle_snapshot)))
         self._write_isolated(
             "model_observations.json",
@@ -6509,6 +6511,46 @@ def _capture_bundle_collector(
 def _capture_error_text(artifact: str, error: BaseException) -> str:
     """Build a durable sentinel for a failed evidence collector."""
     return f"<{artifact} capture failed: {type(error).__name__}: {error}>"
+
+
+def _nio_recovery_snapshot(storage_path: Path) -> dict[str, object]:
+    """Read only non-secret durable nio recovery state from Matrix stores."""
+    stores: dict[str, object] = {}
+    store_root = storage_path / "encryption_keys"
+    for database_path in sorted(store_root.rglob("*.db")) if store_root.exists() else ():
+        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            table_names = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+                )
+            }
+            database_snapshot: dict[str, object] = {}
+            if "syncrecoverygaps" in table_names:
+                database_snapshot["gaps"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        """SELECT room_id, generation, target_token, cursor_token, account_id
+                        FROM syncrecoverygaps ORDER BY room_id, generation""",
+                    )
+                ]
+            if "pendingtimelineevents" in table_names:
+                database_snapshot["events"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        """SELECT room_id, generation, sequence, event_id, is_live,
+                        was_encrypted, was_completed, admission_accepted, provenance,
+                        apply_room_state, account_id FROM pendingtimelineevents
+                        ORDER BY room_id, generation, sequence, event_id""",
+                    )
+                ]
+            if database_snapshot:
+                stores[str(database_path.relative_to(storage_path))] = database_snapshot
+        finally:
+            connection.close()
+    return {"stores": stores}
 
 
 def _record_secondary_failure(
@@ -6769,6 +6811,16 @@ def _persist_run_bundle(
 ) -> Path:
     """Copy disposable stack evidence before cleanup can remove its sources."""
     capture_errors: list[tuple[str, BaseException]] = []
+    nio_recovery_snapshot = cast(
+        "Mapping[str, object]",
+        _capture_bundle_collector(
+            bundle,
+            "nio_recovery.json",
+            lambda: _nio_recovery_snapshot(stack.storage_path),
+            lambda error: {"_capture_error": _capture_error_text("nio_recovery.json", error)},
+            capture_errors,
+        ),
+    )
     oracle_snapshot = cast(
         "Mapping[str, object]",
         _capture_bundle_collector(
@@ -6814,6 +6866,7 @@ def _persist_run_bundle(
         exception=exception,
         log_path=stack.log_path,
         ledger_path=ledger_path,
+        nio_recovery_snapshot=nio_recovery_snapshot,
         oracle_snapshot=oracle_snapshot,
         model_observations=model_observations,
         diagnostics=diagnostics,

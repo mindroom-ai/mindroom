@@ -5035,6 +5035,79 @@ def _snapshot_oracle() -> ExactReplyOracle:
     return oracle
 
 
+def test_nio_recovery_snapshot_keeps_queue_state_without_event_payloads(tmp_path: Path) -> None:
+    """Failure evidence retains recovery ownership without copying encrypted data."""
+    store = tmp_path / "mindroom_data" / "encryption_keys" / "agent" / "store.db"
+    store.parent.mkdir(parents=True)
+    connection = sqlite3.connect(store)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE syncrecoverygaps (
+                room_id TEXT,
+                generation INTEGER,
+                target_token TEXT,
+                cursor_token TEXT,
+                account_id INTEGER
+            );
+            CREATE TABLE pendingtimelineevents (
+                room_id TEXT,
+                generation INTEGER,
+                sequence INTEGER,
+                event_id TEXT,
+                event_payload BLOB,
+                is_live INTEGER,
+                was_encrypted INTEGER,
+                was_completed INTEGER,
+                admission_accepted INTEGER,
+                provenance TEXT,
+                apply_room_state INTEGER,
+                account_id INTEGER
+            );
+            """,
+        )
+        connection.execute(
+            "INSERT INTO syncrecoverygaps VALUES (?, ?, ?, ?, ?)",
+            ("!room:example", 4, "target", "cursor", 2),
+        )
+        connection.execute(
+            "INSERT INTO pendingtimelineevents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("!room:example", 4, 7, "$source", b"secret-event-payload", 1, 0, 0, 1, "live", 1, 2),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    snapshot = live_fuzz._nio_recovery_snapshot(tmp_path / "mindroom_data")
+
+    database = snapshot["stores"]["encryption_keys/agent/store.db"]
+    assert database["gaps"] == [
+        {
+            "room_id": "!room:example",
+            "generation": 4,
+            "target_token": "target",
+            "cursor_token": "cursor",
+            "account_id": 2,
+        },
+    ]
+    assert database["events"] == [
+        {
+            "room_id": "!room:example",
+            "generation": 4,
+            "sequence": 7,
+            "event_id": "$source",
+            "is_live": 1,
+            "was_encrypted": 0,
+            "was_completed": 0,
+            "admission_accepted": 1,
+            "provenance": "live",
+            "apply_room_state": 1,
+            "account_id": 2,
+        },
+    ]
+    assert "secret-event-payload" not in json.dumps(snapshot)
+
+
 @pytest.mark.asyncio
 async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: Path) -> None:
     """A run failure leaves a complete bundle after the stack is destroyed."""
@@ -5068,6 +5141,7 @@ async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: 
     assert json.loads(journal_lines[0])["event_id"] == "$sent"
     assert "mindroom line" in (directory / "mindroom.log").read_text(encoding="utf-8")
     assert (directory / "handled_turns.json").exists()
+    assert json.loads((directory / "nio_recovery.json").read_text(encoding="utf-8")) == {"stores": {}}
     observations = json.loads((directory / "model_observations.json").read_text(encoding="utf-8"))
     assert observations["3"] == [_source_marker("op:1", ORIGINAL_REVISION)]
     diagnostics = json.loads((directory / "diagnostics.json").read_text(encoding="utf-8"))
