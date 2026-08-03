@@ -1807,10 +1807,53 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint(tmp_path: Path) -> None:
-    """Cancellation while draining NIO recovery cannot preserve the rejected checkpoint."""
+    """Cancellation must wait for accepted NIO cleanup before clearing trust."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_rejected"
+    bot.client.loaded_sync_token = "s_rejected"  # noqa: S105
+    save_sync_token(tmp_path, bot.agent_name, "s_rejected", cache_generation=_CACHE_GENERATION)
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_completed = False
+
+    async def blocked_cleanup(_client: nio.AsyncClient) -> None:
+        nonlocal cleanup_completed
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_completed = True
+
+    with patch(
+        "mindroom.bot.invalidate_rejected_sync_position",
+        side_effect=blocked_cleanup,
+    ):
+        task = asyncio.create_task(bot._on_sync_error(sync_error))
+        await cleanup_started.wait()
+        task.cancel("watchdog restart")
+        await asyncio.sleep(0)
+
+        assert not task.done()
+
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError, match="watchdog restart"):
+            await task
+
+    assert bot.client.next_batch is None
+    assert bot.client.loaded_sync_token == ""
+    assert cleanup_completed
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_cleanup_failure_keeps_rejected_client_position(tmp_path: Path) -> None:
+    """Failed transport sanitation must restart without exposing stale gaps tokenlessly."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_rejected"
+    bot.client.loaded_sync_token = "s_rejected"  # noqa: S105
     save_sync_token(tmp_path, bot.agent_name, "s_rejected", cache_generation=_CACHE_GENERATION)
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
@@ -1818,13 +1861,14 @@ async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint
     with (
         patch(
             "mindroom.bot.invalidate_rejected_sync_position",
-            AsyncMock(side_effect=asyncio.CancelledError("watchdog restart")),
+            AsyncMock(side_effect=OSError("recovery reset failed")),
         ),
-        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+        pytest.raises(OSError, match="recovery reset failed"),
     ):
         await bot._on_sync_error(sync_error)
 
-    assert bot.client.next_batch is None
+    assert bot.client.next_batch == "s_rejected"
+    assert bot.client.loaded_sync_token == "s_rejected"  # noqa: S105
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
 
@@ -1840,7 +1884,8 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    await bot._on_sync_error(sync_error)
+    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
+        await bot._on_sync_error(sync_error)
 
     bot._first_sync_done = True
     response = _sync_response("s_later")
@@ -1868,7 +1913,8 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    await bot._on_sync_error(sync_error)
+    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
+        await bot._on_sync_error(sync_error)
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
@@ -1886,7 +1932,8 @@ async def test_unknown_pos_non_restored_runtime_allows_later_checkpoint(tmp_path
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    await bot._on_sync_error(sync_error)
+    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
+        await bot._on_sync_error(sync_error)
 
     bot.client.next_batch = "s_later_after_unknown_pos"
     response = _sync_response(

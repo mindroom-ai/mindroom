@@ -55,9 +55,6 @@ logger = get_logger(__name__)
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
-_NON_LIFECYCLE_CALLBACK_KIND_VALUES = frozenset(
-    kind.value for kind in DispatchCallbackKind if kind is not DispatchCallbackKind.ROOM_LIFECYCLE
-)
 
 _SourceAdmission = Callable[
     [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None, bool],
@@ -70,15 +67,6 @@ _SourceRejectionCallback = Callable[
     Awaitable[None],
 ]
 _RoomLifecycleAdmission = Callable[[nio.TimelineEventProvenance], bool]
-_RoomLifecycleExecution = Callable[[], bool]
-
-
-@dataclass(frozen=True, slots=True)
-class _RoomLifecycleMarkerFence:
-    """Snapshot markers blocked by exact or corrupt lifecycle obligations."""
-
-    member_ids: frozenset[tuple[str, str]]
-    corrupt_room_ids: frozenset[str]
 
 
 async def _admit_all_sources(
@@ -96,6 +84,36 @@ def _ignore_event_provenance(
     _provenance: nio.TimelineEventProvenance,
 ) -> None:
     pass
+
+
+def _may_be_room_lifecycle(callback_kind: str) -> bool:
+    """Fence known lifecycle rows and unknown kinds that cannot be ruled out."""
+    try:
+        return DispatchCallbackKind(callback_kind) is DispatchCallbackKind.ROOM_LIFECYCLE
+    except ValueError:
+        return True
+
+
+def _log_corrupt_obligation(obligation: DispatchObligation) -> None:
+    logger.error(
+        "dispatch_obligation_recovery_corrupt",
+        source_event_id=obligation.source_event_id,
+        callback_kind=obligation.callback_kind.value,
+        room_id=obligation.room_id,
+    )
+
+
+def _room_lifecycle_event(obligation: DispatchObligation) -> nio.RoomMemberEvent | None:
+    """Parse one lifecycle event, logging malformed retained work once."""
+    try:
+        event = parse_recovery_event(obligation)
+    except DispatchObligationCorruptionError:
+        _log_corrupt_obligation(obligation)
+        return None
+    if not isinstance(event, nio.RoomMemberEvent):
+        _log_corrupt_obligation(obligation)
+        return None
+    return event
 
 
 async def _ignore_historical_event_cache(
@@ -130,7 +148,6 @@ class DispatchObligationRunner:
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: _RoomLifecycleAdmission = lambda _provenance: False
-    room_lifecycle_execution_enabled: _RoomLifecycleExecution = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
     _active: set[DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
@@ -244,57 +261,34 @@ class DispatchObligationRunner:
             source_event_ids,
         )
 
-    async def room_lifecycle_marker_fence(self) -> _RoomLifecycleMarkerFence:
+    async def room_lifecycle_marker_fence(
+        self,
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[str]]:
         """Return exact member and room-wide corruption fences for snapshot markers."""
-        pending = await asyncio.to_thread(self.store.pending_with_corruption)
+        obligations, corrupt_rows = await asyncio.to_thread(self.store.pending_with_corruption)
         members: set[tuple[str, str]] = set()
         corrupt_room_ids = {
-            row.room_id for row in pending.corrupt_rows if row.callback_kind not in _NON_LIFECYCLE_CALLBACK_KIND_VALUES
+            room_id
+            for _source_event_id, callback_kind, room_id in corrupt_rows
+            if _may_be_room_lifecycle(callback_kind)
         }
-        for obligation in pending.obligations:
+        for obligation in obligations:
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
                 continue
-            try:
-                event = parse_recovery_event(obligation)
-            except DispatchObligationCorruptionError:
-                event = None
-            if not isinstance(event, nio.RoomMemberEvent):
-                logger.error(
-                    "dispatch_obligation_recovery_corrupt",
-                    source_event_id=obligation.source_event_id,
-                    callback_kind=obligation.callback_kind.value,
-                    room_id=obligation.room_id,
-                )
+            event = _room_lifecycle_event(obligation)
+            if event is None:
                 corrupt_room_ids.add(obligation.room_id)
                 continue
             members.add((obligation.room_id, event.state_key))
-        return _RoomLifecycleMarkerFence(
-            member_ids=frozenset(members),
-            corrupt_room_ids=frozenset(corrupt_room_ids),
-        )
+        return frozenset(members), frozenset(corrupt_room_ids)
 
     async def drain_pending_room_lifecycle(self) -> None:
         """Complete every valid captured member callback before certification."""
         for obligation in await asyncio.to_thread(self.store.pending):
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
                 continue
-            try:
-                event = parse_recovery_event(obligation)
-            except DispatchObligationCorruptionError:
-                logger.error(  # noqa: TRY400
-                    "dispatch_obligation_recovery_corrupt",
-                    source_event_id=obligation.source_event_id,
-                    callback_kind=obligation.callback_kind.value,
-                    room_id=obligation.room_id,
-                )
-                continue
-            if not isinstance(event, nio.RoomMemberEvent):
-                logger.error(
-                    "dispatch_obligation_recovery_corrupt",
-                    source_event_id=obligation.source_event_id,
-                    callback_kind=obligation.callback_kind.value,
-                    room_id=obligation.room_id,
-                )
+            event = _room_lifecycle_event(obligation)
+            if event is None:
                 continue
             await self._run_persisted(
                 obligation,
@@ -565,6 +559,8 @@ class DispatchObligationRunner:
         """Retry every valid pending callback without waiting for another sync response."""
         failed_keys: list[DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
+            if obligation.callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE:
+                continue
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:
                 continue
             try:
@@ -579,12 +575,7 @@ class DispatchObligationRunner:
             except asyncio.CancelledError:
                 raise
             except DispatchObligationCorruptionError:
-                logger.error(  # noqa: TRY400
-                    "dispatch_obligation_recovery_corrupt",
-                    source_event_id=obligation.source_event_id,
-                    callback_kind=obligation.callback_kind.value,
-                    room_id=obligation.room_id,
-                )
+                _log_corrupt_obligation(obligation)
             except Exception:
                 logger.exception(
                     "dispatch_obligation_recovery_failed",
@@ -598,6 +589,8 @@ class DispatchObligationRunner:
 
     def _schedule_retry(self, key: DispatchObligationKey) -> None:
         """Ensure one failed exact callback remains autonomously retry-owned."""
+        if key.callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE:
+            return
         if key in self._retry_corrupt:
             return
         self._retry_keys.setdefault(key, 0)
@@ -793,11 +786,6 @@ class _DispatchObligationTaskWrapper:
         key = self.runner._obligation_for_event(room, event, self.callback_kind).key
         obligation = _ADMITTED_OBLIGATION.get()
         _ADMITTED_OBLIGATION.set(None)
-        if (
-            self.callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
-            and not self.runner.room_lifecycle_execution_enabled()
-        ):
-            return
         if obligation is not None and obligation.key == key:
             self.runner._schedule_background_obligation(
                 obligation,

@@ -285,6 +285,94 @@ async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_rejected_sync_position_reset_failure_keeps_durable_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed generation reset must not publish a tokenless stale generation."""
+    user_id = "@mindroom_agent:example.org"
+    device_id = "AGENTDEVICE"
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=matrix_client_config(),
+    )
+    assert client.store is not None
+    room_id = "!room:example.org"
+    client.next_batch = "s_before_gap"
+    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
+    await client.receive_response(
+        nio.SyncResponse(
+            "s_rejected",
+            nio.Rooms(
+                invite={},
+                join={
+                    room_id: nio.RoomInfo(
+                        nio.Timeline([], limited=True, prev_batch="p_before_gap"),
+                        state=[],
+                        ephemeral=[],
+                        account_data=[],
+                    ),
+                },
+                leave={},
+            ),
+            nio.DeviceOneTimeKeyCount(None, None),
+            nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        ),
+    )
+    assert client.loaded_sync_token == "s_rejected"  # noqa: S105
+    monkeypatch.setattr(
+        client_session,
+        "persist_response_plan",
+        Mock(side_effect=OSError("reset write failed")),
+    )
+
+    with pytest.raises(OSError, match="reset write failed"):
+        await client_session.invalidate_rejected_sync_position(client)
+
+    await client.close()
+    cast("Any", client.store).database.close()
+    restarted = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=matrix_client_config(),
+    )
+    try:
+        assert restarted.loaded_sync_token == "s_rejected"  # noqa: S105
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_sync_position_consumes_all_deferred_dispatch_errors(
+    tmp_path: Path,
+) -> None:
+    """Discarded recovery generations must not poison later fresh responses."""
+    client = _load_persisted_client(
+        tmp_path,
+        user_id="@mindroom_agent:example.org",
+        device_id="AGENTDEVICE",
+        config=matrix_client_config(),
+    )
+    recovery = cast("Any", client)._recovery
+    recovery._deferred_dispatch_errors.extend(
+        [
+            OSError("first rejected callback failed"),
+            OSError("second rejected callback failed"),
+        ],
+    )
+
+    await client_session.invalidate_rejected_sync_position(client)
+
+    assert recovery._deferred_dispatch_errors == []
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_rejected_sync_position_preserves_unadmitted_live_events(tmp_path: Path) -> None:
     """Rejected recovery history must not discard later live callback work."""
     room_id = "!room:example.org"
@@ -381,6 +469,65 @@ async def test_rejected_sync_position_preserves_unadmitted_live_events(tmp_path:
         assert admitted == [(live_event.event_id, nio.TimelineEventProvenance.LIVE)]
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_sliding_initial_timeline_reports_only_num_live_tail_as_live(tmp_path: Path) -> None:
+    """Pinned nio must distinguish Sliding snapshot history from its explicit live tail."""
+    user_id = "@mindroom_agent:example.org"
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id="AGENTDEVICE",
+        config=matrix_client_config(),
+    )
+    admitted: list[tuple[str, nio.TimelineEventProvenance]] = []
+
+    async def admit(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        admitted.append((event.event_id, provenance))
+
+    def member(event_id: str, member_id: str) -> nio.RoomMemberEvent:
+        event = nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": event_id,
+                "sender": member_id,
+                "state_key": member_id,
+                "origin_server_ts": 1,
+                "content": {"membership": "join"},
+                "unsigned": {"prev_content": {"membership": "leave"}},
+            },
+        )
+        assert isinstance(event, nio.RoomMemberEvent)
+        return event
+
+    client.add_event_admission_callback(admit)
+    await client.receive_response(
+        nio.SlidingSyncResponse(
+            "p1",
+            rooms={
+                "!room:example.org": nio.SlidingSyncRoom(
+                    initial=True,
+                    membership="join",
+                    timeline=[
+                        member("$snapshot", "@alice:example.org"),
+                        member("$live", "@bob:example.org"),
+                    ],
+                    num_live=1,
+                ),
+            },
+        ),
+    )
+
+    assert admitted == [
+        ("$snapshot", nio.TimelineEventProvenance.HISTORY),
+        ("$live", nio.TimelineEventProvenance.LIVE),
+    ]
+    await client.close()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")

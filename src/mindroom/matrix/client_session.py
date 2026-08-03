@@ -84,13 +84,19 @@ class _MindRoomAsyncClient(nio.AsyncClient):
     async def invalidate_rejected_sync_position(self) -> None:
         """Discard a server-rejected Classic cursor and its recovery generations."""
         async with self._sync_response_lock:
-            if self.store is not None:
-                # Clear the poisoned transport position before callback drain so
-                # cancellation cannot reintroduce an M_UNKNOWN_POS restart loop.
-                self.store.save_sync_token("")
-            await drain_recovery_dispatches(self._recovery)
+            while True:
+                try:
+                    await drain_recovery_dispatches(self._recovery)
+                except Exception as error:
+                    logger.warning(
+                        "matrix_rejected_sync_recovery_dispatch_failed",
+                        error=str(error),
+                        error_type=type(error).__name__,
+                    )
+                else:
+                    break
             recovery_room_ids = set(self._recovery.gaps)
-            recovery_room_ids.update(room_id for room_id, generation in self._recovery.events if generation > 0)
+            recovery_room_ids.update(room_id for room_id, _generation in self._recovery.events)
             if recovery_room_ids:
                 async with self._recovery_room_state(recovery_room_ids):
                     plan = merge_recovery_plans(
@@ -99,6 +105,10 @@ class _MindRoomAsyncClient(nio.AsyncClient):
                             room_id=room_id,
                             timeline_events=(),
                             user_id=self.user_id,
+                            # In pinned nio, a terminal membership asks the
+                            # recovery owner to reset rejected history while
+                            # rehoming unstarted LIVE work. It does not mutate
+                            # the Matrix room's actual membership.
                             membership="leave",
                         )
                         for room_id in sorted(recovery_room_ids)
@@ -109,9 +119,12 @@ class _MindRoomAsyncClient(nio.AsyncClient):
                         token=None,
                         plan=plan,
                     )
+            if self.store is not None:
+                # Publish tokenless transport state only after every rejected
+                # generation is durably sanitized. A crash before this write
+                # safely retries M_UNKNOWN_POS cleanup from the old token.
+                self.store.save_sync_token("")
             self._recovery.outcomes.clear()
-            self.next_batch = None
-            self.loaded_sync_token = ""
 
     def encrypt(
         self,
@@ -265,8 +278,10 @@ def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> ni
 
 async def invalidate_rejected_sync_position(client: nio.AsyncClient) -> None:
     """Durably discard a rejected Classic cursor for MindRoom-owned clients."""
-    if isinstance(client, _MindRoomAsyncClient):
-        await client.invalidate_rejected_sync_position()
+    if not isinstance(client, _MindRoomAsyncClient):
+        msg = f"Unsupported Matrix client type {type(client).__name__!r}"
+        raise TypeError(msg)
+    await client.invalidate_rejected_sync_position()
 
 
 def _create_matrix_client(

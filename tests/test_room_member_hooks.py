@@ -24,6 +24,7 @@ from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
+from mindroom.matrix.client_session import _MindRoomAsyncClient
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -132,7 +133,8 @@ def _router_bot(
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
     bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
     install_runtime_cache_support(bot)
-    bot.client = MagicMock()
+    bot.client = MagicMock(spec=_MindRoomAsyncClient)
+    bot.client.user_id = bot.agent_user.user_id
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
     bot._room_member_hook_lifecycle.certified()
@@ -161,29 +163,6 @@ def test_room_member_joined_is_a_builtin_hook_event() -> None:
     registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     assert registry.has_hooks(EVENT_ROOM_MEMBER_JOINED)
-
-
-def test_router_registers_room_member_callback_after_initial_sync(tmp_path: Path) -> None:
-    """The router should start listening for member events only after startup sync."""
-    bot = _router_bot(tmp_path)
-
-    bot._register_room_member_callback_after_initial_sync()
-    bot._register_room_member_callback_after_initial_sync()
-
-    bot.client.add_event_admission_callback.assert_not_called()
-    bot.client.add_event_callback.assert_called_once()
-    assert bot.client.add_event_callback.call_args.args[1] is nio.RoomMemberEvent
-
-
-def test_non_router_does_not_register_room_member_callback(tmp_path: Path) -> None:
-    """Non-router bots should not register duplicate member-event callbacks."""
-    bot = _agent_bot(tmp_path)
-    bot.client = MagicMock()
-
-    bot._register_room_member_callback_after_initial_sync()
-
-    bot.client.add_event_admission_callback.assert_not_called()
-    bot.client.add_event_callback.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -404,7 +383,7 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     )
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
-    await bot._dispatch_obligation_runner.recover_pending()
+    await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
 
     assert attempts == 2
     assert not bot._dispatch_obligation_store.has_pending(
@@ -641,7 +620,7 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
@@ -683,7 +662,7 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
@@ -729,7 +708,7 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
@@ -953,7 +932,7 @@ async def test_restored_join_catchup_survives_recovery_settlement(
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot.client.rooms = {room.room_id: room}
     bot.client.loaded_sync_token = ""
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -997,7 +976,7 @@ async def test_restored_join_catchup_survives_recovery_settlement(
 
     assert bot.client.next_batch == "s_restored"
     assert bot._first_sync_done
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert bot._room_member_hook_lifecycle.full_state_required
 
     catchup_after_recovery = _room_member_event(
         event_id="$catchup-after-recovery",
@@ -1043,7 +1022,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     room = _room()
     gap_room_id = "!gap:localhost"
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot.client.rooms = {room.room_id: room}
     bot.client.loaded_sync_token = ""
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -1087,8 +1066,6 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     assert seen == []
     assert bot._room_member_hook_lifecycle.full_state_required
     assert bot._first_sync_done
-    assert bot._room_member_callback_registered
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
 
     recovery = _sync_response_with_state(
         room.room_id,
@@ -1108,7 +1085,6 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     assert bot.client.next_batch == "s_restored"
     assert bot._room_member_hook_lifecycle.full_state_required
     assert bot._first_sync_done
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
 
     replay = _sync_response_with_state(
         room.room_id,
@@ -1228,11 +1204,7 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
         ),
     )
 
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
-
-    bot._register_room_member_callback_after_initial_sync()
     room_member_admission = bot._dispatch_obligation_runner._admit_source_event
-    room_member_callback = bot.client.add_event_callback.call_args.args[0]
     live_event = _room_member_event(
         event_id="$join-during-bootstrap",
         user_id="@bob:localhost",
@@ -1243,8 +1215,6 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
         live_event,
         nio.TimelineEventProvenance.LIVE,
     )
-    await room_member_callback(room, live_event)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == []
 
@@ -1256,7 +1226,7 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
         ),
     )
 
-    assert bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert not bot._room_member_hook_lifecycle.full_state_required
     assert seen == ["$join-during-bootstrap"]
 
     await bot._on_room_member(
@@ -1281,7 +1251,7 @@ async def test_post_start_rewind_captures_member_join_until_replay_certifies(
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot.client.rooms = {room.room_id: room}
     bot.client.loaded_sync_token = ""
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -1304,16 +1274,14 @@ async def test_post_start_rewind_captures_member_join_until_replay_certifies(
     )
 
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
-    assert bot._room_member_hook_lifecycle.callback_execution_enabled
     assert not bot._room_member_hook_lifecycle.full_state_required
 
     bot.client.next_batch = "s_failed"
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     assert bot.client.next_batch == "s_next"
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert bot._room_member_hook_lifecycle.full_state_required
 
     room_member_admission = bot._dispatch_obligation_runner._admit_source_event
-    room_member_callback = bot.client.add_event_callback.call_args.args[0]
     live_event = _room_member_event(
         event_id="$join-during-replay",
         user_id="@carol:localhost",
@@ -1324,8 +1292,6 @@ async def test_post_start_rewind_captures_member_join_until_replay_certifies(
         live_event,
         nio.TimelineEventProvenance.LIVE,
     )
-    await room_member_callback(room, live_event)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == []
 
@@ -1339,15 +1305,15 @@ async def test_post_start_rewind_captures_member_join_until_replay_certifies(
     )
 
     assert seen == ["$join-during-replay"]
-    assert bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert not bot._room_member_hook_lifecycle.full_state_required
 
 
 @pytest.mark.asyncio
-async def test_registered_room_member_callback_uses_delivery_time_arming_state(
+async def test_response_owned_member_drain_uses_admission_time_phase(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Queued recovery-sync member events should not emit after hooks re-arm."""
+    """Historical recovery events stay fenced while later live work drains by response."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
@@ -1359,9 +1325,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    bot._register_room_member_callback_after_initial_sync()
     room_member_admission = bot._dispatch_obligation_runner._admit_source_event
-    room_member_callback = bot.client.add_event_callback.call_args.args[0]
     monkeypatch.setattr(
         bot._conversation_cache,
         "cache_sync_timeline_for_certification",
@@ -1377,9 +1341,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         timeline_event,
         nio.TimelineEventProvenance.HISTORY,
     )
-    await room_member_callback(room, timeline_event)
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == []
 
@@ -1389,17 +1351,22 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         live_event,
         nio.TimelineEventProvenance.LIVE,
     )
-    await room_member_callback(room, live_event)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[live_event],
+        ),
+    )
 
     assert seen == ["$live"]
 
 
 @pytest.mark.asyncio
-async def test_member_callback_runs_exact_pending_lifecycle_obligation(
+async def test_response_barrier_runs_exact_pending_lifecycle_obligation(
     tmp_path: Path,
 ) -> None:
-    """A member callback may retry its exact durable lifecycle work."""
+    """The response barrier retries exact durable lifecycle work."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
@@ -1412,8 +1379,6 @@ async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._first_sync_done = True
     bot._room_member_hook_lifecycle.certified()
-    bot._register_room_member_callback_after_initial_sync()
-    room_member_callback = bot.client.add_event_callback.call_args.args[0]
     event = _room_member_event(event_id="$pending-member")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
@@ -1422,8 +1387,7 @@ async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     )
     assert obligation is not None
 
-    await room_member_callback(room, event)
-    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+    await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
 
     assert seen == ["$pending-member"]
     assert not bot._dispatch_obligation_store.has_pending(
@@ -1447,7 +1411,7 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     bot = _router_bot(tmp_path)
     room = _room()
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
     bot._sync_cache_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
@@ -1581,7 +1545,10 @@ def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path)
     """Initial sync history must not enter the delayed live-callback boundary."""
     bot = _router_bot(tmp_path)
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=False)
+    bot._room_member_hook_lifecycle.prepare_startup(
+        transport="classic",
+        resuming_position=False,
+    )
 
     assert (
         bot._dispatch_obligation_runner._admission_kind(
@@ -1589,6 +1556,58 @@ def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path)
             nio.TimelineEventProvenance.HISTORY,
         )
         is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_sliding_response_drains_only_live_room_member_obligations(tmp_path: Path) -> None:
+    """Sliding readiness must settle its live tail without admitting snapshot history."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._room_member_hook_lifecycle.prepare_startup(
+        transport="sliding",
+        resuming_position=True,
+    )
+    history = _room_member_event(event_id="$sliding-history")
+    live = _room_member_event(event_id="$sliding-live", user_id="@bob:localhost")
+
+    await bot._dispatch_obligation_runner._admit_source_event(
+        room,
+        history,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+    await bot._dispatch_obligation_runner._admit_source_event(
+        room,
+        live,
+        nio.TimelineEventProvenance.LIVE,
+    )
+
+    assert not bot._dispatch_obligation_store.has_pending(
+        history.event_id,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert bot._dispatch_obligation_store.has_pending(
+        live.event_id,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+
+    await bot._handle_sliding_sync_response(nio.SlidingSyncResponse("pos"))
+
+    assert seen == [live.event_id]
+    assert not bot._dispatch_obligation_store.has_pending(
+        live.event_id,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert not bot._room_member_hook_lifecycle.admission_enabled(
+        nio.TimelineEventProvenance.HISTORY,
     )
 
 

@@ -1309,6 +1309,16 @@ async def test_room_lifecycle_drain_waits_for_exact_active_owner(tmp_path: Path)
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
+    pending_loaded = asyncio.Event()
+    event_loop = asyncio.get_running_loop()
+    original_pending = store.pending
+
+    def observed_pending() -> list[DispatchObligation]:
+        pending = original_pending()
+        event_loop.call_soon_threadsafe(pending_loaded.set)
+        return pending
+
+    store.pending = observed_pending
     runner = DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.ROOM_LIFECYCLE: callback},
@@ -1323,6 +1333,7 @@ async def test_room_lifecycle_drain_waits_for_exact_active_owner(tmp_path: Path)
     active = asyncio.create_task(runner._run_persisted(obligation, room=room, event=event))
     await entered.wait()
     drain = asyncio.create_task(runner.drain_pending_room_lifecycle())
+    await pending_loaded.wait()
     await asyncio.sleep(0)
 
     assert not drain.done()
@@ -1333,6 +1344,34 @@ async def test_room_lifecycle_drain_waits_for_exact_active_owner(tmp_path: Path)
 
     assert attempts == 1
     assert not store.has_pending(event.event_id, DispatchCallbackKind.ROOM_LIFECYCLE)
+
+
+@pytest.mark.asyncio
+async def test_generic_recovery_leaves_room_lifecycle_for_response_owner(tmp_path: Path) -> None:
+    """Startup recovery must not race the response-owned lifecycle barrier."""
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.ROOM_LIFECYCLE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _member_event("$response-owned-member")
+    obligation = await runner.persist(room, event, DispatchCallbackKind.ROOM_LIFECYCLE)
+    assert obligation is not None
+
+    await runner.recover_pending(turn_backed=False)
+
+    assert attempts == 0
+    assert store.has_pending(event.event_id, DispatchCallbackKind.ROOM_LIFECYCLE)
 
 
 @pytest.mark.asyncio

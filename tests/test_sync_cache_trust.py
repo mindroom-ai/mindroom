@@ -611,10 +611,6 @@ async def test_safe_checkpoint_catchup_replays_after_recovery_before_certifying(
             recovered_room_ids=frozenset({second_room_id}),
         ),
     )
-    replayed = await trust.certify_response(
-        next_batch="s_replayed",
-        cache_result=SyncCacheWriteResult(complete=True),
-    )
     post_certification_room_id = "!post-certification:localhost"
     post_certification_gap = await trust.certify_response(
         next_batch="s_post_certification_gap",
@@ -634,10 +630,9 @@ async def test_safe_checkpoint_catchup_replays_after_recovery_before_certifying(
     assert first_gap.replay_required_after_recovery is True
     assert first_recovery.reason == "sync_cache_replay_required"
     assert first_recovery.reset_client_token is True
-    assert second_gap.replay_required_after_recovery is True
-    assert second_recovery.reason == "sync_cache_replay_required"
-    assert second_recovery.reset_client_token is True
-    assert replayed.state is SyncTrustState.CERTIFIED
+    assert second_gap.replay_required_after_recovery is False
+    assert second_recovery.state is SyncTrustState.CERTIFIED
+    assert second_recovery.reset_client_token is False
     assert post_certification_gap.replay_required_after_recovery is False
     assert post_certification_recovery.state is SyncTrustState.CERTIFIED
     assert trust.retry_token() == "s_post_certification_recovery"

@@ -161,7 +161,7 @@ def certify_sync_response(
     )
     if cache_result.unrecovered_room_ids and token is not None:
         return _uncertain_decision(
-            reason=cast("str", reason),
+            reason=reason or "sync_recovery_incomplete",
             unresolved_recovery_room_ids=unresolved_recovery_room_ids,
             replay_required_after_recovery=replay_required_after_recovery,
         )
@@ -179,9 +179,12 @@ def certify_sync_response(
         )
 
     if reason is not None:
+        tokenless_limited_baseline = (
+            tokenless_baseline_pending and cache_result.complete and reason == "limited_sync_timeline"
+        )
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=reason != "limited_sync_timeline",
+            reset_client_token=not tokenless_limited_baseline,
         )
 
     checkpoint = SyncCheckpoint(token=cast("str", token))

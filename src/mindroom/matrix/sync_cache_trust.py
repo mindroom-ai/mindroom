@@ -279,7 +279,11 @@ class SyncCacheTrust:
                 )
                 self._unresolved_recovery_room_ids = decision.unresolved_recovery_room_ids
                 self._replay_required_after_recovery = decision.replay_required_after_recovery
-                if decision.state is SyncTrustState.CERTIFIED or decision.clear_saved_token:
+                if (
+                    decision.state is SyncTrustState.CERTIFIED
+                    or decision.clear_saved_token
+                    or decision.reset_client_token
+                ):
                     self._safe_checkpoint_catchup_pending = False
                 if decision.reset_client_token:
                     self._refresh_tokenless_baseline_pending()

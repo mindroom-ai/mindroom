@@ -1209,7 +1209,7 @@ async def test_sync_iteration_cancel_preserves_restart_shutdown_source() -> None
 
 @pytest.mark.asyncio
 async def test_full_state_stays_enabled_until_first_sync_response() -> None:
-    """A cancelled first sync must keep requesting full state on retry."""
+    """Every bot must keep requesting full state until its first response."""
     full_state_values: list[bool] = []
 
     class FakeClient:
@@ -1219,7 +1219,7 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=False)
     bot._sync_shutting_down = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
@@ -1261,7 +1261,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
     bot._first_sync_done = False
-    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
+    bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=False)
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
@@ -1278,9 +1278,22 @@ async def test_full_state_only_after_successful_first_sync() -> None:
         event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
 
-    # Call the real sync_forever method
     await AgentBot.sync_forever(bot)
-    bot._room_member_hook_lifecycle.certified()
+    bot._mark_sync_progress = MagicMock()
+    bot._handle_classic_sync_response = AsyncMock(return_value=False)
+    bot._run_sync_response_side_effects = AsyncMock()
+    bot._calls_reconcile_pending = False
+    await AgentBot._on_sync_response(
+        bot,
+        nio.SyncResponse(
+            "s_first",
+            nio.Rooms(invite={}, join={}, leave={}),
+            nio.DeviceOneTimeKeyCount(None, None),
+            nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        ),
+    )
     await AgentBot.sync_forever(bot)
 
     assert full_state_values == [True, False]
@@ -1298,7 +1311,10 @@ async def test_pending_member_bootstrap_forces_replacement_full_state() -> None:
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True
     bot._room_member_hook_lifecycle = RoomMemberHookLifecycle(enabled=True)
-    bot._room_member_hook_lifecycle.prepare_startup(resuming_position=True)
+    bot._room_member_hook_lifecycle.prepare_startup(
+        transport="classic",
+        resuming_position=True,
+    )
     bot._sync_shutting_down = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
@@ -1436,7 +1452,12 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
 
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert (
+        bot._room_member_hook_lifecycle.admission_enabled(
+            nio.TimelineEventProvenance.LIVE,
+        )
+        is False
+    )
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:
@@ -1677,7 +1698,9 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
         await bot._on_sync_error(error)
 
     assert bot._sync_continuity_store.load().checkpoint is not None
-    assert not bot._room_member_hook_lifecycle.callback_execution_enabled
+    assert not bot._room_member_hook_lifecycle.admission_enabled(
+        nio.TimelineEventProvenance.LIVE,
+    )
     assert not any(entry["log_level"] == "warning" for entry in logs)
 
 

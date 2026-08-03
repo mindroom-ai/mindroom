@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Literal
 
 import nio
 
@@ -17,6 +18,7 @@ class _RoomMemberHookPhase(Enum):
     BASELINE = "baseline"
     FULL_STATE_CATCHUP = "full_state_catchup"
     CATCHUP = "catchup"
+    SLIDING_CATCHUP = "sliding_catchup"
     LIVE = "live"
 
 
@@ -38,11 +40,6 @@ class RoomMemberHookLifecycle:
     def __post_init__(self) -> None:
         """Start enabled owners behind a tokenless baseline fence."""
         self._phase = _RoomMemberHookPhase.BASELINE if self.enabled else _RoomMemberHookPhase.DISABLED
-
-    @property
-    def callback_execution_enabled(self) -> bool:
-        """Return whether nio's ordinary member callback may execute now."""
-        return self._phase is _RoomMemberHookPhase.LIVE
 
     @property
     def baseline_record_pending(self) -> bool:
@@ -72,10 +69,18 @@ class RoomMemberHookLifecycle:
             _RoomMemberHookPhase.CATCHUP,
         }
 
-    def prepare_startup(self, *, resuming_position: bool) -> None:
-        """Initialize one process startup from its selected Classic position."""
+    def prepare_startup(
+        self,
+        *,
+        transport: Literal["classic", "sliding"],
+        resuming_position: bool,
+    ) -> None:
+        """Initialize startup without carrying Classic history authority into Sliding."""
         if not self.enabled:
             self._phase = _RoomMemberHookPhase.DISABLED
+            return
+        if transport == "sliding":
+            self._phase = _RoomMemberHookPhase.SLIDING_CATCHUP
             return
         self._phase = _RoomMemberHookPhase.FULL_STATE_CATCHUP if resuming_position else _RoomMemberHookPhase.BASELINE
 
@@ -103,7 +108,7 @@ class RoomMemberHookLifecycle:
         """Return lifecycle work required before applying one certification decision."""
         certified = decision.state is SyncTrustState.CERTIFIED and not decision.reset_client_token
         return RoomMemberResponsePlan(
-            drain_captured_timeline=(certified and self._phase is _RoomMemberHookPhase.CATCHUP),
+            drain_captured_timeline=(certified and self._phase is not _RoomMemberHookPhase.DISABLED),
             dispatch_state=(certified and self._phase is _RoomMemberHookPhase.LIVE and not first_sync_response),
         )
 

@@ -86,7 +86,7 @@ from mindroom.tool_system.worker_routing import tool_execution_identity
 from . import constants, interactive
 from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_authorized_sender
-from .background_tasks import create_background_task, wait_for_background_tasks
+from .background_tasks import create_background_task, run_coroutine_until_complete, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .cold_history_fence import ColdHistoryFence
@@ -329,7 +329,6 @@ class AgentBot:
     _startup_thread_prewarm_task: asyncio.Task[None] | None
     _call_manager: CallManager | None
     _calls_reconcile_pending: bool
-    _room_member_callback_registered: bool
     _room_member_hook_lifecycle: RoomMemberHookLifecycle
     _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
@@ -365,7 +364,6 @@ class AgentBot:
         self._orchestrator_ready_handled = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
-        self._room_member_callback_registered = False
         self._room_member_hook_lifecycle = RoomMemberHookLifecycle(
             enabled=self.agent_name == ROUTER_AGENT_NAME,
         )
@@ -556,7 +554,6 @@ class AgentBot:
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=self._room_member_hook_lifecycle.admission_enabled,
-            room_lifecycle_execution_enabled=lambda: self._room_member_hook_lifecycle.callback_execution_enabled,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1218,6 +1215,7 @@ class AgentBot:
         )
         cast("Any", client).next_batch = sync_token
         self._room_member_hook_lifecycle.prepare_startup(
+            transport=self.config.matrix_sync.mode,
             resuming_position=sync_token is not None,
         )
 
@@ -1387,30 +1385,6 @@ class AgentBot:
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
-    def _register_room_member_callback_after_initial_sync(self) -> None:
-        """Start listening for live member joins after startup history is drained."""
-        if self.agent_name != ROUTER_AGENT_NAME or self._room_member_callback_registered:
-            return
-        client = self.client
-        if client is None:
-            return
-        client.add_event_callback(self._create_room_member_task_wrapper(), nio.RoomMemberEvent)
-        self._room_member_callback_registered = True
-
-    def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
-        """Run live join work only after its matching admission succeeds."""
-        durable_callback = self._dispatch_obligation_runner.task_wrapper(
-            DispatchCallbackKind.ROOM_LIFECYCLE,
-            owner=self._runtime_view,
-        )
-
-        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if not isinstance(event, nio.RoomMemberEvent):
-                return
-            await durable_callback(room, event)
-
-        return wrapper
-
     async def _run_pre_certification_sync_response_side_effects(
         self,
         response: nio.SyncResponse,
@@ -1430,7 +1404,6 @@ class AgentBot:
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
         if first_sync_response:
-            self._register_room_member_callback_after_initial_sync()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
@@ -1536,6 +1509,7 @@ class AgentBot:
             await self._room_lifecycle.observe_trusted_sync_rooms(
                 room_id for room_id, room in response.rooms.items() if room.membership == "join"
             )
+        await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
         self._room_member_hook_lifecycle.certified()
         self._mark_sync_progress()
 
@@ -1584,19 +1558,21 @@ class AgentBot:
             return
         if _response.status_code == "M_UNKNOWN_POS":
             client = self.client
-            try:
-                if client is not None:
-                    await invalidate_rejected_sync_position(client)
-            except Exception as error:
-                self.logger.warning(
-                    "matrix_sync_rejected_transport_cleanup_failed",
-                    error=str(error),
-                    error_type=type(error).__name__,
-                )
-            finally:
-                decision = await self._sync_cache_trust.reject_unknown_pos()
-                self._apply_client_rewind_decision(decision)
-                self._room_member_hook_lifecycle.unknown_position()
+            cleanup_succeeded = False
+
+            async def reject_position() -> None:
+                nonlocal cleanup_succeeded
+                try:
+                    if client is not None:
+                        await invalidate_rejected_sync_position(client)
+                    cleanup_succeeded = True
+                finally:
+                    decision = await self._sync_cache_trust.reject_unknown_pos()
+                    if cleanup_succeeded:
+                        self._apply_client_rewind_decision(decision)
+                        self._room_member_hook_lifecycle.unknown_position()
+
+            await run_coroutine_until_complete(reject_position())
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -1941,7 +1917,6 @@ class AgentBot:
         self._first_sync_done = False
         self._orchestrator_ready_handled = False
         self._room_member_hook_lifecycle.stop()
-        self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
 
@@ -2111,7 +2086,7 @@ class AgentBot:
                 room_ids=self.rooms,
                 timeout_ms=_SYNC_TIMEOUT_MS,
                 sync_filter=_SYNC_FILTER,
-                first_sync_done=not self._room_member_hook_lifecycle.full_state_required,
+                first_sync_done=(self._first_sync_done and not self._room_member_hook_lifecycle.full_state_required),
             )
         finally:
             self._reconcile_classic_sync_cursor_after_loop_exit()
@@ -2295,12 +2270,11 @@ class AgentBot:
                 DispatchCallbackKind.ROOM_LIFECYCLE,
             )
         if plan.record_events:
-            marker_fence = await self._dispatch_obligation_runner.room_lifecycle_marker_fence()
+            fenced_members, corrupt_room_ids = await self._dispatch_obligation_runner.room_lifecycle_marker_fence()
             record_events = tuple(
                 (room, event)
                 for room, event in plan.record_events
-                if room.room_id not in marker_fence.corrupt_room_ids
-                and (room.room_id, event.state_key) not in marker_fence.member_ids
+                if room.room_id not in corrupt_room_ids and (room.room_id, event.state_key) not in fenced_members
             )
         else:
             record_events = ()
