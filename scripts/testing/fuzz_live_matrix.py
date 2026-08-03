@@ -2730,6 +2730,7 @@ class LiveMatrixClient:
             msg = "Matrix createRoom omitted room_id"
             raise TypeError(msg)
         self.room_id = room_id
+        self.room_ids = (room_id,)
 
     async def send_event(
         self,

@@ -234,6 +234,7 @@ async def test_restart_room_exposes_prejoin_history(monkeypatch: pytest.MonkeyPa
     try:
         await client.create_public_room()
         assert client.room_id == "!restart:example"
+        assert client.room_ids == ("!restart:example",)
         assert request == (
             "POST",
             "/_matrix/client/v3/createRoom",
