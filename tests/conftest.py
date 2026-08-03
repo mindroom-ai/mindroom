@@ -719,6 +719,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.user_id = user_id
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
+    client.loaded_sync_token = ""
     presence_response = MagicMock()
     presence_response.presence = "offline"
     presence_response.last_active_ago = 3_600_000

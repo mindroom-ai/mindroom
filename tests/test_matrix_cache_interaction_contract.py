@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.logging_config import get_logger
@@ -35,8 +36,6 @@ from tests.event_cache_test_support import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-
-    import nio
 
     from mindroom.bot_runtime_view import BotRuntimeView
 
@@ -87,6 +86,7 @@ class _SyncEnvelope:
     account_data: _EventSection = field(default_factory=_EventSection)
     to_device: _EventSection = field(default_factory=_EventSection)
     device_lists: _DeviceLists = field(default_factory=_DeviceLists)
+    recovered_room_ids: frozenset[str] = frozenset()
     unrecovered_room_ids: frozenset[str] = frozenset()
 
 
@@ -194,6 +194,33 @@ def _sync_response(
         rooms=_SyncRooms(
             join={room_id: _RoomSync(timeline=_Timeline(events=list(events), limited=limited))},
         ),
+    )
+
+
+def _real_sync_response(
+    *,
+    limited_room_ids: tuple[str, ...] = (),
+    recovered_room_ids: frozenset[str] = frozenset(),
+    unrecovered_room_ids: frozenset[str] = frozenset(),
+) -> nio.SyncResponse:
+    joined_rooms = {
+        room_id: nio.RoomInfo(
+            timeline=nio.Timeline(events=[], limited=True, prev_batch=f"p_{index}"),
+            state=[],
+            ephemeral=[],
+            account_data=[],
+        )
+        for index, room_id in enumerate(limited_room_ids)
+    }
+    return nio.SyncResponse(
+        next_batch="s_after",
+        rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        recovered_room_ids=recovered_room_ids,
+        unrecovered_room_ids=unrecovered_room_ids,
     )
 
 
@@ -1082,7 +1109,8 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
         cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)], limited=True)),
     )
 
-    assert result.complete is False
+    assert result.complete is True
+    assert result.certified is True
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.errors == ()
     assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
@@ -1091,6 +1119,45 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
     assert state is not None
     assert state.gap_reason == "sync_opaque_encrypted_event"
     assert thread_cache_rejection_reason(state) is not None
+
+
+@pytest.mark.asyncio
+async def test_recovered_limited_sync_certifies_after_nio_callback_success(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Pinned nio recovers only after every non-live callback succeeds."""
+    response = _real_sync_response(
+        limited_room_ids=(_ROOM_ID,),
+        recovered_room_ids=frozenset({_ROOM_ID}),
+    )
+
+    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(response)
+
+    assert result.complete is True
+    assert result.limited_room_ids == (_ROOM_ID,)
+    assert result.recovered_room_ids == frozenset({_ROOM_ID})
+    assert result.unrecovered_room_ids == frozenset()
+    assert result.certified is True
+
+
+@pytest.mark.asyncio
+async def test_cache_seam_preserves_unrecovered_outcome_from_an_earlier_gap(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An outcome for a room absent from this wire window must still block certification."""
+    response = _real_sync_response(
+        unrecovered_room_ids=frozenset({_ROOM_ID}),
+    )
+
+    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(response)
+
+    assert result.complete is True
+    assert result.limited_room_ids == ()
+    assert result.recovered_room_ids == frozenset()
+    assert result.unrecovered_room_ids == frozenset({_ROOM_ID})
+    assert result.certified is False
+    assert result.runtime_diagnostics is not None
+    assert result.runtime_diagnostics["cache_backend"] in {"postgres", "sqlite"}
 
 
 @pytest.mark.asyncio

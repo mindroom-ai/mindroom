@@ -192,6 +192,7 @@ class _SyncEnvelope:
     account_data: _EventSection
     to_device: _EventSection
     device_lists: _DeviceLists
+    recovered_room_ids: frozenset[str] = frozenset()
     unrecovered_room_ids: frozenset[str] = frozenset()
 
 
@@ -569,7 +570,8 @@ class CacheFuzzRunner:
         result = await self.policy.cache_sync_timeline_for_certification(
             cast("nio.SyncResponse", _sync_response(events, room=room, limited=limited)),
         )
-        assert result.complete is not limited
+        assert result.complete is True
+        assert result.certified is True
         assert result.limited_room_ids == ((room_id(room),) if limited else ())
         assert result.errors == ()
 

@@ -31,6 +31,8 @@ from tests.sync_continuity_helpers import load_sync_checkpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.dispatch_obligations.storage import DispatchObligation, DispatchObligationKey
+
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
@@ -92,6 +94,7 @@ def _sync_response_with_state(
     events: list[object],
     *,
     timeline_events: list[object] | None = None,
+    timeline_limited: bool = False,
 ) -> nio.SyncResponse:
     response = MagicMock()
     response.__class__ = nio.SyncResponse
@@ -102,7 +105,7 @@ def _sync_response_with_state(
         join={
             room_id: SimpleNamespace(
                 state=events,
-                timeline=SimpleNamespace(events=timeline_events or [], limited=False),
+                timeline=SimpleNamespace(events=timeline_events or [], limited=timeline_limited),
             ),
         },
         leave={},
@@ -451,7 +454,8 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
         )
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-    assert bot.client.next_batch == retry_token
+    assert bot.client.next_batch == "s_after_marker_failure"
+    assert bot._sync_cache_trust.rewind_is_deferred_until_recovery()
 
 
 @pytest.mark.asyncio
@@ -805,10 +809,69 @@ async def test_router_ignores_limited_sync_state_member_snapshot(
         _sync_response_with_state(
             room.room_id,
             [_room_member_event(event_id="$limited-state")],
+            timeline_limited=True,
         ),
     )
 
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot marker must not overtake exact pending lifecycle work."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    event = _room_member_event(event_id="$delayed-lifecycle")
+    obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert obligation is not None
+
+    lookup_started = threading.Event()
+    release_lookup = threading.Event()
+    pending_for = bot._dispatch_obligation_store.pending_for
+
+    def delayed_pending_for(key: DispatchObligationKey) -> DispatchObligation | None:
+        lookup_started.set()
+        assert release_lookup.wait(timeout=1.0)
+        return pending_for(key)
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "pending_for", delayed_pending_for)
+    callback = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+        owner=bot._runtime_view,
+    )
+    await callback(room, event)
+    assert await asyncio.to_thread(lookup_started.wait, 1.0)
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$profile-snapshot", prev_membership="join")],
+            timeline_limited=True,
+        ),
+    )
+    release_lookup.set()
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == ["$delayed-lifecycle"]
+    assert not bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
 
 
 @pytest.mark.asyncio

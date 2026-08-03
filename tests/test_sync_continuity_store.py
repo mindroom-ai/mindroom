@@ -205,6 +205,11 @@ def test_each_changed_record_gets_monotonic_revision_under_store_lock(
             '{"version":"mindroom-sync-continuity-v2","revision":0,'
             '"checkpoint":null,"pending_join_decrypt_fences":[],"extra":true}'
         ),
+        (
+            '{"version":"mindroom-sync-continuity-v3","revision":0,'
+            '"checkpoint":null,"pending_join_decrypt_fences":[],'
+            '"unsettled_recovery_room_ids":["!room:localhost","!room:localhost"]}'
+        ),
     ],
 )
 def test_obsolete_or_corrupt_continuity_record_fails_closed(
