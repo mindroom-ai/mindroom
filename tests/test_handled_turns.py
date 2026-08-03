@@ -22,6 +22,7 @@ from mindroom.handled_turns import (
     TurnRecord,
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
+    canonicalize_turn_record,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -224,6 +225,75 @@ def test_turn_record_normalizes_ids_and_prompt_map() -> None:
     assert handled_turn.source_event_prompts == {"$a": "prompt a"}
     assert handled_turn.anchor_event_id == "$b"
     assert handled_turn.is_coalesced
+
+
+def test_turn_record_has_no_post_init_normalization_hook() -> None:
+    """Canonical records should be constructed explicitly without hidden mutation."""
+    assert "__post_init__" not in TurnRecord.__dict__
+
+
+def test_ledger_canonicalizes_record_before_identity_resolution(temp_dir: Path) -> None:
+    """The persistence boundary should compare canonical turn identities."""
+    tracker = HandledTurnLedger("test_canonical_identity_boundary", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(["$source"], response_event_id="$old", timestamp=1.0),
+    )
+
+    tracker.record_handled_turn(
+        TurnRecord(source_event_ids=("$source",), response_event_id="$new", timestamp=2.0),
+    )
+
+    record = tracker.get_turn_record("$source")
+    assert record is not None
+    assert record.anchor_event_id == "$source"
+    assert record.response_event_id == "$new"
+
+
+def test_turn_record_create_normalizes_coupled_source_state() -> None:
+    """The explicit factory should canonicalize interdependent source facts."""
+    record = TurnRecord.create(
+        ["source", "source", ""],
+        discovery_event_ids=["source", "edit", "edit"],
+        redacted_source_event_ids=["missing", "edit"],
+        pending_redaction_cleanup_event_ids=["source", "edit"],
+        source_event_prompts={"source": "prompt"},
+        source_event_revisions={"edit": [4, "edit-event"]},
+    )
+
+    assert record.source_event_ids == ("source",)
+    assert record.discovery_event_ids == ("edit",)
+    assert record.redacted_source_event_ids == ("edit",)
+    assert record.pending_redaction_cleanup_event_ids == ("edit",)
+    assert record.source_event_prompts == {"source": "prompt"}
+    assert record.source_event_revisions is None
+
+
+def test_canonicalize_turn_record_prunes_new_redactions() -> None:
+    """Explicit updates should reapply source-state invariants."""
+    record = TurnRecord.create(
+        ["first", "second"],
+        source_event_prompts={"first": "one", "second": "two"},
+    )
+
+    updated = canonicalize_turn_record(
+        record,
+        redacted_source_event_ids=("first",),
+        pending_redaction_cleanup_event_ids=("first", "second"),
+    )
+
+    assert updated.redacted_source_event_ids == ("first",)
+    assert updated.pending_redaction_cleanup_event_ids == ("first",)
+    assert updated.source_event_prompts == {"second": "two"}
+
+
+def test_canonicalize_turn_record_links_command_result_to_started_checkpoint() -> None:
+    """A stored command result should explicitly imply execution started."""
+    record = TurnRecord.create(["source"], command_execution_started=False)
+
+    updated = canonicalize_turn_record(record, command_result_text="done")
+
+    assert updated.command_execution_started is True
+    assert updated.command_result_text == "done"
 
 
 def test_turn_record_preserves_response_context() -> None:
@@ -467,7 +537,7 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
         ),
         "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
     }
-    redacted = replace(turn_record, redacted_source_event_ids=("$human-first",))
+    redacted = canonicalize_turn_record(turn_record, redacted_source_event_ids=("$human-first",))
     assert redacted.replay_source_event_ids == ("$second",)
     assert redacted.source_event_prompts == {"$second": "second"}
     tracker2.record_handled_turn(redacted)

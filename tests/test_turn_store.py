@@ -2179,7 +2179,7 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
         ),
     )
 
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$second-response"))
+    store.record_turn(TurnRecord(source_event_ids=("$event",), response_event_id="$second-response"))
 
     record = store.get_turn_record("$event")
     assert record is not None
@@ -2198,8 +2198,13 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     terminal_finished = threading.Event()
     create_turn_record = TurnRecord.create
 
-    def blocking_create(source_event_ids: list[str], *, completed: bool = True) -> TurnRecord:
-        turn_record = create_turn_record(source_event_ids, completed=completed)
+    def blocking_create(
+        source_event_ids: list[str],
+        *,
+        completed: bool = True,
+        **kwargs: object,
+    ) -> TurnRecord:
+        turn_record = create_turn_record(source_event_ids, completed=completed, **kwargs)
         if not completed:
             echo_record_built.set()
             assert release_echo_record.wait(timeout=2)
@@ -2234,6 +2239,15 @@ def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Pat
     assert record.completed
     assert record.response_event_id == "$response"
     assert record.visible_echo_event_id == "$echo"
+
+
+def test_record_responded_turn_rejects_empty_response_event_id(tmp_path: Path) -> None:
+    """The durable response boundary should reject a noncanonical empty event ID."""
+    store = _store(tmp_path)
+    noncanonical_record = TurnRecord(source_event_ids=("$source",), response_event_id="")
+
+    with pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"):
+        store.record_responded_turn(noncanonical_record)
 
 
 @pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])

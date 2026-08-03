@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -132,7 +133,7 @@ class VisibleResponseReconciler:
         """Durably bind one visible response to its incomplete turn before generation."""
         await asyncio.to_thread(
             self.deps.turn_store.record_pending_turn,
-            replace(handled_turn, response_event_id=response_event_id, completed=False),
+            canonicalize_turn_record(handled_turn, response_event_id=response_event_id, completed=False),
         )
 
     async def deliver_recoverable_text(
@@ -168,7 +169,7 @@ class VisibleResponseReconciler:
             handled_turn.source_event_ids,
         )
         tracked_turn = self.deps.turn_store.attach_response_context(
-            replace(
+            canonicalize_turn_record(
                 handled_turn,
                 requester_id=requester_id,
                 correlation_id=correlation_id,
