@@ -546,8 +546,10 @@ Credential leases are single-use: once consumed by an `/execute` call, the lease
 ## Agent prompt visibility
 
 MindRoom automatically adds a concise **Tool Execution Environment** section to each agent system prompt.
-It is generated from the agent's effective runtime configuration and lists the tools that execute locally versus through a worker, the configured worker backend and scope, and whether routing is active.
-This is intentionally per tool: an agent can use both primary-runtime and worker-routed tools, so `worker_scope` does not imply that the whole agent is sandboxed.
+It is generated from the successfully loaded toolkits and lists which tools execute locally versus through a worker.
+When worker routing is active, the section explains the backend, the runtime reuse and isolation boundary, and the lifetime of persisted worker state in plain language.
+When no tool uses a worker, the section omits irrelevant backend and scope configuration.
+Execution location is intentionally per tool: an agent can use both primary-runtime and worker-routed tools, so `worker_scope` does not imply that the whole agent is sandboxed.
 
 ## Per-agent configuration
 

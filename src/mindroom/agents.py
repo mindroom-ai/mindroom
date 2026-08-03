@@ -890,17 +890,47 @@ def _render_tool_execution_environment(
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
 
+    if not worker_routed_tool_names:
+        if not local_tool_names:
+            return "## Tool Execution Environment\n- No tools are available in this runtime."
+        return (
+            "## Tool Execution Environment\n"
+            f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.\n"
+            "- No tools use a worker runtime."
+        )
+
     backend = primary_worker_backend_name(runtime_paths)
-    scope = worker_scope or "unscoped"
-    routing_state = "enabled" if worker_routed_tool_names else "disabled"
-    return (
-        "## Tool Execution Environment\n"
-        f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.\n"
-        f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.\n"
-        f"- Worker routing: {routing_state}; backend: `{backend}`; scope: `{scope}`.\n"
-        "- Sandboxing is applied per tool, not per agent. A single agent may use both local and "
-        "worker-routed tools."
-    )
+    lines = [
+        "## Tool Execution Environment",
+        f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
+        f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
+        f"- Worker backend: `{backend}`.",
+    ]
+    if backend == "static_runner":
+        lines.append(
+            "- Worker reuse: requests use the configured static runner; no per-user or per-agent "
+            "worker state boundary is selected.",
+        )
+    else:
+        scope_description = {
+            None: "one runtime for this agent within the current tenant or account",
+            "shared": "one runtime for this agent, shared by all users",
+            "user": "one runtime for this user, shared across this user's agents",
+            "user_agent": "one runtime used only by this user-agent pair",
+        }[worker_scope]
+        idle_behavior = {
+            "docker": "the container stops",
+            "kubernetes": "the deployment scales to zero",
+        }[backend]
+        lines.extend(
+            (
+                f"- Worker reuse: {scope_description}.",
+                f"- Worker state is reused across turns for that scope. After the configured idle timeout, "
+                f"{idle_behavior}; persisted files and caches remain until an operator deletes that worker state.",
+            ),
+        )
+    lines.append("- Execution location is determined per tool; this agent is not sandboxed as a whole.")
+    return "\n".join(lines)
 
 
 def _registry_tool_routes_through_worker(

@@ -32,6 +32,7 @@ from mindroom.agents import (
     _apply_preload_cap,
     _load_context_files,
     _prune_toolkit_functions,
+    _render_tool_execution_environment,
     _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
@@ -450,10 +451,9 @@ def test_agent_role_describes_local_tool_execution_environment(
     agent = _create_agent_for_test("calculator", config=_bind_runtime_paths(config, runtime_paths))
 
     assert "## Tool Execution Environment" in agent.role
-    assert "Local tools (primary MindRoom runtime): `calculator`." in agent.role
-    assert "Worker-routed tools: none." in agent.role
-    assert "Worker routing: disabled; backend: `static_runner`; scope: `unscoped`." in agent.role
-    assert "Sandboxing is applied per tool, not per agent." in agent.role
+    assert "All available tools run in the primary MindRoom runtime: `calculator`." in agent.role
+    assert "No tools use a worker runtime." in agent.role
+    assert "Worker backend:" not in agent.role
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -483,7 +483,81 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
 
     assert "Local tools (primary MindRoom runtime): `calculator`." in agent.role
     assert "Worker-routed tools: `shell`." in agent.role
-    assert "Worker routing: enabled; backend: `kubernetes`; scope: `user_agent`." in agent.role
+    assert "Worker backend: `kubernetes`." in agent.role
+    assert "Worker reuse: one runtime used only by this user-agent pair." in agent.role
+    assert "Worker state is reused across turns for that scope." in agent.role
+    assert "After the configured idle timeout, the deployment scales to zero" in agent.role
+    assert "persisted files and caches remain until an operator deletes that worker state." in agent.role
+    assert "Execution location is determined per tool; this agent is not sandboxed as a whole." in agent.role
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "expected_reuse"),
+    [
+        (None, "one runtime for this agent within the current tenant or account"),
+        ("shared", "one runtime for this agent, shared by all users"),
+        ("user", "one runtime for this user, shared across this user's agents"),
+        ("user_agent", "one runtime used only by this user-agent pair"),
+    ],
+)
+def test_tool_execution_environment_explains_dedicated_worker_scope(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+    expected_reuse: str,
+) -> None:
+    """Each dedicated-worker scope should be translated into its runtime boundary."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+
+    rendered = _render_tool_execution_environment(
+        runtime_paths=runtime_paths,
+        local_tool_names=(),
+        worker_routed_tool_names=("shell",),
+        worker_scope=worker_scope,
+    )
+
+    assert f"Worker reuse: {expected_reuse}." in rendered
+    assert "Worker state is reused across turns for that scope." in rendered
+    assert "After the configured idle timeout, the deployment scales to zero" in rendered
+
+
+def test_tool_execution_environment_explains_static_runner_without_persistence_claim(tmp_path: Path) -> None:
+    """The shared static runner should not claim dedicated persisted state."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    rendered = _render_tool_execution_environment(
+        runtime_paths=runtime_paths,
+        local_tool_names=(),
+        worker_routed_tool_names=("shell",),
+        worker_scope="user_agent",
+    )
+
+    assert "Worker backend: `static_runner`." in rendered
+    assert "requests use the configured static runner" in rendered
+    assert "no per-user or per-agent worker state boundary is selected" in rendered
+    assert "persisted files and caches" not in rendered
+
+
+def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Path) -> None:
+    """Docker wording should state exactly what idle cleanup retains."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+
+    rendered = _render_tool_execution_environment(
+        runtime_paths=runtime_paths,
+        local_tool_names=(),
+        worker_routed_tool_names=("shell",),
+        worker_scope="user_agent",
+    )
+
+    assert "After the configured idle timeout, the container stops" in rendered
+    assert "persisted files and caches remain until an operator deletes that worker state." in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))
@@ -499,8 +573,8 @@ def test_agent_role_omits_tool_that_failed_to_build(
     agent = _create_agent_for_test("calculator", config=config)
 
     assert agent.tools == []
-    assert "Local tools (primary MindRoom runtime): none." in agent.role
-    assert "Worker-routed tools: none." in agent.role
+    assert "No tools are available in this runtime." in agent.role
+    assert "Worker backend:" not in agent.role
 
 
 @patch("mindroom.agent_storage.SqliteDb")
@@ -525,9 +599,9 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert "Local tools (primary MindRoom runtime): `report_publishing`." in agent.role
-    assert "Worker-routed tools: none." in agent.role
-    assert "Worker routing: disabled; backend: `kubernetes`; scope: `user_agent`." in agent.role
+    assert "All available tools run in the primary MindRoom runtime: `report_publishing`." in agent.role
+    assert "No tools use a worker runtime." in agent.role
+    assert "Worker backend:" not in agent.role
 
 
 @patch("mindroom.agent_storage.SqliteDb")
