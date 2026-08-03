@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -1230,3 +1230,9 @@ def test_stream_resolution_union_covers_handled() -> None:
     """The streaming resolution union accepts the handled sentinel."""
     resolution: StreamAttemptResolution = HandledAttempt()
     assert isinstance(resolution, HandledAttempt)
+
+
+def test_turn_adapter_callback_surfaces_stay_within_baselines() -> None:
+    """The turn adapters must not grow beyond the reviewed callback baselines."""
+    assert len(fields(BlockingTurnAdapter)) <= 10
+    assert len(fields(StreamingTurnAdapter)) <= 11
