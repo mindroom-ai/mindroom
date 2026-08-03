@@ -109,7 +109,7 @@ def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path:
         },
     )
 
-    assert not sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
         "approved_egress",
         runtime_paths=runtime_paths,
     )
@@ -1419,7 +1419,7 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
         execution_mode=None,
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
 
 
 def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4551,7 +4551,7 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -4559,7 +4559,7 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=None,
@@ -4583,9 +4583,9 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -4608,9 +4608,9 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -4633,7 +4633,7 @@ def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -4655,7 +4655,7 @@ def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypat
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -5315,7 +5315,7 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -5323,7 +5323,7 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=None,
@@ -5347,14 +5347,14 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
         )
         is True
     )
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
         )
@@ -5376,7 +5376,7 @@ def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
     )
 
     assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
@@ -5448,7 +5448,7 @@ class TestWorkerToolsOverride:
 
         # None override -> falls through to sandbox-proxy env controls
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5456,7 +5456,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5473,7 +5473,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=[],
@@ -5481,7 +5481,7 @@ class TestWorkerToolsOverride:
             is False
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "file",
                 runtime_paths=runtime_paths,
                 worker_tools_override=[],
@@ -5498,7 +5498,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5506,7 +5506,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "file",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5514,7 +5514,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell", "file"],
@@ -5532,7 +5532,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5550,7 +5550,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5571,7 +5571,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5579,7 +5579,7 @@ class TestWorkerToolsOverride:
             is False
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5601,7 +5601,7 @@ class TestWorkerToolsOverride:
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5609,7 +5609,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5633,7 +5633,7 @@ class TestWorkerToolsOverride:
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5641,7 +5641,7 @@ class TestWorkerToolsOverride:
             is True
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "calculator",
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5664,7 +5664,7 @@ class TestWorkerToolsOverride:
         runtime_paths = _runtime_paths_from_env()
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
@@ -5718,7 +5718,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
@@ -5726,7 +5726,7 @@ class TestWorkerToolsOverride:
             is False
         )
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
                 runtime_paths=runtime_paths,
                 worker_tools_override=[tool_name],
@@ -5743,7 +5743,7 @@ class TestWorkerToolsOverride:
         )
 
         assert (
-            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 "browser",
                 runtime_paths=runtime_paths,
                 worker_tools_override=["browser"],

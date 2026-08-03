@@ -486,6 +486,50 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
     assert "Worker routing: enabled; backend: `kubernetes`; scope: `user_agent`." in agent.role
 
 
+@patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_role_omits_tool_that_failed_to_build(
+    _mock_storage: MagicMock,  # noqa: PT019
+    _mock_get_tool_by_name: MagicMock,  # noqa: PT019
+) -> None:
+    """The prompt should not advertise a toolkit that is unavailable at runtime."""
+    config = _test_config()
+    config.agents["calculator"].include_default_tools = False
+
+    agent = _create_agent_for_test("calculator", config=config)
+
+    assert agent.tools == []
+    assert "Local tools (primary MindRoom runtime): none." in agent.role
+    assert "Worker-routed tools: none." in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """Agent-context toolkits should stay local because they bypass registry proxy wrapping."""
+    config = _test_config()
+    config.agents["general"].tools = ["report_publishing"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_tools = ["report_publishing"]
+    config.agents["general"].worker_scope = "user_agent"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+
+    assert "Local tools (primary MindRoom runtime): `report_publishing`." in agent.role
+    assert "Worker-routed tools: none." in agent.role
+    assert "Worker routing: disabled; backend: `kubernetes`; scope: `user_agent`." in agent.role
+
+
 @patch("mindroom.agent_storage.SqliteDb")
 def test_restricted_agent_omits_tool_execution_environment(
     _mock_storage: MagicMock,  # noqa: PT019
