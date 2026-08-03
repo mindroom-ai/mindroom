@@ -266,7 +266,7 @@ async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path
     assert client.loaded_sync_token == "s_rejected"  # noqa: S105
     assert tuple(cast("Any", client)._recovery.gaps) == (room_id,)
 
-    await client_session.invalidate_rejected_sync_position(client)
+    await client.invalidate_rejected_sync_position()
     await client.close()
     assert client.store is not None
     cast("Any", client.store).database.close()
@@ -331,7 +331,7 @@ async def test_rejected_sync_position_reset_failure_keeps_durable_token(
     )
 
     with pytest.raises(OSError, match="reset write failed"):
-        await client_session.invalidate_rejected_sync_position(client)
+        await client.invalidate_rejected_sync_position()
 
     await client.close()
     cast("Any", client.store).database.close()
@@ -366,7 +366,7 @@ async def test_rejected_sync_position_consumes_all_deferred_dispatch_errors(
         ],
     )
 
-    await client_session.invalidate_rejected_sync_position(client)
+    await client.invalidate_rejected_sync_position()
 
     assert recovery._deferred_dispatch_errors == []
     await client.close()
@@ -438,7 +438,7 @@ async def test_rejected_sync_position_preserves_unadmitted_live_events(tmp_path:
     assert not recovery._active_dispatches
     assert [event.event_id for events in recovery.events.values() for event in events] == [live_event.event_id]
 
-    await client_session.invalidate_rejected_sync_position(client)
+    await client.invalidate_rejected_sync_position()
     await client.close()
     assert client.store is not None
     cast("Any", client.store).database.close()

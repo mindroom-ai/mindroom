@@ -276,14 +276,6 @@ def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> ni
     )
 
 
-async def invalidate_rejected_sync_position(client: nio.AsyncClient) -> None:
-    """Durably discard a rejected Classic cursor for MindRoom-owned clients."""
-    if not isinstance(client, _MindRoomAsyncClient):
-        msg = f"Unsupported Matrix client type {type(client).__name__!r}"
-        raise TypeError(msg)
-    await client.invalidate_rejected_sync_position()
-
-
 def _create_matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -506,7 +498,6 @@ async def restore_login(
 __all__ = [
     "PermanentMatrixStartupError",
     "create_authenticated_client",
-    "invalidate_rejected_sync_position",
     "login",
     "login_flows",
     "login_with_token",

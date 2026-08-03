@@ -1500,12 +1500,6 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
 
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
-    assert (
-        bot._room_member_hook_lifecycle.admission_enabled(
-            nio.TimelineEventProvenance.LIVE,
-        )
-        is False
-    )
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:
@@ -1746,9 +1740,6 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
         await bot._on_sync_error(error)
 
     assert bot._sync_continuity_store.load().checkpoint is not None
-    assert not bot._room_member_hook_lifecycle.admission_enabled(
-        nio.TimelineEventProvenance.LIVE,
-    )
     assert not any(entry["log_level"] == "warning" for entry in logs)
 
 

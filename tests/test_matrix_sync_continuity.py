@@ -1793,13 +1793,10 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
     sync_error.status_code = "M_UNKNOWN_POS"
 
     invalidate_rejected_sync_position = AsyncMock()
-    with patch(
-        "mindroom.bot.invalidate_rejected_sync_position",
-        invalidate_rejected_sync_position,
-    ):
-        await bot._on_sync_error(sync_error)
+    bot.client.invalidate_rejected_sync_position = invalidate_rejected_sync_position
+    await bot._on_sync_error(sync_error)
 
-    invalidate_rejected_sync_position.assert_awaited_once_with(bot.client)
+    invalidate_rejected_sync_position.assert_awaited_once_with()
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
@@ -1819,16 +1816,14 @@ async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint
     release_cleanup = asyncio.Event()
     cleanup_completed = False
 
-    async def blocked_cleanup(_client: nio.AsyncClient) -> None:
+    async def blocked_cleanup() -> None:
         nonlocal cleanup_completed
         cleanup_started.set()
         await release_cleanup.wait()
         cleanup_completed = True
 
-    with patch(
-        "mindroom.bot.invalidate_rejected_sync_position",
-        side_effect=blocked_cleanup,
-    ):
+    bot.client.invalidate_rejected_sync_position = AsyncMock(side_effect=blocked_cleanup)
+    try:
         task = asyncio.create_task(bot._on_sync_error(sync_error))
         await cleanup_started.wait()
         task.cancel("watchdog restart")
@@ -1839,6 +1834,8 @@ async def test_unknown_pos_cleanup_cancellation_still_clears_mindroom_checkpoint
         release_cleanup.set()
         with pytest.raises(asyncio.CancelledError, match="watchdog restart"):
             await task
+    finally:
+        release_cleanup.set()
 
     assert bot.client.next_batch is None
     assert bot.client.loaded_sync_token == ""
@@ -1863,13 +1860,8 @@ async def test_unknown_pos_cleanup_failure_keeps_rejected_client_position(tmp_pa
 
     bot.client.sync_forever = AsyncMock(side_effect=rejected_sync_loop)
 
-    with (
-        patch(
-            "mindroom.bot.invalidate_rejected_sync_position",
-            AsyncMock(side_effect=OSError("recovery reset failed")),
-        ),
-        pytest.raises(OSError, match="recovery reset failed"),
-    ):
+    bot.client.invalidate_rejected_sync_position = AsyncMock(side_effect=OSError("recovery reset failed"))
+    with pytest.raises(OSError, match="recovery reset failed"):
         await bot.sync_forever()
 
     assert bot.client.next_batch == "s_rejected"
@@ -1889,8 +1881,8 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
-        await bot._on_sync_error(sync_error)
+    bot.client.invalidate_rejected_sync_position = AsyncMock()
+    await bot._on_sync_error(sync_error)
 
     bot._first_sync_done = True
     response = _sync_response("s_later")
@@ -1918,8 +1910,8 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
-        await bot._on_sync_error(sync_error)
+    bot.client.invalidate_rejected_sync_position = AsyncMock()
+    await bot._on_sync_error(sync_error)
 
     assert bot.client.next_batch is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
@@ -1937,8 +1929,8 @@ async def test_unknown_pos_non_restored_runtime_allows_later_checkpoint(tmp_path
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
 
-    with patch("mindroom.bot.invalidate_rejected_sync_position", AsyncMock()):
-        await bot._on_sync_error(sync_error)
+    bot.client.invalidate_rejected_sync_position = AsyncMock()
+    await bot._on_sync_error(sync_error)
 
     bot.client.next_batch = "s_later_after_unknown_pos"
     response = _sync_response(

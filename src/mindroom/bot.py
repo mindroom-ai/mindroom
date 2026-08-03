@@ -117,7 +117,7 @@ from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
-from .matrix.client_session import PermanentMatrixStartupError, invalidate_rejected_sync_position
+from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.room_member_joins import (
     RoomMemberJoin,
@@ -1397,9 +1397,13 @@ class AgentBot:
             await self._record_room_member_joined_events(
                 room_member_plan.baseline_record_events,
             )
-            self._room_member_hook_lifecycle.baseline_recorded()
         if room_member_plan.drain_captured_timeline:
             await self._dispatch_obligation_runner.drain_pending_room_lifecycle()
+        if room_member_plan.baseline_record_events is not None:
+            await self._record_room_member_joined_events(
+                room_member_plan.baseline_record_events,
+            )
+            self._room_member_hook_lifecycle.baseline_recorded()
         if room_member_plan.dispatch_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
 
@@ -1582,20 +1586,17 @@ class AgentBot:
             )
         if _response.status_code == "M_UNKNOWN_POS":
             client = self.client
-            cleanup_succeeded = False
+            assert client is not None
 
             async def reject_position() -> None:
-                nonlocal cleanup_succeeded
                 try:
-                    if client is not None:
-                        await invalidate_rejected_sync_position(client)
-                    cleanup_succeeded = True
-                finally:
-                    decision = await self._sync_cache_trust.reject_unknown_pos()
-                    if cleanup_succeeded:
-                        self._apply_client_rewind_decision(decision)
-                    else:
-                        self._sync_cache_trust.defer_replay_after_pre_certification_failure()
+                    await cast("Any", client).invalidate_rejected_sync_position()
+                except BaseException:
+                    await self._sync_cache_trust.reject_unknown_pos()
+                    self._sync_cache_trust.defer_replay_after_pre_certification_failure()
+                    raise
+                decision = await self._sync_cache_trust.reject_unknown_pos()
+                self._apply_client_rewind_decision(decision)
 
             await run_coroutine_until_complete(reject_position())
             self.logger.warning(

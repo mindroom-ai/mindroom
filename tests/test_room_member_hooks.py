@@ -811,6 +811,70 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hook_enabled", "pending_prev_membership"),
+    [(True, "join"), (False, "leave")],
+    ids=["ignored-profile", "hook-disabled-join"],
+)
+async def test_restored_baseline_revisits_member_after_pending_lifecycle_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hook_enabled: bool,
+    pending_prev_membership: str,
+) -> None:
+    """Settled lifecycle work must release its member's retained baseline marker."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_hook_lifecycle.prepare_startup(transport="classic", resuming_position=True)
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_restored"
+    if hook_enabled:
+        bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._maybe_start_startup_thread_prewarm = MagicMock()
+    bot._maybe_start_deferred_overdue_task_drain = MagicMock()
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+    pending = _room_member_event(
+        event_id="$pending-lifecycle",
+        prev_membership=pending_prev_membership,
+    )
+    await bot._dispatch_obligation_runner._admit_source_event(
+        room,
+        pending,
+        nio.TimelineEventProvenance.HISTORY,
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$existing-member", prev_membership=None)],
+            timeline_events=[pending],
+        ),
+    )
+    if not hook_enabled:
+        bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$later-profile", prev_membership=None),
+    )
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_sync_state_member_snapshot_without_previous_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

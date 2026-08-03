@@ -93,15 +93,6 @@ def _may_be_room_lifecycle(callback_kind: str) -> bool:
         return True
 
 
-def _log_corrupt_obligation(obligation: DispatchObligation) -> None:
-    logger.error(
-        "dispatch_obligation_recovery_corrupt",
-        source_event_id=obligation.source_event_id,
-        callback_kind=obligation.callback_kind.value,
-        room_id=obligation.room_id,
-    )
-
-
 async def _ignore_historical_event_cache(
     _room: nio.MatrixRoom,
     _event: nio.Event,
@@ -326,12 +317,7 @@ class DispatchObligationRunner:
             return
         _ADMITTED_OBLIGATION.set(None)
         try:
-            obligation = await self.persist(
-                room,
-                event,
-                callback_kind,
-                provenance,
-            )
+            obligation = await self.persist(room, event, callback_kind, provenance)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -519,17 +505,9 @@ class DispatchObligationRunner:
             event = parse_recovery_event(obligation)
         if obligation.requires_pending_check:
             with turn_dispatch_recovery_scope(active=obligation.callback_kind in _TURN_BACKED_KINDS):
-                await self._run_obligation(
-                    obligation,
-                    room=room,
-                    event=event,
-                )
+                await self._run_obligation(obligation, room=room, event=event)
             return
-        await self._run_obligation(
-            obligation,
-            room=room,
-            event=event,
-        )
+        await self._run_obligation(obligation, room=room, event=event)
 
     def _room_lifecycle_event(self, obligation: DispatchObligation) -> nio.RoomMemberEvent | None:
         """Parse one lifecycle event, logging malformed retained work once."""
@@ -548,7 +526,12 @@ class DispatchObligationRunner:
         if obligation.key in self._reported_corrupt:
             return
         self._reported_corrupt.add(obligation.key)
-        _log_corrupt_obligation(obligation)
+        logger.error(
+            "dispatch_obligation_recovery_corrupt",
+            source_event_id=obligation.source_event_id,
+            callback_kind=obligation.callback_kind.value,
+            room_id=obligation.room_id,
+        )
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
@@ -675,8 +658,7 @@ class DispatchObligationRunner:
         event: DispatchEvent,
     ) -> bool:
         """Run one obligation, returning whether this caller acquired its live claim."""
-        claimed = await self._claim(obligation.key)
-        if not claimed:
+        if not await self._claim(obligation.key):
             return False
         try:
             if obligation.requires_pending_check and not await asyncio.to_thread(

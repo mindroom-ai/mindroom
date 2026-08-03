@@ -40,7 +40,7 @@ def _decrypt_not_fenced(_room_id: str) -> bool:
 
 @dataclass(slots=True)
 class ColdHistoryFence:
-    """Admit live events and exact durable retries of historical events."""
+    """Admit live work, lifecycle-gated history, and exact durable historical retries."""
 
     obligations: _PendingDispatchObligations
     decrypt_notice_is_fenced: _DecryptNoticeFence = _decrypt_not_fenced
@@ -67,13 +67,15 @@ class ColdHistoryFence:
         callback_kind: DispatchCallbackKind,
         provenance: nio.TimelineEventProvenance | None = None,
     ) -> DispatchSourceAdmission:
-        """Apply invite, decrypt-notice, and event-provenance policy."""
+        """Apply invite, decrypt-notice, lifecycle, and event-provenance policy."""
         if callback_kind is DispatchCallbackKind.INVITE:
             return DispatchSourceAdmission.ACCEPTED
         if callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE and self.decrypt_notice_is_fenced(room_id):
             return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
         if provenance is not nio.TimelineEventProvenance.HISTORY:
             return DispatchSourceAdmission.ACCEPTED
+        # RoomMemberHookLifecycle.admission_enabled already gates which
+        # historical membership phases may reach this callback kind.
         if callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE:
             return DispatchSourceAdmission.ACCEPTED
         if await asyncio.to_thread(
