@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,12 +28,13 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     return client
 
 
-def _encrypted_client_with_shared_session(
+def _encrypted_client_with_outbound_session(
     *,
     room_id: str,
     user_ids: frozenset[str],
+    session_shared: bool = True,
 ) -> tuple[nio.AsyncClient, nio.MatrixRoom]:
-    """Return one real nio room backed by an already-shared outbound session."""
+    """Return one real nio room backed by an existing outbound session."""
     bot_user_id = "@bot:localhost"
     client = nio.AsyncClient("https://localhost", bot_user_id)
     room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
@@ -44,7 +46,7 @@ def _encrypted_client_with_shared_session(
     client.store = MagicMock()
     client.olm = MagicMock()
     client.olm.outbound_group_sessions = {
-        room_id: SimpleNamespace(shared=True),
+        room_id: SimpleNamespace(shared=session_shared),
     }
     client.olm.users_for_key_query = set()
     client.olm.should_query_keys = False
@@ -120,7 +122,7 @@ async def test_encrypted_proof_refreshes_membership_after_preparation() -> None:
     """Proof-bound encrypted sends must refresh membership after payload preparation."""
     room_id = "!room:localhost"
     before = frozenset({"@bot:localhost", "@departed:localhost"})
-    client, _room = _encrypted_client_with_shared_session(room_id=room_id, user_ids=before)
+    client, _room = _encrypted_client_with_outbound_session(room_id=room_id, user_ids=before)
     proof = RoomDeliveryHydrationProof(encrypted=True, joined_user_ids=before)
     response = nio.JoinedMembersResponse(
         [nio.RoomMember("@bot:localhost", "Bot", "")],
@@ -350,14 +352,21 @@ async def test_hydration_requires_encryption_in_authoritative_full_state() -> No
         ),
     ],
 )
+@pytest.mark.parametrize("session_shared", [False, True])
 @pytest.mark.asyncio
-async def test_encrypted_hydration_rotates_shared_session_when_membership_changes(
+async def test_encrypted_hydration_retires_outbound_session_when_membership_changes(
     before: frozenset[str],
     after: frozenset[str],
+    *,
+    session_shared: bool,
 ) -> None:
-    """Authoritative membership changes must retire the previously shared session."""
+    """Authoritative membership changes must retire every exposed session."""
     room_id = "!room:localhost"
-    client, room = _encrypted_client_with_shared_session(room_id=room_id, user_ids=before)
+    client, room = _encrypted_client_with_outbound_session(
+        room_id=room_id,
+        user_ids=before,
+        session_shared=session_shared,
+    )
     response = nio.JoinedMembersResponse(
         [nio.RoomMember(user_id, user_id, "") for user_id in sorted(after)],
         room_id,
@@ -375,6 +384,52 @@ async def test_encrypted_hydration_rotates_shared_session_when_membership_change
     assert frozenset(user_id for user_id, user in room.users.items() if not user.invited) == after
     assert client.olm is not None
     assert room_id not in client.olm.outbound_group_sessions
+
+
+@pytest.mark.asyncio
+async def test_membership_change_fences_sends_before_failed_key_query() -> None:
+    """A changed room must retire its shared session before key readiness awaits."""
+    room_id = "!room:localhost"
+    joined_user_id = "@joined:localhost"
+    before = frozenset({"@bot:localhost", "@departed:localhost"})
+    after = frozenset({"@bot:localhost", joined_user_id})
+    client, room = _encrypted_client_with_outbound_session(room_id=room_id, user_ids=before)
+    response = nio.JoinedMembersResponse(
+        [nio.RoomMember(user_id, user_id, "") for user_id in sorted(after)],
+        room_id,
+    )
+    assert client.olm is not None
+    client.olm.users_for_key_query = {joined_user_id}
+    client.olm.should_query_keys = True
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    state_during_query: tuple[bool, bool] | None = None
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        client._handle_joined_members(response)
+        return response
+
+    async def keys_query() -> nio.KeysQueryError:
+        nonlocal state_during_query
+        state_during_query = (
+            room_id in client.olm.outbound_group_sessions,
+            room.members_synced,
+        )
+        query_started.set()
+        await release_query.wait()
+        return nio.KeysQueryError("upstream unavailable", "M_UNKNOWN")
+
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    client.keys_query = AsyncMock(side_effect=keys_query)
+
+    hydration = asyncio.create_task(hydrate_joined_room_for_delivery(client, room_id))
+    await query_started.wait()
+
+    assert state_during_query == (False, False)
+    release_query.set()
+    assert await hydration is None
+    assert room_id not in client.olm.outbound_group_sessions
+    assert room.members_synced is False
 
 
 @pytest.mark.asyncio

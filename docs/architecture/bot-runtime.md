@@ -165,7 +165,9 @@ The coordinator admits at most eight concurrent read-bearing phases across owner
 A room-recovery phase may issue owner-specific membership and hydration requests while holding one phase slot.
 A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
 Encrypted hidden-room hydration publishes a full-state `MatrixRoom` with exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
-Hydration invalidates an existing outbound Megolm session whenever authoritative joined membership differs from the prior complete snapshot.
+Hydration retires every existing outbound Megolm session as soon as authoritative joined membership differs from the prior complete snapshot, before any full-state or device-key await.
+While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must establish key readiness instead of reusing incomplete encryption state.
+An encrypted cache replacement that disagrees with the hydration snapshot is likewise marked membership-unsynchronized before hydration retries.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
 Distinct policies for the same room never run concurrently.

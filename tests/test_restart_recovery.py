@@ -897,6 +897,7 @@ async def test_encrypted_room_hydration_rejects_partial_room_from_state_query_ra
     assert hydrated is None
     assert owner.client.rooms[room_id] is concurrent_room
     assert remote_member_id not in concurrent_room.users
+    assert concurrent_room.members_synced is False
     assert room_id not in owner.client.encrypted_rooms
 
 
@@ -1030,6 +1031,8 @@ async def test_encrypted_room_hydration_rejects_concurrent_partial_sync_room() -
     owner.client.should_query_keys = True
     owner.client.users_for_key_query = {remote_member_id}
     concurrent_room = nio.MatrixRoom(room_id=room_id, own_user_id=owner.user_id)
+    concurrent_room.encrypted = True
+    concurrent_room.members_synced = True
 
     async def keys_query() -> nio.KeysQueryResponse:
         owner.client.rooms[room_id] = concurrent_room
@@ -1042,7 +1045,8 @@ async def test_encrypted_room_hydration_rejects_concurrent_partial_sync_room() -
 
     assert hydrated is None
     assert owner.client.rooms[room_id] is concurrent_room
-    assert concurrent_room.encrypted is False
+    assert concurrent_room.encrypted is True
+    assert concurrent_room.members_synced is False
     assert room_id not in owner.client.encrypted_rooms
 
 

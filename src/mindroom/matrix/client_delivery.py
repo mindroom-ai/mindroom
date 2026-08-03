@@ -250,6 +250,26 @@ def _joined_room_user_ids(room: nio.MatrixRoom) -> frozenset[str]:
     return frozenset(user_id for user_id, user in room.users.items() if not user.invited)
 
 
+def _retire_membership_changed_outbound_session(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    prior_joined_user_ids: frozenset[str] | None,
+    joined_user_ids: frozenset[str],
+) -> None:
+    """Discard every session that may have been exposed to obsolete members."""
+    if client.olm is None or prior_joined_user_ids == joined_user_ids:
+        return
+    session = client.olm.outbound_group_sessions.pop(room_id, None)
+    if session is not None:
+        logger.info(
+            "matrix_outbound_group_session_retired_for_membership_change",
+            room_id=room_id,
+            prior_member_count=(len(prior_joined_user_ids) if prior_joined_user_ids is not None else None),
+            joined_member_count=len(joined_user_ids),
+        )
+
+
 def _room_covers_joined_members(
     room: nio.MatrixRoom,
     joined_user_ids: frozenset[str],
@@ -258,16 +278,23 @@ def _room_covers_joined_members(
     return room.encrypted and room.members_synced and joined_user_ids == _joined_room_user_ids(room)
 
 
+def _fence_incomplete_encrypted_room(room: nio.MatrixRoom) -> None:
+    """Force nio sends to refresh an encrypted room rejected by hydration."""
+    if room.encrypted:
+        room.members_synced = False
+
+
 async def _encrypted_room_for_hydration(
     client: nio.AsyncClient,
     room_id: str,
     members: nio.JoinedMembersResponse,
+    joined_user_ids: frozenset[str],
 ) -> _EncryptedRoomHydration | None:
     """Return a complete candidate or an authoritative encrypted sync room."""
-    joined_user_ids = frozenset(member.user_id for member in members.members)
     room = cached_room(client, room_id)
     if room is not None:
         if not _room_covers_joined_members(room, joined_user_ids):
+            _fence_incomplete_encrypted_room(room)
             return None
         return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
 
@@ -283,6 +310,7 @@ async def _encrypted_room_for_hydration(
             else None
         )
     if not _room_covers_joined_members(room, joined_user_ids):
+        _fence_incomplete_encrypted_room(room)
         return None
     return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
 
@@ -295,6 +323,35 @@ def _pending_room_key_query_user_ids(
     if client.olm is None:
         return set()
     return set(room.users).intersection(client.users_for_key_query)
+
+
+def _log_incomplete_room_device_keys(room_id: str, pending_room_members: set[str]) -> None:
+    """Log an encrypted room that must remain fenced from sending."""
+    logger.error(
+        "matrix_encrypted_room_device_keys_incomplete",
+        room_id=room_id,
+        pending_member_count=len(pending_room_members),
+    )
+
+
+async def _room_device_keys_are_ready(
+    client: nio.AsyncClient,
+    room_id: str,
+    room: nio.MatrixRoom,
+) -> bool:
+    """Query pending room keys while keeping nio's send path fenced."""
+    if not client.should_query_keys:
+        return True
+    room.members_synced = False
+    key_query = await client.keys_query()
+    if not isinstance(key_query, nio.KeysQueryResponse):
+        return False
+    pending_room_members = _pending_room_key_query_user_ids(client, room)
+    if pending_room_members:
+        _log_incomplete_room_device_keys(room_id, pending_room_members)
+        return False
+    room.members_synced = True
+    return True
 
 
 def delivery_hydration_is_current(
@@ -325,6 +382,7 @@ def _current_encrypted_room_after_hydration(
     if current_room is None:
         return hydration.room if hydration.unpublished_candidate else None
     if not _room_covers_joined_members(current_room, hydration.joined_user_ids):
+        _fence_incomplete_encrypted_room(current_room)
         logger.error(
             "matrix_encrypted_room_cache_changed_during_hydration",
             room_id=room_id,
@@ -351,36 +409,31 @@ async def _hydrate_encrypted_joined_room(
     members = await client.joined_members(room_id)
     if not isinstance(members, nio.JoinedMembersResponse):
         return None
+    joined_user_ids = frozenset(member.user_id for member in members.members)
+    _retire_membership_changed_outbound_session(
+        client,
+        room_id,
+        prior_joined_user_ids=prior_joined_user_ids,
+        joined_user_ids=joined_user_ids,
+    )
 
-    hydration = await _encrypted_room_for_hydration(client, room_id, members)
+    hydration = await _encrypted_room_for_hydration(client, room_id, members, joined_user_ids)
     if hydration is None:
         return None
     room = hydration.room
     if client.olm is not None:
         client.olm.update_tracked_users(room)
-    if client.should_query_keys:
-        key_query = await client.keys_query()
-        if not isinstance(key_query, nio.KeysQueryResponse):
-            return None
+    if not await _room_device_keys_are_ready(client, room_id, room):
+        return None
 
     room = _current_encrypted_room_after_hydration(client, room_id, hydration)
     if room is None:
         return None
 
-    if (
-        client.olm is not None
-        and prior_joined_user_ids != hydration.joined_user_ids
-        and room_id in client.olm.outbound_group_sessions
-    ):
-        client.invalidate_outbound_session(room_id)
-
     pending_room_members = _pending_room_key_query_user_ids(client, room)
     if pending_room_members:
-        logger.error(
-            "matrix_encrypted_room_device_keys_incomplete",
-            room_id=room_id,
-            pending_member_count=len(pending_room_members),
-        )
+        room.members_synced = False
+        _log_incomplete_room_device_keys(room_id, pending_room_members)
         return None
 
     if client.store is not None:

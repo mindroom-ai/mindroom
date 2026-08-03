@@ -6,7 +6,7 @@
 **Goal:** Make proof-bound Matrix recovery delivery validate encryption before uploads, refresh exact encrypted membership immediately before send, and rotate stale Megolm sessions.
 
 **Architecture:** `mindroom.matrix.client_delivery` owns the complete preflight, content preparation, final hydration, and send sequence.
-Encrypted hydration compares exact joined membership before and after `joined_members`, invalidates an existing outbound session when that membership is unknown or changed, and completes device-key queries before returning a proof.
+Encrypted hydration compares exact joined membership before and after `joined_members`, retires every existing outbound session immediately when that membership is unknown or changed, and fences sending until device-key queries complete.
 Restart recovery remains a consumer of this boundary and does not acquire crypto-specific branches.
 
 **Tech Stack:** Python 3.13, matrix-nio, asyncio, pytest, pytest-asyncio, Ruff, ty, Vulture, Tach, GitHub CLI.
@@ -128,18 +128,21 @@ def _joined_room_user_ids(room: nio.MatrixRoom) -> frozenset[str]:
 
 Change coverage from subset matching to exact equality with `_joined_room_user_ids(room)`.
 At the start of `_hydrate_encrypted_joined_room`, snapshot exact joined membership from a cached encrypted, member-synchronized room or use `None` when no complete prior snapshot exists.
-After `_current_encrypted_room_after_hydration` selects the authoritative room, invalidate only an existing outbound session when the prior set is unknown or differs from `hydration.joined_user_ids`:
+Immediately after `joined_members` returns, retire any existing outbound session when the prior set is unknown or differs from the authoritative response so no later state or key await exposes the old session:
 
 ```python
-membership_changed = previous_joined_user_ids != hydration.joined_user_ids
+joined_user_ids = frozenset(member.user_id for member in members.members)
+membership_changed = previous_joined_user_ids != joined_user_ids
 if (
     client.olm is not None
     and membership_changed
     and room_id in client.olm.outbound_group_sessions
 ):
-    client.invalidate_outbound_session(room_id)
+    client.olm.outbound_group_sessions.pop(room_id)
 ```
 
+Discard partially distributed sessions as well as sessions marked fully shared because a departed device may already possess either key.
+When device keys require a query, mark the room membership-unsynchronized before awaiting the query and restore it only after no joined member remains pending.
 Keep tracked-user updates, key queries, cache publication, and proof construction in the same hydration owner.
 
 - [ ] **Step 5: Run the new test and existing hydration tests and verify GREEN**
@@ -365,7 +368,8 @@ Add these one-sentence-per-line statements in the restart-recovery scope and del
 
 ```markdown
 Encrypted hidden-room hydration publishes a full-state `MatrixRoom` with exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
-Hydration invalidates an existing outbound Megolm session whenever authoritative joined membership differs from the prior complete snapshot.
+Hydration retires every existing outbound Megolm session before later awaits whenever authoritative joined membership differs from the prior complete snapshot.
+Pending device-key work keeps the room send-fenced through nio's membership-synchronization state.
 Proof-bound delivery validates encryption before large-message preparation can upload content.
 After preparation, encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and then enters nio's send path without unrelated application awaits.
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
