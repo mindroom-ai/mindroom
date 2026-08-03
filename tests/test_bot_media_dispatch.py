@@ -21,7 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
@@ -497,7 +497,7 @@ class TestAgentBot(AgentBotTestBase):
         bot._turn_controller._ready_voice_event = AsyncMock(
             return_value=ReadyPendingEvent(
                 pending_event=PendingEvent(
-                    event=PreparedTextEvent(
+                    event=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$voice",
                         body="voice second",
@@ -520,7 +520,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed first",
@@ -590,7 +590,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",
@@ -642,7 +642,7 @@ class TestAgentBot(AgentBotTestBase):
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "typed second"},
         }
-        prepared_sidecar = PreparedTextEvent(
+        prepared_sidecar = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="sidecar first",
@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
-        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedTextEvent:
+        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
             await release_preview_normalization.wait()
             return prepared_sidecar
 
@@ -682,7 +682,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",

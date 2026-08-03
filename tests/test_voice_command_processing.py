@@ -28,7 +28,7 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
@@ -1099,7 +1099,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     normalization_started = asyncio.Event()
     placeholder_send_started = asyncio.Event()
     normalization_count = 0
-    normalized_event = PreparedTextEvent(
+    normalized_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}@home turn on the lights",
@@ -1115,7 +1115,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         source_kind_override=VOICE_SOURCE_KIND,
     )
 
-    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedTextEvent, str]:
+    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedIngress, str]:
         nonlocal normalization_count
         normalization_count += 1
         normalization_started.set()
@@ -1244,7 +1244,7 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
 
     await bot._visible_voice_echo.finish(
         handle,
-        PreparedTextEvent(
+        PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1288,7 +1288,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
             raw_source=event.source,
         ),
     )
-    fallback_event = PreparedTextEvent(
+    fallback_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1345,7 +1345,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
         return True
 
     bot._delivery_gateway.edit_text.side_effect = edit_text
-    fallback_event = PreparedTextEvent(
+    fallback_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}[Attached voice message]",
@@ -1356,7 +1356,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
             },
         },
     )
-    transcript_event = PreparedTextEvent(
+    transcript_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=f"{VOICE_PREFIX}summarize this audio",

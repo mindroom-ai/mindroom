@@ -28,7 +28,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
@@ -214,8 +214,8 @@ def _room_prepared_text_event(
     body: str,
     server_timestamp: int = 1_712_350_000_000,
     sender: str = "@user:example.com",
-) -> PreparedTextEvent:
-    return PreparedTextEvent(
+) -> PreparedIngress:
+    return PreparedIngress(
         sender=sender,
         event_id=event_id,
         body=body,
@@ -240,7 +240,7 @@ def _threaded_prepared_text_event(
     sender: str = "@user:example.com",
     source_kind: str | None = None,
     content_overrides: dict[str, object] | None = None,
-) -> PreparedTextEvent:
+) -> PreparedIngress:
     content: dict[str, object] = {
         "body": body,
         "msgtype": "m.text",
@@ -250,7 +250,7 @@ def _threaded_prepared_text_event(
         content[SOURCE_KIND_KEY] = source_kind
     if content_overrides is not None:
         content.update(content_overrides)
-    return PreparedTextEvent(
+    return PreparedIngress(
         sender=sender,
         event_id=event_id,
         body=body,
@@ -281,7 +281,7 @@ def _normalized_voice_result(
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     return inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedTextEvent(
+        event=PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body=text,
@@ -304,14 +304,14 @@ def _handled_source_event_ids(handled_turn: TurnRecord | None) -> list[str]:
 
 
 def _assert_voice_fallback_dispatch(
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]],
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]],
     *,
     source_event_id: str,
     thread_id: str,
-) -> PreparedTextEvent:
+) -> PreparedIngress:
     assert len(dispatches) == 1
     dispatched_event, handled_source_ids = dispatches[0]
-    assert isinstance(dispatched_event, PreparedTextEvent)
+    assert isinstance(dispatched_event, PreparedIngress)
     assert dispatched_event.body == "🎤 [Attached voice message]"
     assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
@@ -650,7 +650,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
     lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedTextEvent(
+        event=PreparedIngress(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 continue",
@@ -758,7 +758,7 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
             },
         },
     )
-    normalized_event = PreparedTextEvent(
+    normalized_event = PreparedIngress(
         sender=voice_event.sender,
         event_id=voice_event.event_id,
         body="🎤 continue somewhere else",
@@ -855,7 +855,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         },
     )
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedTextEvent(
+        event=PreparedIngress(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 room mode follow-up",
@@ -960,7 +960,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
 
     async def resolve_text_event(
         request: inbound_turn_normalizer.TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         return _threaded_prepared_text_event(
             event_id=request.event.event_id,
             body=request.event.body,
@@ -969,7 +969,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1070,7 +1070,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
 
     async def resolve_text_event(
         request: inbound_turn_normalizer.TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         return _threaded_prepared_text_event(
             event_id=request.event.event_id,
             body=request.event.body,
@@ -1079,7 +1079,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1147,7 +1147,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
     release_lookup = asyncio.Event()
     dispatches: list[tuple[list[str], str]] = []
 
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id == "$voice":
             lookup_started.set()
             await release_lookup.wait()
@@ -1160,7 +1160,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
 
     async def resolve_text_event(
         request: inbound_turn_normalizer.TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         return _threaded_prepared_text_event(
             event_id=request.event.event_id,
             body=request.event.body,
@@ -1169,7 +1169,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1264,7 +1264,7 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
 
     async def resolve_text_event(
         request: inbound_turn_normalizer.TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         return _room_prepared_text_event(
             event_id=request.event.event_id,
             body=request.event.body,
@@ -1273,7 +1273,7 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1359,7 +1359,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        _dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1486,11 +1486,11 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$audio-fails")
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1531,11 +1531,11 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$audio-download-fails")
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1567,11 +1567,11 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_f
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$thread-resolution-fails")
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1626,11 +1626,11 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
         },
         server_timestamp=1_712_350_000_002,
     )
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
@@ -1664,11 +1664,11 @@ async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallba
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$cache-append-fails")
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,

@@ -46,7 +46,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -190,8 +190,8 @@ def _envelope(
     )
 
 
-def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
-    return PreparedTextEvent(
+def _prepared_text_event(*, event_id: str = "$event") -> PreparedIngress:
+    return PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body="hello",
@@ -253,7 +253,7 @@ def _reserved_follow_up_case(
         source_event_id=event_id,
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body=body,
@@ -510,7 +510,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     room.room_id = "!room:localhost"
     pending_events = [
         PendingEvent(
-            event=PreparedTextEvent(
+            event=PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a1",
                 body="A first",
@@ -523,7 +523,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
         PendingEvent(
-            event=PreparedTextEvent(
+            event=PreparedIngress(
                 sender="@bob:localhost",
                 event_id="$b1",
                 body="B <context> & more",
@@ -536,7 +536,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
         PendingEvent(
-            event=PreparedTextEvent(
+            event=PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a2",
                 body="A follow-up",
@@ -2141,7 +2141,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         source_event_id="$command",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$command",
         body="!help",
@@ -2201,7 +2201,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         source_event_id="$older",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$older",
         body="older follow-up",

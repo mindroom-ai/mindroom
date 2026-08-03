@@ -46,7 +46,7 @@ from tests.test_turn_controller_focused import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.dispatch_handoff import PreparedTextEvent
+    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, TextNormalizationRequest
     from mindroom.turn_store import TurnStore
     from tests.test_turn_controller_focused import _Harness
@@ -88,7 +88,7 @@ class _ResolveClaimSpy:
     source_event_id: str
     claim_live_at_resolve: list[bool] = field(default_factory=list)
 
-    async def resolve_text_event(self, request: TextNormalizationRequest) -> PreparedTextEvent:
+    async def resolve_text_event(self, request: TextNormalizationRequest) -> PreparedIngress:
         """Record the claim state at this resolve, then delegate."""
         self.ledger.events.append(("normalize", None))
         probe = TurnRecord.create([self.source_event_id], completed=False)
@@ -106,7 +106,7 @@ class _BlockingNormalizer:
     started: asyncio.Event
     calls: int = 0
 
-    async def resolve_text_event(self, _request: TextNormalizationRequest) -> PreparedTextEvent:
+    async def resolve_text_event(self, _request: TextNormalizationRequest) -> PreparedIngress:
         """Signal that resolution started, then wait for cancellation."""
         self.calls += 1
         self.started.set()
@@ -121,7 +121,7 @@ class _FailingNormalizer:
 
     calls: int = 0
 
-    async def resolve_text_event(self, _request: TextNormalizationRequest) -> PreparedTextEvent:
+    async def resolve_text_event(self, _request: TextNormalizationRequest) -> PreparedIngress:
         """Resolution must never run on the path under test."""
         self.calls += 1
         msg = "normalization must not run on this path"

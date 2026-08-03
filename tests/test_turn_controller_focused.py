@@ -91,7 +91,7 @@ if TYPE_CHECKING:
     from unittest.mock import AsyncMock
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
-    from mindroom.dispatch_handoff import PreparedTextEvent
+    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -1130,7 +1130,7 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     async def resolve_with_barrier(
         _normalizer: InboundTurnNormalizer,
         request: TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         if request.event.event_id == first.event_id:
             normalization_started.set()
             await release_normalization.wait()
@@ -1579,7 +1579,7 @@ async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     async def normalize_with_barrier(
         normalizer: InboundTurnNormalizer,
         request: TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         normalization_started.set()
         await release_normalization.wait()
         return await resolve_text_event(normalizer, request)

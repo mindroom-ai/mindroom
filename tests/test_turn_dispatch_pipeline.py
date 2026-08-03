@@ -33,7 +33,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -135,7 +135,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-root",
             reply_to_event_id=voice_event.event_id,
         )
-        fallback_event = PreparedTextEvent(
+        fallback_event = PreparedIngress(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 [Attached voice message]",
@@ -1520,7 +1520,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$followup",
             body="stop right now!",
@@ -1638,7 +1638,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@mindroom_general:localhost",
             event_id=f"${source_kind}",
             body=f"@mindroom_calculator:localhost {source_kind} says hello",
@@ -1693,7 +1693,7 @@ class TestAgentBot(AgentBotTestBase):
         room.users = {"@user:localhost": MagicMock()}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$voice-followup",
             body="please stop",
@@ -1801,7 +1801,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="full long text",
@@ -1896,7 +1896,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar-followup",
             body="please stop",

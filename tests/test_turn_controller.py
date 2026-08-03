@@ -17,7 +17,7 @@ from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoal
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -571,7 +571,7 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
         "type": "m.room.message",
         "room_id": "!test:localhost",
     }
-    prepared_event = PreparedTextEvent(
+    prepared_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar-selection:localhost",
         body="1",

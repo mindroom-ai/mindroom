@@ -28,7 +28,7 @@ from mindroom.coalescing_batch import (
     is_active_follow_up_coalescing_key,
 )
 from mindroom.config.main import Config
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress, build_dispatch_handoff
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -484,7 +484,7 @@ def test_batch_construction_does_not_close_mixed_solo_metadata() -> None:
 def test_single_prepared_event_handoff_synthesizes_canonical_thread_relation() -> None:
     """A canonical batch key must control dispatch target for non-voice prepared events too."""
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    prepared = PreparedTextEvent(
+    prepared = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar:localhost",
         body="sidecar preview",

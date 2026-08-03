@@ -44,8 +44,8 @@ class _PendingEventLike(Protocol):
 
 
 @dataclass(frozen=True)
-class PreparedTextEvent:
-    """Canonical inbound text event for dispatch."""
+class PreparedIngress:
+    """Canonical prepared ingress value: the sole normalized inbound text event for dispatch."""
 
     sender: str
     event_id: str
@@ -55,10 +55,10 @@ class PreparedTextEvent:
     source_kind_override: str | None = None
 
 
-# Voice messages are normalized into PreparedTextEvent before coalescing, so
+# Voice messages are normalized into PreparedIngress before coalescing, so
 # this contract only includes routed image/file/video events.
 type MediaDispatchEvent = MatrixMediaDispatchEvent
-type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
+type TextDispatchEvent = nio.RoomMessageText | PreparedIngress
 type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 
 
@@ -133,7 +133,7 @@ def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEven
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:
     """Return the prompt text contributed by one dispatch event."""
     if is_audio_message_event(event):
-        msg = "Raw audio must be normalized into PreparedTextEvent before coalescing"
+        msg = "Raw audio must be normalized into PreparedIngress before coalescing"
         raise TypeError(msg)
     if is_image_message_event(event):
         return extract_media_caption(event, default="[Attached image]")
@@ -315,7 +315,7 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
         return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
     if thread_id == event.event_id:
         return False
-    return isinstance(event, PreparedTextEvent) or batch.source_kind == VOICE_SOURCE_KIND
+    return isinstance(event, PreparedIngress) or batch.source_kind == VOICE_SOURCE_KIND
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -344,7 +344,7 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     return merged
 
 
-def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
+def _single_prepared_dispatch_event(event: PreparedIngress, source_kind: str) -> PreparedIngress:
     if source_kind in {MESSAGE_SOURCE_KIND, event.source_kind_override}:
         return event
     return replace(event, source_kind_override=source_kind)
@@ -358,13 +358,13 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
     if (
         len(batch.pending_events) == 1
-        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
+        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedIngress)
         and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
     ):
-        if isinstance(batch.primary_event, PreparedTextEvent):
+        if isinstance(batch.primary_event, PreparedIngress):
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
         return batch.primary_event
-    return PreparedTextEvent(
+    return PreparedIngress(
         sender=batch.primary_event.sender,
         event_id=batch.primary_event.event_id,
         body=batch.prompt,

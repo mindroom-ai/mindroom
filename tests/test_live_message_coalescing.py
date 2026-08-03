@@ -43,7 +43,7 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PendingDispatchMetadata,
-    PreparedTextEvent,
+    PreparedIngress,
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
@@ -929,7 +929,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
 def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> None:
     """Voice messages should enter coalescing as synthetic text, not raw media."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
@@ -950,7 +950,7 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
     """Preserve queue order even when Matrix timestamps disagree."""
     room = _make_room()
     real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
-    synthetic_event = PreparedTextEvent(
+    synthetic_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$synthetic",
         body="synthetic",
@@ -991,7 +991,7 @@ def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> 
 def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -> None:
     """Voice should win batch source_kind precedence even when a text event is primary."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="voice prompt",
@@ -1394,7 +1394,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id == "$m2":
             second_lookup_started.set()
             await release_second_lookup.wait()
@@ -1482,7 +1482,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
 
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id == "$m2":
             second_lookup_started.set()
             await release_second_lookup.wait()
@@ -2582,7 +2582,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 async def test_pending_dispatch_policy_preserves_active_followup_without_bypassing_modality() -> None:
     """Active follow-up policy should stay metadata while voice remains coalescible."""
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice_followup",
         body="voice follow-up",
@@ -2616,7 +2616,7 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
     assert calls[0].source_kind == "voice"
     assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     dispatch_event = _build_batch_dispatch_event(calls[0])
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     assert dispatch_event.source_kind_override == "voice"
 
 
@@ -2636,11 +2636,11 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         event_id=f"$spoof_{spoofed_source_kind}",
         source_kind=spoofed_source_kind,
     )
-    calls: list[nio.RoomMessageImage | PreparedTextEvent] = []
+    calls: list[nio.RoomMessageImage | PreparedIngress] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageImage | PreparedTextEvent,
+        dispatched_event: nio.RoomMessageImage | PreparedIngress,
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
@@ -2666,7 +2666,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
 
     assert len(calls) == 1
     dispatched = calls[0]
-    assert isinstance(dispatched, PreparedTextEvent)
+    assert isinstance(dispatched, PreparedIngress)
     assert dispatched.event_id == f"$spoof_{spoofed_source_kind}"
     assert dispatched.source_kind_override == IMAGE_SOURCE_KIND
 
@@ -3334,7 +3334,7 @@ async def test_handle_coalesced_batch_uses_batch_key_for_text_primary(tmp_path: 
         await bot._turn_controller.handle_coalesced_batch(batch)
 
     dispatched_event = mock_dispatch.await_args.args[1]
-    assert isinstance(dispatched_event, PreparedTextEvent)
+    assert isinstance(dispatched_event, PreparedIngress)
     content = dispatched_event.source["content"]
     assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$voice_thread"}
 
@@ -3366,7 +3366,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     assert "m.relates_to" not in handoff.event.source["content"]
 
 
@@ -3386,7 +3386,7 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
     assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
 
@@ -3408,7 +3408,7 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     content = handoff.event.source["content"]
     assert "m.relates_to" not in content
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
@@ -3431,7 +3431,7 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     content = handoff.event.source["content"]
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
@@ -3489,7 +3489,7 @@ def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> No
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     content = handoff.event.source["content"]
     assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$new-thread"}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
@@ -3513,7 +3513,7 @@ def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
 
     handoff = build_dispatch_handoff(batch)
 
-    assert isinstance(handoff.event, PreparedTextEvent)
+    assert isinstance(handoff.event, PreparedIngress)
     assert handoff.event.source["content"]["m.relates_to"] == {
         "rel_type": "m.thread",
         "event_id": "$post-stt-thread",
@@ -4264,7 +4264,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     """Skip an older message during backlog replay when a newer unresponded message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4350,7 +4350,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
     """
     bot = _make_bot(tmp_path)
     room = _make_room()
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id="$bob",
         body="bob",
@@ -4456,7 +4456,7 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
     room = _make_room()
     relay_event_id = "$relay"
     human_event_id = "$human"
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id=relay_event_id,
         body="relay",
@@ -4540,7 +4540,7 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
     assert projected.source_event_ids == (retained_event_id,)
     assert projected.source_event_metadata == {}
 
-    primary_event = PreparedTextEvent(
+    primary_event = PreparedIngress(
         sender="@bob:localhost",
         event_id=retained_event_id,
         body="retained",
@@ -4593,7 +4593,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
     """Degraded empty thread history must not prove that no newer thread message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4656,7 +4656,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
     """Cached replay proof must be strictly newer, matching the full-history guard."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4719,7 +4719,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
     """Cached voice transcripts that parse like commands should still count as requester turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -4773,7 +4773,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
 
 def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
     """Replay suppression is gated by turn-origin policy, not just sender/timestamp matching."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@mindroom_general:localhost",
         event_id="$managed",
         body="internal status",
@@ -4807,7 +4807,7 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
 
 def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
     """Visible router voice echoes must not suppress the canonical voice turn in full history."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4853,7 +4853,7 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
 
 def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
     """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4900,7 +4900,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     """Router transcript echoes must not suppress the canonical voice turn they represent."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -4966,7 +4966,7 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     """Only router transcript echoes are replay noise; other marked relays still count as newer turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice",
         body="check my calendar",
@@ -5032,7 +5032,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
     """Degraded replay guard should accept cache-indexed plain replies as same-thread proof."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5094,7 +5094,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
     """Cached edits should not count as newer unresponded requester turns."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5159,7 +5159,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     """Degraded replay guard should proceed unless raw cached events positively prove a newer same-thread turn."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="old",
@@ -5216,7 +5216,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    dispatch_event = PreparedTextEvent(
+    dispatch_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$img1",
         body="[Attached image]",
@@ -5267,7 +5267,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     """Normal live dispatch proceeds when no newer unresponded message exists."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="hello",
@@ -5358,7 +5358,7 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
     )
     dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     content = dispatch_event.source.get("content", {})
     mentions = content.get("m.mentions", {})
     assert "@mindroom_test_agent:localhost" in mentions.get("user_ids", [])
@@ -5367,7 +5367,7 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
 def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     """A trusted voice + text batch must preserve system-owned fallback metadata."""
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
@@ -5396,7 +5396,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     )
     dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     content = dispatch_event.source.get("content", {})
     assert content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
 
@@ -5404,7 +5404,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
 def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
     """Single prepared events should carry active policy separately from source kind."""
     room = _make_room()
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$followup",
         body="stop if you see this",
@@ -5428,7 +5428,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
 
     assert handoff.ingress.source_kind == "message"
     assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     assert dispatch_event.source_kind_override is None
 
 
@@ -5459,7 +5459,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
 def test_batch_dispatch_event_preserves_original_sender() -> None:
     """A relay batch must preserve original_sender metadata."""
     room = _make_room()
-    relay_event = PreparedTextEvent(
+    relay_event = PreparedIngress(
         sender="@bridge:localhost",
         event_id="$relay1",
         body="relayed message",
@@ -5492,7 +5492,7 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
     )
     dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     content = dispatch_event.source.get("content", {})
     assert content.get(ORIGINAL_SENDER_KEY) == "@real_user:remote"
 
@@ -5500,7 +5500,7 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
 def test_batch_dispatch_event_preserves_attachment_ids() -> None:
     """Attachment IDs from all events must flow through to the synthetic source."""
     room = _make_room()
-    event_with_attachment = PreparedTextEvent(
+    event_with_attachment = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="see attached",
@@ -5512,7 +5512,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
         },
         server_timestamp=1000,
     )
-    event_with_another = PreparedTextEvent(
+    event_with_another = PreparedIngress(
         sender="@user:localhost",
         event_id="$m2",
         body="another",
@@ -5544,7 +5544,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
     )
     dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     content = dispatch_event.source.get("content", {})
     raw_ids = content.get(ATTACHMENT_IDS_KEY, [])
     assert isinstance(raw_ids, list), "attachment IDs must be a list, not a comma-string"
@@ -5562,7 +5562,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
     """A newer !command must not suppress an older legitimate message during backlog replay."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="What is the project structure?",
@@ -5613,7 +5613,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
     """A newer command with leading whitespace must not suppress older messages."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    older_event = PreparedTextEvent(
+    older_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="hello",
@@ -5667,7 +5667,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
     """Synthetic scheduled events must never be suppressed by the thread-history guard."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    scheduled_event = PreparedTextEvent(
+    scheduled_event = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$s1",
         body="scheduled task output",
@@ -5720,7 +5720,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
     """Synthetic hook events must never be suppressed by the thread-history guard."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    hook_event = PreparedTextEvent(
+    hook_event = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$h1",
         body="hook result",
@@ -5771,7 +5771,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
     bot = _make_bot(tmp_path)
     room = _make_room()
 
-    first_fire = PreparedTextEvent(
+    first_fire = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$s1",
         body="scheduled fire 1",
@@ -5828,7 +5828,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
     """Coalesced user batches (is_synthetic=True, source_kind='user') must be guarded."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    coalesced_event = PreparedTextEvent(
+    coalesced_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$m1",
         body="batched message",
@@ -5871,7 +5871,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
     bot = _make_bot(tmp_path)
     room = _make_room()
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    coalesced_event = PreparedTextEvent(
+    coalesced_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$img1",
         body="[Attached image]",
@@ -5918,7 +5918,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     """Non-voice !commands must still take the command execution path."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    command_event = PreparedTextEvent(
+    command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$c1",
         body="!schedule tomorrow at 9am turn off the lights",
@@ -5951,7 +5951,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     """Voice active follow-ups should force response policy without becoming commands."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    voice_command_event = PreparedTextEvent(
+    voice_command_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice_command",
         body="!schedule tomorrow at 9am turn off the lights",
@@ -6006,7 +6006,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     """An older !help replayed while a newer normal message exists must still dispatch."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    cmd_event = PreparedTextEvent(
+    cmd_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$c1",
         body="!help",
@@ -6099,7 +6099,7 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     )
     dispatch_event = _build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert isinstance(dispatch_event, PreparedIngress)
     content = dispatch_event.source.get("content", {})
     formatted = content.get("formatted_body", "")
     assert "@mindroom_test_agent:localhost" in formatted
@@ -6126,7 +6126,7 @@ def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixI
 async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
-    enqueued: Sequence[tuple[nio.Event | PreparedTextEvent, str, str | None, dict[str, object]]],
+    enqueued: Sequence[tuple[nio.Event | PreparedIngress, str, str | None, dict[str, object]]],
     *,
     captured_plan_extra_content: list[object] | None = None,
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
@@ -6157,14 +6157,14 @@ async def _capture_gate_dispatches(
     }
     original_coalescing_thread_id = bot._conversation_resolver.coalescing_thread_id
 
-    async def coalescing_thread_id(room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+    async def coalescing_thread_id(room: nio.MatrixRoom, event: nio.Event | PreparedIngress) -> str | None:
         if event.event_id in coalescing_thread_id_overrides:
             return cast("str | None", coalescing_thread_id_overrides[event.event_id])
         return await original_coalescing_thread_id(room, event)
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
-        event: nio.Event | PreparedTextEvent,
+        event: nio.Event | PreparedIngress,
         **_kwargs: object,
     ) -> object:
         thread_id = EventInfo.from_event(event.source).thread_id
@@ -6208,7 +6208,7 @@ async def _capture_gate_dispatches(
         for event, source_kind, dispatch_policy_source_kind, metadata in enqueued:
             await _enqueue_for_dispatch(
                 bot,
-                cast("nio.RoomMessageText | PreparedTextEvent", event),
+                cast("nio.RoomMessageText | PreparedIngress", event),
                 room,
                 source_kind=source_kind,
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -6231,7 +6231,7 @@ async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-active",
         body="!help",
@@ -6264,7 +6264,7 @@ async def test_gate_final_envelope_preserves_non_active_voice_command_policy(tmp
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-normal",
         body="!help",
@@ -6499,7 +6499,7 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
     """Coalesced attachment IDs should reach both the final envelope and model payload request."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
-    first = PreparedTextEvent(
+    first = PreparedIngress(
         sender="@user:localhost",
         event_id="$att1",
         body="first attachment",
@@ -6512,7 +6512,7 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
         },
         server_timestamp=1000,
     )
-    second = PreparedTextEvent(
+    second = PreparedIngress(
         sender="@user:localhost",
         event_id="$att2",
         body="second attachment",
@@ -6685,7 +6685,7 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    spoofed_voice = PreparedTextEvent(
+    spoofed_voice = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-spoof",
         body="voice transcript",
@@ -6725,7 +6725,7 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-trusted",
         body="voice transcript",
@@ -6771,7 +6771,7 @@ async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
     bot = _make_bot(tmp_path, debounce_ms=0)
     bot.config.agents["test_agent"].thread_mode = "room"
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-transcript",
         body="voice transcript",
@@ -6814,7 +6814,7 @@ async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_pri
     """Root voice audio should stay in the current payload when later root text becomes primary."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
-    voice_event = PreparedTextEvent(
+    voice_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$voice-root",
         body="voice transcript",
@@ -6905,7 +6905,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
-        event: nio.Event | PreparedTextEvent,
+        event: nio.Event | PreparedIngress,
         **_kwargs: object,
     ) -> object:
         thread_id = EventInfo.from_event(event.source).thread_id
@@ -6966,7 +6966,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
         body="preview",
         sender="@mindroom_test_agent:localhost",
     )
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender="@mindroom_test_agent:localhost",
         event_id="$trusted-sidecar",
         body="hydrated scheduled body",
@@ -7027,7 +7027,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     preview = _text_event(event_id="$sidecar", body="preview")
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar",
         body="@test_agent hydrated body",
@@ -7087,7 +7087,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         "preview_size": len(sidecar.body),
         "is_complete_content": True,
     }
-    hydrated = PreparedTextEvent(
+    hydrated = PreparedIngress(
         sender=sidecar.sender,
         event_id=sidecar.event_id,
         body="hydrated body",

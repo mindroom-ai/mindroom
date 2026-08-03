@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
+from .dispatch_handoff import DispatchEvent, PreparedIngress, is_media_dispatch_event
 from .dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -37,7 +37,7 @@ def _effective_source_kind(
 ) -> str | None:
     if fallback_source_kind is not None:
         return fallback_source_kind
-    if isinstance(event, PreparedTextEvent) and event.source_kind_override is not None:
+    if isinstance(event, PreparedIngress) and event.source_kind_override is not None:
         return event.source_kind_override
     return None
 
@@ -57,7 +57,7 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     clients upload attachments first and send the caption text last, so a batch
     ending in text is complete and a batch ending in media may still grow.
     """
-    return isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent)
+    return isinstance(pending_event.event, nio.RoomMessageText | PreparedIngress)
 
 
 def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:

@@ -46,7 +46,7 @@ from mindroom.dispatch_handoff import (
     DispatchPayloadMetadata,
     MediaDispatchEvent,
     PendingDispatchMetadata,
-    PreparedTextEvent,
+    PreparedIngress,
     TextDispatchEvent,
     build_dispatch_handoff,
     payload_metadata_from_source,
@@ -266,9 +266,9 @@ def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
     stripped_content = dict(content)
     stripped_content.pop("m.relates_to", None)
     stripped_source = {**event.source, "content": stripped_content}
-    if isinstance(event, PreparedTextEvent):
+    if isinstance(event, PreparedIngress):
         return replace(event, source=stripped_source)
-    return PreparedTextEvent(
+    return PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=event.body,
@@ -333,7 +333,7 @@ def _consume_queued_notice_reservations_from_metadata(
             reservation.cancel()
 
 
-def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedTextEvent:
+def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
     """Return a dispatchable fallback when voice normalization itself fails."""
     body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     source = dict(event.source) if isinstance(event.source, dict) else {}
@@ -358,7 +358,7 @@ def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     source["content"] = content
-    return PreparedTextEvent(
+    return PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
         body=body,
@@ -420,7 +420,7 @@ class _DispatchPreparation:
 class _ReadyVoiceFallback:
     """Fallback event plus its ready ingress wrapper."""
 
-    event: PreparedTextEvent
+    event: PreparedIngress
     ready: ReadyPendingEvent
 
 
@@ -623,7 +623,7 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        prepared_event: PreparedTextEvent,
+        prepared_event: PreparedIngress,
         dispatch_event: TextDispatchEvent,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
@@ -822,7 +822,7 @@ class TurnController:
         event: nio.RoomMessageText,
         *,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         """Normalize one inbound text event while recording ingress timing boundaries."""
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
@@ -838,7 +838,7 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        prepared_event: PreparedTextEvent,
+        prepared_event: PreparedIngress,
         dispatch_event: TextDispatchEvent,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
@@ -2608,7 +2608,7 @@ class TurnController:
         room: nio.MatrixRoom,
         event: AudioMessageEvent,
         thread_id: str | None,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         try:
             fallback = await self.deps.normalizer.prepare_raw_voice_fallback_event(
                 VoiceNormalizationRequest(
@@ -2710,7 +2710,7 @@ class TurnController:
         event: AudioMessageEvent,
         thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> tuple[PreparedTextEvent, str | None]:
+    ) -> tuple[PreparedIngress, str | None]:
         """Normalize voice or return a raw-audio fallback event for unexpected failures."""
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")

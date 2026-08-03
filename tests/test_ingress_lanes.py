@@ -16,7 +16,7 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, Rea
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -736,7 +736,7 @@ def _normalized_voice_transcript(
         "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
     }
     return inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedTextEvent(
+        event=PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
             body="voice transcript",
