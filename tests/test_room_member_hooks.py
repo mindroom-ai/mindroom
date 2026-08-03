@@ -130,6 +130,7 @@ def _router_bot(
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
+    bot._room_member_join_bootstrap_pending = False
     return bot
 
 
@@ -877,7 +878,7 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ["invalid-json", "wrong-event-type"])
+@pytest.mark.parametrize("corruption", ["invalid-json", "wrong-event-type", "invalid-callback-kind"])
 async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
     tmp_path: Path,
     corruption: str,
@@ -893,24 +894,30 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
     assert obligation is not None
-    event_source_json = (
-        "{"
-        if corruption == "invalid-json"
-        else json.dumps(
-            {
-                "content": {"body": "not membership", "msgtype": "m.text"},
-                "event_id": event.event_id,
-                "origin_server_ts": 1,
-                "sender": event.sender,
-                "type": "m.room.message",
-            },
-        )
-    )
     with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
-        connection.execute(
-            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
-            (event_source_json, event.event_id),
-        )
+        if corruption == "invalid-callback-kind":
+            connection.execute(
+                "UPDATE dispatch_obligations SET callback_kind = ? WHERE source_event_id = ?",
+                ("not-a-callback-kind", event.event_id),
+            )
+        else:
+            event_source_json = (
+                "{"
+                if corruption == "invalid-json"
+                else json.dumps(
+                    {
+                        "content": {"body": "not membership", "msgtype": "m.text"},
+                        "event_id": event.event_id,
+                        "origin_server_ts": 1,
+                        "sender": event.sender,
+                        "type": "m.room.message",
+                    },
+                )
+            )
+            connection.execute(
+                "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+                (event_source_json, event.event_id),
+            )
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(
@@ -921,10 +928,7 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
         record_only=True,
     )
 
-    assert bot._dispatch_obligation_store.has_pending(
-        event.event_id,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert event.event_id in bot._dispatch_obligation_store.unsettled_source_event_ids()
     assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
 
 
@@ -975,15 +979,27 @@ async def test_restored_join_catchup_survives_recovery_settlement(
         ),
     )
 
+    failed_catchup = _sync_response_with_state(
+        room.room_id,
+        [_room_member_event(event_id="$stale-baseline-member", user_id="@bob:localhost")],
+        timeline_events=[_room_member_event(event_id="$failed-catchup", prev_membership=None)],
+    )
     bot.client.next_batch = "s_failed"
     with pytest.raises(RuntimeError, match="transient membership failure"):
-        await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+        await bot._on_sync_response(failed_catchup)
 
+    bot.mark_sync_loop_started()
     bot.client.next_batch = "s_settled"
-    await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$refreshed-baseline-member", user_id="@bob:localhost")],
+        ),
+    )
 
     assert bot.client.next_batch == "s_restored"
-    assert not bot._first_sync_done
+    assert bot._first_sync_done
+    assert not bot._room_member_join_hooks_armed
 
     bot.client.next_batch = "s_replay"
     await bot._on_sync_response(
@@ -996,6 +1012,105 @@ async def test_restored_join_catchup_survives_recovery_settlement(
 
     assert seen == ["$catchup-after-recovery"]
     assert bot._first_sync_done
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", user_id="@bob:localhost", prev_membership=None),
+    )
+
+    assert seen == ["$catchup-after-recovery"]
+
+
+@pytest.mark.asyncio
+async def test_restored_join_catchup_waits_for_nio_gap_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty recovery response must rewind without consuming catch-up state."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    gap_room_id = "!gap:localhost"
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    bot.client.rooms = {room.room_id: room}
+    bot.client.loaded_sync_token = ""
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    cache_generation = bot.event_cache.cache_generation
+    assert cache_generation is not None
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_restored",
+        cache_generation=cache_generation,
+    )
+    await bot._prepare_matrix_sync_continuity()
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(
+            side_effect=[
+                SyncCacheWriteResult(
+                    complete=True,
+                    unrecovered_room_ids=frozenset({gap_room_id}),
+                ),
+                SyncCacheWriteResult(
+                    complete=True,
+                    recovered_room_ids=frozenset({gap_room_id}),
+                ),
+                SyncCacheWriteResult(complete=True),
+            ],
+        ),
+    )
+
+    catchup = _sync_response_with_state(
+        room.room_id,
+        [_room_member_event(event_id="$existing-member", user_id="@bob:localhost")],
+        timeline_events=[_room_member_event(event_id="$catchup-before-recovery", prev_membership=None)],
+    )
+    catchup.unrecovered_room_ids = frozenset({gap_room_id})
+    await bot._on_sync_response(catchup)
+
+    assert seen == []
+    assert bot._restored_token_catchup_pending
+    assert bot._first_sync_done
+    assert bot._room_member_callback_registered
+    assert not bot._room_member_join_hooks_armed
+
+    recovery = _sync_response_with_state(room.room_id, [])
+    recovery.recovered_room_ids = frozenset({gap_room_id})
+    bot.client.next_batch = "s_recovered"
+    await bot._on_sync_response(recovery)
+
+    assert seen == []
+    assert bot.client.next_batch == "s_restored"
+    assert bot._restored_token_catchup_pending
+    assert bot._first_sync_done
+    assert not bot._room_member_join_hooks_armed
+
+    replay = _sync_response_with_state(
+        room.room_id,
+        [],
+        timeline_events=[_room_member_event(event_id="$catchup-before-recovery", prev_membership=None)],
+    )
+    bot.client.next_batch = "s_replay"
+    await bot._on_sync_response(replay)
+
+    assert seen == ["$catchup-before-recovery"]
+    assert not bot._restored_token_catchup_pending
+    assert bot._first_sync_done
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", user_id="@bob:localhost", prev_membership=None),
+    )
+
+    assert seen == ["$catchup-before-recovery"]
 
 
 @pytest.mark.asyncio
@@ -1042,6 +1157,62 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
 
     assert seen == ["$live"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-start tokenless baseline must be recorded before hooks re-arm."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_rejected"
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(
+            side_effect=[
+                SyncCacheWriteResult(
+                    complete=True,
+                    limited_room_ids=(room.room_id,),
+                ),
+                SyncCacheWriteResult(complete=True),
+            ],
+        ),
+    )
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$baseline-member")],
+            timeline_limited=True,
+        ),
+    )
+
+    assert not bot._room_member_join_hooks_armed
+
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+
+    assert bot._room_member_join_hooks_armed
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", prev_membership=None),
+    )
+
+    assert seen == []
 
 
 @pytest.mark.asyncio

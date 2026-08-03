@@ -339,6 +339,7 @@ class AgentBot:
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
     _restored_token_catchup_pending: bool
+    _room_member_join_bootstrap_pending: bool
     _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
@@ -376,6 +377,7 @@ class AgentBot:
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
         self._restored_token_catchup_pending = False
+        self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
@@ -1208,6 +1210,8 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        if self.agent_name == ROUTER_AGENT_NAME and not self._room_member_join_hooks_armed:
+            self._room_member_join_bootstrap_pending = True
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1433,10 +1437,14 @@ class AgentBot:
             decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
         )
         return _RoomMemberJoinSyncHookPlan(
-            arm_after_response=True,
+            arm_after_response=hooks_were_armed or decision.state is SyncTrustState.CERTIFIED,
             emit_state=emit_certified_state,
             emit_timeline=(decision.state is SyncTrustState.CERTIFIED and restored_token_first_sync_response),
-            record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
+            record_state_seen=(
+                decision.state is SyncTrustState.CERTIFIED
+                and not emit_certified_state
+                and not self._room_member_join_bootstrap_pending
+            ),
         )
 
     async def _run_pre_certification_sync_response_side_effects(
@@ -1482,12 +1490,16 @@ class AgentBot:
         room_member_join_hooks_were_armed: bool,
     ) -> tuple[_RoomMemberJoinSyncHookPlan, bool]:
         """Apply one Classic response through transport and cache owners."""
+        if self.agent_name == ROUTER_AGENT_NAME and not room_member_join_hooks_were_armed:
+            self._room_member_join_bootstrap_pending = True
         self._apply_transport_recovery_outcome(
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
+                if self._room_member_join_bootstrap_pending:
+                    await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
                 await self._apply_own_room_membership_from_sync(response)
                 await cache_fenced_world_readable_join_history(
                     cast("nio.AsyncClient", self.client),
@@ -1522,6 +1534,8 @@ class AgentBot:
                 next_batch=response.next_batch,
                 cache_result=cache_result,
             )
+            if restored_token_first_sync_response and decision.unresolved_recovery_room_ids:
+                decision = replace(decision, replay_required_after_recovery=True)
             room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
                 first_sync_response=first_sync_response,
                 restored_token_first_sync_response=restored_token_first_sync_response,
@@ -1556,8 +1570,9 @@ class AgentBot:
                     error_type=type(error).__name__,
                 )
                 raise
-        if _decision.state is SyncTrustState.CERTIFIED:
+        if _decision.state is SyncTrustState.CERTIFIED and not rejected_response:
             self._restored_token_catchup_pending = False
+            self._room_member_join_bootstrap_pending = False
         self._mark_sync_progress()
         return room_member_join_hook_plan, rejected_response
 
@@ -1599,12 +1614,6 @@ class AgentBot:
         elif isinstance(_response, nio.SlidingSyncResponse):
             await self._handle_sliding_sync_response(_response)
         if dispatch_persist_failure_rejected_response:
-            return
-        if (
-            isinstance(_response, nio.SyncResponse)
-            and first_sync_response
-            and self._sync_cache_trust.state is not SyncTrustState.CERTIFIED
-        ):
             return
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
@@ -1648,6 +1657,7 @@ class AgentBot:
                 self._apply_client_rewind_decision(decision)
                 self._room_member_join_hooks_armed = False
                 self._restored_token_catchup_pending = False
+                self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -1993,6 +2003,7 @@ class AgentBot:
         self._orchestrator_ready_handled = False
         self._room_member_join_hooks_armed = False
         self._restored_token_catchup_pending = False
+        self._room_member_join_bootstrap_pending = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
@@ -2163,7 +2174,7 @@ class AgentBot:
                 room_ids=self.rooms,
                 timeout_ms=_SYNC_TIMEOUT_MS,
                 sync_filter=_SYNC_FILTER,
-                first_sync_done=self._first_sync_done,
+                first_sync_done=(self._first_sync_done and not self._room_member_join_bootstrap_pending),
             )
         finally:
             self._reconcile_classic_sync_cursor_after_loop_exit()

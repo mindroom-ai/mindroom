@@ -1218,6 +1218,7 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
+    bot._room_member_join_bootstrap_pending = True
     bot._sync_shutting_down = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
@@ -1259,6 +1260,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
     bot._first_sync_done = False
+    bot._room_member_join_bootstrap_pending = False
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
@@ -1282,6 +1284,28 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     await AgentBot.sync_forever(bot)
 
     assert full_state_values == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_pending_member_bootstrap_forces_replacement_full_state() -> None:
+    """A post-start lifecycle bootstrap must reacquire full state on loop replacement."""
+    full_state_values: list[bool] = []
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
+            full_state_values.append(full_state)
+
+    bot = MagicMock(spec=AgentBot)
+    bot._first_sync_done = True
+    bot._room_member_join_bootstrap_pending = True
+    bot._sync_shutting_down = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
+    bot.client = FakeClient()
+
+    await AgentBot.sync_forever(bot)
+
+    assert full_state_values == [True]
 
 
 @pytest.mark.asyncio
@@ -1383,6 +1407,7 @@ async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True
+    bot._room_member_join_bootstrap_pending = False
     bot._sync_shutting_down = False
     bot.config = Config()
     bot.rooms = []

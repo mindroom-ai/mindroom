@@ -55,6 +55,9 @@ logger = get_logger(__name__)
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
+_NON_LIFECYCLE_CALLBACK_KIND_VALUES = frozenset(
+    kind.value for kind in DispatchCallbackKind if kind is not DispatchCallbackKind.ROOM_LIFECYCLE
+)
 
 _SourceAdmission = Callable[
     [str, str, DispatchCallbackKind, nio.TimelineEventProvenance | None],
@@ -242,9 +245,7 @@ class DispatchObligationRunner:
         pending = await asyncio.to_thread(self.store.pending_with_corruption)
         members: set[tuple[str, str]] = set()
         corrupt_room_ids = {
-            row.room_id
-            for row in pending.corrupt_rows
-            if row.callback_kind == DispatchCallbackKind.ROOM_LIFECYCLE.value
+            row.room_id for row in pending.corrupt_rows if row.callback_kind not in _NON_LIFECYCLE_CALLBACK_KIND_VALUES
         }
         for obligation in pending.obligations:
             if obligation.callback_kind is not DispatchCallbackKind.ROOM_LIFECYCLE:
