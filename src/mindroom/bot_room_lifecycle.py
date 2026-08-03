@@ -290,9 +290,7 @@ class BotRoomLifecycle:
             return []
 
         current_rooms = set(joined_rooms)
-        configured_rooms = set(self.deps.get_configured_rooms())
-        if self._should_persist_invited_rooms():
-            configured_rooms.update(self.invited_rooms)
+        configured_rooms = set(self.desired_room_ids)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
             if root_space_id is not None:

@@ -164,7 +164,8 @@ The coordinator also enumerates every owner's authoritative joined-room list, so
 The coordinator admits at most eight concurrent read-bearing phases across owner room discovery, room-recovery leases, and initial target freshness checks.
 A room-recovery phase may issue owner-specific membership and hydration requests while holding one phase slot.
 A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
-Encrypted hidden-room hydration publishes a member-only `MatrixRoom` into nio's shared cache before delivery, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
+Encrypted hidden-room hydration publishes a full-state `MatrixRoom` with exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
+Hydration invalidates an existing outbound Megolm session whenever authoritative joined membership differs from the prior complete snapshot.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
 Distinct policies for the same room never run concurrently.
@@ -192,6 +193,9 @@ The exact interrupted owner sends its own explicitly mentioned trusted resume re
 Owner-authored resume relays use the standard dispatch-context path and resolve thread history before the response lock.
 The response runner refreshes that history again after acquiring the lifecycle lock.
 Resume delivery runs outside the read budget with one admitted delivery under global pacing.
+Proof-bound delivery validates encryption before large-message preparation can upload content.
+After preparation, encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and then enters nio's send path without unrelated application awaits.
+This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
 Pause also cancels and drains shared membership snapshots before configuration mutation can replace their Matrix clients.
 Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its owned lifecycle state.

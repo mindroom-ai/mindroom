@@ -245,12 +245,17 @@ class _EncryptedRoomHydration:
     unpublished_candidate: bool
 
 
+def _joined_room_user_ids(room: nio.MatrixRoom) -> frozenset[str]:
+    """Return the room users whose current membership is joined."""
+    return frozenset(user_id for user_id, user in room.users.items() if not user.invited)
+
+
 def _room_covers_joined_members(
     room: nio.MatrixRoom,
     joined_user_ids: frozenset[str],
 ) -> bool:
-    """Return whether one encrypted sync room covers authoritative joined members."""
-    return room.encrypted and room.members_synced and joined_user_ids.issubset(room.users)
+    """Return whether one encrypted sync room has the authoritative joined members."""
+    return room.encrypted and room.members_synced and joined_user_ids == _joined_room_user_ids(room)
 
 
 async def _encrypted_room_for_hydration(
@@ -305,7 +310,7 @@ def delivery_hydration_is_current(
         room is not None
         and room.encrypted
         and room.members_synced
-        and proof.joined_user_ids.issubset(room.users)
+        and proof.joined_user_ids == _joined_room_user_ids(room)
         and not _pending_room_key_query_user_ids(client, room)
     )
 
@@ -337,6 +342,12 @@ async def _hydrate_encrypted_joined_room(
     room_id: str,
 ) -> RoomDeliveryHydrationProof | None:
     """Hydrate encrypted send state before publishing an owned room candidate."""
+    prior_room = cached_room(client, room_id)
+    prior_joined_user_ids = (
+        _joined_room_user_ids(prior_room)
+        if prior_room is not None and prior_room.encrypted and prior_room.members_synced
+        else None
+    )
     members = await client.joined_members(room_id)
     if not isinstance(members, nio.JoinedMembersResponse):
         return None
@@ -355,6 +366,13 @@ async def _hydrate_encrypted_joined_room(
     room = _current_encrypted_room_after_hydration(client, room_id, hydration)
     if room is None:
         return None
+
+    if (
+        client.olm is not None
+        and prior_joined_user_ids != hydration.joined_user_ids
+        and room_id in client.olm.outbound_group_sessions
+    ):
+        client.invalidate_outbound_session(room_id)
 
     pending_room_members = _pending_room_key_query_user_ids(client, room)
     if pending_room_members:
@@ -479,17 +497,69 @@ async def _cache_bypass_has_plaintext_room(
     return True
 
 
-async def _delivery_hydration_is_current_at_send(
+async def _delivery_hydration_is_current_before_preparation(
     client: nio.AsyncClient,
     room_id: str,
     proof: RoomDeliveryHydrationProof,
 ) -> bool:
-    """Validate one proof against local state and authoritative plaintext state."""
+    """Validate one proof before message preparation can cause side effects."""
     if proof.encrypted:
         return delivery_hydration_is_current(client, room_id, proof)
     if await _remote_room_encrypted(client, room_id) is not False:
         return False
     return delivery_hydration_is_current(client, room_id, proof)
+
+
+async def _refresh_delivery_hydration_at_send(
+    client: nio.AsyncClient,
+    room_id: str,
+    proof: RoomDeliveryHydrationProof,
+) -> bool:
+    """Refresh authoritative delivery state immediately before one send."""
+    if not proof.encrypted:
+        return await _delivery_hydration_is_current_before_preparation(client, room_id, proof)
+    refreshed = await hydrate_joined_room_for_delivery(client, room_id)
+    return refreshed is not None and refreshed.encrypted
+
+
+def _log_stale_delivery_hydration(
+    room_id: str,
+    *,
+    operation: str,
+    proof: RoomDeliveryHydrationProof,
+) -> None:
+    """Log rejection of one stale proof-bound delivery."""
+    logger.warning(
+        "matrix_room_delivery_hydration_stale",
+        room_id=room_id,
+        operation=operation,
+        expected_encrypted=proof.encrypted,
+    )
+
+
+async def _can_prepare_room_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    cache_bypass: bool,
+    operation: str,
+    delivery_proof: RoomDeliveryHydrationProof | None,
+) -> bool:
+    """Return whether message preparation can safely begin."""
+    if delivery_proof is None:
+        return not cache_bypass or await _cache_bypass_has_plaintext_room(
+            client,
+            room_id,
+            operation=operation,
+        )
+    if await _delivery_hydration_is_current_before_preparation(client, room_id, delivery_proof):
+        return True
+    _log_stale_delivery_hydration(
+        room_id,
+        operation=operation,
+        proof=delivery_proof,
+    )
+    return False
 
 
 async def send_message_result(
@@ -509,10 +579,12 @@ async def send_message_result(
     rooms = client.rooms
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
     cache_bypass = isinstance(rooms, Mapping) and room is None
-    if (
-        cache_bypass
-        and delivery_proof is None
-        and not await _cache_bypass_has_plaintext_room(client, room_id, operation=operation)
+    if not await _can_prepare_room_message(
+        client,
+        room_id,
+        cache_bypass=cache_bypass,
+        operation=operation,
+        delivery_proof=delivery_proof,
     ):
         return None
 
@@ -524,16 +596,15 @@ async def send_message_result(
         message_type=message_type,
     )
     content_sent = await prepare_large_message(client, room_id, content)
-    if delivery_proof is not None and not await _delivery_hydration_is_current_at_send(
+    if delivery_proof is not None and not await _refresh_delivery_hydration_at_send(
         client,
         room_id,
         delivery_proof,
     ):
-        logger.warning(
-            "matrix_room_delivery_hydration_stale",
-            room_id=room_id,
+        _log_stale_delivery_hydration(
+            room_id,
             operation=operation,
-            expected_encrypted=delivery_proof.encrypted,
+            proof=delivery_proof,
         )
         return None
     emit_timing_event(
