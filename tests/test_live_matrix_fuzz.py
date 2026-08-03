@@ -3125,6 +3125,7 @@ def test_ledger_redaction_audit_requires_harness_expected_tombstone() -> None:
     assert FinalStateAuditor._ledger_redaction_problems(
         {"$source": live},
         {"$source"},
+        {"$source"},
     ) == ["harness-redacted source $source has no durable tombstone"]
 
     tombstoned = TurnRecord.create(
@@ -3136,6 +3137,24 @@ def test_ledger_redaction_audit_requires_harness_expected_tombstone() -> None:
     assert (
         FinalStateAuditor._ledger_redaction_problems(
             {"$source": tombstoned},
+            {"$source"},
+            {"$source"},
+        )
+        == []
+    )
+
+
+def test_ledger_redaction_audit_ignores_non_harness_runtime_records() -> None:
+    """Runtime-owned stop-reaction tombstones are outside source audit authority."""
+    stop_reaction = TurnRecord.create(
+        source_event_ids=("$stop-reaction",),
+        redacted_source_event_ids=("$stop-reaction",),
+        completed=False,
+    )
+    assert (
+        FinalStateAuditor._ledger_redaction_problems(
+            {"$stop-reaction": stop_reaction},
+            set(),
             {"$source"},
         )
         == []

@@ -3327,7 +3327,13 @@ class FinalStateAuditor:
 
         problems: list[str] = []
         harness_redacted = set(redacted_source_event_ids)
-        problems.extend(self._ledger_redaction_problems(records, harness_redacted))
+        problems.extend(
+            self._ledger_redaction_problems(
+                records,
+                harness_redacted,
+                set(oracle.expected_sources),
+            ),
+        )
         ledger_response_ids, attributed, optional_problems = self._attribute_optional_replies(
             replies,
             records,
@@ -3416,11 +3422,12 @@ class FinalStateAuditor:
     def _ledger_redaction_problems(
         records: Mapping[str, TurnRecord],
         harness_redacted: set[str],
+        audited_source_event_ids: set[str],
     ) -> list[str]:
         """Require exact durable tombstones for harness-authored source redactions."""
         problems: list[str] = []
         for event_id, record in records.items():
-            forged = set(record.redacted_source_event_ids) - harness_redacted
+            forged = (set(record.redacted_source_event_ids) & audited_source_event_ids) - harness_redacted
             if forged:
                 problems.append(
                     f"turn record {event_id} claims unobserved source redactions: {sorted(forged)}",
@@ -3540,7 +3547,13 @@ class FinalStateAuditor:
         expected_sources = self.oracle.expected_sources
         problems: list[str] = []
         harness_redacted = set(redacted_source_event_ids)
-        problems.extend(self._ledger_redaction_problems(records, harness_redacted))
+        problems.extend(
+            self._ledger_redaction_problems(
+                records,
+                harness_redacted,
+                set(expected_sources),
+            ),
+        )
         for source_event_id, record in records.items():
             if record.response_event_id is None:
                 continue
