@@ -1596,7 +1596,9 @@ class TestAgentBot(AgentBotTestBase):
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is event
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
         assert {item.kind for item in pending_event.dispatch_metadata} == {
@@ -1674,7 +1676,9 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
         assert pending_event.source_kind == source_kind
 
     @pytest.mark.asyncio

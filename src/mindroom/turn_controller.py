@@ -2222,7 +2222,7 @@ class TurnController:
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_event,
-            dispatch_event=event,
+            dispatch_event=prepared_event,
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=ingress_thread_id,
