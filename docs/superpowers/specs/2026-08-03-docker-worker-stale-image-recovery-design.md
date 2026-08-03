@@ -13,6 +13,7 @@ The recovery refreshes `last_started_at` and increments `startup_count` for both
 
 `_relaunch_after_stale_image` remains responsible only for Docker operations.
 It pulls the configured image once, recomputes the launch-config hash, removes the incompatible container, and creates its replacement.
+The recomputed launch-config hash stays local to that ensure call through container labeling and metadata persistence, so concurrent workers cannot overwrite one another's image identity.
 The replacement readiness check stays outside the typed recovery catch so a second protocol mismatch follows the ordinary failure path without another pull.
 
 ## Error Behavior

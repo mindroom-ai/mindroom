@@ -353,7 +353,6 @@ class DockerWorkerBackend:
             self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
         self.worker_grantable_credentials = worker_grantable_credentials
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
-        self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
@@ -429,9 +428,13 @@ class DockerWorkerBackend:
             )
 
         with self._worker_lock(spec.worker_key):
-            self._launch_config_hash = self._compute_launch_config_hash()
+            launch_config_hash = self._compute_launch_config_hash()
             paths = self._state_paths(spec.worker_key)
-            metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
+            metadata = self._load_metadata(paths) or self._default_metadata(
+                spec.worker_key,
+                timestamp,
+                launch_config_hash=launch_config_hash,
+            )
             identity_changed = self._sync_metadata_identity(metadata)
 
             should_restart = identity_changed or self._should_restart(
@@ -461,6 +464,7 @@ class DockerWorkerBackend:
                     metadata,
                     paths,
                     private_agent_names=spec.private_agent_names,
+                    launch_config_hash=launch_config_hash,
                 )
                 try:
                     endpoint = self._wait_for_ready(container)
@@ -476,8 +480,7 @@ class DockerWorkerBackend:
                     self._save_metadata(paths, metadata)
                     if not cold_start_emitted:
                         emit_progress("cold_start")
-                        cold_start_emitted = True
-                    container = self._relaunch_after_stale_image(
+                    container, launch_config_hash = self._relaunch_after_stale_image(
                         metadata,
                         paths,
                         private_agent_names=spec.private_agent_names,
@@ -502,7 +505,7 @@ class DockerWorkerBackend:
             metadata.image = self.config.image
             metadata.publish_host = self.config.publish_host
             metadata.worker_port = self.config.worker_port
-            metadata.launch_config_hash = self._launch_config_hash
+            metadata.launch_config_hash = launch_config_hash
             self._save_metadata(paths, metadata)
             handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
             emit_progress("ready")
@@ -603,9 +606,18 @@ class DockerWorkerBackend:
     def _state_paths(self, worker_key: str) -> LocalWorkerStatePaths:
         return local_worker_state_paths_for_root(self._workers_root / worker_dir_name(worker_key))
 
-    def _default_metadata(self, worker_key: str, now: float) -> _DockerWorkerMetadata:
+    def _default_metadata(
+        self,
+        worker_key: str,
+        now: float,
+        *,
+        launch_config_hash: str | None = None,
+    ) -> _DockerWorkerMetadata:
         worker_id = self._container_name_for_worker(worker_key)
         lifecycle = initial_worker_lifecycle_state(now=now)
+        resolved_launch_config_hash = (
+            self._compute_launch_config_hash() if launch_config_hash is None else launch_config_hash
+        )
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
@@ -618,7 +630,7 @@ class DockerWorkerBackend:
             image=self.config.image,
             publish_host=self.config.publish_host,
             worker_port=self.config.worker_port,
-            launch_config_hash=self._launch_config_hash,
+            launch_config_hash=resolved_launch_config_hash,
         )
 
     def _container_name_for_worker(self, worker_key: str) -> str:
@@ -752,6 +764,7 @@ class DockerWorkerBackend:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
+        launch_config_hash: str,
     ) -> _DockerContainer:
         paths.root.mkdir(parents=True, exist_ok=True)
         container = self._read_container(metadata.container_name)
@@ -777,7 +790,7 @@ class DockerWorkerBackend:
                     private_agent_names=private_agent_names,
                 ),
                 ports={f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
-                labels=self._container_labels(metadata),
+                labels=self._container_labels(metadata, launch_config_hash=launch_config_hash),
                 user=self.config.user,
             )
         elif not self._container_is_running(container):
@@ -800,7 +813,7 @@ class DockerWorkerBackend:
         *,
         private_agent_names: frozenset[str] | None,
         stale_error: WorkerBackendError,
-    ) -> _DockerContainer:
+    ) -> tuple[_DockerContainer, str]:
         """Pull the configured image once and relaunch after a protocol mismatch.
 
         A stale local image otherwise fails every worker start until someone
@@ -812,14 +825,18 @@ class DockerWorkerBackend:
         except self._docker_errors.DockerException as exc:
             msg = f"{stale_error} Pulling '{self.config.image}' failed: {exc}"
             raise WorkerBackendError(msg) from exc
-        self._launch_config_hash = self._compute_launch_config_hash()
+        launch_config_hash = self._compute_launch_config_hash()
         container = self._read_container(metadata.container_name)
         self._stop_container(container)
         self._remove_container(container)
-        return self._ensure_container(
-            metadata,
-            paths,
-            private_agent_names=private_agent_names,
+        return (
+            self._ensure_container(
+                metadata,
+                paths,
+                private_agent_names=private_agent_names,
+                launch_config_hash=launch_config_hash,
+            ),
+            launch_config_hash,
         )
 
     def _reload_container(self, container: _DockerContainer) -> None:
@@ -1031,13 +1048,18 @@ class DockerWorkerBackend:
         )
         return mount_specs
 
-    def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:
+    def _container_labels(
+        self,
+        metadata: _DockerWorkerMetadata,
+        *,
+        launch_config_hash: str,
+    ) -> dict[str, str]:
         labels = {
             _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
             _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
             _LABEL_NAME: _LABEL_NAME_VALUE,
             _LABEL_WORKER_ID: metadata.worker_id,
-            _LABEL_LAUNCH_CONFIG_HASH: self._launch_config_hash,
+            _LABEL_LAUNCH_CONFIG_HASH: launch_config_hash,
             _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
         }
         labels.update(self.config.extra_labels)
