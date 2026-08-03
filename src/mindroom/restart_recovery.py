@@ -722,14 +722,20 @@ class RestartRecoveryCoordinator:
                 for target in work.targets
                 if (owner.user_id, target.target_event_id) not in recovered.auto_resume_target_keys
             )
-            targets = _newest_targets(
-                (*retained_targets, *recovered_targets),
-            )
+            # A retained target carries an ambiguous earlier send: Matrix may have
+            # committed that relay before the response was lost. Only a scan that
+            # actually read this room's history can prove it did not land, so a
+            # failed scan defers those targets instead of risking a duplicate resume.
+            scan_failed = owner.user_id in recovered.retry_owner_user_ids
+            deferred_targets = retained_targets if scan_failed else ()
+            deliverable_targets = () if scan_failed else retained_targets
+            targets = _newest_targets((*deliverable_targets, *recovered_targets))
+            pending_targets = _newest_targets((*deferred_targets, *targets))
             if (task := asyncio.current_task()) is not None and task.cancelling():
                 outcomes[work.owner_user_id] = _OwnerAttemptResult(
                     work=work,
                     owner=owner,
-                    retry_targets=targets,
+                    retry_targets=pending_targets,
                     cancelled=True,
                 )
                 continue
@@ -737,7 +743,7 @@ class RestartRecoveryCoordinator:
                 outcomes[work.owner_user_id] = _OwnerAttemptResult(
                     work=work,
                     owner=owner,
-                    retry_targets=targets,
+                    retry_targets=pending_targets,
                     membership_unavailable=True,
                 )
                 continue
@@ -746,8 +752,13 @@ class RestartRecoveryCoordinator:
                 owner,
                 targets,
                 config,
-                scan_failed=owner.user_id in recovered.retry_owner_user_ids,
+                scan_failed=scan_failed,
             )
+            if deferred_targets:
+                outcome = replace(
+                    outcome,
+                    retry_targets=_newest_targets((*deferred_targets, *outcome.retry_targets)),
+                )
             outcomes[work.owner_user_id] = outcome
         return tuple(outcomes[job.owner_user_id] for job in lease.jobs)
 

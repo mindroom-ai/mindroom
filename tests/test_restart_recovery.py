@@ -2983,6 +2983,55 @@ async def test_successful_rescan_discards_retained_ambiguous_delivery_target(
 
 
 @pytest.mark.asyncio
+async def test_failed_rescan_defers_retained_ambiguous_delivery_target(
+    tmp_path: Path,
+) -> None:
+    """A retained target must not resend while history cannot prove it is unresumed."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    scan_attempts = 0
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_attempts
+        scan_attempts += 1
+        if scan_attempts == 1:
+            return RoomRecoveryResult(interrupted_threads=(target,))
+        # History read keeps failing, so this scan proves nothing about whether
+        # the ambiguous first relay already landed.
+        return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        delivered_target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(delivered_target.target_event_id)
+        # Matrix committed the relay but the response was lost.
+        return False
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await _wait_until(lambda: scan_attempts >= 4)
+    finally:
+        await coordinator.stop()
+
+    assert delivered_targets == [target.target_event_id]
+
+
+@pytest.mark.asyncio
 async def test_ready_owner_immediately_retries_startup_and_replacement_room_intents(
     tmp_path: Path,
 ) -> None:
