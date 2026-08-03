@@ -1401,9 +1401,8 @@ class ResponseRunner:
             existing_event_is_placeholder=request.existing_event_is_placeholder,
         )
         if pending.terminal_event_id is None:
-            return FinalDeliveryOutcome(
+            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                 terminal_status=terminal_status,
-                event_id=None,
                 failure_reason=failure_reason,
             )
         return await self.deps.delivery_gateway.finalize_streamed_response(
@@ -1439,9 +1438,8 @@ class ResponseRunner:
         if progress.delivery_outcome is not None:
             return
         if progress.stage_started:
-            delivery_outcome = FinalDeliveryOutcome(
+            delivery_outcome = self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                 terminal_status=terminal_status,
-                event_id=None,
                 failure_reason=failure_reason,
             )
         else:
@@ -1473,14 +1471,9 @@ class ResponseRunner:
             )
         except asyncio.CancelledError as exc:
             failure_reason = cancel_failure_reason(classify_cancel_source(exc))
-            cancelled_outcome = FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=final_delivery_outcome.final_visible_event_id,
-                is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
-                final_visible_body=final_delivery_outcome.final_visible_body,
+            cancelled_outcome = self.deps.delivery_gateway.cancelled_terminal_outcome(
+                final_delivery_outcome,
                 failure_reason=failure_reason,
-                tool_trace=final_delivery_outcome.tool_trace,
-                extra_content=final_delivery_outcome.extra_content,
             )
             await lifecycle.finalize(
                 cancelled_outcome,  # lifecycle.finalize cancelled terminal outcome before re-raising
@@ -2125,9 +2118,8 @@ class ResponseRunner:
                     else:
                         failure_reason = cancel_failure_reason(classify_cancel_source(exc))
                         progress.settle(
-                            FinalDeliveryOutcome(
+                            self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                                 terminal_status="cancelled",
-                                event_id=None,
                                 failure_reason=failure_reason,
                             ),
                         )
@@ -2653,9 +2645,8 @@ class ResponseRunner:
                 )
             failure_reason = cancel_failure_reason(cancel_source)
             return build_outcome(
-                FinalDeliveryOutcome(
+                self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                     terminal_status="cancelled",
-                    event_id=None,
                     failure_reason=failure_reason,
                 ),
             )

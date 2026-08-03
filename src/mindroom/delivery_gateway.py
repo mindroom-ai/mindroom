@@ -372,6 +372,36 @@ class DeliveryGateway:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
         return cancel_failure_reason(classify_cancel_source(error))
 
+    def terminal_outcome_without_visible_event(
+        self,
+        *,
+        terminal_status: Literal["cancelled", "error"],
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Return the terminal outcome for one turn with no visible event to finalize."""
+        return FinalDeliveryOutcome(
+            terminal_status=terminal_status,
+            event_id=None,
+            failure_reason=failure_reason,
+        )
+
+    def cancelled_terminal_outcome(
+        self,
+        outcome: FinalDeliveryOutcome,
+        *,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Return the cancelled derivative of one delivery outcome, preserving visible facts."""
+        return FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=outcome.final_visible_event_id,
+            is_visible_response=outcome.final_visible_event_id is not None,
+            final_visible_body=outcome.final_visible_body,
+            failure_reason=failure_reason,
+            tool_trace=outcome.tool_trace,
+            extra_content=outcome.extra_content,
+        )
+
     async def _cleanup_completed_placeholder_only_stream(
         self,
         *,
