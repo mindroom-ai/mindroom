@@ -122,11 +122,11 @@ class TestAgentBot(AgentBotTestBase):
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         with (
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ) as mock_send_message,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
             patch_response_runner_module(
@@ -173,11 +173,11 @@ class TestAgentBot(AgentBotTestBase):
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch_response_runner_module(
@@ -222,11 +222,11 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch_response_runner_module(
@@ -282,11 +282,11 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch_response_runner_module(
@@ -370,9 +370,9 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
-            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
             patch_response_runner_module(
@@ -599,11 +599,11 @@ class TestAgentBot(AgentBotTestBase):
                 team_response=AsyncMock(return_value=interactive_response),
             ),
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,

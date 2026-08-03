@@ -354,7 +354,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
         with (
-            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(return_value=None)),
             pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
         ):
             await bot._turn_controller._execute_response_action(
@@ -2984,7 +2984,7 @@ class TestAgentBot(AgentBotTestBase):
                 emit_cancelled_response=AsyncMock(),
             ),
         )
-        with patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock(return_value=None)):
             outcome = await gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),

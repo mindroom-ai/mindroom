@@ -603,7 +603,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 AsyncMock(return_value="$latest:localhost"),
             ),
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 AsyncMock(
                     return_value=DeliveredMatrixEvent(
                         event_id="$router_response:localhost",

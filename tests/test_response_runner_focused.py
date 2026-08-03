@@ -34,6 +34,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.message_target import ResponseLifecycleKey
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -1394,7 +1395,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         response_envelope=second_envelope,
     )
     assert reservation is not None
-    queued_signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
+    queued_signal = coordinator._thread_queued_signals[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
     # A duplicate reservation for the same queued event must not double-register.
     assert (
@@ -1473,7 +1474,7 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     queued_two = run_queued()
     for _ in range(10):
         await asyncio.sleep(0)
-    queued_signal = coordinator._thread_queued_signals[("!room:localhost", "$thread")]
+    queued_signal = coordinator._thread_queued_signals[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
 
     gate.set()

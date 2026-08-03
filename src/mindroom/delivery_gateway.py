@@ -31,7 +31,14 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    MatrixDeliveryFailure,
+    MatrixDeliveryFailureKind,
+    MatrixSendOutcome,
+    edit_message_outcome,
+    send_message_outcome,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -316,6 +323,22 @@ class DeliveryGatewayDeps:
     response_hooks: ResponseHookService
 
 
+_MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
+    MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
+    MatrixDeliveryFailureKind.SYNC_PREREQUISITE: "room cache not yet synced for encrypted delivery",
+    MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
+    MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
+    MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
+}
+
+
+def _matrix_delivery_failure_reason(outcome: MatrixSendOutcome) -> str:
+    """Translate one typed Matrix delivery failure into the gateway failure vocabulary."""
+    if isinstance(outcome, MatrixDeliveryFailure):
+        return f"{_MATRIX_DELIVERY_FAILURE_REASONS[outcome.kind]}: {outcome.detail}"
+    return "matrix delivery failed"
+
+
 @dataclass(frozen=True)
 class FinalizeStreamedResponseRequest:
     """Parameters for finalizing one streamed Matrix response."""
@@ -511,9 +534,8 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        failure_reason = "send_message_result returned None"
         try:
-            delivered = await send_message_result(
+            outcome = await send_message_outcome(
                 client,
                 resolved_target.room_id,
                 content,
@@ -522,6 +544,10 @@ class DeliveryGateway:
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the send"
+        else:
+            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            if delivered is None:
+                failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -551,9 +577,8 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-        failure_reason = "edit_message_result returned None"
         try:
-            delivered = await edit_message_result(
+            outcome = await edit_message_outcome(
                 client,
                 target.room_id,
                 request.event_id,
@@ -564,6 +589,10 @@ class DeliveryGateway:
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the edit"
+        else:
+            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
+            if delivered is None:
+                failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
@@ -882,7 +911,8 @@ class DeliveryGateway:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        delivered = await send_message_result(self._client(), target.room_id, content)
+        outcome = await send_message_outcome(self._client(), target.room_id, content)
+        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
@@ -975,13 +1005,14 @@ class DeliveryGateway:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        delivered = await edit_message_result(
+        outcome = await edit_message_outcome(
             self._client(),
             target.room_id,
             event_id,
             content,
             body,
         )
+        delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,

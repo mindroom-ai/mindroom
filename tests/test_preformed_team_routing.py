@@ -321,7 +321,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
 
     with patch(
-        "mindroom.delivery_gateway.edit_message_result",
+        "mindroom.delivery_gateway.edit_message_outcome",
         new=AsyncMock(
             return_value=DeliveredMatrixEvent(
                 event_id="$existing_response",
