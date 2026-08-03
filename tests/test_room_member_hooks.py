@@ -26,7 +26,13 @@ from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoi
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    test_runtime_paths,
+    wrap_extracted_collaborators,
+)
 from tests.identity_helpers import persist_entity_accounts
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
@@ -935,7 +941,6 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
 @pytest.mark.asyncio
 async def test_restored_join_catchup_survives_recovery_settlement(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Intermediate recovery settlement must not consume restored timeline catch-up."""
     seen: list[str] = []
@@ -951,6 +956,7 @@ async def test_restored_join_catchup_survives_recovery_settlement(
     bot.client.rooms = {room.room_id: room}
     bot.client.loaded_sync_token = ""
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    wrap_extracted_collaborators(bot, "_conversation_cache")
     cache_generation = bot.event_cache.cache_generation
     assert cache_generation is not None
     save_sync_token(
@@ -960,23 +966,15 @@ async def test_restored_join_catchup_survives_recovery_settlement(
         cache_generation=cache_generation,
     )
     await bot._prepare_matrix_sync_continuity()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(
-            return_value=SyncCacheWriteResult(complete=True),
-        ),
+    bot._conversation_cache.cache_sync_timeline_for_certification = AsyncMock(
+        return_value=SyncCacheWriteResult(complete=True),
     )
-    monkeypatch.setattr(
-        bot,
-        "_apply_own_room_membership_from_sync",
-        AsyncMock(
-            side_effect=[
-                RuntimeError("transient membership failure"),
-                None,
-                None,
-            ],
-        ),
+    bot._conversation_cache.mark_room_joined = AsyncMock(
+        side_effect=[
+            RuntimeError("transient membership failure"),
+            None,
+            None,
+        ],
     )
 
     failed_catchup = _sync_response_with_state(
@@ -1024,7 +1022,6 @@ async def test_restored_join_catchup_survives_recovery_settlement(
 @pytest.mark.asyncio
 async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An empty recovery response must rewind without consuming catch-up state."""
     seen: list[str] = []
@@ -1041,6 +1038,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     bot.client.rooms = {room.room_id: room}
     bot.client.loaded_sync_token = ""
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    wrap_extracted_collaborators(bot, "_conversation_cache")
     cache_generation = bot.event_cache.cache_generation
     assert cache_generation is not None
     save_sync_token(
@@ -1050,22 +1048,18 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
         cache_generation=cache_generation,
     )
     await bot._prepare_matrix_sync_continuity()
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(
-            side_effect=[
-                SyncCacheWriteResult(
-                    complete=True,
-                    unrecovered_room_ids=frozenset({gap_room_id}),
-                ),
-                SyncCacheWriteResult(
-                    complete=True,
-                    recovered_room_ids=frozenset({gap_room_id}),
-                ),
-                SyncCacheWriteResult(complete=True),
-            ],
-        ),
+    bot._conversation_cache.cache_sync_timeline_for_certification = AsyncMock(
+        side_effect=[
+            SyncCacheWriteResult(
+                complete=True,
+                unrecovered_room_ids=frozenset({gap_room_id}),
+            ),
+            SyncCacheWriteResult(
+                complete=True,
+                recovered_room_ids=frozenset({gap_room_id}),
+            ),
+            SyncCacheWriteResult(complete=True),
+        ],
     )
 
     catchup = _sync_response_with_state(
@@ -1162,7 +1156,6 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
 @pytest.mark.asyncio
 async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A post-start tokenless baseline must be recorded before hooks re-arm."""
     seen: list[str] = []
@@ -1176,18 +1169,15 @@ async def test_unknown_pos_limited_baseline_stays_fenced_until_certified(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(
-            side_effect=[
-                SyncCacheWriteResult(
-                    complete=True,
-                    limited_room_ids=(room.room_id,),
-                ),
-                SyncCacheWriteResult(complete=True),
-            ],
-        ),
+    wrap_extracted_collaborators(bot, "_conversation_cache")
+    bot._conversation_cache.cache_sync_timeline_for_certification = AsyncMock(
+        side_effect=[
+            SyncCacheWriteResult(
+                complete=True,
+                limited_room_ids=(room.room_id,),
+            ),
+            SyncCacheWriteResult(complete=True),
+        ],
     )
     sync_error = MagicMock(spec=nio.SyncError)
     sync_error.status_code = "M_UNKNOWN_POS"
