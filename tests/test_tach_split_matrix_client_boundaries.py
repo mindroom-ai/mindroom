@@ -29,6 +29,7 @@ RUNTIME_PROTOCOL_PRIVATE_SYMBOL = "_check_narrow_protocols_are_subsets_of_bot_ru
 RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
     "OrchestratorRuntime",
     "SupportsClientConfig",
+    "SupportsClientConfigGeneration",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -25,10 +24,10 @@ from mindroom.dispatch_handoff import (
     merge_payload_metadata,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
-from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs
@@ -84,6 +83,21 @@ class _PreparedTextDispatch:
     dispatch_started_at: float
 
 
+def _turn_claim_for_dispatch(
+    controller: TurnController,
+    raw_event: TextDispatchEvent,
+    handled_turn: TurnRecord | None,
+) -> TurnRecord:
+    if handled_turn is not None:
+        return handled_turn
+    routed_alias = controller.deps.ingress.router_relay_original_event_id(raw_event)
+    return TurnRecord.create(
+        [raw_event.event_id],
+        discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
+        completed=False,
+    )
+
+
 async def dispatch_text_message(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -101,7 +115,7 @@ async def dispatch_text_message(
     current_prompt_is_structured: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
-    turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
+    turn_claim = _turn_claim_for_dispatch(controller, raw_event, handled_turn)
     if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
     claim_transferred = False
@@ -119,7 +133,7 @@ async def dispatch_text_message(
             raw_event,
             requester_user_id,
             media_events=media_events,
-            handled_turn=handled_turn,
+            handled_turn=turn_claim,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
@@ -250,7 +264,7 @@ async def _prepare_text_dispatch(
             discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
         )
 
-    command = _parsed_command_for_event(
+    command = _command_control_input(
         controller,
         event,
         media_events=media_events,
@@ -273,8 +287,6 @@ async def _prepare_text_dispatch(
         dispatch_timing.mark("dispatch_prepare_ready")
     if prepared is None:
         return None
-    if command is not None and prepared.dispatch.envelope.source_kind == VOICE_SOURCE_KIND:
-        command = None
     return _PreparedTextDispatch(
         event=event,
         payload_metadata=payload_metadata,
@@ -290,7 +302,7 @@ async def _prepare_text_dispatch(
     )
 
 
-def _parsed_command_for_event(
+def _command_control_input(
     controller: TurnController,
     event: TextDispatchEvent,
     *,
@@ -299,14 +311,8 @@ def _parsed_command_for_event(
 ) -> Command | None:
     if media_events:
         return None
-    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
-        return None
-    if is_audio_message_event(event) or is_voice_event(
-        event,
-        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
-    ):
-        return None
-    return command_parser.parse(event.body)
+    source_kind = ingress_metadata.source_kind if ingress_metadata is not None else MESSAGE_SOURCE_KIND
+    return controller.deps.ingress.command_control_input(event, source_kind=source_kind)
 
 
 def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
@@ -354,6 +360,7 @@ async def _blocked_before_plan(
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
         and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
     )
+    current_turn_event_ids = prepared.handled_turn.indexed_event_ids
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
@@ -361,6 +368,7 @@ async def _blocked_before_plan(
             requester_user_id=requester_user_id,
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
+            current_turn_event_ids=current_turn_event_ids,
         )
         if may_be_superseded and not skips_turn:
             controller.deps.logger.warning(
@@ -376,9 +384,10 @@ async def _blocked_before_plan(
             requester_user_id,
             prepared.replay_guard.history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
+            current_turn_event_ids=current_turn_event_ids,
         )
     if skips_turn:
-        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
+        controller.deps.turn_store.record_turn(prepared.handled_turn)
     return skips_turn
 
 
@@ -444,6 +453,7 @@ async def _apply_turn_plan(
         return
 
     assert plan.response_action is not None
+    handled_turn = prepared.handled_turn
     reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
         prepared.handled_turn.source_event_ids,
     )
@@ -456,7 +466,7 @@ async def _apply_turn_plan(
         else None
     )
     handled_turn = controller.deps.turn_store.attach_response_context(
-        prepared.handled_turn,
+        handled_turn,
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
@@ -615,6 +625,8 @@ def _tracked_route_turn(
 ) -> TurnRecord | None:
     if single_direct_media_route:
         return None
+    if prepared.handled_turn.discovery_event_ids:
+        return prepared.handled_turn
     if not prepared.handled_turn.is_coalesced and (
         not prepared.handled_turn.source_event_ids
         or prepared.handled_turn.source_event_ids[0] == prepared.event.event_id

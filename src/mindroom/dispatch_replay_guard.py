@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +38,7 @@ def has_newer_unresponded_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     may_be_superseded_by_newer_requester_turn: bool,
+    current_turn_event_ids: Collection[str] = (),
     requester_user_id_for_event: _RequesterResolver,
     is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
@@ -63,7 +64,10 @@ def has_newer_unresponded_in_thread(
             continue
         if message.timestamp is None or message.timestamp <= event_ts:
             continue
-        if message.event_id == event.event_id:
+        # A sibling source of this very turn cannot supersede it: this turn is
+        # the dispatch that answers the sibling, so skipping here would drop
+        # the whole coalesced batch with nothing left to respond.
+        if message.event_id == event.event_id or message.event_id in current_turn_event_ids:
             continue
         if is_handled(message.event_id):
             continue
@@ -106,6 +110,7 @@ def _unresponded_requester_event_id(
     event_source: dict[str, Any],
     *,
     skipped_event_id: str,
+    current_turn_event_ids: Collection[str],
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
     is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
@@ -117,7 +122,12 @@ def _unresponded_requester_event_id(
         return None
     event_id = event_source.get("event_id")
     sender = event_source.get("sender")
-    if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
+    if (
+        not isinstance(event_id, str)
+        or event_id == skipped_event_id
+        or event_id in current_turn_event_ids
+        or not isinstance(sender, str)
+    ):
         return None
     content = event_source.get("content")
     if (
@@ -144,6 +154,7 @@ async def _newer_unresponded_cached_thread_event_id(
     room_id: str,
     skipped_event_id: str,
     skipped_event_ts_ms: int,
+    current_turn_event_ids: Collection[str],
     requester_user_id: str,
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
@@ -168,6 +179,7 @@ async def _newer_unresponded_cached_thread_event_id(
         event_id = _unresponded_requester_event_id(
             event_source,
             skipped_event_id=skipped_event_id,
+            current_turn_event_ids=current_turn_event_ids,
             requester_user_id=requester_user_id,
             requester_user_id_for_event=requester_user_id_for_event,
             is_visible_router_voice_echo=is_visible_router_voice_echo,
@@ -186,6 +198,7 @@ async def has_newer_unresponded_cached_thread_event(
     requester_user_id: str,
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,
+    current_turn_event_ids: Collection[str] = (),
     get_recent_room_events: _RecentRoomEventsLookup | None,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
@@ -220,6 +233,7 @@ async def has_newer_unresponded_cached_thread_event(
         room_id=room_id,
         skipped_event_id=event.event_id,
         skipped_event_ts_ms=int(event.server_timestamp),
+        current_turn_event_ids=current_turn_event_ids,
         requester_user_id=requester_user_id,
         thread_id=thread_id,
         get_thread_id_for_event=get_thread_id_for_event,

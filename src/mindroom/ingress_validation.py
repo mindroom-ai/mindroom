@@ -14,6 +14,7 @@ from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     is_auto_resume_relay_body,
@@ -303,6 +304,19 @@ class IngressValidator:
             return None
 
         return requester_user_id
+
+    def command_control_input_for_event(self, event: TextDispatchEvent) -> Command | None:
+        """Classify one raw or hydrated event through the trusted command boundary."""
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        source_kind = (
+            self.event_source_kind(event, content)
+            if isinstance(content, dict) and self.sender_is_trusted_for_ingress_metadata(event.sender)
+            else None
+        )
+        return self.command_control_input(
+            event,
+            source_kind=source_kind or MESSAGE_SOURCE_KIND,
+        )
 
     def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""

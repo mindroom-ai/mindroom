@@ -434,6 +434,10 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
+
+        def timestamp_formatter(timestamp_ms: float | None) -> str | None:
+            return format_timestamp_ms(timestamp_ms, timezone=self.config.timezone)
+
         self._dispatch_obligation_store = DispatchObligationStore(
             tracking_path=self.storage_path / "tracking",
             principal_id=runtime_matrix_id.full_id,
@@ -454,10 +458,7 @@ class AgentBot:
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
             room_scope_is_single_conversation=self._room_scope_is_single_conversation,
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
-            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                timestamp_ms,
-                timezone=self.config.timezone,
-            ),
+            timestamp_formatter=timestamp_formatter,
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
             on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
@@ -609,10 +610,7 @@ class AgentBot:
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
                 receipt_order=self._dispatch_obligation_runner.receipt_order,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
-                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                    timestamp_ms,
-                    timezone=self.config.timezone,
-                ),
+                timestamp_formatter=timestamp_formatter,
             ),
         )
         self._turn_policy = TurnPolicy(
@@ -637,6 +635,8 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
+                source_for_inflight_revision_event_id=(self._edit_regenerator.source_for_inflight_revision_event_id),
+                regenerate_redacted_revision=self._edit_regenerator.handle_redacted_revision,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
@@ -773,6 +773,11 @@ class AgentBot:
         self.__dict__.pop("matrix_id", None)
         self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
+
+    @property
+    def runtime_generation(self) -> str:
+        """Clock-free ownership stamp for streams created by this bot start."""
+        return self._runtime_view.runtime_generation
 
     @property
     def client(self) -> nio.AsyncClient | None:
@@ -1916,6 +1921,15 @@ class AgentBot:
             unsettled_source_event_ids=unsettled_source_event_ids,
         )
 
+    async def unsettled_turn_dispatch_source_event_ids(self) -> frozenset[str]:
+        """Return source IDs whose exact message or media callbacks remain owned."""
+        obligations = await asyncio.to_thread(self._dispatch_obligation_store.pending)
+        return frozenset(
+            obligation.source_event_id
+            for obligation in obligations
+            if obligation.callback_kind in {DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA}
+        )
+
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
 
@@ -2007,6 +2021,7 @@ class AgentBot:
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self.client.close()
+        self._runtime_view.mark_runtime_stopped()
         self.logger.info("Stopped agent bot")
 
     async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:

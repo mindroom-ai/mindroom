@@ -239,9 +239,18 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def event_is_redacted(self, event_id: str) -> bool:
+        """Return whether one exact Matrix event has a durable redaction tombstone."""
+        record = self._ledger.get_turn_record(event_id)
+        return record is not None and event_id in record.redacted_source_event_ids
+
     def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
+
+    def source_for_revision_event_id(self, revision_event_id: str) -> tuple[TurnRecord, str] | None:
+        """Return the durable turn source whose current revision is this event."""
+        return self._ledger.source_for_revision_event_id(revision_event_id)
 
     def _update_response_turn(
         self,
@@ -365,17 +374,18 @@ class TurnStore:
             callback(turn_record.indexed_event_ids)
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim exclusive physical sources while aliases remain advisory."""
-        alias_owners = map(self.get_turn_record, turn_record.discovery_event_ids)
+        """Claim one complete turn identity without blocking on durable I/O."""
+        durable_owners = map(self.get_turn_record, turn_record.indexed_event_ids)
         if not turn_record.source_event_ids or any(
             owner is not None and owner.completed and not same_turn_identity(owner, turn_record)
-            for owner in alias_owners
+            for owner in durable_owners
         ):
             return False
         source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
         with self._pending_claim_lock:
             if any(
-                source_ids.intersection(claim.source_event_ids) or discovery_ids.intersection(claim.discovery_event_ids)
+                source_ids.intersection(claim.indexed_event_ids)
+                or discovery_ids.intersection(claim.discovery_event_ids)
                 for claim in self._pending_turn_claims
             ):
                 return False

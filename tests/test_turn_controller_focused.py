@@ -636,8 +636,8 @@ def _router_relay_event(
 async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Config, tmp_path: Path) -> None:
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
-    The dispatch replay guard must consume the exact callback obligation without
-    growing the handled-turn ledger, evaluating policy, or sending anything.
+    The dispatch replay guard must persist exact no-response attribution without
+    evaluating policy or sending anything.
     """
     newer_history = thread_history_result(
         [
@@ -659,8 +659,11 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is False
-    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+    persisted = harness.turn_store.get_turn_record(event.event_id)
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio

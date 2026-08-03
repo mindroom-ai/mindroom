@@ -132,7 +132,13 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
     )
     return DeliveryGateway(
         DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime=SimpleNamespace(
+                client=_client(),
+                orchestrator=None,
+                config=config,
+                runtime_started_at=0.0,
+                runtime_generation="test-generation",
+            ),
             runtime_paths=runtime_paths_for(config),
             agent_name="code",
             logger=Mock(),

@@ -301,13 +301,10 @@ class _MultiAgentOrchestrator:
             event_cache_provider=self._approval_event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
-                self._recover_stale_streams_after_restart(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                )
+            recover_stale_streams=lambda bots, config, scanned_room_ids: self._recover_stale_streams_after_restart(
+                bots,
+                config,
+                scanned_room_ids,
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
@@ -616,6 +613,8 @@ class _MultiAgentOrchestrator:
         attempt = 0
         try:
             while True:
+                if not self.running:
+                    return
                 bot = self.agent_bots.get(entity_name)
                 if bot is None:
                     return
@@ -631,24 +630,7 @@ class _MultiAgentOrchestrator:
                 if start_status is None:
                     return
                 if start_status:
-                    logger.info("Bot recovered after startup failure", agent_name=entity_name)
-                    bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
-                    self._bind_started_runtime_support_services([bot])
-                    self._schedule_ready_turn_dispatch_recovery()
-                    config = self.config
-                    if config is not None:
-                        self._resolve_bot_room_aliases(bots_to_setup, config)
-                    self._start_sync_task(entity_name, bot)
-                    if bots_to_setup:
-                        await run_with_retry(
-                            f"Updating Matrix room memberships for {entity_name}",
-                            partial(self._setup_rooms_and_memberships, bots_to_setup),
-                            permanent_error_check=is_permanent_startup_error,
-                            update_runtime_state=False,
-                        )
-                    if config is not None:
-                        await self._recover_pending_replacement_rooms(config)
-                    self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+                    await self._finish_recovered_bot_start(entity_name, bot)
                     return
 
                 attempt += 1
@@ -668,9 +650,60 @@ class _MultiAgentOrchestrator:
             if self._bot_start_tasks.get(entity_name) is current_task:
                 del self._bot_start_tasks[entity_name]
 
+    async def _finish_recovered_bot_start(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
+        """Rebind runtime support, room state, and pending maintenance after a background bot start succeeds."""
+        if not self.running:
+            # Shutdown already began: binding runtime support or starting a
+            # sync task now would leak work past stop()'s teardown passes.
+            logger.info("Skipping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
+        logger.info("Bot recovered after startup failure", agent_name=entity_name)
+        bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
+        self._bind_started_runtime_support_services([bot])
+        self._schedule_ready_turn_dispatch_recovery()
+        config = self.config
+        if config is not None:
+            self._resolve_bot_room_aliases(bots_to_setup, config)
+        self._start_sync_task(entity_name, bot)
+        if bots_to_setup:
+            await run_with_retry(
+                f"Updating Matrix room memberships for {entity_name}",
+                partial(self._setup_rooms_and_memberships, bots_to_setup),
+                permanent_error_check=is_permanent_startup_error,
+                update_runtime_state=False,
+            )
+        if not self.running:
+            logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
+        if config is not None:
+            await self._startup_maintenance.recover_after_bot_start([bot], config)
+        if not self.running:
+            logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
+        if config is not None:
+            await self._recover_pending_replacement_rooms(config)
+        if not self.running:
+            logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
+        self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+        # Mirror the maintenance-debt guard: a recovery landing mid-shutdown
+        # (after stop() cancelled maintenance but before retry tasks die)
+        # must not resume deferred maintenance against a closing client.
+        if config is not None and self.running:
+            self._startup_maintenance.resume_pending_maintenance(
+                config=config,
+                running_bots=self._running_startup_maintenance_bots,
+            )
+
     async def _schedule_bot_start_retry(self, entity_name: str) -> None:
         """Schedule background retries for one failed bot startup."""
+        if not self.running:
+            # A reload racing shutdown must not spawn a retry that survives
+            # the stop() cancellation pass.
+            return
         await self._cancel_bot_start_task(entity_name)
+        if not self.running:
+            return
         self._bot_start_tasks[entity_name] = create_logged_task(
             self._run_bot_start_retry(entity_name),
             name=f"retry_start_{entity_name}",
@@ -1124,7 +1157,6 @@ class _MultiAgentOrchestrator:
         self,
         bots: list[AgentBot | TeamBot],
         config: Config,
-        startup_cutoff_ms: int | None,
         scanned_room_ids: set[str],
         *,
         target_room_ids: set[str] | None = None,
@@ -1134,21 +1166,22 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
                 continue
+            unsettled_turn_source_event_ids = await bot.unsettled_turn_dispatch_source_event_ids()
             actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
+                runtime_generation=bot.runtime_generation,
+                unsettled_turn_source_event_ids=unsettled_turn_source_event_ids,
             )
         if not actors:
             return
         router_bot = self._router_bot()
-
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
             resume_conversation_cache=router_bot._conversation_cache if router_bot is not None else None,
             config=config,
             runtime_paths=self.runtime_paths,
-            startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
             target_room_ids=target_room_ids,
         )
@@ -1158,6 +1191,9 @@ class _MultiAgentOrchestrator:
             cleaned_count=result.cleaned_count,
             resumed_count=result.resumed_count,
         )
+        if result.retry_required:
+            msg = "Stale stream recovery incomplete"
+            raise RuntimeError(msg)
 
     def _capture_replacement_recovery_rooms(
         self,
@@ -1220,7 +1256,6 @@ class _MultiAgentOrchestrator:
             await self._recover_stale_streams_after_restart(
                 recovery_bots,
                 config,
-                None,
                 scanned_room_ids,
                 target_room_ids=set().union(*claimed_room_ids.values()),
             )
@@ -1282,14 +1317,13 @@ class _MultiAgentOrchestrator:
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
-        startup_cutoff_ms = int(time.time() * 1000)
         phase_started = log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
                 self._start_sync_task(entity_name, bot)
         log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
-        self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
+        self._startup_maintenance.start(started_bots, config)
 
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
@@ -1589,7 +1623,7 @@ class _MultiAgentOrchestrator:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
         await self._prepare_accounts_for_config_update(new_config, plan)
-        replay_startup_maintenance = await self._startup_maintenance.cancel()
+        replay_startup_maintenance = await self._startup_maintenance.suspend_for_config_reload()
 
         try:
             if plugin_changes:
@@ -1668,10 +1702,11 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            if replay_startup_maintenance and self.running and self.config is not None:
+            if self.running and self.config is not None:
                 self._startup_maintenance.restart_after_config_reload(
                     config=self.config,
                     running_bots=self._running_startup_maintenance_bots,
+                    replay=replay_startup_maintenance,
                 )
 
     def _router_bot(self) -> AgentBot | TeamBot | None:
@@ -1928,8 +1963,15 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
-        await shutdown_approval_runtime()
+        # Cancel the retry producer (config reload) before the retry tasks
+        # themselves, then the retries before any other awaited teardown: a
+        # reload finishing after the retry-cancel pass could otherwise spawn
+        # a fresh retry that survives shutdown, and a retry completing
+        # mid-shutdown would rebind runtime support and start sync tasks the
+        # passes below have already torn down.
         await self.config_reload.cancel()
+        await self._cancel_bot_start_tasks()
+        await shutdown_approval_runtime()
         owner = self._mcp_catalog_change_task_owner
         await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
         await wait_for_background_tasks(
@@ -1942,7 +1984,6 @@ class _MultiAgentOrchestrator:
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()
-        await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.

@@ -4102,6 +4102,7 @@ from = ["mindroom.memory"]
 expose = [
     "OrchestratorRuntime",
     "SupportsClientConfig",
+    "SupportsClientConfigGeneration",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",

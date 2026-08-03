@@ -17,6 +17,7 @@ from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -390,14 +391,17 @@ def _build_response_runner(
         side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
     )
     bot._edit_message = AsyncMock(return_value=True)
-    runtime = SimpleNamespace(
+    runtime = BotRuntimeState(
         client=bot.client,
         config=config,
+        runtime_paths=runtime_paths,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
         event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=None,
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
+        runtime_generation="test-generation",
     )
     hook_context = HookContextSupport(
         runtime=runtime,

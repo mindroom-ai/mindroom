@@ -173,6 +173,7 @@ def _record_handled_turn(
     *,
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
+    source_event_revisions: dict[str, tuple[int, str]] | None = None,
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = "@user:example.com",
@@ -186,6 +187,7 @@ def _record_handled_turn(
             response_event_id=response_event_id,
             visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_revisions=source_event_revisions,
             source_event_metadata=source_event_metadata,
             response_owner=response_owner,
             requester_id=requester_id,
@@ -792,6 +794,98 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     assert response_target.reply_to_event_id == "$router-echo:example.com"
     assert response_target.resolved_thread_id == stored_target.resolved_thread_id
     assert response_target == stored_target
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision_state", ["committed", "inflight"])
+async def test_redacting_current_edit_regenerates_from_reverted_source_body(
+    tmp_path: Path,
+    revision_state: str,
+) -> None:
+    """A redacted edit is a newer source revision whose body comes from current Matrix state."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    bot.logger = MagicMock()
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
+    target = MessageTarget.resolve(room.room_id, "$original:example.com", "$original:example.com")
+    _record_handled_turn(
+        bot._turn_store,
+        ["$original:example.com"],
+        response_event_id="$response:example.com",
+        source_event_prompts={"$original:example.com": "edited question"},
+        source_event_revisions=(
+            {"$original:example.com": (1_000_001, "$edit:example.com")} if revision_state == "committed" else None
+        ),
+        response_owner="test_agent",
+        history_scope=_agent_history_scope("test_agent"),
+        conversation_target=target,
+    )
+    source_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "original question", "msgtype": "m.text"},
+            "event_id": "$original:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_000_000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    source_event.source = source_event.__dict__["source"]
+    source_response = nio.RoomGetEventResponse()
+    source_response.event = source_event
+    bot._conversation_cache.get_event = AsyncMock(return_value=source_response)
+    generated = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    replace_edit_regenerator_deps(bot, generate_response=generated)
+    context = MagicMock(
+        am_i_mentioned=False,
+        is_thread=False,
+        thread_id=None,
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    redaction = MagicMock(spec=nio.RedactionEvent)
+    redaction.event_id = "$redaction:example.com"
+    redaction.redacts = "$edit:example.com"
+    redaction.server_timestamp = 1_000_002
+    if revision_state == "inflight":
+        bot._edit_regenerator._inflight_revision_sources[redaction.redacts] = source_event.event_id
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "extract_message_context",
+            new=AsyncMock(return_value=context),
+        ),
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+        ),
+        patch.object(bot._turn_store, "_remove_stale_runs_for_turn_record", return_value=True),
+    ):
+        await bot._edit_regenerator.handle_redacted_revision(room, redaction, source_event.event_id)
+
+    request = generated.await_args.args[0]
+    assert request.prompt == "original question"
+    assert request.correlation_id == redaction.event_id
+    persisted = bot._turn_store.get_turn_record(source_event.event_id)
+    assert persisted is not None
+    assert persisted.source_event_prompts == {source_event.event_id: "original question"}
+    assert persisted.source_event_revisions == {source_event.event_id: (1_000_002, redaction.event_id)}
 
 
 def test_remove_run_by_event_id_removes_team_runs() -> None:

@@ -539,6 +539,21 @@ class HandledTurnLedger:
             raise RuntimeError(msg)
         return next(iter(matches.values()), None)
 
+    def source_for_revision_event_id(self, revision_event_id: str) -> tuple[TurnRecord, str] | None:
+        """Return the sole turn source whose current revision is this Matrix event."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            matches = {
+                (record.indexed_event_ids, source_event_id): (record, source_event_id)
+                for record in self._responses.values()
+                for source_event_id, revision in (record.source_event_revisions or {}).items()
+                if revision[1] == revision_event_id
+            }
+        if len(matches) > 1:
+            msg = f"Multiple turn sources own revision event {revision_event_id!r}"
+            raise RuntimeError(msg)
+        return next(iter(matches.values()), None)
+
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
         if self._state.loaded:

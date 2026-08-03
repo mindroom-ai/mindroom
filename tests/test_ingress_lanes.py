@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, cast
+import json
+from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,17 +17,23 @@ from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, Rea
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.turn_policy import _DispatchPlan
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     prepared_dispatch_result,
@@ -50,11 +57,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
-    from mindroom.handled_turns import TurnRecord
+    from mindroom.turn_store import TurnStore
+
+
+class _BotWithTurnStore(Protocol):
+    _turn_store: TurnStore
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
     return nio.MatrixRoom(room_id, "@mindroom:localhost")
+
+
+def _assert_turn_reclaimable(bot: _BotWithTurnStore, event_id: str) -> None:
+    turn_store = bot._turn_store
+    turn = TurnRecord.create([event_id], completed=False)
+    assert turn_store.try_claim_turn(turn)
+    turn_store.release_pending_turn_claim(turn)
 
 
 def _plain_event(
@@ -435,6 +453,430 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
     assert "command" in request.response_text.lower()
     dispatch_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$cmd")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_command_claims_before_conversation_resolution(tmp_path: Path) -> None:
+    """A replay cannot pass precheck, wait in resolution, then execute the command again."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000)
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def resolve_thread_id(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord,
+        **_metadata: object,
+    ) -> None:
+        assert handled_turn.source_event_ids == ("$cmd",)
+        bot._turn_store.record_turn(handled_turn)
+
+    resolve_mock = AsyncMock(side_effect=resolve_thread_id)
+    dispatch_mock = AsyncMock(side_effect=record_dispatch)
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=dispatch_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        resolution_calls_before_release = resolve_mock.await_count
+        release_resolution.set()
+        await asyncio.gather(first, second)
+
+    assert resolution_calls_before_release == 1
+    dispatch_mock.assert_awaited_once()
+    _assert_turn_reclaimable(bot, "$cmd")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_media_claims_before_conversation_resolution(tmp_path: Path) -> None:
+    """A replay cannot enter media resolution while the first delivery owns it."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    event = _image_event(event_id="$image", server_timestamp=1000)
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def resolve_thread_id(_room: nio.MatrixRoom, _event: nio.RoomMessageImage) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+
+    resolve_mock = AsyncMock(side_effect=resolve_thread_id)
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
+        await asyncio.sleep(0)
+        assert resolve_mock.await_count == 1
+        release_resolution.set()
+        await asyncio.gather(first, second)
+        await bot._coalescing_gate.drain_all()
+
+    _assert_turn_reclaimable(bot, event.event_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", [None, SCHEDULED_SOURCE_KIND], ids=["plain", "spoofed-scheduled"])
+async def test_duplicate_unresolvable_command_emits_one_terminal_notice(
+    tmp_path: Path,
+    source_kind: str | None,
+) -> None:
+    """Target-resolution failure remains one handled command despite untrusted source metadata."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    command_event = _text_event(
+        event_id="$cmd",
+        body="!help",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+    )
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def fail_thread_resolution(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+        message = "unproven root"
+        raise ThreadMembershipLookupError(message)
+
+    resolve_mock = AsyncMock(side_effect=fail_thread_resolution)
+    send_text_mock = AsyncMock(return_value="$notice")
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        resolution_calls_before_release = resolve_mock.await_count
+        release_resolution.set()
+        await asyncio.gather(first, second)
+
+    assert resolution_calls_before_release == 1
+    send_text_mock.assert_awaited_once()
+    assert bot._turn_store.is_handled("$cmd")
+    _assert_turn_reclaimable(bot, "$cmd")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_command_shaped_bypass_source_resolution_failure_is_not_command_terminal(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Synthetic command-shaped text keeps normal resolution-failure semantics."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    send_text_mock = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+        pytest.raises(ThreadMembershipLookupError, match="unproven root"),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    send_text_mock.assert_not_awaited()
+    assert not bot._turn_store.is_handled("$synthetic")
+    _assert_turn_reclaimable(bot, "$synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_duplicate_command_shaped_bypass_source_waits_and_retries_after_failed_owner(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """A replay waits for the first synthetic owner, then retries after that owner fails."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    release_resolution = asyncio.Event()
+
+    async def fail_thread_resolution(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        await release_resolution.wait()
+        message = "unproven root"
+        raise ThreadMembershipLookupError(message)
+
+    resolve_mock = AsyncMock(side_effect=fail_thread_resolution)
+    send_text_mock = AsyncMock(return_value="$notice")
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
+        await _wait_for(lambda: resolve_mock.await_count == 1)
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
+        await asyncio.sleep(0)
+        assert resolve_mock.await_count == 1
+        release_resolution.set()
+        outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert isinstance(outcomes[0], ThreadMembershipLookupError)
+    assert isinstance(outcomes[1], ThreadMembershipLookupError)
+    assert resolve_mock.await_count == 2
+    send_text_mock.assert_not_awaited()
+    assert not bot._turn_store.is_handled("$synthetic")
+    _assert_turn_reclaimable(bot, "$synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_command_shaped_bypass_source_dispatches_as_conversation(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Every successful bypass source treats command-shaped text as conversation."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    handled_turn = TurnRecord.create([event.event_id], completed=False)
+    prepared = _prepared_dispatch(
+        event_id=event.event_id,
+        requester_user_id="@user:localhost",
+        body=event.body,
+        source_kind=source_kind,
+    )
+    prepare_dispatch = AsyncMock(return_value=prepared_dispatch_result(prepared))
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+
+    with (
+        patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=AsyncMock()) as execute_command,
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            event,
+            "@user:localhost",
+            handled_turn=handled_turn,
+            ingress_metadata=DispatchIngressMetadata(source_kind=source_kind),
+        )
+
+    assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
+    plan_turn.assert_awaited_once()
+    execute_command.assert_not_awaited()
+    _assert_turn_reclaimable(bot, event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_hydrated_sidecar_noncommand_releases_raw_command_claim_before_gate(tmp_path: Path) -> None:
+    """A sidecar body changing command classification must still reach normal dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$sidecar", body="!help", server_timestamp=1000)
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar",
+        },
+    )
+    download_response = MagicMock(
+        spec=nio.DownloadResponse,
+        body=json.dumps({"msgtype": "m.text", "body": "ordinary hydrated conversation"}).encode(),
+    )
+    bot.client.download = AsyncMock(return_value=download_response)
+    prepared = _prepared_dispatch(
+        event_id=event.event_id,
+        requester_user_id=event.sender,
+        body="ordinary hydrated conversation",
+    )
+    prepare_dispatch = AsyncMock(return_value=prepared_dispatch_result(prepared))
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=AsyncMock(return_value=None)),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._command_turn_executor, "execute_if_owned", new=AsyncMock()) as execute_command,
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+        await bot._coalescing_gate.drain_all()
+
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar")
+    assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
+    plan_turn.assert_awaited_once()
+    execute_command.assert_not_awaited()
+    _assert_turn_reclaimable(bot, event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_raw_command_with_hydrated_noncommand_is_not_terminal(tmp_path: Path) -> None:
+    """Target failure classifies a v2 sidecar from its hydrated ordinary body."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$sidecar-ordinary",
+        body="!help",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+    )
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar-ordinary",
+        },
+    )
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps({"msgtype": "m.text", "body": "ordinary hydrated conversation"}).encode(),
+        ),
+    )
+    send_text = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text),
+        pytest.raises(ThreadMembershipLookupError, match="unproven root"),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-ordinary")
+    send_text.assert_not_awaited()
+    assert not bot._turn_store.is_handled(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_raw_noncommand_with_hydrated_command_is_terminal(tmp_path: Path) -> None:
+    """Target failure recognizes a command that exists only in a v2 sidecar."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$sidecar-command",
+        body="ordinary preview",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+    )
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar-command",
+        },
+    )
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps({"msgtype": "m.text", "body": "!help"}).encode(),
+        ),
+    )
+    send_text = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-command")
+    send_text.assert_awaited_once()
+    assert bot._turn_store.is_handled(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio

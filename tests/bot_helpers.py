@@ -260,6 +260,11 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     tracker.get_turn_record.return_value = None
     tracker.has_responded.return_value = False
 
+    def has_responded(event_id: str) -> bool:
+        tracked_record = tracker.get_turn_record(event_id)
+        turn_record = tracked_record if isinstance(tracked_record, TurnRecord) else stored_records.get(event_id)
+        return turn_record is not None and (turn_record.completed or event_id in turn_record.redacted_source_event_ids)
+
     def update_handled_turn(
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
@@ -288,6 +293,7 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
             on_persisted(turn_record)
         return turn_record
 
+    tracker.has_responded.side_effect = has_responded
     tracker.update_handled_turn.side_effect = update_handled_turn
     _turn_store(bot)._ledger = tracker
     return tracker

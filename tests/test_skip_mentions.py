@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -14,9 +14,16 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import (
+    SKIP_MENTIONS_KEY,
+    STREAM_GENERATION_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     EditTextRequest,
@@ -299,6 +306,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 enable_streaming=True,
                 orchestrator=None,
                 event_cache=make_event_cache_mock(),
+                runtime_generation="gen-default",
             ),
             runtime_paths=runtime_paths,
             agent_name="email_agent",
@@ -440,6 +448,168 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
     # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
     gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_stamps_runtime_generation_on_nonterminal_send(tmp_path: Path) -> None:
+    """Pending placeholders must carry the bot generation's clock-free ownership stamp."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+
+    content = send_result.await_args.args[2]
+    assert content[STREAM_GENERATION_KEY] == "gen-1"
+    assert content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_does_not_stamp_terminal_or_plain_sends(tmp_path: Path) -> None:
+    """Terminal statuses and plain sends stay unstamped."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="done",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            ),
+        )
+        await gateway.send_text(SendTextRequest(target=target, response_text="plain"))
+
+    for send_call in send_result.await_args_list:
+        assert STREAM_GENERATION_KEY not in send_call.args[2]
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_reads_generation_live_per_delivery(tmp_path: Path) -> None:
+    """A rotated runtime generation reaches later deliveries without rebuilding the gateway.
+
+    The generation rotates on every runtime start of the same bot object, so
+    the gateway must read it through the live provider at delivery time — a
+    constructor-time snapshot would falsely protect prior-run streams.
+    """
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+        gateway.deps.runtime.runtime_generation = "gen-2"
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking again...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+
+    stamped = [send_call.args[2][STREAM_GENERATION_KEY] for send_call in send_result.await_args_list]
+    assert stamped == ["gen-1", "gen-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancel_source", "expects_generation"),
+    [
+        ("sync_restart", True),
+        ("interrupted", True),
+        ("user_stop", False),
+    ],
+)
+async def test_auto_resumable_cancellation_edit_keeps_runtime_generation(
+    tmp_path: Path,
+    cancel_source: Literal["sync_restart", "interrupted", "user_stop"],
+    *,
+    expects_generation: bool,
+) -> None:
+    """Auto-resumable notes retain ownership; user stops remain unstamped."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+
+    with patch(
+        "mindroom.matrix.client_delivery.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as send_result:
+        await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=target,
+                event_id="$response",
+                existing_event_is_placeholder=False,
+                cancel_source=cancel_source,
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id=f"corr-{cancel_source}",
+                ),
+            ),
+        )
+
+    content = send_result.await_args.args[2]
+    if expects_generation:
+        assert content[STREAM_GENERATION_KEY] == "gen-1"
+        assert content["m.new_content"][STREAM_GENERATION_KEY] == "gen-1"
+    else:
+        assert STREAM_GENERATION_KEY not in content
+        assert STREAM_GENERATION_KEY not in content["m.new_content"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_passes_runtime_generation_to_streaming(tmp_path: Path) -> None:
+    """Streaming delivery forwards the bot generation without touching the shared extra-content dict."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    shared_collector: dict[str, object] = {}
+
+    async def stream() -> AsyncIterator[str]:
+        yield "hello"
+
+    with patch(
+        "mindroom.delivery_gateway.send_streaming_response",
+        new=AsyncMock(return_value=SimpleNamespace(event_id="$stream", final_visible_body="hello")),
+    ) as send_streaming:
+        await gateway.deliver_stream(
+            StreamingDeliveryRequest(
+                target=target,
+                response_stream=stream(),
+                extra_content=shared_collector,
+            ),
+        )
+
+    assert send_streaming.await_args.kwargs["runtime_generation"] == "gen-1"
+    assert send_streaming.await_args.kwargs["extra_content"] is shared_collector
+    assert shared_collector == {}
 
 
 @pytest.mark.asyncio

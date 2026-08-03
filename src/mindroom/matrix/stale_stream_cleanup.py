@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,7 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
+    STREAM_GENERATION_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -52,6 +54,11 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
+from mindroom.runtime_generation_lease import (
+    acknowledge_stopped_runtime_generation_proofs,
+    runtime_generation_owner_stopped,
+    stopped_runtime_generation_proofs,
+)
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -69,15 +76,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-# Startup cleanup receives a pre-sync cutoff and ignores messages at or after
-# that timestamp, so post-sync cleanup cannot clobber streams created by this
-# process. The remaining race is another concurrently running instance cleaning
-# up a message during a long provider/tool stall where no new chunks arrive for
-# a while, so keep a generous recency guard here.
-_STALE_STREAM_RECENCY_GUARD_MS = 10_000
-# Restart cleanup should only edit active-looking messages from the current
-# outage window. Explicit terminal interrupted notes may still be auto-resumed
-# later because they are already user-visible interrupted outcomes.
+# Restart cleanup edits active-looking outage-window messages. Explicit terminal
+# interrupted notes remain resumable because they are already user-visible.
 _STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _RECOVERY_ROOM_CONCURRENCY = 8
@@ -85,6 +85,7 @@ _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
 _MAX_EXTRA_INTERRUPTED_HISTORY_PAGES = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
+_RECOVERY_INCARNATION_KEY = "io.mindroom.recovery_incarnation"
 _TERMINAL_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED},
 )
@@ -100,6 +101,7 @@ class _InterruptedThread:
     partial_text: str
     agent_name: str
     original_sender_id: str | None = None
+    recovery_incarnation: str | None = field(default=None, compare=False)
     timestamp_ms: int = field(default=0, compare=False)
 
 
@@ -109,6 +111,14 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    # Current runtime generation of the owning bot instance. Candidates whose
+    # latest content carries this stamp are live current-generation output and
+    # must never be repaired, regardless of clocks or live-task snapshots.
+    runtime_generation: str
+    # Source events whose exact turn callbacks remain durably owned. Cleanup
+    # may repair their stale visible messages, but must not create a second
+    # auto-resume turn while the original callback is being replayed.
+    unsettled_turn_source_event_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -118,6 +128,16 @@ class _StaleStreamRecoveryResult:
     room_count: int
     cleaned_count: int
     resumed_count: int
+    retry_required: bool = False
+
+
+@dataclass(frozen=True)
+class _StaleRoomCleanupResult:
+    """Outcome and proof coverage from one room scan."""
+
+    cleaned_count: int
+    interrupted_threads: list[_InterruptedThread]
+    history_complete: bool
 
 
 @dataclass
@@ -129,6 +149,7 @@ class _MessageState:
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
+    source_event_id: str | None = None
     stream_status: str | None = None
     requester_user_id: str | None = None
     bot_user_id: str | None = None
@@ -141,31 +162,32 @@ class _ScannedRoomMessageStates:
 
     message_states: dict[str, _MessageState]
     auto_resume_target_event_ids: set[str]
+    history_complete: bool = True
 
 
 @dataclass(frozen=True)
 class _CleanupScanPolicy:
     """History scan bounds for one startup stale-stream cleanup run."""
 
-    startup_cutoff_ms: int | None
     collect_terminal_interrupted_for_resume: bool
     terminal_interrupted_only: bool
     max_extra_old_pages: int
+    require_complete_history: bool
 
 
 def _cleanup_scan_policy(
     config: Config,
     *,
-    startup_cutoff_ms: int | None,
     terminal_interrupted_only: bool = False,
+    require_complete_history: bool = False,
 ) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
     return _CleanupScanPolicy(
-        startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
         terminal_interrupted_only=terminal_interrupted_only,
         max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
+        require_complete_history=require_complete_history,
     )
 
 
@@ -198,20 +220,19 @@ async def recover_stale_streaming_messages(
     resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int | None,
     scanned_room_ids: set[str],
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
+    stopped_generations = stopped_runtime_generation_proofs(runtime_paths)
+    all_room_actors, joined_room_scan_complete = await _joined_room_actors(actors)
     room_actors = {
         room_id: joined_actors
-        for room_id, joined_actors in (await _joined_room_actors(actors)).items()
+        for room_id, joined_actors in all_room_actors.items()
         if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
     scanned_room_ids.update(room_actors)
-    if not room_actors:
-        return _StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
 
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
     all_bot_user_ids = set(actors)
@@ -220,26 +241,29 @@ async def recover_stale_streaming_messages(
     async def recover_room(
         room_id: str,
         joined_actors: dict[str, StaleStreamCleanupActor],
-    ) -> tuple[int, list[_InterruptedThread]]:
+    ) -> tuple[str, _StaleRoomCleanupResult] | None:
         scan_actor = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
         if scan_actor is None:
             scan_actor = joined_actors[min(joined_actors)]
         async with semaphore:
             try:
-                return await _cleanup_stale_streaming_room(
-                    scan_actor.client,
-                    room_id=room_id,
-                    actors=joined_actors,
-                    bot_user_ids=all_bot_user_ids,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    startup_cutoff_ms=startup_cutoff_ms,
-                    terminal_interrupted_only=target_room_ids is not None,
+                return (
+                    room_id,
+                    await _cleanup_stale_streaming_room(
+                        scan_actor.client,
+                        room_id=room_id,
+                        actors=joined_actors,
+                        bot_user_ids=all_bot_user_ids,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        terminal_interrupted_only=target_room_ids is not None,
+                        proof_generations=stopped_generations,
+                    ),
                 )
             except Exception:
                 scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
-                return 0, []
+                return None
 
     tasks = [
         asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
@@ -247,10 +271,18 @@ async def recover_stale_streaming_messages(
     ]
     cleaned_count = 0
     resumed_count = 0
+    retry_required = False
+    fresh_full_history_room_ids: set[str] = set()
     try:
         for completed in asyncio.as_completed(tasks):
-            room_cleaned_count, interrupted_threads = await completed
-            cleaned_count += room_cleaned_count
+            room_recovery = await completed
+            if room_recovery is None:
+                retry_required = True
+                continue
+            room_id, room_result = room_recovery
+            cleaned_count += room_result.cleaned_count
+            fresh_full_history_room_ids.update([room_id] if room_result.history_complete else [])
+            interrupted_threads = room_result.interrupted_threads
             if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
                 continue
             resumed_count += await _auto_resume_interrupted_threads(
@@ -267,22 +299,41 @@ async def recover_stale_streaming_messages(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    all_room_ids = set(all_room_actors)
+    proof_coverage_complete = bool(
+        stopped_generations
+        and joined_room_scan_complete
+        and target_room_ids is None
+        and all_room_ids
+        and all_room_ids.issubset(fresh_full_history_room_ids),
+    )
+    proof_retry_required = bool(
+        stopped_generations and target_room_ids is None and all_room_ids and not proof_coverage_complete,
+    )
+    acknowledge_stopped_runtime_generation_proofs(
+        runtime_paths,
+        stopped_generations if proof_coverage_complete else set(),
+    )
+    scanned_room_ids.difference_update(all_room_ids if proof_retry_required else set())
+    retry_required |= proof_retry_required
+
     return _StaleStreamRecoveryResult(
         room_count=len(room_actors),
         cleaned_count=cleaned_count,
         resumed_count=resumed_count,
+        retry_required=retry_required,
     )
 
 
 async def _joined_room_actors(
     actors: dict[str, StaleStreamCleanupActor],
-) -> dict[str, dict[str, StaleStreamCleanupActor]]:
+) -> tuple[dict[str, dict[str, StaleStreamCleanupActor]], bool]:
     """Return each joined room once with every available bot account in it."""
 
     async def joined_rooms_for_actor(
         bot_user_id: str,
         actor: StaleStreamCleanupActor,
-    ) -> tuple[str, StaleStreamCleanupActor, list[str]]:
+    ) -> tuple[str, StaleStreamCleanupActor, list[str] | None]:
         try:
             joined_rooms = await get_joined_rooms(actor.client)
         except Exception:
@@ -292,16 +343,20 @@ async def _joined_room_actors(
                 exc_info=True,
             )
             joined_rooms = None
-        return bot_user_id, actor, joined_rooms or []
+        return bot_user_id, actor, joined_rooms
 
     joined_room_results = await asyncio.gather(
         *(joined_rooms_for_actor(bot_user_id, actor) for bot_user_id, actor in actors.items()),
     )
     room_actors: dict[str, dict[str, StaleStreamCleanupActor]] = {}
+    scan_complete = True
     for bot_user_id, actor, joined_room_ids in joined_room_results:
+        if joined_room_ids is None:
+            scan_complete = False
+            continue
         for room_id in joined_room_ids:
             room_actors.setdefault(room_id, {})[bot_user_id] = actor
-    return room_actors
+    return room_actors, scan_complete
 
 
 async def _auto_resume_interrupted_threads(
@@ -347,7 +402,17 @@ async def _auto_resume_interrupted_threads(
                 runtime_paths=runtime_paths,
             )
             delay_due = True
-            delivered = await send_message_result(client, interrupted_thread.room_id, content)
+            delivered = await send_message_result(
+                client,
+                interrupted_thread.room_id,
+                content,
+                transaction_id=_recovery_transaction_id(
+                    "auto-resume",
+                    interrupted_thread.room_id,
+                    interrupted_thread.target_event_id,
+                    interrupted_thread.recovery_incarnation or interrupted_thread.target_event_id,
+                ),
+            )
             if delivered is not None:
                 if conversation_cache is not None:
                     conversation_cache.notify_outbound_message(
@@ -485,17 +550,18 @@ async def _cleanup_stale_streaming_room(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
-) -> tuple[int, list[_InterruptedThread]]:
+    proof_generations: set[str] | None = None,
+) -> _StaleRoomCleanupResult:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
-        return 0, []
+        return _StaleRoomCleanupResult(cleaned_count=0, interrupted_threads=[], history_complete=False)
+    proof_generation_snapshot = proof_generations or set()
     current_time_ms = int(time.time() * 1000)
     scan_policy = _cleanup_scan_policy(
         config,
-        startup_cutoff_ms=startup_cutoff_ms,
         terminal_interrupted_only=terminal_interrupted_only,
+        require_complete_history=bool(proof_generation_snapshot),
     )
     scanned_state = await _scan_room_message_states(
         scan_client,
@@ -509,7 +575,11 @@ async def _cleanup_stale_streaming_room(
     )
     message_states = scanned_state.message_states
     if not message_states:
-        return 0, []
+        return _StaleRoomCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=[],
+            history_complete=scanned_state.history_complete,
+        )
 
     cleaned_count = 0
     prior_edit_succeeded_by_bot: set[str] = set()
@@ -538,6 +608,7 @@ async def _cleanup_stale_streaming_room(
             current_time_ms=current_time_ms,
             scan_policy=scan_policy,
             prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
+            proof_generations=proof_generation_snapshot,
         )
         if edited:
             cleaned_count += 1
@@ -545,7 +616,11 @@ async def _cleanup_stale_streaming_room(
         if interrupted is not None:
             interrupted_threads.append(interrupted)
 
-    return cleaned_count, interrupted_threads
+    return _StaleRoomCleanupResult(
+        cleaned_count=cleaned_count,
+        interrupted_threads=interrupted_threads,
+        history_complete=scanned_state.history_complete,
+    )
 
 
 async def _process_stale_room_candidate(
@@ -562,11 +637,19 @@ async def _process_stale_room_candidate(
     current_time_ms: int,
     scan_policy: _CleanupScanPolicy,
     prior_edit_succeeded: bool,
+    proof_generations: set[str],
 ) -> tuple[bool, _InterruptedThread | None]:
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
+    latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
+    proof_owned = isinstance(latest_generation, str) and latest_generation in proof_generations
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
-    if agent_name is None or _should_skip_for_startup_cleanup_window(
+    if agent_name is None:
+        if proof_owned:
+            msg = f"Stopped-owner agent mapping incomplete for {room_id} {target_event_id}"
+            raise RuntimeError(msg)
+        return False, None
+    if not proof_owned and _should_skip_for_startup_cleanup_window(
         state,
         now_ms=current_time_ms,
         scan_policy=scan_policy,
@@ -574,8 +657,14 @@ async def _process_stale_room_candidate(
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
+    if not _has_cleanup_authority(state, actor=actor, runtime_paths=runtime_paths):
+        if proof_owned:
+            msg = f"Stopped-owner authority incomplete for {room_id} {target_event_id}"
+            raise RuntimeError(msg)
+        return False, None
+    recovery_incarnation = _recovery_incarnation(state, target_event_id=target_event_id)
     if _is_cleanup_candidate(state):
-        return await _cleanup_candidate_message(
+        result = await _cleanup_candidate_message(
             actor.client,
             room_id=room_id,
             target_event_id=target_event_id,
@@ -586,23 +675,62 @@ async def _process_stale_room_candidate(
             conversation_cache=actor.conversation_cache,
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
+            recovery_incarnation=recovery_incarnation,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
+    elif _has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state):
+        result = await _handle_interrupted_message(
+            actor.client,
+            room_id=room_id,
+            target_event_id=target_event_id,
+            state=state,
+            auto_resume_target_event_ids=auto_resume_target_event_ids,
+            can_auto_resume=_has_resumable_interrupted_note(state),
+            bot_user_ids=bot_user_ids,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=actor.conversation_cache,
+            agent_name=agent_name,
+            prior_edit_succeeded=prior_edit_succeeded,
+            recovery_incarnation=recovery_incarnation,
+        )
+    else:
         return False, None
-    return await _handle_interrupted_message(
-        actor.client,
+    if proof_owned and not result[0]:
+        msg = f"Stopped-owner certification incomplete for {room_id} {target_event_id}"
+        raise RuntimeError(msg)
+    return _without_auto_resume_for_unsettled_turn(
+        result,
+        actor=actor,
+        state=state,
         room_id=room_id,
         target_event_id=target_event_id,
-        state=state,
-        auto_resume_target_event_ids=auto_resume_target_event_ids,
-        can_auto_resume=_has_resumable_interrupted_note(state),
-        bot_user_ids=bot_user_ids,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=actor.conversation_cache,
-        agent_name=agent_name,
-        prior_edit_succeeded=prior_edit_succeeded,
     )
+
+
+def _without_auto_resume_for_unsettled_turn(
+    result: tuple[bool, _InterruptedThread | None],
+    *,
+    actor: StaleStreamCleanupActor,
+    state: _MessageState,
+    room_id: str,
+    target_event_id: str,
+) -> tuple[bool, _InterruptedThread | None]:
+    """Drop a relay candidate while exact callback replay owns its source."""
+    edited, interrupted = result
+    if (
+        interrupted is not None
+        and state.source_event_id is not None
+        and state.source_event_id in actor.unsettled_turn_source_event_ids
+    ):
+        logger.info(
+            "Skipping auto-resume because exact turn recovery remains pending",
+            room_id=room_id,
+            thread_id=state.thread_id,
+            target_event_id=target_event_id,
+            source_event_id=state.source_event_id,
+        )
+        interrupted = None
+    return edited, interrupted
 
 
 async def _handle_interrupted_message(
@@ -619,16 +747,10 @@ async def _handle_interrupted_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
+    recovery_incarnation: str,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
-    interrupted = None
-    if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
-        interrupted = _interrupted_thread_from_terminal_state(
-            room_id=room_id,
-            target_event_id=target_event_id,
-            state=state,
-            agent_name=agent_name,
-        )
+    requires_stopped_owner_certification = _has_runtime_generation_stamp(state)
     repaired = await _repair_restart_marked_message_metadata(
         client,
         room_id=room_id,
@@ -638,7 +760,18 @@ async def _handle_interrupted_message(
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
         prior_edit_succeeded=prior_edit_succeeded,
+        recovery_incarnation=recovery_incarnation,
     )
+    interrupted = None
+    stopped_owner_certified = not requires_stopped_owner_certification or repaired
+    if stopped_owner_certified and can_auto_resume and target_event_id not in auto_resume_target_event_ids:
+        interrupted = _interrupted_thread_from_terminal_state(
+            room_id=room_id,
+            target_event_id=target_event_id,
+            state=state,
+            agent_name=agent_name,
+            recovery_incarnation=recovery_incarnation,
+        )
     await _redact_stop_reactions(
         client,
         room_id=room_id,
@@ -659,10 +792,11 @@ async def _repair_restart_marked_message_metadata(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
+    recovery_incarnation: str,
 ) -> bool:
-    """Repair non-terminal stream metadata on already restart-marked messages."""
+    """Repair active metadata and certify positively stopped runtime ownership."""
     assert state.latest_body is not None
-    if not _has_non_terminal_stream_status(state.latest_content):
+    if not _has_non_terminal_stream_status(state.latest_content) and not _has_runtime_generation_stamp(state):
         return False
 
     try:
@@ -673,10 +807,14 @@ async def _repair_restart_marked_message_metadata(
             room_id=room_id,
             target_event_id=target_event_id,
             new_text=state.latest_body,
-            preserved_content=_terminal_stream_content(state.latest_content),
+            preserved_content=_terminal_stream_content(
+                state.latest_content,
+                recovery_incarnation=recovery_incarnation,
+            ),
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
+            recovery_incarnation=recovery_incarnation,
         )
     except Exception as exc:
         logger.warning(
@@ -699,6 +837,7 @@ async def _cleanup_one_stale_message(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
+    recovery_incarnation: str,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
     assert state.latest_body is not None
@@ -707,10 +846,14 @@ async def _cleanup_one_stale_message(
         room_id=room_id,
         target_event_id=target_event_id,
         new_text=build_restart_interrupted_body(state.latest_body),
-        preserved_content=_terminal_stream_content(state.latest_content),
+        preserved_content=_terminal_stream_content(
+            state.latest_content,
+            recovery_incarnation=recovery_incarnation,
+        ),
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
+        recovery_incarnation=recovery_incarnation,
     )
     if not edit_succeeded:
         return False, None
@@ -724,6 +867,7 @@ async def _cleanup_one_stale_message(
             partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
             agent_name=agent_name,
             original_sender_id=state.requester_user_id,
+            recovery_incarnation=recovery_incarnation,
             timestamp_ms=state.latest_timestamp,
         )
     await _redact_stop_reactions(
@@ -748,6 +892,7 @@ async def _cleanup_candidate_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
+    recovery_incarnation: str,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Best-effort cleanup of one stale candidate message."""
     try:
@@ -763,6 +908,7 @@ async def _cleanup_candidate_message(
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
             agent_name=agent_name,
+            recovery_incarnation=recovery_incarnation,
         )
     except Exception as exc:
         logger.warning(
@@ -786,7 +932,7 @@ async def _scan_room_message_states(
     scan_policy: _CleanupScanPolicy,
 ) -> _ScannedRoomMessageStates:
     """Scan room history and return latest state by original event ID."""
-    message_states, message_events = await _collect_room_history_events(
+    message_states, message_events, history_complete = await _collect_room_history_events(
         client,
         room_id=room_id,
         cleanup_bot_user_ids=cleanup_bot_user_ids,
@@ -832,6 +978,7 @@ async def _scan_room_message_states(
     return _ScannedRoomMessageStates(
         message_states=message_states,
         auto_resume_target_event_ids=auto_resume_target_event_ids,
+        history_complete=history_complete,
     )
 
 
@@ -858,12 +1005,18 @@ async def _collect_room_history_events(
     cleanup_bot_user_ids: set[str],
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
-) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText | nio.RoomMessageNotice]]:
+) -> tuple[
+    dict[str, _MessageState],
+    list[nio.RoomMessageText | nio.RoomMessageNotice],
+    bool,
+]:
     """Return visible room-message events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
     message_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
     from_token: str | None = None
+    seen_end_tokens: set[str] = set()
     lookback_pages_scanned = 0
+    history_complete = False
 
     while True:
         response = await client.room_messages(
@@ -873,14 +1026,11 @@ async def _collect_room_history_events(
             direction=nio.MessageDirection.back,
         )
         if not isinstance(response, nio.RoomMessagesResponse):
-            logger.warning(
-                "Failed to fetch room history during stale stream cleanup",
-                room_id=room_id,
-                error=str(response),
-            )
-            return {}, []
+            msg = f"Failed to fetch room history during stale stream cleanup for {room_id}: {response}"
+            raise TypeError(msg)
 
         if not response.chunk:
+            history_complete = True
             break
 
         for event in response.chunk:
@@ -902,8 +1052,10 @@ async def _collect_room_history_events(
                     error=str(exc),
                 )
 
-        if not response.end:
+        if not response.end or response.end in seen_end_tokens:
+            history_complete = not response.end
             break
+        seen_end_tokens.add(response.end)
         lookback_pages_scanned, stop_scan = _lookback_scan_state(
             response.chunk,
             now_ms=now_ms,
@@ -914,7 +1066,7 @@ async def _collect_room_history_events(
             break
         from_token = response.end
 
-    return message_states, message_events
+    return message_states, message_events, history_complete
 
 
 def _merge_bot_resolved_message_states(
@@ -938,6 +1090,7 @@ def _merge_bot_resolved_message_states(
             bot_user_id=message.sender,
             requester_user_id=requester_user_id,
             fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
+            fallback_source_event_id=scanned_message.reply_to_event_id if scanned_message is not None else None,
         )
 
 
@@ -949,6 +1102,7 @@ def _merge_resolved_message_state(
     bot_user_id: str,
     requester_user_id: str | None,
     fallback_thread_id: str | None = None,
+    fallback_source_event_id: str | None = None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -963,6 +1117,7 @@ def _merge_resolved_message_state(
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id or fallback_thread_id
+    state.source_event_id = message.reply_to_event_id or fallback_source_event_id
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
     state.bot_user_id = bot_user_id
@@ -1451,6 +1606,7 @@ async def _edit_stale_message(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
+    recovery_incarnation: str | None = None,
 ) -> bool:
     """Edit a stale message.
 
@@ -1482,6 +1638,12 @@ async def _edit_stale_message(
         content,
         new_text,
         extra_content=extra_content,
+        transaction_id=_recovery_transaction_id(
+            "certify",
+            room_id,
+            target_event_id,
+            recovery_incarnation or target_event_id,
+        ),
     )
     if delivered is not None:
         if conversation_cache is not None:
@@ -1526,11 +1688,18 @@ def _has_non_terminal_stream_status(content: dict[str, Any] | None) -> bool:
     return isinstance(stream_status, str) and stream_status not in _TERMINAL_STREAM_STATUSES
 
 
-def _terminal_stream_content(content: dict[str, Any] | None) -> dict[str, Any]:
-    """Return metadata with a terminal stream status for cleanup edits."""
-    if content is None:
-        return {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-    return {**content, STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+def _terminal_stream_content(
+    content: dict[str, Any] | None,
+    *,
+    recovery_incarnation: str,
+) -> dict[str, Any]:
+    """Return certified terminal metadata for cleanup edits."""
+    terminal_content = dict(content or {})
+    terminal_content.pop(STREAM_GENERATION_KEY, None)
+    terminal_content[_RECOVERY_INCARNATION_KEY] = recovery_incarnation
+    if terminal_content.get(STREAM_STATUS_KEY) not in _TERMINAL_STREAM_STATUSES:
+        terminal_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
+    return terminal_content
 
 
 async def _redact_stop_reactions(
@@ -1645,6 +1814,32 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
     return f"{stripped_text[: limit - 1]}…"
 
 
+def _recovery_incarnation(state: _MessageState, *, target_event_id: str) -> str:
+    """Return stable identity for one interrupted visible response incarnation."""
+    runtime_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
+    if isinstance(runtime_generation, str):
+        visible_event_id = state.latest_event_id or target_event_id
+        identity = f"{runtime_generation}\0{visible_event_id}\0{target_event_id}"
+        return hashlib.sha256(identity.encode()).hexdigest()
+    existing_incarnation = (state.latest_content or {}).get(_RECOVERY_INCARNATION_KEY)
+    if isinstance(existing_incarnation, str) and existing_incarnation:
+        return existing_incarnation
+    visible_event_id = state.latest_event_id or target_event_id
+    identity = f"{visible_event_id}\0{target_event_id}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _recovery_transaction_id(
+    operation: str,
+    room_id: str,
+    target_event_id: str,
+    recovery_incarnation: str,
+) -> str:
+    """Return one stable Matrix transaction ID for an idempotent recovery action."""
+    identity = f"{operation}\0{room_id}\0{target_event_id}\0{recovery_incarnation}"
+    return f"mindroom-{operation}-{hashlib.sha256(identity.encode()).hexdigest()}"
+
+
 def _ordered_auto_resume_candidates(
     interrupted: list[_InterruptedThread],
 ) -> list[_InterruptedThread]:
@@ -1697,6 +1892,7 @@ def _interrupted_thread_from_terminal_state(
     target_event_id: str,
     state: _MessageState,
     agent_name: str,
+    recovery_incarnation: str,
 ) -> _InterruptedThread | None:
     """Build an auto-resume record for an already-terminal interrupted response."""
     assert state.latest_body is not None
@@ -1709,8 +1905,30 @@ def _interrupted_thread_from_terminal_state(
         partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
         agent_name=agent_name,
         original_sender_id=state.requester_user_id,
+        recovery_incarnation=recovery_incarnation,
         timestamp_ms=state.latest_timestamp,
     )
+
+
+def _has_cleanup_authority(
+    state: _MessageState,
+    *,
+    actor: StaleStreamCleanupActor,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Require positive stopped-owner proof before repairing stamped output."""
+    latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
+    if not isinstance(latest_generation, str):
+        return True
+    return latest_generation != actor.runtime_generation and runtime_generation_owner_stopped(
+        runtime_paths,
+        latest_generation,
+    )
+
+
+def _has_runtime_generation_stamp(state: _MessageState) -> bool:
+    """Return whether the latest visible state still needs owner certification."""
+    return isinstance((state.latest_content or {}).get(STREAM_GENERATION_KEY), str)
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:
@@ -1729,31 +1947,15 @@ def _should_skip_for_startup_cleanup_window(
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
 ) -> bool:
-    """Return whether startup cleanup should ignore one candidate by age."""
-    timestamp_ms = state.latest_timestamp
-    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
-        return True
-    # A terminal interruption cannot still be receiving chunks. Targeted
-    # replacement recovery passes no cutoff because local and Matrix clocks
-    # are not comparable.
-    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
-        scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
-    ):
-        return True
-    if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
+    """Return whether startup cleanup should ignore one candidate by age.
+
+    Current-run ownership is proven by the generation stamp, not by clocks, so
+    the only age bound left here is the history lookback window that stops old
+    messages from being mutated.
+    """
+    if _is_older_than_cleanup_window(state.latest_timestamp, now_ms=now_ms):
         return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))
     return False
-
-
-def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int | None) -> bool:
-    """Return whether a message may have been created by the current process."""
-    return startup_cutoff_ms is not None and timestamp_ms >= startup_cutoff_ms
-
-
-def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
-    """Return whether a timestamp is still within the startup recency guard."""
-    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
 
 
 def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
@@ -1779,6 +1981,8 @@ def _lookback_scan_state(
     lookback_pages_scanned: int,
 ) -> tuple[int, bool]:
     """Return updated old-page count and whether history pagination should stop."""
+    if scan_policy.require_complete_history:
+        return lookback_pages_scanned, False
     if not _chunk_reaches_cleanup_lookback_limit(events, now_ms=now_ms):
         return lookback_pages_scanned, False
     if not scan_policy.collect_terminal_interrupted_for_resume:

@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
-from unittest.mock import ANY, MagicMock, patch
+from typing import TYPE_CHECKING, cast
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from agno.db.base import SessionType
@@ -24,6 +24,7 @@ from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -39,12 +40,21 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.text_ingress_dispatch import _run_claimed_response
+from mindroom.text_ingress_dispatch import (
+    _blocked_before_plan,
+    _PreparedTextDispatch,
+    _run_claimed_response,
+    dispatch_text_message,
+)
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.text_ingress_dispatch import _ReplayGuard
+    from mindroom.turn_controller import TurnController
+    from mindroom.turn_policy import PreparedDispatch
 
 
 def _store(
@@ -62,6 +72,418 @@ def _store(
             on_terminal_turn_persisted=on_terminal_turn_persisted,
         ),
     )
+
+
+def _is_claimed(store: TurnStore, event_id: str) -> bool:
+    """Inspect the reservation-owned records at the TurnStore unit seam."""
+    with store._pending_claim_lock:
+        return any(event_id in claim.indexed_event_ids for claim in store._pending_turn_claims)
+
+
+def test_complete_turn_claim_owns_source_and_discovery_alias(tmp_path: Path) -> None:
+    """One reservation-owned record carries every live identity."""
+    store = _store(tmp_path)
+    claimed_turn = TurnRecord.create(
+        ["$relay"],
+        discovery_event_ids=("$routed",),
+        completed=False,
+    )
+
+    assert store.try_claim_turn(claimed_turn)
+    assert _is_claimed(store, "$relay") is True
+    assert _is_claimed(store, "$routed") is True
+    store.release_pending_turn_claim(claimed_turn)
+    assert _is_claimed(store, "$routed") is False
+    assert _is_claimed(store, "$relay") is False
+
+
+def test_source_replay_collides_with_live_discovery_alias(tmp_path: Path) -> None:
+    """A routed source stays owned until both original and relay settle."""
+    store = _store(tmp_path)
+    original = TurnRecord.create(["$routed"], completed=False)
+    relay = TurnRecord.create(["$relay"], discovery_event_ids=("$routed",), completed=False)
+    replay = TurnRecord.create(["$routed"], completed=False)
+
+    assert store.try_claim_turn(original)
+    assert store.try_claim_turn(relay)
+    store.release_pending_turn_claim(original)
+    assert store.try_claim_turn(replay) is False
+
+    store.release_pending_turn_claim(relay)
+    assert store.try_claim_turn(replay) is True
+    store.release_pending_turn_claim(replay)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_releases_claim_when_router_alias_discovery_fails(tmp_path: Path) -> None:
+    """Every failure after the primary claim must leave the source replayable."""
+    store = _store(tmp_path)
+
+    def fail_alias_discovery(_event: object) -> str:
+        msg = "alias discovery failed"
+        raise RuntimeError(msg)
+
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(
+                turn_store=store,
+                ingress=SimpleNamespace(router_relay_original_event_id=fail_alias_discovery),
+            ),
+        ),
+    )
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+
+    with pytest.raises(RuntimeError, match="alias discovery failed"):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
+        )
+
+    assert _is_claimed(store, "$relay") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_claims_complete_router_relay_turn_before_first_await(tmp_path: Path) -> None:
+    """Dispatch claims source and routed alias together before preparation."""
+    store = _store(tmp_path)
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
+    )
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    prepared = SimpleNamespace(
+        handled_turn=TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+        event=raw_event,
+    )
+    observed: dict[str, bool] = {}
+    prepared_turns: list[TurnRecord | None] = []
+
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
+        prepared_turns.append(handled_turn)
+        return prepared
+
+    async def blocked(*_args: object, **_kwargs: object) -> bool:
+        observed["routed_in_flight"] = _is_claimed(store, "$routed")
+        return True
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=capture_prepared,
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(side_effect=blocked),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
+        )
+
+    assert observed["routed_in_flight"] is True
+    assert prepared_turns == [
+        TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+    ]
+    assert _is_claimed(store, "$routed") is False
+    assert _is_claimed(store, "$relay") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) -> None:
+    """A relay whose routed alias is already owned leaves that owner untouched.
+
+    The routed original may still be live when the relay overlaps it. The relay's
+    up-front claim must fail for that alias and never release it, so the original
+    turn's claim survives the relay's finally block.
+    """
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
+    )
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
+    prepared_claims: list[TurnRecord | None] = []
+
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
+        prepared_claims.append(handled_turn)
+        return prepared
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=capture_prepared,
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
+        )
+
+    # The relay released its complete record; the routed original still owns its source.
+    assert prepared_claims == [
+        TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+    ]
+    assert _is_claimed(store, "$routed") is True
+    assert _is_claimed(store, "$relay") is False
+
+
+def _prepared_replay_guard_dispatch(*, degraded: bool) -> tuple[_PreparedTextDispatch, TurnRecord]:
+    event = PreparedTextEvent(
+        sender="@user:example.org",
+        event_id="$current",
+        body="current",
+        source={},
+        server_timestamp=1_000,
+    )
+    handled_turn = TurnRecord.create(["$current", "$coalesced-sibling"], completed=False)
+    prepared = _PreparedTextDispatch(
+        command=None,
+        event=event,
+        handled_turn=handled_turn,
+        payload_metadata=None,
+        dispatch=cast(
+            "PreparedDispatch",
+            SimpleNamespace(
+                envelope=SimpleNamespace(
+                    origin=SimpleNamespace(may_be_superseded_by_newer_requester_turn=True),
+                ),
+            ),
+        ),
+        replay_guard=cast(
+            "_ReplayGuard",
+            SimpleNamespace(
+                degraded=degraded,
+                history=[],
+                thread_id="$thread",
+            ),
+        ),
+        dispatch_started_at=0.0,
+    )
+    return prepared, handled_turn
+
+
+@pytest.mark.asyncio
+async def test_full_replay_guard_receives_every_current_turn_event_id() -> None:
+    """The full-history seam must not treat a coalesced sibling as newer work."""
+    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=False)
+    full_guard = MagicMock(return_value=False)
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock()),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_in_thread=full_guard,
+        ),
+    )
+
+    assert (
+        await _blocked_before_plan(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            prepared,
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
+            requester_user_id="@user:example.org",
+        )
+        is False
+    )
+    assert full_guard.call_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> None:
+    """The cache fallback seam must not treat a coalesced sibling as newer work."""
+    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=True)
+    cached_guard = AsyncMock(return_value=False)
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock()),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_cached_thread_event=cached_guard,
+        ),
+    )
+
+    assert (
+        await _blocked_before_plan(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            prepared,
+            command_executor=MagicMock(),
+            visible_responses=MagicMock(),
+            requester_user_id="@user:example.org",
+        )
+        is False
+    )
+    assert cached_guard.await_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_replay_guard_persists_no_response_supersession(tmp_path: Path) -> None:
+    """A skipped older turn needs durable no-response proof for restart and live-fuzz attribution."""
+    store = _store(tmp_path)
+    prepared, _handled_turn = _prepared_replay_guard_dispatch(degraded=False)
+    visible_responses = SimpleNamespace(settle_source_events_ignored=AsyncMock())
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock(), turn_store=store),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_in_thread=MagicMock(return_value=True),
+        ),
+    )
+
+    assert await _blocked_before_plan(
+        controller,
+        MagicMock(room_id="!room:example.org"),
+        prepared,
+        command_executor=MagicMock(),
+        visible_responses=visible_responses,
+        requester_user_id="@user:example.org",
+    )
+
+    persisted = store.get_turn_record("$current")
+    assert persisted is not None
+    assert persisted.completed is True
+    assert persisted.response_event_id is None
+    assert store.get_turn_record("$coalesced-sibling") == persisted
+    visible_responses.settle_source_events_ignored.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_path: Path) -> None:
+    """A responding relay keeps its routed alias durable without stealing its live claim."""
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
+    marked = store.mark_source_redacted("$routed")
+    assert marked is not None
+
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$relay")
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    prepared = SimpleNamespace(
+        event=raw_event,
+        payload_metadata=None,
+        handled_turn=TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+        ),
+        dispatch=SimpleNamespace(
+            requester_user_id="@user:example.org",
+            target=target,
+            scheduled_history_budget=None,
+        ),
+        dispatch_started_at=1.0,
+    )
+    plan = SimpleNamespace(
+        kind="respond",
+        response_action=SimpleNamespace(kind="reject"),
+    )
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(
+                turn_store=store,
+                ingress=SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed"),
+                turn_policy=SimpleNamespace(plan_turn=AsyncMock(return_value=plan)),
+                response_runner=SimpleNamespace(has_active_response_for_target=MagicMock()),
+            ),
+            _client=lambda: MagicMock(),
+        ),
+    )
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch.is_dm_room",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+            command_executor=MagicMock(),
+            visible_responses=SimpleNamespace(settle_source_events_ignored=AsyncMock()),
+        )
+
+    persisted = store.get_turn_record("$relay")
+    assert persisted is not None
+    assert persisted.discovery_event_ids == ("$routed",)
+    assert persisted.redacted_source_event_ids == ("$routed",)
+    # The relay released only its own claim; the overlapping original still owns its alias.
+    assert _is_claimed(store, "$routed") is True
+    assert _is_claimed(store, "$relay") is False
+
+    store._ledger.flush()
+    _reset_handled_turn_ledger_runtime()
+    restarted = _store(tmp_path)
+    assert restarted.get_turn_record("$routed") == persisted
 
 
 def _load_with_recovery(
@@ -407,6 +829,41 @@ def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> 
     assert sum(claims) == 1
     store.release_pending_turn_claim(turn)
     assert store.try_claim_turn(turn) is True
+
+
+def test_is_claimed_in_flight_tracks_live_claims(tmp_path: Path) -> None:
+    """A replayed delivery must be detectable while its first delivery is answered."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+
+    assert _is_claimed(store, "$source") is False
+    assert store.try_claim_turn(turn) is True
+    assert _is_claimed(store, "$source") is True
+    store.release_pending_turn_claim(turn)
+    assert _is_claimed(store, "$source") is False
+
+
+def test_same_turn_can_reclaim_terminal_owner_for_recovery(tmp_path: Path) -> None:
+    """Current edit and restart recovery may reclaim its own durable source identity."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    store.record_turn(turn)
+
+    assert store.try_claim_turn(turn) is True
+    assert _is_claimed(store, "$source") is True
+    store.release_pending_turn_claim(turn)
+
+
+def test_is_claimed_in_flight_sees_absorbed_discovery_alias(tmp_path: Path) -> None:
+    """Discovery aliases folded into a claim also count as in flight."""
+    store = _store(tmp_path)
+    turn = replace(
+        TurnRecord.create(["$source"], completed=False),
+        discovery_event_ids=("$alias",),
+    )
+
+    assert store.try_claim_turn(turn) is True
+    assert _is_claimed(store, "$alias") is True
 
 
 def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Path) -> None:

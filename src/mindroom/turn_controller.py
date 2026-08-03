@@ -121,7 +121,7 @@ from mindroom.turn_record import canonicalize_turn_record
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     import nio
     import structlog
@@ -317,6 +317,21 @@ def _queued_notice_dispatch_metadata(
     )
 
 
+def _pending_turn_claim_dispatch_metadata(
+    turn_store: TurnStore,
+    turn_claim: TurnRecord | None,
+) -> tuple[PendingDispatchMetadata, ...]:
+    if turn_claim is None:
+        return ()
+    return (
+        PendingDispatchMetadata(
+            kind=_PENDING_TURN_CLAIM_METADATA_KIND,
+            payload=turn_claim,
+            close=lambda: turn_store.release_pending_turn_claim(turn_claim),
+        ),
+    )
+
+
 def _consume_queued_notice_reservations_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
     *,
@@ -500,6 +515,7 @@ class TurnController:
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         may_be_superseded_by_newer_requester_turn: bool,
+        current_turn_event_ids: Collection[str] = (),
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
         return has_newer_unresponded_in_thread(
@@ -507,6 +523,7 @@ class TurnController:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            current_turn_event_ids=current_turn_event_ids,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,
@@ -525,6 +542,7 @@ class TurnController:
         requester_user_id: str,
         thread_id: str | None,
         may_be_superseded_by_newer_requester_turn: bool,
+        current_turn_event_ids: Collection[str] = (),
     ) -> bool:
         """Return positive replay proof from raw cached room events when thread history degraded."""
         event_cache = self.deps.runtime.event_cache
@@ -534,6 +552,7 @@ class TurnController:
             requester_user_id=requester_user_id,
             thread_id=thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            current_turn_event_ids=current_turn_event_ids,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
             get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
@@ -645,7 +664,7 @@ class TurnController:
         )
         try:
             await self._enqueue_for_dispatch(
-                dispatch_event,
+                prepared_event,
                 room,
                 source_kind=envelope.source_kind,
                 callback_source_kind=callback_source_kind,
@@ -658,6 +677,7 @@ class TurnController:
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
+                discovery_event_id=self.deps.ingress.router_relay_original_event_id(dispatch_event),
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -848,6 +868,7 @@ class TurnController:
         prepared_source_kind = (
             self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
         )
+        ingress_turn = reservation_owner.pending_turn_claim or TurnRecord.create([prepared_event.event_id])
         if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
@@ -884,18 +905,21 @@ class TurnController:
                     selection=selection,
                     user_id=envelope.requester_id,
                     source_event_id=prepared_event.event_id,
+                    source_turn=ingress_turn,
                 )
                 return _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
+            routed_alias = self.deps.ingress.router_relay_original_event_id(dispatch_event)
             if (turn_claim := reservation_owner.pending_turn_claim) is not None:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)
                 reservation_owner.pending_turn_claim = None
             await self._dispatch_command_control_input(
                 room=room,
-                dispatch_event=dispatch_event,
+                dispatch_event=prepared_event,
                 envelope=envelope,
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
+                discovery_event_id=routed_alias,
             )
             return _IngressAdmissionOutcome.CONSUMED
         return await self._enqueue_prepared_text_for_dispatch(
@@ -930,14 +954,21 @@ class TurnController:
             prechecked_event.requester_user_id,
         )
 
-    async def _notify_command_target_not_ready(
+    async def _handle_unresolvable_command_target(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
+        *,
+        dispatch_timing: DispatchPipelineTiming | None,
     ) -> bool:
-        """Fail one command visibly when its conversation cannot be resolved yet."""
-        if command_parser.parse(event.body.strip()) is None:
+        """Hydrate and terminalize one canonical command whose target is unresolved."""
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            event,
+            dispatch_timing=dispatch_timing,
+        )
+        if self.deps.ingress.command_control_input_for_event(prepared_event) is None:
             return False
+
         self.deps.logger.warning(
             "command_target_not_ready",
             event_id=event.event_id,
@@ -951,8 +982,13 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
+            routed_alias = self.deps.ingress.router_relay_original_event_id(event)
+            command_turn = TurnRecord.create(
+                [event.event_id],
+                discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
+            )
             pending_turn, response_event_id = await self.deps.visible_responses.prepare_visible_delivery_turn(
-                TurnRecord.create([event.event_id]),
+                command_turn,
                 requester_id=event.sender,
                 correlation_id=event.event_id,
                 target=target,
@@ -972,7 +1008,13 @@ class TurnController:
                 canonicalize_turn_record(pending_turn, response_event_id=response_event_id),
             )
             return True
-        await self.deps.visible_responses.settle_source_events_ignored(TurnRecord.create([event.event_id]))
+        routed_alias = self.deps.ingress.router_relay_original_event_id(event)
+        await self.deps.visible_responses.settle_source_events_ignored(
+            TurnRecord.create(
+                [event.event_id],
+                discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
+            ),
+        )
         return True
 
     async def _dispatch_command_control_input(
@@ -983,6 +1025,7 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
+        discovery_event_id: str | None,
     ) -> None:
         """Dispatch one command as a control input without entering the coalescing gate."""
         pending_event = PendingEvent(
@@ -994,16 +1037,22 @@ class TurnController:
             hook_source=envelope.hook_source,
             message_received_depth=envelope.message_received_depth,
             trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
+            discovery_event_id=discovery_event_id,
         )
         batch = build_coalesced_batch(
             CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
         handoff = build_dispatch_handoff(batch)
+        source_metadata = dict(handoff.source_event_metadata)
+        routed_aliases = tuple(
+            filter(None, (item.discovery_event_id for item in source_metadata.values())),
+        )
         handled_turn = TurnRecord.create(
             handoff.source_event_ids,
+            discovery_event_ids=routed_aliases,
             source_event_prompts=dict(handoff.source_event_prompts),
-            source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
+            source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
         )
         await self._dispatch_handoff(handoff, handled_turn=handled_turn)
 
@@ -1022,6 +1071,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
+        discovery_event_id: str | None = None,
         callback_source_kind: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
@@ -1052,15 +1102,11 @@ class TurnController:
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
-        dispatch_metadata = _queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target)
-        if (turn_claim := reservation_owner.pending_turn_claim) is not None:
-            dispatch_metadata += (
-                PendingDispatchMetadata(
-                    kind=_PENDING_TURN_CLAIM_METADATA_KIND,
-                    payload=turn_claim,
-                    close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
-                ),
-            )
+        turn_claim = reservation_owner.pending_turn_claim
+        dispatch_metadata = _queued_notice_dispatch_metadata(
+            queued_notice_reservation,
+            queued_notice_target,
+        ) + _pending_turn_claim_dispatch_metadata(self.deps.turn_store, turn_claim)
         pending_event = PendingEvent(
             event=event,
             room=room,
@@ -1070,7 +1116,7 @@ class TurnController:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+            discovery_event_id=discovery_event_id or self.deps.ingress.router_relay_original_event_id(event),
             callback_source_kind=callback_source_kind,
             turn_dispatch_recovery=turn_dispatch_recovery_active(),
             dispatch_metadata=dispatch_metadata,
@@ -1288,6 +1334,7 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        source_turn: TurnRecord | None = None,
     ) -> None:
         """Own claim settlement around one validated interactive selection."""
         try:
@@ -1296,6 +1343,7 @@ class TurnController:
                 selection=selection,
                 user_id=user_id,
                 source_event_id=source_event_id,
+                source_turn=source_turn,
             )
             interactive.commit_selection(selection)
         except BaseException:
@@ -1309,6 +1357,7 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        source_turn: TurnRecord | None = None,
     ) -> None:
         """Execute one selection after its caller transfers claim ownership."""
         if await self._interactive_selection_is_durably_terminal(
@@ -1333,10 +1382,18 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=selection.question_event_id,
         )
+        source_turn_aliases = source_turn.discovery_event_ids if source_turn is not None else ()
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
                 [selection.question_event_id],
-                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                discovery_event_ids=tuple(
+                    dict.fromkeys(
+                        (
+                            *((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                            *source_turn_aliases,
+                        ),
+                    ),
+                ),
                 requester_id=user_id,
                 correlation_id=selection.question_event_id,
             ),
@@ -1991,8 +2048,6 @@ class TurnController:
         try:
             handoff = build_dispatch_handoff(batch)
         except BaseException:
-            # Close-and-clear so the gate's segment owner cannot close the
-            # same metadata a second time when this exception reaches it.
             close_pending_event_metadata_once(list(batch.pending_events))
             raise
         _consume_queued_notice_reservations_from_metadata(
@@ -2175,7 +2230,11 @@ class TurnController:
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         except ThreadMembershipLookupError:
-            if await self._notify_command_target_not_ready(room, event):
+            if await self._handle_unresolvable_command_target(
+                room,
+                event,
+                dispatch_timing=dispatch_timing,
+            ):
                 return _IngressAdmissionOutcome.CONSUMED
             raise
         if await self._should_skip_router_before_shared_ingress_work(
@@ -2418,6 +2477,7 @@ class TurnController:
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
+        reservation_owner.pending_turn_claim = None
         await reservation_owner.admit(
             admission_key,
             ready_task=ready_task,

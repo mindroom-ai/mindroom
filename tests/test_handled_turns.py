@@ -607,6 +607,28 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
     assert recovered.requester_id == "@user:example.com"
 
 
+def test_current_source_revision_is_reverse_resolvable(temp_dir: Path) -> None:
+    """A redacted edit must resolve back to the one source whose current body it supplied."""
+    tracker = HandledTurnLedger("test_source_revision_lookup", base_path=temp_dir)
+    record = TurnRecord.create(
+        ["$first", "$second"],
+        response_event_id="$response",
+        source_event_revisions={
+            "$first": (1_000_010, "$edit-first"),
+            "$second": (1_000_020, "$edit-second"),
+        },
+    )
+    tracker.record_handled_turn(record)
+
+    resolved = tracker.source_for_revision_event_id("$edit-second")
+    assert resolved is not None
+    resolved_record, source_event_id = resolved
+    assert source_event_id == "$second"
+    assert resolved_record.source_event_ids == record.source_event_ids
+    assert resolved_record.source_event_revisions == record.source_event_revisions
+    assert tracker.source_for_revision_event_id("$unknown") is None
+
+
 def test_user_stop_state_persists_across_restart(temp_dir: Path) -> None:
     """Durable STOP order and visible completion survive outside run metadata."""
     tracker = HandledTurnLedger("test_user_stop_cutoff", base_path=temp_dir)

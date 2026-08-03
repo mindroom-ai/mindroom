@@ -139,6 +139,9 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     config = matrix_client_config()
 
     assert config.backfill_limited_timelines is True
+    assert config.backfill_max_events == 100_000
+    assert config.backfill_max_pages == 1_000
+    assert config.backfill_page_size == 100
     assert config.backfill_persist_recovery is True
     assert config.store_sync_tokens is True
 
