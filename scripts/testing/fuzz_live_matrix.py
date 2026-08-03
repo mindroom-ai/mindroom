@@ -2834,7 +2834,10 @@ class LiveMatrixClient:
                 msg = "Matrix sync room timeline events must be a list"
                 raise TypeError(msg)
             if timeline.get("limited") is True and not allow_limited:
-                events = await self.paginate_room(room_id)
+                # A canonical backfill closes the missing prefix, while the
+                # live sync suffix can contain events newer than the history
+                # snapshot.  Retain both before advancing past next_batch.
+                events = [*await self.paginate_room(room_id), *events]
             for raw_event in events:
                 if not isinstance(raw_event, dict):
                     continue

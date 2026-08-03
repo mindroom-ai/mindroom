@@ -4241,7 +4241,7 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
                     "!room:example": {
                         "timeline": {
                             "limited": True,
-                            "events": [],
+                            "events": [{"event_id": "$live-suffix"}],
                         },
                     },
                 },
@@ -4257,7 +4257,10 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
     try:
         await client.wait_until_quiet(deadline_seconds=1.0, quiet_seconds=0.0)
         assert client.next_batch == "truncated"
-        assert client.seen_events == {"$recovered": {"event_id": "$recovered"}}
+        assert client.seen_events == {
+            "$recovered": {"event_id": "$recovered"},
+            "$live-suffix": {"event_id": "$live-suffix"},
+        }
     finally:
         await client.close()
 
