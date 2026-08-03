@@ -941,6 +941,72 @@ async def test_encrypted_room_hydration_queries_new_member_device_keys() -> None
 
 
 @pytest.mark.asyncio
+async def test_cached_encrypted_room_hydration_retries_pending_member_device_keys() -> None:
+    """A cached encrypted room must not bypass pending member device keys."""
+    owner = _owner()
+    room_id = "!code:example.org"
+    remote_member_id = "@human:remote.example.org"
+    room = owner.client.rooms[room_id]
+    room.encrypted = True
+    room.members_synced = True
+    room.add_member(remote_member_id, "Human", None)
+    owner.client.olm = MagicMock()
+    owner.client.should_query_keys = True
+    owner.client.users_for_key_query = {remote_member_id}
+    owner.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(remote_member_id, "Human", None)],
+            room_id=room_id,
+        ),
+    )
+    owner.client.keys_query = AsyncMock(
+        return_value=nio.KeysQueryResponse(
+            device_keys={},
+            failures={"remote.example.org": {"errcode": "M_UNAVAILABLE"}},
+        ),
+    )
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    owner.client.keys_query.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_room_hydration_rejects_concurrent_partial_sync_room() -> None:
+    """A room installed during key hydration must be complete before adoption."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    remote_member_id = "@human:remote.example.org"
+    _hide_encrypted_room(
+        owner,
+        room_id,
+        members=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(remote_member_id, "Human", None)],
+            room_id=room_id,
+        ),
+    )
+    owner.client.olm = MagicMock()
+    owner.client.should_query_keys = True
+    owner.client.users_for_key_query = {remote_member_id}
+    concurrent_room = nio.MatrixRoom(room_id=room_id, own_user_id=owner.user_id)
+
+    async def keys_query() -> nio.KeysQueryResponse:
+        owner.client.rooms[room_id] = concurrent_room
+        owner.client.users_for_key_query = set()
+        return nio.KeysQueryResponse(device_keys={}, failures={})
+
+    owner.client.keys_query = AsyncMock(side_effect=keys_query)
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    assert owner.client.rooms[room_id] is concurrent_room
+    assert concurrent_room.encrypted is False
+    assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
 async def test_encrypted_room_hydration_publishes_complete_room_state() -> None:
     """A hidden encrypted room must not become a permanently partial cache entry."""
     owner = _owner()
