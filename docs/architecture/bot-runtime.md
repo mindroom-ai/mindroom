@@ -164,9 +164,14 @@ The coordinator also enumerates every owner's authoritative joined-room list, so
 The coordinator admits at most eight concurrent read-bearing phases across owner room discovery, room-recovery leases, and initial target freshness checks.
 A room-recovery phase may issue owner-specific membership and hydration requests while holding one phase slot.
 A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
-Encrypted hidden-room hydration publishes a full-state `MatrixRoom` with exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
-Hydration retires every existing outbound Megolm session as soon as authoritative joined membership differs from the prior complete snapshot, before any full-state or device-key await.
-While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must establish key readiness instead of reusing incomplete encryption state.
+Encrypted hidden-room hydration publishes full non-membership state plus an exact authoritative joined-only encryption roster into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
+Invite membership is intentionally omitted from encrypted delivery caches because nio uses `MatrixRoom.users` as the Megolm recipient roster.
+Hydration retires every existing outbound Megolm session as soon as the prior recipient roster is unknown, invite-polluted, or differs from authoritative joined membership, while preserving a shared session when the authoritative roster is unchanged.
+While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must re-establish key readiness instead of reusing incomplete encryption state.
+Sync responses preapply membership, encryption, summary-count, and device-list invalidations at `receive_response` entry before recovery dispatch or callbacks can await.
+Membership request generations reject an older joined-members response before it can overwrite a newer roster and remain bound through any hidden-room full-state await until publication.
+Every runtime key query, including pinned-device discovery, is globally sequenced so an older response or a response predating a device-list invalidation cannot roll nio's device store backward.
+Hidden-room full state and joined-members results must agree on the joined roster before either can publish a cache entry.
 An encrypted cache replacement that disagrees with the hydration snapshot is likewise marked membership-unsynchronized before hydration retries.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
@@ -195,8 +200,17 @@ The exact interrupted owner sends its own explicitly mentioned trusted resume re
 Owner-authored resume relays use the standard dispatch-context path and resolve thread history before the response lock.
 The response runner refreshes that history again after acquiring the lifecycle lock.
 Resume delivery runs outside the read budget with one admitted delivery under global pacing.
-Proof-bound delivery validates encryption before large-message preparation can upload content.
-After preparation, encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and then enters nio's send path without unrelated application awaits.
+Proof-bound delivery validates encryption before large-message, file, audio, or approval payload preparation can upload content, and each upload is bound to the proof's exact encryption mode.
+File delivery completes local file I/O before establishing that proof so an encryption transition during the read cannot leave a plaintext upload behind.
+An encryption-state probe rechecks the room cache after its network await so a stale plaintext response cannot authorize a plaintext upload after sync has enabled encryption.
+Nio's monotonic encrypted-room record always overrides a later negative encryption-state probe.
+Local room-encryption enablement holds the room delivery lock across its state read, write, monotonic membership fence, and outbound-session retirement so it cannot overlap a same-client plaintext send.
+Sync-discovered encryption uses the same monotonic fence and retirement transition.
+After preparation, every encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and retains one per-client, per-room application delivery lock through nio's send path.
+All application room events, including reactions and custom events, use the same delivery lock instead of calling nio directly.
+The runtime Matrix client removes invitees from encrypted crypto rosters after membership processing and rejects nio send preparation when membership, joined-member device keys, the recipient generation, or the room identity is stale.
+Request-scoped transport validation binds room identity, encryption mode, recipient and membership generations, joined roster, and pending device keys after dynamic header preparation and on every HTTP retry.
+Application retry sleeps release the room lock, rehydrate after reacquiring it, and reuse one transaction ID for the complete logical delivery.
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
 Pause also cancels and drains shared membership snapshots before configuration mutation can replace their Matrix clients.

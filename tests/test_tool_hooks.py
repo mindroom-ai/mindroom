@@ -69,6 +69,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_event_cache_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -165,13 +166,12 @@ def _initialize_router_approval_store(
     *,
     room_send: AsyncMock | None = None,
     editor: AsyncMock | None = None,
-) -> tuple[MagicMock, AsyncMock]:
+) -> tuple[AsyncMock, AsyncMock]:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
+    client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     client.room_send = room_send or AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )

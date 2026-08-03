@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import create_room, ensure_room_encryption_enabled
 from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
 from mindroom.matrix.rooms import _managed_room_should_be_encrypted
@@ -81,9 +83,14 @@ class TestEnsureRoomEncryptionEnabled:
     async def test_noop_when_already_encrypted(self) -> None:
         """An encrypted room needs no state change."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.encrypted_rooms = set()
+        client.sharing_session = {}
+        client.olm = None
         client.room_get_state_event.return_value = _state_present()
 
         assert await ensure_room_encryption_enabled(client, "!room:localhost") is True
+        assert "!room:localhost" in client.encrypted_rooms
         client.room_put_state.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -91,10 +98,14 @@ class TestEnsureRoomEncryptionEnabled:
         """A missing encryption state event is added once."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
+        client.encrypted_rooms = set()
+        client.sharing_session = {}
+        client.olm = None
         client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
         client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id="!room:localhost")
 
         assert await ensure_room_encryption_enabled(client, "!room:localhost") is True
+        assert "!room:localhost" in client.encrypted_rooms
         client.room_put_state.assert_awaited_once_with(
             "!room:localhost",
             "m.room.encryption",
@@ -102,17 +113,62 @@ class TestEnsureRoomEncryptionEnabled:
         )
 
     @pytest.mark.asyncio
-    async def test_enabling_flips_cached_room_encrypted_flag(self) -> None:
-        """Sends inside the sync window must already see the room as encrypted."""
+    async def test_enabling_fences_cached_room_delivery(self) -> None:
+        """Sends inside the sync window must refresh encrypted membership and keys."""
         client = AsyncMock(spec=nio.AsyncClient)
-        cached_room = MagicMock(spec=nio.MatrixRoom)
-        cached_room.encrypted = False
+        room_id = "!room:localhost"
+        cached_room = nio.MatrixRoom(room_id, "@bot:localhost")
+        cached_room.members_synced = True
+        cached_room.add_member("@bot:localhost", "Bot", None)
         client.rooms = {"!room:localhost": cached_room}
+        client.encrypted_rooms = set()
+        client.sharing_session = {}
+        client.olm = MagicMock()
+        client.olm.outbound_group_sessions = {room_id: MagicMock()}
         client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
         client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id="!room:localhost")
 
-        assert await ensure_room_encryption_enabled(client, "!room:localhost") is True
+        assert await ensure_room_encryption_enabled(client, room_id) is True
         assert cached_room.encrypted is True
+        assert not cached_room.members_synced
+        assert room_id in client.encrypted_rooms
+        assert room_id not in client.olm.outbound_group_sessions
+
+    @pytest.mark.asyncio
+    async def test_enablement_waits_for_active_plaintext_delivery(self) -> None:
+        """Local encryption enablement must serialize with the room delivery boundary."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        room_id = "!room:localhost"
+        cached_room = nio.MatrixRoom(room_id, "@bot:localhost")
+        cached_room.members_synced = True
+        cached_room.add_member("@bot:localhost", "Bot", None)
+        client.rooms = {room_id: cached_room}
+        client.encrypted_rooms = set()
+        client.sharing_session = {}
+        client.olm = None
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=room_id)
+        transport_started = asyncio.Event()
+        release_transport = asyncio.Event()
+
+        async def send_plaintext(**_kwargs: object) -> nio.RoomSendResponse:
+            transport_started.set()
+            await release_transport.wait()
+            return nio.RoomSendResponse(event_id="$message", room_id=room_id)
+
+        client.room_send = AsyncMock(side_effect=send_plaintext)
+        send_task = asyncio.create_task(
+            send_message_result(client, room_id, {"body": "before encryption", "msgtype": "m.text"}),
+        )
+        await transport_started.wait()
+        enable_task = asyncio.create_task(ensure_room_encryption_enabled(client, room_id))
+        await asyncio.sleep(0)
+        put_count_while_send_blocked = client.room_put_state.await_count
+        release_transport.set()
+
+        assert await send_task is not None
+        assert await enable_task is True
+        assert put_count_while_send_blocked == 0
 
     @pytest.mark.asyncio
     async def test_reports_failure_when_put_state_rejected(self) -> None:
@@ -308,6 +364,9 @@ class TestEncryptCommand:
         """Admins can enable encryption with confirm."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
+        client.encrypted_rooms = set()
+        client.sharing_session = {}
+        client.olm = None
         client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
         client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id="!room:localhost")
         admin_gate = AsyncMock(return_value="@requester:localhost")

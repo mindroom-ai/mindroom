@@ -48,7 +48,9 @@ def _make_context(
     )
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     client.room_send = AsyncMock()
-    client.room_get_state_event = AsyncMock()
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
     client.room_get_event = AsyncMock()

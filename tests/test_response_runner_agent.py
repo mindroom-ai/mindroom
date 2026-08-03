@@ -157,7 +157,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
@@ -215,7 +215,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -499,7 +499,7 @@ class TestAgentBot(AgentBotTestBase):
         """Non-streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -860,7 +860,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1587,7 +1587,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1654,7 +1654,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))

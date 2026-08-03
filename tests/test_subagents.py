@@ -31,7 +31,7 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import delivered_matrix_side_effect, make_event_cache_mock
+from tests.conftest import delivered_matrix_side_effect, make_event_cache_mock, make_matrix_client_mock
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -113,6 +113,8 @@ def _make_context(
     effective_config = config or _make_config()
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
+    client = make_matrix_client_mock(user_id=room.own_user_id)
+    client.rooms[room_id] = room
     conversation_cache = AsyncMock()
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     conversation_cache.notify_outbound_message = Mock()
@@ -125,7 +127,7 @@ def _make_context(
             reply_to_event_id=None,
         ),
         requester_id=requester_id,
-        client=MagicMock(),
+        client=client,
         config=effective_config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),

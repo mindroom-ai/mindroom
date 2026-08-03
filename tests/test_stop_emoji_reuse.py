@@ -320,6 +320,15 @@ async def test_stop_manager_add_and_remove_button_notifies_cache_bookkeeping() -
     stop_manager = StopManager()
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@agent:example.com"
+    client.rooms = {
+        "!test:example.com": nio.MatrixRoom("!test:example.com", client.user_id),
+    }
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(room_id="!test:example.com", event_id="$reaction:example.com"),
     )

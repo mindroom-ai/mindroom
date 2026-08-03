@@ -3,10 +3,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 > Native review agents remain read-only because the main thread owns every repository mutation for this PR.
 
-**Goal:** Make proof-bound Matrix recovery delivery validate encryption before uploads, refresh exact encrypted membership immediately before send, and rotate stale Megolm sessions.
+**Goal:** Make every Matrix application send share one room delivery boundary that validates encryption readiness, uses an authoritative joined-only crypto roster, and rotates stale Megolm sessions.
 
 **Architecture:** `mindroom.matrix.client_delivery` owns the complete preflight, content preparation, final hydration, and send sequence.
 Encrypted hydration compares exact joined membership before and after `joined_members`, retires every existing outbound session immediately when that membership is unknown or changed, and fences sending until device-key queries complete.
+Every raw event and message send acquires the same per-client, per-room lock, while the runtime client rejects stale readiness and invitees at nio's final preparation boundary.
+Request-owned membership generations reject older joined-members responses, membership and device-list generations reject superseded key queries, and prepared uploads retain their proven encryption mode.
+Recipient and membership generations also bind the final transport attempt to the exact hydrated room state.
 Restart recovery remains a consumer of this boundary and does not acquire crypto-specific branches.
 
 **Tech Stack:** Python 3.13, matrix-nio, asyncio, pytest, pytest-asyncio, Ruff, ty, Vulture, Tach, GitHub CLI.
@@ -101,7 +104,8 @@ async def test_encrypted_hydration_rotates_shared_session_when_membership_change
     proof = await hydrate_joined_room_for_delivery(client, room_id)
 
     assert proof == RoomDeliveryHydrationProof(encrypted=True, joined_user_ids=after)
-    assert frozenset(user_id for user_id, user in room.users.items() if not user.invited) == after
+    assert frozenset(room.users) == after
+    assert not room.invited_users
     assert client.olm is not None
     assert room_id not in client.olm.outbound_group_sessions
 ```
@@ -122,12 +126,12 @@ Add the exact joined-user helper and use it in `_room_covers_joined_members` and
 
 ```python
 def _joined_room_user_ids(room: nio.MatrixRoom) -> frozenset[str]:
-    """Return the room users whose current membership is joined."""
-    return frozenset(user_id for user_id, user in room.users.items() if not user.invited)
+    """Return the exact nio roster used for encrypted session sharing."""
+    return frozenset(room.users)
 ```
 
-Change coverage from subset matching to exact equality with `_joined_room_user_ids(room)`.
-At the start of `_hydrate_encrypted_joined_room`, snapshot exact joined membership from a cached encrypted, member-synchronized room or use `None` when no complete prior snapshot exists.
+Replace cached membership with the authoritative joined response and require exact equality with `_joined_room_user_ids(room)` plus an empty invite map.
+At the start of `_hydrate_encrypted_joined_room`, snapshot an invite-free recipient roster from a cached encrypted, member-synchronized room or use `None` when no trustworthy prior snapshot exists.
 Immediately after `joined_members` returns, retire any existing outbound session when the prior set is unknown or differs from the authoritative response so no later state or key await exposes the old session:
 
 ```python
@@ -367,11 +371,12 @@ Keep the router root-space addition and current-room difference unchanged.
 Add these one-sentence-per-line statements in the restart-recovery scope and delivery sections:
 
 ```markdown
-Encrypted hidden-room hydration publishes a full-state `MatrixRoom` with exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
-Hydration retires every existing outbound Megolm session before later awaits whenever authoritative joined membership differs from the prior complete snapshot.
+Encrypted hidden-room hydration publishes full non-membership state plus exact authoritative joined membership into nio's shared cache, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
+Hydration intentionally omits invite membership from the encryption roster and retires every existing outbound Megolm session before later awaits whenever the prior roster is unknown, invite-polluted, or changed.
 Pending device-key work keeps the room send-fenced through nio's membership-synchronization state.
 Proof-bound delivery validates encryption before large-message preparation can upload content.
-After preparation, encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and then enters nio's send path without unrelated application awaits.
+After preparation, encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and retains its application delivery lock through nio's send path.
+All application room events use the same per-client, per-room lock, and the runtime client rejects stale readiness at nio's final preparation boundary.
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 ```
 
@@ -397,6 +402,74 @@ git commit -m "fix: finalize encrypted recovery delivery safely"
 ```
 
 If the documentation generator modifies tracked files under `skills/mindroom-docs/references/`, inspect those changes and add only the generated files attributable to `docs/architecture/bot-runtime.md` before committing.
+
+---
+
+### Task 3B: Close The Application And Crypto Boundaries Found In Review
+
+**Files:**
+- Modify: `src/mindroom/matrix/client_delivery.py`
+- Modify: `src/mindroom/matrix/client_session.py`
+- Modify: every production module that calls `AsyncClient.room_send`
+- Modify: the corresponding Matrix transport tests
+
+**Interfaces:**
+- Produces: `send_room_event_result(...) -> nio.RoomSendResponse | nio.RoomSendError | None`.
+- Produces: one per-client, per-room delivery lock shared by hydration, messages, reactions, and custom events.
+- Preserves: raw `RoomSendError` details and deterministic transaction IDs for config-confirmation reactions.
+
+- [ ] **Step 1: Reproduce the failed-key-query race with real nio**
+
+Start hydration with a blocked key query, queue a normal application send for the same room, fail both readiness attempts, and assert that nio encryption and the wire transport are never reached.
+Add the successful counterpart and assert that exactly one queued send reaches the wire after key readiness succeeds.
+
+- [ ] **Step 2: Reproduce invitee key-sharing exposure**
+
+Hydrate a real encrypted `MatrixRoom` containing an invitee and assert that the resulting `room.users` exactly equals `/joined_members`, the invite map is empty, and both fully and partially distributed sessions are retired.
+Cover invite-to-join promotion and an invite added during the key-query await.
+
+- [ ] **Step 3: Add the centralized raw-event boundary**
+
+Add a typed raw-result helper that acquires the room delivery lock, establishes encrypted readiness or authoritative plaintext cache bypass, and retains the lock through the private transport primitive.
+Migrate reactions, approval events, low-level tool events, stop buttons, and call notices to this helper.
+Add a static source guard that permits `.room_send(` only inside `client_delivery.py`.
+
+- [ ] **Step 4: Add the runtime nio fail-closed boundary**
+
+Make `_MindRoomAsyncClient` remove invitees from encrypted rosters after joined-member and sync processing.
+Override nio send preparation to raise `SendRetryError` when encrypted membership is unsynchronized, a joined member still needs a key query, or invitees remain in the crypto roster.
+This prevents nio from using its unchecked member-and-key refresh fallback after application validation.
+
+- [ ] **Step 5: Verify caller compatibility**
+
+Run the focused transport suites for messages, approvals, config confirmations, interactive reactions, stop buttons, Matrix API tools, and MatrixRTC notices.
+Use proper cached-room and crypto-state test doubles instead of weakening production interfaces for old mocks.
+
+- [ ] **Step 6: Fence stale hydration responses**
+
+Preapply membership events, encryption events, joined-count mismatches, and device-list changes at `receive_response` entry before Classic Sync or Sliding Sync recovery work can await.
+Give every delivery-owned `joined_members` request an ordering token and reject its response before cache mutation when a newer membership update or joined-members response won.
+Retain the accepted membership generation through hidden-room full-state validation and candidate publication.
+Globally sequence every runtime `keys_query`, including pinned-device discovery, and reject an older response at the client response boundary before nio mutates its device store.
+Capture device-list and membership generations across delivery-owned `keys_query`, and requeue the queried and current room users before rejecting a superseded response.
+Do not use the recipient generation for key-query supersession because a successful key query legitimately retires its own obsolete outbound session.
+Require hidden-room full state and joined-members results to agree on their joined-only roster before cache publication.
+
+- [ ] **Step 7: Preserve stable sessions and payload confidentiality**
+
+Compare raw joined-only rosters during authoritative response handling so the temporary send fence does not rotate an unchanged shared session.
+Recheck cached room identity and encryption after each encryption-state network await.
+Treat `encrypted_rooms` as monotonic proof that overrides any later negative state-event response.
+Pass the proven encryption mode into large-message, file, audio, and approval upload preparation, and reject mode changes before the event references the upload.
+Read local file bytes before obtaining the proof so encryption changes during file I/O precede upload-mode selection.
+Hold the room delivery lock across local encryption state reads and writes, then route local and sync-discovered encryption through the same monotonic membership fence and outbound-session retirement.
+
+- [ ] **Step 8: Guard transport retries**
+
+Bind the exact room identity, mode, roster, pending-key state, and recipient generation to nio's room-send request.
+Validate that guard after dynamic header preparation and before every HTTP attempt.
+Release the application room lock during recovery backoff and rehydrate after reacquiring it.
+Generate one transaction ID per logical message delivery and reuse it across every application retry.
 
 ---
 

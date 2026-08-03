@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.delivery_lock import room_delivery_lock
+from mindroom.matrix.encryption_recipients import mark_room_encrypted_for_delivery
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -144,19 +146,23 @@ async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) 
     Enabling encryption is irreversible; this helper never disables it.
     Returns whether the room is encrypted after the call.
     """
+    async with room_delivery_lock(client, room_id):
+        return await _ensure_room_encryption_enabled_locked(client, room_id)
+
+
+async def _ensure_room_encryption_enabled_locked(client: nio.AsyncClient, room_id: str) -> bool:
+    """Enable room encryption while holding the application delivery lock."""
     enabled = await room_encryption_enabled(client, room_id)
     if enabled:
+        mark_room_encrypted_for_delivery(client, room_id)
         return True
     if enabled is None:
         return False
     response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
     if isinstance(response, nio.RoomPutStateResponse):
-        cached_room = client.rooms.get(room_id)
-        if cached_room is not None:
-            # nio only encrypts sends once the cached room flips encrypted, which
-            # normally happens on the next sync; flip it now so replies sent inside
-            # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
-            cached_room.encrypted = True
+        # nio normally observes this state on the next sync, so publish the
+        # irreversible transition locally before any confirmation can be sent.
+        mark_room_encrypted_for_delivery(client, room_id)
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return True
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))

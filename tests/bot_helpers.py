@@ -59,6 +59,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_matrix_client_delivery_mock_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
@@ -234,6 +235,8 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
 
 def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
     """Attach the full injected runtime-support bundle to a bot test instance."""
+    if isinstance(bot.client, AsyncMock | MagicMock):
+        install_matrix_client_delivery_mock_support(bot.client, user_id=bot.matrix_id.full_id)
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
     bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()

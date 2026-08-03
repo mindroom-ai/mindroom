@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
+from nio.client.sliding_membership import sliding_room_is_invite
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -19,12 +20,28 @@ from mindroom.constants import (
     runtime_matrix_ssl_verify,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.encryption_recipients import (
+    advance_device_key_epoch,
+    advance_room_membership_epoch,
+    apply_authoritative_joined_roster,
+    complete_deferred_outbound_group_session_retirement,
+    joined_only_recipient_user_ids,
+    key_query_request,
+    key_query_response_is_current,
+    mark_room_encrypted_for_delivery,
+    record_joined_members_response,
+    record_key_query_response_applied,
+    remove_invited_encryption_recipients,
+    retire_outbound_group_session,
+    room_delivery_guard_is_current,
+)
 from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import AsyncGenerator, Mapping, MutableSequence
+    from uuid import UUID
 
 logger = get_logger(__name__)
 
@@ -54,6 +71,167 @@ def _log_custom_olm_rejection(
     )
 
 
+def _complete_encrypted_recipient_roster(room: nio.MatrixRoom) -> frozenset[str] | None:
+    """Return a complete joined-only roster suitable for change detection."""
+    if not room.encrypted or not room.members_synced:
+        return None
+    return joined_only_recipient_user_ids(room)
+
+
+def _ready_encrypted_recipient_roster(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+) -> frozenset[str] | None:
+    """Return the exact roster only when nio can encrypt without refreshing."""
+    recipient_user_ids = _complete_encrypted_recipient_roster(room)
+    if client.olm is None or recipient_user_ids is None:
+        return None
+    if recipient_user_ids.intersection(client.users_for_key_query):
+        return None
+    return recipient_user_ids
+
+
+def _retire_session_after_recipient_change(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    prior_recipient_user_ids: frozenset[str] | None,
+    room: nio.MatrixRoom,
+) -> None:
+    """Retire a session when a synchronous membership owner changes recipients."""
+    current_recipient_user_ids = joined_only_recipient_user_ids(room) if room.encrypted else None
+    if prior_recipient_user_ids == current_recipient_user_ids:
+        return
+    if client.olm is not None and current_recipient_user_ids is not None:
+        client.olm.update_tracked_users(room)
+    if retire_outbound_group_session(client, room_id):
+        logger.info(
+            "matrix_outbound_group_session_retired_for_membership_change",
+            room_id=room_id,
+            prior_member_count=(len(prior_recipient_user_ids) if prior_recipient_user_ids is not None else None),
+            joined_member_count=(len(current_recipient_user_ids) if current_recipient_user_ids is not None else None),
+        )
+
+
+def _membership_reset_room_ids(response: nio.SyncResponse | nio.SlidingSyncResponse) -> frozenset[str]:
+    """Return rooms whose response proves the client is no longer joined."""
+    if isinstance(response, nio.SyncResponse):
+        return frozenset(response.rooms.leave) | frozenset(response.rooms.invite)
+    return frozenset(
+        room_id
+        for room_id, room in response.rooms.items()
+        if sliding_room_is_invite(room) or room.membership in ("leave", "ban")
+    )
+
+
+def _is_membership_update(event: object) -> bool:
+    """Return whether one sync item carries room membership state."""
+    return isinstance(event, nio.RoomMemberEvent) or (
+        isinstance(event, nio.SlidingSyncStateStub) and event.type == "m.room.member"
+    )
+
+
+def _membership_update_room_ids(response: nio.SyncResponse | nio.SlidingSyncResponse) -> frozenset[str]:
+    """Return rooms with membership state that can supersede an in-flight roster query."""
+    room_ids = set(_membership_reset_room_ids(response))
+    if isinstance(response, nio.SyncResponse):
+        room_ids.update(
+            room_id
+            for room_id, room in response.rooms.join.items()
+            if any(_is_membership_update(event) for event in (*room.state, *room.timeline.events))
+        )
+    else:
+        room_ids.update(
+            room_id
+            for room_id, room in response.rooms.items()
+            if any(_is_membership_update(event) for event in (*room.required_state, *room.timeline))
+        )
+    return frozenset(room_ids)
+
+
+def _encryption_update_room_ids(response: nio.SyncResponse | nio.SlidingSyncResponse) -> frozenset[str]:
+    """Return rooms whose response proves encryption is enabled."""
+    if isinstance(response, nio.SyncResponse):
+        return frozenset(
+            room_id
+            for room_id, room in response.rooms.join.items()
+            if any(isinstance(event, nio.RoomEncryptionEvent) for event in (*room.state, *room.timeline.events))
+        )
+    return frozenset(
+        room_id
+        for room_id, room in response.rooms.items()
+        if any(isinstance(event, nio.RoomEncryptionEvent) for event in (*room.required_state, *room.timeline))
+    )
+
+
+def _joined_count_disagrees(room: nio.MatrixRoom, joined_count: int | None) -> bool:
+    """Return whether a sync summary disproves the cached joined roster."""
+    if joined_count is None:
+        return False
+    recipient_user_ids = joined_only_recipient_user_ids(room)
+    return recipient_user_ids is None or len(recipient_user_ids) != joined_count
+
+
+def _joined_count_mismatch_room_ids(
+    client: nio.AsyncClient,
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> frozenset[str]:
+    """Return cached rooms whose summary disproves their recipient roster."""
+    if isinstance(response, nio.SyncResponse):
+        joined_counts = (
+            (room_id, info.summary.joined_member_count)
+            for room_id, info in response.rooms.join.items()
+            if info.summary is not None
+        )
+    else:
+        joined_counts = ((room_id, info.joined_count) for room_id, info in response.rooms.items())
+    return frozenset(
+        room_id
+        for room_id, joined_count in joined_counts
+        if (room := client.rooms.get(room_id)) is not None and _joined_count_disagrees(room, joined_count)
+    )
+
+
+def _preapply_membership_invalidations(
+    client: nio.AsyncClient,
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> None:
+    """Fence every cached encrypted roster disproved by one sync response."""
+    room_ids = _membership_update_room_ids(response) | _joined_count_mismatch_room_ids(client, response)
+    for room_id in room_ids:
+        advance_room_membership_epoch(client, room_id)
+        room = client.rooms.get(room_id)
+        if room is not None and room.encrypted:
+            room.members_synced = False
+            retire_outbound_group_session(client, room_id)
+
+
+def _preapply_encryption_invalidations(
+    client: nio.AsyncClient,
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> None:
+    """Make parsed encryption state monotonic before sync processing awaits."""
+    for room_id in _encryption_update_room_ids(response):
+        mark_room_encrypted_for_delivery(client, room_id)
+
+
+def _preapply_device_invalidations(
+    client: nio.AsyncClient,
+    response: nio.SyncResponse | nio.SlidingSyncResponse,
+) -> None:
+    """Fence sessions and key queries invalidated by one device-list delta."""
+    if client.olm is None:
+        return
+    changed_user_ids = frozenset(response.device_list.changed) | frozenset(response.device_list.left)
+    if changed_user_ids:
+        advance_device_key_epoch(client)
+    for room_id, room in client.rooms.items():
+        if room.encrypted and changed_user_ids.intersection(room.users):
+            retire_outbound_group_session(client, room_id)
+    if changed_user_ids:
+        client.olm.add_changed_users(set(changed_user_ids))
+
+
 class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
@@ -73,7 +251,202 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         headers = self.config.custom_headers
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
+        if not room_delivery_guard_is_current(self):
+            message = "Matrix room delivery state changed before transport delivery."
+            raise nio.SendRetryError(message)
         return await super().send(*args, **kwargs)
+
+    async def keys_query(self) -> nio.KeysQueryResponse | nio.KeysQueryError:
+        """Order device-key responses across concurrent runtime queries."""
+        with key_query_request(self, frozenset(self.users_for_key_query)):
+            return await super().keys_query()
+
+    def invalidate_outbound_session(self, room_id: str) -> None:
+        """Retire every session invalidated by a membership transition."""
+        room = self.rooms.get(room_id)
+        if room is not None:
+            remove_invited_encryption_recipients(room)
+            if room.encrypted and self.olm is not None:
+                self.olm.update_tracked_users(room)
+        retire_outbound_group_session(self, room_id)
+
+    def _invalidate_session_for_member_event(self, room_id: str) -> None:
+        """Order every applied member event against authoritative roster reads."""
+        advance_room_membership_epoch(self, room_id)
+        super()._invalidate_session_for_member_event(room_id)
+
+    def _apply_sliding_sync_summary(
+        self,
+        room: nio.MatrixRoom,
+        sliding_room: nio.SlidingSyncRoom,
+    ) -> None:
+        """Keep non-authoritative Sliding heroes out of encryption recipients."""
+        prior_user_ids = frozenset(room.users)
+        super()._apply_sliding_sync_summary(room, sliding_room)
+        if not room.encrypted:
+            return
+        summary_user_ids = frozenset(room.users).difference(prior_user_ids)
+        for user_id in summary_user_ids:
+            room.remove_member(user_id)
+        removed_invitees = remove_invited_encryption_recipients(room)
+        joined_count_mismatch = _joined_count_disagrees(room, sliding_room.joined_count)
+        if summary_user_ids or removed_invitees or joined_count_mismatch:
+            advance_room_membership_epoch(self, room.room_id)
+            room.members_synced = False
+            retire_outbound_group_session(self, room.room_id)
+
+    def _handle_joined_members(self, response: nio.JoinedMembersResponse) -> None:
+        """Apply joined membership without retaining encrypted-room invitees."""
+        if not record_joined_members_response(self, response.room_id):
+            return
+        room = self.rooms.get(response.room_id)
+        if room is None:
+            return
+        prior_recipient_user_ids = joined_only_recipient_user_ids(room) if room.encrypted else None
+        apply_authoritative_joined_roster(room, response)
+        if room.encrypted and self.olm is not None:
+            self.olm.update_tracked_users(room)
+        _retire_session_after_recipient_change(
+            self,
+            response.room_id,
+            prior_recipient_user_ids=prior_recipient_user_ids,
+            room=room,
+        )
+
+    def _handle_joined_state(
+        self,
+        room_id: str,
+        join_info: nio.RoomInfo,
+        encrypted_rooms: set[str],
+    ) -> None:
+        """Apply state without exposing encrypted-room invitees to later callbacks."""
+        prior_room = self.rooms.get(room_id)
+        prior_recipient_user_ids = (
+            joined_only_recipient_user_ids(prior_room) if prior_room is not None and prior_room.encrypted else None
+        )
+        super()._handle_joined_state(room_id, join_info, encrypted_rooms)
+        room = self.rooms[room_id]
+        remove_invited_encryption_recipients(room)
+        _retire_session_after_recipient_change(
+            self,
+            room_id,
+            prior_recipient_user_ids=prior_recipient_user_ids,
+            room=room,
+        )
+        joined_count = join_info.summary.joined_member_count if join_info.summary is not None else None
+        if room.encrypted and _joined_count_disagrees(room, joined_count):
+            room.members_synced = False
+            retire_outbound_group_session(self, room_id)
+
+    def _handle_timeline_event(
+        self,
+        event: nio.Event | nio.BadEventType,
+        room_id: str,
+        room: nio.MatrixRoom,
+        encrypted_rooms: set[str],
+    ) -> nio.Event | nio.BadEventType | None:
+        """Apply one event without yielding an invite-polluted crypto roster."""
+        prior_recipient_user_ids = joined_only_recipient_user_ids(room) if room.encrypted else None
+        decrypted = super()._handle_timeline_event(event, room_id, room, encrypted_rooms)
+        remove_invited_encryption_recipients(room)
+        _retire_session_after_recipient_change(
+            self,
+            room_id,
+            prior_recipient_user_ids=prior_recipient_user_ids,
+            room=room,
+        )
+        return decrypted
+
+    async def _handle_joined_rooms(self, response: nio.SyncResponse) -> None:
+        """Remove encrypted-room invitees before sync response handling completes."""
+        await super()._handle_joined_rooms(response)
+        for room_id in response.rooms.join:
+            room = self.rooms.get(room_id)
+            if room is not None:
+                remove_invited_encryption_recipients(room)
+
+    async def _process_timeline(
+        self,
+        room_id: str,
+        room: nio.MatrixRoom,
+        timeline: MutableSequence[nio.Event | nio.BadEventType],
+        encrypted_rooms: set[str],
+        deduplicate: bool = False,
+    ) -> None:
+        """Fence required-state invitees before any timeline callback can yield."""
+        if remove_invited_encryption_recipients(room):
+            advance_room_membership_epoch(self, room_id)
+            retire_outbound_group_session(self, room_id)
+        if room.encrypted and self.olm is not None:
+            self.olm.update_tracked_users(room)
+        await super()._process_timeline(
+            room_id,
+            room,
+            timeline,
+            encrypted_rooms,
+            deduplicate=deduplicate,
+        )
+
+    def _preapply_delivery_invalidations(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+        """Fence membership and device changes before any sync callback can send."""
+        _preapply_membership_invalidations(self, response)
+        _preapply_encryption_invalidations(self, response)
+        _preapply_device_invalidations(self, response)
+
+    async def receive_response(self, response: nio.Response) -> None:
+        """Fence delivery invalidations before sync recovery or callbacks can await."""
+        if isinstance(response, nio.KeysQueryResponse) and not key_query_response_is_current(self):
+            return
+        if isinstance(response, (nio.SyncResponse, nio.SlidingSyncResponse)):
+            self._preapply_delivery_invalidations(response)
+        await super().receive_response(response)
+        if isinstance(response, nio.KeysQueryResponse):
+            record_key_query_response_applied(self)
+
+    async def _prepare_room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[Any, Any],
+        tx_id: str | UUID,
+        ignore_unverified_devices: bool,
+    ) -> tuple[str, str, str]:
+        """Reject stale crypto state instead of letting nio refresh and send through it."""
+        room = self.rooms.get(room_id)
+        recipient_user_ids: frozenset[str] | None = None
+        if room is not None and room.encrypted:
+            recipient_user_ids = _ready_encrypted_recipient_roster(self, room)
+            if recipient_user_ids is None:
+                message = "Encrypted room delivery readiness must be refreshed before sending."
+                raise nio.SendRetryError(message)
+        retirement_was_deferred = False
+        try:
+            request = await super()._prepare_room_send(
+                room_id,
+                message_type,
+                content,
+                tx_id,
+                ignore_unverified_devices,
+            )
+        finally:
+            retirement_was_deferred = complete_deferred_outbound_group_session_retirement(
+                self,
+                room_id,
+            )
+        if retirement_was_deferred:
+            message = "Encrypted room recipients changed during session sharing."
+            raise nio.SendRetryError(message)
+        if recipient_user_ids is None:
+            return request
+        current_room = self.rooms.get(room_id)
+        current_recipient_user_ids = (
+            _ready_encrypted_recipient_roster(self, current_room) if current_room is not None else None
+        )
+        if current_room is room and current_recipient_user_ids == recipient_user_ids:
+            return request
+        retire_outbound_group_session(self, room_id)
+        message = "Encrypted room recipients changed during send preparation."
+        raise nio.SendRetryError(message)
 
     def encrypt(
         self,
@@ -94,8 +467,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         return encrypted_message_type, encrypted_content
 
     def _handle_olm_events(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
-        """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        super()._handle_olm_events(response)
+        """Apply OTK counts without replaying preapplied device invalidations."""
         count = response.device_key_count.signed_curve25519
         if self.olm is not None and count is not None:
             self.olm.uploaded_key_count = count

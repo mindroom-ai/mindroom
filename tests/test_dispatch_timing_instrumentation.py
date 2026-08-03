@@ -28,6 +28,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -163,7 +164,7 @@ async def test_queue_delivery_request_marks_enqueued_delivery() -> None:
 async def test_send_message_result_marks_prepare_and_send_phases() -> None:
     """Matrix sends should mark large-message prep and room-send boundaries."""
     timing_events: list[tuple[str, dict[str, object]]] = []
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     room = Mock()
     room.encrypted = False
     client.rooms = {"!room:localhost": room}

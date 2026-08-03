@@ -97,8 +97,12 @@ def _owner(
     client.user_id = user_id
     client.rooms = {room_id: nio.MatrixRoom(room_id=room_id, own_user_id=user_id) for room_id in rooms}
     client.encrypted_rooms = set()
+    client.sharing_session = {}
     client.store = None
     client.olm = None
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
     return RecoveryOwner(
         user_id=user_id,
         generation=object() if generation is None else generation,
@@ -116,6 +120,18 @@ def _hide_encrypted_room(
     members: nio.JoinedMembersResponse | nio.JoinedMembersError | None = None,
 ) -> None:
     owner.client.rooms = {}
+    joined_members = members if isinstance(members, nio.JoinedMembersResponse) else None
+    member_events = [
+        {
+            "content": {"displayname": member.display_name, "membership": "join"},
+            "event_id": f"$join-{index}",
+            "origin_server_ts": index + 2,
+            "sender": member.user_id,
+            "state_key": member.user_id,
+            "type": "m.room.member",
+        }
+        for index, member in enumerate(joined_members.members if joined_members is not None else [])
+    ]
     owner.client.room_get_state_event = AsyncMock(
         return_value=nio.RoomGetStateEventResponse(
             content={"algorithm": "m.megolm.v1.aes-sha2"},
@@ -135,6 +151,7 @@ def _hide_encrypted_room(
                     "state_key": "",
                     "type": "m.room.encryption",
                 },
+                *member_events,
             ],
             room_id=room_id,
         ),
@@ -1051,8 +1068,8 @@ async def test_encrypted_room_hydration_rejects_concurrent_partial_sync_room() -
 
 
 @pytest.mark.asyncio
-async def test_encrypted_room_hydration_publishes_complete_room_state() -> None:
-    """A hidden encrypted room must not become a permanently partial cache entry."""
+async def test_encrypted_room_hydration_publishes_state_with_joined_only_roster() -> None:
+    """A hidden encrypted room keeps non-membership state and only joined recipients."""
     owner = _owner()
     room_id = "!hidden:example.org"
     invited_user_id = "@invited:example.org"
@@ -1104,7 +1121,8 @@ async def test_encrypted_room_hydration_publishes_complete_room_state() -> None:
     room = owner.client.rooms[room_id]
     assert room.encrypted is True
     assert room.name == "Recovery Room"
-    assert invited_user_id in room.invited_users
+    assert set(room.users) == set(hydrated.joined_user_ids)
+    assert invited_user_id not in room.invited_users
     assert room.power_levels.users[owner.user_id] == 100
     assert room.members_synced is True
 

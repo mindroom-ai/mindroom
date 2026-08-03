@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
@@ -35,6 +36,17 @@ from mindroom.streaming import (
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 
 
+async def _prepare_large_message(client: Any, content: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401
+    """Prepare content with the encryption mode used by this integration client."""
+    room = client.rooms.get("!room:server")
+    return await prepare_large_message(
+        client,
+        "!room:server",
+        content,
+        room_encrypted=bool(room is not None and room.encrypted),
+    )
+
+
 class MockClient:
     """Mock Matrix client for testing."""
 
@@ -48,6 +60,17 @@ class MockClient:
         self.messages_sent = []
         self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed
+        self.encrypted_rooms: set[str] = set()
+        self.sharing_session: dict[str, object] = {}
+        self.olm = None
+
+    async def room_get_state_event(
+        self,
+        _room_id: str,
+        _event_type: str,
+    ) -> nio.RoomGetStateEventError:
+        """Return authoritative plaintext state for integration sends."""
+        return nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
 
     async def room_send(
         self,
@@ -491,7 +514,7 @@ async def test_message_exactly_at_limit() -> None:
     text = "e" * text_size
     content = {"body": text, "msgtype": "m.text"}
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await _prepare_large_message(client, content)
 
     # Should pass through unchanged (just under limit)
     assert result == content
@@ -513,7 +536,7 @@ async def test_message_with_formatted_body_no_tools() -> None:
         "format": "org.matrix.custom.html",
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await _prepare_large_message(client, content)
 
     # Should be an m.file message with truncated preview
     assert result["msgtype"] == "m.file"
@@ -549,7 +572,7 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
         _TOOL_TRACE_KEY: {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "web_search"}]},
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await _prepare_large_message(client, content)
 
     assert result["msgtype"] == "m.file"
     assert result["info"]["mimetype"] == "application/json"
@@ -581,7 +604,7 @@ async def test_large_message_preview_uses_generic_truncation_with_plain_markers(
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await _prepare_large_message(client, content)
 
     assert result["msgtype"] == "m.file"
 

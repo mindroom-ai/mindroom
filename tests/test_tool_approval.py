@@ -1419,7 +1419,11 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock(side_effect=cache_after_send)
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")
+    room.members_synced = True
+    room.add_member(client.user_id, "Router", None)
+    client.rooms = {"!room:localhost": room}
+    _configure_plaintext_delivery_client(client)
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
@@ -1466,6 +1470,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     client = MagicMock()
     client.user_id = None
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    _configure_plaintext_delivery_client(client)
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
@@ -1493,6 +1498,25 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     )
 
 
+def _configure_plaintext_delivery_client(client: MagicMock) -> None:
+    """Give one Matrix mock authoritative plaintext delivery state."""
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.store = None
+    client.should_query_keys = False
+    client.users_for_key_query = set()
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            [nio.RoomMember(client.user_id, "Router", "")],
+            "!room:localhost",
+        ),
+    )
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
+
+
 def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, MagicMock]:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -1501,7 +1525,11 @@ def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchest
 
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")
+    room.members_synced = True
+    room.add_member(client.user_id, "Router", None)
+    client.rooms = {"!room:localhost": room}
+    _configure_plaintext_delivery_client(client)
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
@@ -1602,6 +1630,95 @@ async def test_approval_transport_offloads_encrypted_full_arguments_to_file_side
 
 
 @pytest.mark.asyncio
+async def test_approval_transport_hydrates_encryption_before_offloading_full_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-sync plaintext cache must not cause plaintext approval arguments upload."""
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    room_id = "!room:localhost"
+    client.store = None
+    client.should_query_keys = False
+    client.users_for_key_query = set()
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            room_id,
+        ),
+    )
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            [nio.RoomMember(client.user_id, "Router", "")],
+            room_id,
+        ),
+    )
+    client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/encrypted-full-args"), None))
+    encrypt_attachment = MagicMock(
+        return_value=(
+            b"encrypted-full-arguments",
+            {
+                "key": {"k": "secret"},
+                "iv": "iv-value",
+                "hashes": {"sha256": "sha256-value"},
+            },
+        ),
+    )
+    monkeypatch.setattr("mindroom.matrix.large_messages.crypto.attachments.encrypt_attachment", encrypt_attachment)
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        room_id,
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "SENSITIVE " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    uploaded_bytes = client.upload.await_args.kwargs["data_provider"](None, None).read()
+    assert uploaded_bytes == b"encrypted-full-arguments"
+    assert "full_arguments_file" in sent.sent_content
+    assert "full_arguments_url" not in sent.sent_content
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_rejects_plaintext_sidecar_after_encryption_transition(tmp_path: Path) -> None:
+    """A plaintext arguments sidecar must retain its preparation mode through delivery."""
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    room = client.rooms["!room:localhost"]
+
+    async def upload_and_enable_encryption(**_kwargs: object) -> tuple[nio.UploadResponse, None]:
+        room.encrypted = True
+        client.encrypted_rooms.add(room.room_id)
+        return nio.UploadResponse("mxc://localhost/plaintext-full-args"), None
+
+    client.upload = AsyncMock(side_effect=upload_and_enable_encryption)
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        room.room_id,
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "SENSITIVE " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is None
+    client.upload.assert_awaited_once()
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_fails(tmp_path: Path) -> None:
     orchestrator, client = _approval_transport_orchestrator(tmp_path)
     client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
@@ -1637,6 +1754,7 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    _configure_plaintext_delivery_client(client)
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"))
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
@@ -1679,6 +1797,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     router_client = MagicMock()
     router_client.user_id = "@mindroom_router:localhost"
     router_client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    _configure_plaintext_delivery_client(router_client)
     router_client.room_send = AsyncMock(side_effect=room_send)
     router_bot = MagicMock(agent_name="router", running=True, client=router_client)
     router_bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")

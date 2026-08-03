@@ -28,6 +28,7 @@ from tests.bot_helpers import (
     AgentBotTestBase,
     _attachment_record_stub,
     _install_runtime_cache_support,
+    _make_matrix_client_mock,
     _room_send_response,
     _runtime_bound_config,
     _set_turn_store_tracker,
@@ -941,9 +942,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$router_guidance")
         tracker = _set_turn_store_tracker(bot, MagicMock())
         tracker.has_responded.return_value = False

@@ -239,6 +239,11 @@ async def _run_cleanup(
     terminal_interrupted_only: bool = False,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
+    client.encrypted_rooms = set()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
     assert joined_rooms == [ROOM_ID]
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         result = await cleanup_stale_streaming_room(

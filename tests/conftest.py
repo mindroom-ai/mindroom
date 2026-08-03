@@ -713,11 +713,33 @@ class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
         return len(self._rooms)
 
 
+def install_matrix_client_delivery_mock_support(
+    client: AsyncMock | MagicMock,
+    *,
+    user_id: str,
+) -> None:
+    """Install strict plaintext delivery state on an existing Matrix client mock."""
+    assigned_attributes = vars(client)
+    if "user_id" not in assigned_attributes:
+        client.user_id = user_id
+    if "rooms" not in assigned_attributes:
+        client.rooms = _AutoRoomCache(user_id)
+    if "encrypted_rooms" not in assigned_attributes:
+        client.encrypted_rooms = set()
+    if "sharing_session" not in assigned_attributes:
+        client.sharing_session = {}
+    if "olm" not in assigned_attributes:
+        client.olm = None
+    if "room_get_state_event" not in assigned_attributes:
+        client.room_get_state_event = AsyncMock(
+            return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+        )
+
+
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = user_id
-    client.rooms = _AutoRoomCache(user_id)
+    install_matrix_client_delivery_mock_support(client, user_id=user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
     presence_response = MagicMock()
@@ -864,6 +886,8 @@ def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> E
 
 def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
     """Attach required cache runtime support to one test bot."""
+    if isinstance(bot.client, AsyncMock | MagicMock):
+        install_matrix_client_delivery_mock_support(bot.client, user_id=bot.matrix_id.full_id)
     if bot._runtime_view.event_cache is None:
         bot.event_cache = make_event_cache_mock()
     if bot._runtime_view.event_cache_write_coordinator is None:

@@ -24,6 +24,15 @@ def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""
     client = AsyncMock()
     client.user_id = "@mindroom_test:localhost"
+    client.rooms = {
+        "!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id),
+    }
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
     return client
 
 
