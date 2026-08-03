@@ -12,8 +12,8 @@ The recovery refreshes `last_started_at` and increments `startup_count` for both
 `ensure_worker` emits `cold_start` at recovery time only when the current ensure attempt has not already emitted that phase.
 
 `_relaunch_after_stale_image` remains responsible only for Docker operations.
-It pulls the configured image once, recomputes the launch-config hash, removes the incompatible container, and creates its replacement.
-The recomputed launch-config hash stays local to that ensure call through container labeling and metadata persistence, so concurrent workers cannot overwrite one another's image identity.
+It pulls the configured image once, resolves the pulled image ID, recomputes the launch-config hash, removes the incompatible container, and creates its replacement from that exact image ID.
+Each resolved image reference and launch-config hash stay local to that ensure call through container creation, labeling, and metadata persistence, so concurrent workers cannot overwrite or invalidate one another's image identity.
 The replacement readiness check stays outside the typed recovery catch so a second protocol mismatch follows the ordinary failure path without another pull.
 
 ## Error Behavior

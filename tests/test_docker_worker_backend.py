@@ -39,6 +39,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
+    _DockerLaunchConfig,
     _DockerWorkerMetadata,
     _load_docker_client_and_errors,
     _worker_health_compatibility_error,
@@ -251,24 +252,28 @@ class _ConcurrentLaunchHashRace:
         self.recovering_key = recovering_key
         self.stale_reader_key = stale_reader_key
         self.recovering_container_name = backend._container_name_for_worker(recovering_key)
-        self.original_compute_launch_hash = backend._compute_launch_config_hash
+        self.stale_reader_container_name = backend._container_name_for_worker(stale_reader_key)
+        self.original_resolve_launch_config = backend._resolve_launch_config
         self.original_ensure_container = backend._ensure_container
         self.original_sync_metadata_identity = backend._sync_metadata_identity
-        self.old_launch_hash = self.original_compute_launch_hash()
-        self.new_launch_hash = self.original_compute_launch_hash(image_identity="sha256:image-v2")
+        self.old_launch_config = self.original_resolve_launch_config()
+        self.new_launch_hash = backend._launch_config_from_image_identity(
+            "sha256:image-v2",
+            image_resolved=True,
+        ).launch_config_hash
         self.thread_context = _WorkerThreadContext()
         self.stale_hash_read = threading.Event()
         self.recovery_hash_assigned = threading.Event()
         self.stale_hash_assigned = threading.Event()
         self.ensure_counts: dict[str, int] = {}
 
-    def compute_launch_config_hash(self, *, image_identity: str | None = None) -> str:
-        launch_hash = self.original_compute_launch_hash(image_identity=image_identity)
-        if self.thread_context.worker_key == self.stale_reader_key and image_identity is None:
+    def resolve_launch_config(self) -> _DockerLaunchConfig:
+        launch_config = self.original_resolve_launch_config()
+        if self.thread_context.worker_key == self.stale_reader_key:
             self.stale_hash_read.set()
             assert self.recovery_hash_assigned.wait(timeout=5.0)
-            return self.old_launch_hash
-        return launch_hash
+            return self.old_launch_config
+        return launch_config
 
     def ensure_container(
         self,
@@ -276,7 +281,7 @@ class _ConcurrentLaunchHashRace:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
-        launch_config_hash: str,
+        launch_config: _DockerLaunchConfig,
     ) -> _FakeContainer:
         worker_key = metadata.worker_key
         self.ensure_counts[worker_key] = self.ensure_counts.get(worker_key, 0) + 1
@@ -287,7 +292,7 @@ class _ConcurrentLaunchHashRace:
             metadata,
             paths,
             private_agent_names=private_agent_names,
-            launch_config_hash=launch_config_hash,
+            launch_config=launch_config,
         )
         return cast("_FakeContainer", container)
 
@@ -297,7 +302,7 @@ class _ConcurrentLaunchHashRace:
         return self.original_sync_metadata_identity(metadata)
 
     def wait_for_ready(self, container: _FakeContainer) -> str:
-        if container.name == self.recovering_container_name and container.attrs["Image"] == "sha256:image-v1":
+        if container.attrs["Image"] == "sha256:image-v1":
             message = "stale worker image"
             raise _WorkerImageIncompatibleError(message)
         host_port = self.backend._container_host_port(container)
@@ -2312,7 +2317,7 @@ def test_docker_worker_stale_recovery_keeps_its_launch_hash_during_concurrent_en
         recovering_key=recovering_key,
         stale_reader_key=stale_reader_key,
     )
-    monkeypatch.setattr(backend, "_compute_launch_config_hash", race.compute_launch_config_hash)
+    monkeypatch.setattr(backend, "_resolve_launch_config", race.resolve_launch_config)
     monkeypatch.setattr(backend, "_ensure_container", race.ensure_container)
     monkeypatch.setattr(backend, "_sync_metadata_identity", race.sync_metadata_identity)
     monkeypatch.setattr(backend, "_wait_for_ready", race.wait_for_ready)
@@ -2326,10 +2331,22 @@ def test_docker_worker_stale_recovery_keeps_its_launch_hash_during_concurrent_en
 
     replacement = fake_client.containers.by_name[race.recovering_container_name]
     replacement_labels = replacement.attrs["Config"]["Labels"]
-    metadata = backend._load_metadata(backend._state_paths(recovering_key))
-    assert metadata is not None
+    stale_reader_container = fake_client.containers.by_name[race.stale_reader_container_name]
+    stale_reader_labels = stale_reader_container.attrs["Config"]["Labels"]
+    recovering_metadata = backend._load_metadata(backend._state_paths(recovering_key))
+    stale_reader_metadata = backend._load_metadata(backend._state_paths(stale_reader_key))
+    assert recovering_metadata is not None
+    assert stale_reader_metadata is not None
+    assert replacement.attrs["Image"] == "sha256:image-v2"
     assert replacement_labels["mindroom.ai/launch-config-hash"] == race.new_launch_hash
-    assert metadata.launch_config_hash == race.new_launch_hash
+    assert recovering_metadata.launch_config_hash == race.new_launch_hash
+    assert stale_reader_container.attrs["Image"] == "sha256:image-v2"
+    assert stale_reader_labels["mindroom.ai/launch-config-hash"] == race.new_launch_hash
+    assert stale_reader_metadata.launch_config_hash == race.new_launch_hash
+
+    created_count = len(fake_client.containers.created_containers)
+    backend.ensure_worker(WorkerSpec(stale_reader_key), now=1.0)
+    assert len(fake_client.containers.created_containers) == created_count
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(
