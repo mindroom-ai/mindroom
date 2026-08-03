@@ -46,6 +46,48 @@ The scope is the path in `docs/architecture/bot-runtime.md` from exact callback 
 The current production boundary is approximately 22,000 to 24,000 physical source lines depending on whether adjacent recovery helpers are included.
 Phase 0 will add one checked manifest so later measurements use an exact file list.
 
+At reviewed commit `a88da5ae6`, the core pipeline manifest is the following 34 files and totals 22,644 physical source lines.
+
+```text
+src/mindroom/turn_controller.py
+src/mindroom/response_runner.py
+src/mindroom/response_turn.py
+src/mindroom/response_lifecycle.py
+src/mindroom/response_terminal.py
+src/mindroom/response_attempt.py
+src/mindroom/response_payload_preparation.py
+src/mindroom/execution_preparation.py
+src/mindroom/ingress_validation.py
+src/mindroom/inbound_turn_normalizer.py
+src/mindroom/conversation_resolver.py
+src/mindroom/ingress_lanes.py
+src/mindroom/coalescing.py
+src/mindroom/coalescing_batch.py
+src/mindroom/text_ingress_dispatch.py
+src/mindroom/turn_policy.py
+src/mindroom/dispatch_handoff.py
+src/mindroom/dispatch_replay_guard.py
+src/mindroom/command_turn_executor.py
+src/mindroom/reaction_dispatch.py
+src/mindroom/user_stop_reconciliation.py
+src/mindroom/visible_response_reconciliation.py
+src/mindroom/turn_store.py
+src/mindroom/handled_turns.py
+src/mindroom/redacted_turn_cleanup.py
+src/mindroom/sync_restart_retry.py
+src/mindroom/turn_settlement_retry.py
+src/mindroom/delivery_gateway.py
+src/mindroom/final_delivery.py
+src/mindroom/streaming.py
+src/mindroom/edit_regenerator.py
+src/mindroom/message_target.py
+src/mindroom/prompt_ingress_reservation.py
+src/mindroom/dispatch_callback_outcome.py
+```
+
+Including all four Python files in `src/mindroom/dispatch_obligations/` adds 1,718 lines and produces the adjacent-recovery boundary of 24,362 lines.
+The mixed-purpose composition and entity files `bot.py`, `ai.py`, and `teams.py` are excluded from this whole-file boundary because most of their contents are outside the turn pipeline, but every changed source line in them still counts toward churn and the final net `src/` delta.
+
 Expected production-code churn is 5,000 to 8,000 lines.
 Expected test churn is another 4,000 to 7,000 lines because the focused suites contain many direct dependency-object constructions and private response-runner calls.
 Expected net production reduction is 1,000 to 2,500 lines, with a central estimate near 1,700 lines.
@@ -142,7 +184,7 @@ Do not require command journal milestones or other mid-turn durable records to f
 ### Changes
 
 - Add the missing glossary and corrected ordinary-turn and multi-purpose-callback diagrams to `docs/architecture/bot-runtime.md` rather than creating a second source of truth.
-- Add an exact pipeline file manifest and a checked LOC-report command.
+- Materialize the 34-file core boundary and four-file adjacent-recovery boundary above as the exact checked pipeline manifest, and add a checked LOC-report command.
 - Create a terminal-write call-site inventory covering `turn_controller.py`, `text_ingress_dispatch.py`, `command_turn_executor.py`, `edit_regenerator.py`, reaction handling, user stop, redaction, and recovery.
 - Create a method-ownership ledger for code expected to leave `turn_controller.py` and `response_runner.py`.
 - Reuse the existing restart harnesses and injectable coalescing controls instead of adding a production seam-hook framework.
@@ -299,6 +341,7 @@ Between 100 lines added and 100 lines removed.
 ### Changes
 
 - Make the gateway the sole normal constructor of `FinalDeliveryOutcome`.
+- Relocate the five current non-gateway constructions in `response_runner.py`: no-terminal-event pre-delivery finalization, missing-outcome settlement after delivery starts, late-cancellation finalization, team blocking cancellation before an event exists, and agent blocking cancellation before an event exists.
 - Share one final event-ID precedence function across streaming, blocking, cancellation, placeholder adoption, and pre-delivery terminal paths.
 - Preserve `StreamTransportOutcome` as transport evidence and keep durable handledness outside `streaming.py`.
 - Centralize canonical provider text, rendered Matrix text, visible-body state, replay text, and empty-terminal reconciliation in the existing delivery types.
@@ -355,11 +398,11 @@ Remove 250 to 400 lines.
 - Streaming and blocking modes preserve completed, empty, failed, interrupted, continued, and cancelled semantics.
 - Under-lock payload preparation remains exactly once.
 - Dynamic continuation and empty-run retry limits remain independent.
-- Structural coverage prevents adapter callback fields from growing beyond the reviewed baseline.
+- Structural coverage pins `BlockingTurnAdapter` to at most 10 callback fields and `StreamingTurnAdapter` to at most 11 callback fields, unless the phase reduces those reviewed baselines.
 
 ### Exit gate
 
-The number of adapter callback fields is lower than the current baseline or the phase is limited to helper extraction.
+The number of adapter callback fields is below the current 10-field blocking and 11-field streaming baselines, or the phase is limited to helper extraction without increasing either baseline.
 `response_runner.py` contains less duplicated settlement logic without absorbing entity-specific domain behavior.
 
 ### Expected net production delta
