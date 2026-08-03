@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import hydrate_joined_room_for_delivery, send_message_result
+from mindroom.matrix.client_delivery import (
+    encrypted_room_ready_for_delivery,
+    hydrate_joined_room_for_delivery,
+    send_message_result,
+)
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
@@ -437,11 +441,15 @@ def build_matrix_restart_recovery_operations(
             await asyncio.sleep(delay)
         if not await hydrate_joined_room_for_delivery(owner.client, target.room_id):
             return RestartDeliveryOutcome.RETRY
+        hydrated_room = owner.client.rooms.get(target.room_id)
+        encrypted_delivery = hydrated_room is not None and hydrated_room.encrypted
         freshness = await target_freshness(owner, target, config)
         if freshness is InterruptedTargetFreshness.RETRY:
             return RestartDeliveryOutcome.RETRY
         if freshness is not InterruptedTargetFreshness.CURRENT:
             return RestartDeliveryOutcome.TERMINAL
+        if encrypted_delivery and not encrypted_room_ready_for_delivery(owner.client, target.room_id):
+            return RestartDeliveryOutcome.RETRY
         content = build_auto_resume_content(
             target,
             config=config,

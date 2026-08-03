@@ -274,6 +274,17 @@ def _pending_room_key_query_user_ids(
     return set(room.users).intersection(client.users_for_key_query)
 
 
+def encrypted_room_ready_for_delivery(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether the current encrypted room can be sent to without another key query."""
+    room = cached_room(client, room_id)
+    return (
+        room is not None
+        and room.encrypted
+        and room.members_synced
+        and not _pending_room_key_query_user_ids(client, room)
+    )
+
+
 def _current_encrypted_room_after_hydration(
     client: nio.AsyncClient,
     room_id: str,
@@ -880,6 +891,7 @@ __all__ = [
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
+    "encrypted_room_ready_for_delivery",
     "hydrate_joined_room_for_delivery",
     "send_audio_message",
     "send_file_message",

@@ -1182,6 +1182,44 @@ async def test_encrypted_delivery_retries_when_member_device_keys_remain_pending
 
 
 @pytest.mark.asyncio
+async def test_encrypted_delivery_retries_when_freshness_adds_pending_member_keys(tmp_path: Path) -> None:
+    """A member discovered after hydration must block the immediate encrypted send."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    room = owner.client.rooms[target.room_id]
+    room.encrypted = True
+    room.members_synced = True
+    owner.client.olm = MagicMock()
+    owner.client.users_for_key_query = set()
+    remote_member_id = "@human:remote.example.org"
+    send_message = AsyncMock(side_effect=delivered_matrix_side_effect("$resume"))
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def freshness_after_hydration(
+        *_args: object,
+        **_kwargs: object,
+    ) -> InterruptedTargetFreshness:
+        room.add_member(remote_member_id, "Human", None)
+        owner.client.users_for_key_query = {remote_member_id}
+        return InterruptedTargetFreshness.CURRENT
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(side_effect=freshness_after_hydration),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=send_message,
+        ),
+    ):
+        delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.RETRY
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_target_delivery_rechecks_freshness_after_hidden_room_hydration(
     tmp_path: Path,
 ) -> None:
