@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, cast, get_type_hints
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
+from mindroom.matrix.sync_recovery_classification import classic_no_recovery_needed_room_ids
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ def _sync_response(
     recovered_room_ids: frozenset[str],
     unrecovered_room_ids: frozenset[str],
     next_batch: str = "s_after",
+    leave_room_ids: tuple[str, ...] = (),
 ) -> nio.SyncResponse:
     """Build a real response carrying authoritative recovery outcomes."""
     joined_rooms = {
@@ -74,7 +76,19 @@ def _sync_response(
     }
     return nio.SyncResponse(
         next_batch=next_batch,
-        rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
+        rooms=nio.Rooms(
+            invite={},
+            join=joined_rooms,
+            leave={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                )
+                for room_id in leave_room_ids
+            },
+        ),
         device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
         device_list=nio.DeviceList(changed=[], left=[]),
         to_device_events=[],
@@ -82,6 +96,58 @@ def _sync_response(
         recovered_room_ids=recovered_room_ids,
         unrecovered_room_ids=unrecovered_room_ids,
     )
+
+
+@pytest.mark.asyncio
+async def test_authoritative_departure_settles_prior_gap_before_clean_certification(tmp_path: Path) -> None:
+    """A purged leave room must not retain nio's reset outcome as permanent debt."""
+    room_id = "!departed:localhost"
+    trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
+    gap_response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset({room_id}),
+        next_batch="s_gap",
+    )
+    gap = await trust.certify_response(
+        next_batch=gap_response.next_batch,
+        cache_result=_cache_result(gap_response, limited_room_ids=(), complete=True),
+    )
+    departure_response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset({room_id}),
+        next_batch="s_leave",
+        leave_room_ids=(room_id,),
+    )
+    departure_result = _cache_result(departure_response, limited_room_ids=(), complete=True)
+    departure_result = replace(
+        departure_result,
+        no_recovery_needed_room_ids=classic_no_recovery_needed_room_ids(
+            departure_response,
+            user_id="@code:localhost",
+        ),
+    )
+    departure = await trust.certify_response(
+        next_batch=departure_response.next_batch,
+        cache_result=departure_result,
+    )
+    clean_response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset(),
+        next_batch="s_clean",
+    )
+    clean = await trust.certify_response(
+        next_batch=clean_response.next_batch,
+        cache_result=_cache_result(clean_response, limited_room_ids=(), complete=True),
+    )
+
+    assert gap.unsettled_recovery_room_ids == frozenset({room_id})
+    assert departure.state is SyncTrustState.UNCERTAIN
+    assert departure.unsettled_recovery_room_ids == frozenset()
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
 
 
 def _cache_result(

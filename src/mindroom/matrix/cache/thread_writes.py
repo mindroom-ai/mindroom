@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -1426,21 +1427,17 @@ class ThreadSyncWritePolicy:
         runtime_available = self._cache_ops.cache_runtime_available()
         pending_durable_write_room_ids = self._cache_ops.pending_durable_write_room_ids()
         complete = runtime_available and not errors and not pending_durable_write_room_ids
-        classified_room_ids = response.recovered_room_ids | response.unrecovered_room_ids
-        has_recovery_obligation = bool(
-            response.unrecovered_room_ids or any(room_id not in classified_room_ids for room_id in limited_room_ids),
-        )
-        runtime_diagnostics = (
-            None
-            if complete and not errors and not has_recovery_obligation
-            else self._cache_ops.cache_runtime_diagnostics()
-        )
-        return SyncCacheWriteResult.from_sync_response(
+        cache_result = SyncCacheWriteResult.from_sync_response(
             response,
             complete=complete,
             limited_room_ids=limited_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),
-            runtime_diagnostics=runtime_diagnostics,
+        )
+        if cache_result.certified:
+            return cache_result
+        return replace(
+            cache_result,
+            runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
         )

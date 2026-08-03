@@ -55,8 +55,8 @@ def test_recovered_limited_room_certifies_after_nio_callback_success() -> None:
     )
 
     assert cache_result._unclassified_limited_room_ids == ()
-    assert cache_result._has_recovery_obligation is False
-    assert cache_result._certified is True
+    assert cache_result.has_certification_blocker is False
+    assert cache_result.certified is True
 
 
 def test_own_join_boundary_advances_without_certifying_limited_checkpoint() -> None:
@@ -74,9 +74,59 @@ def test_own_join_boundary_advances_without_certifying_limited_checkpoint() -> N
     )
 
     assert cache_result._unclassified_limited_room_ids == ()
+    assert cache_result.certified is False
     assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.reason == "limited_sync_join_boundary"
+    assert decision.reason == "sync_recovery_boundary"
     assert decision.reset_client_token is False
+
+
+def test_own_join_boundary_settles_prior_gap_before_clean_certification() -> None:
+    """An own-join reset must discharge nio's same-response unrecovered outcome."""
+    room_id = "!joined:localhost"
+    gap = certify_sync_response(
+        next_batch="s_gap",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({room_id}),
+        ),
+    )
+    boundary = certify_sync_response(
+        next_batch="s_join",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=(room_id,),
+            unrecovered_room_ids=frozenset({room_id}),
+            no_recovery_needed_room_ids=frozenset({room_id}),
+        ),
+        unsettled_recovery_room_ids=gap.unsettled_recovery_room_ids,
+    )
+    clean = certify_sync_response(
+        next_batch="s_clean",
+        cache_result=SyncCacheWriteResult(complete=True),
+        unsettled_recovery_room_ids=boundary.unsettled_recovery_room_ids,
+    )
+
+    assert gap.unsettled_recovery_room_ids == frozenset({room_id})
+    assert boundary.state is SyncTrustState.UNCERTAIN
+    assert boundary.reason == "sync_recovery_boundary"
+    assert boundary.unsettled_recovery_room_ids == frozenset()
+    assert clean.state is SyncTrustState.CERTIFIED
+    assert clean.checkpoint_to_save == SyncCheckpoint("s_clean")
+
+
+def test_unrecovered_room_reason_outweighs_independent_join_boundary() -> None:
+    """A benign join boundary must not hide another room's missing history."""
+    decision = certify_sync_response(
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!joined:localhost",),
+            unrecovered_room_ids=frozenset({"!missing:localhost"}),
+            no_recovery_needed_room_ids=frozenset({"!joined:localhost"}),
+        ),
+    )
+
+    assert decision.reason == "sync_recovery_incomplete"
 
 
 def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() -> None:
@@ -92,8 +142,8 @@ def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() 
     )
 
     assert cache_result._unclassified_limited_room_ids == (unclassified_room,)
-    assert cache_result._has_recovery_obligation is True
-    assert cache_result._certified is False
+    assert cache_result.has_certification_blocker is True
+    assert cache_result.certified is False
 
 
 @pytest.mark.parametrize(

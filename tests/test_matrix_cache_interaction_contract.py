@@ -1110,7 +1110,7 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
     )
 
     assert result.complete is True
-    assert result._certified is False
+    assert result.certified is False
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.errors == ()
     assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
@@ -1137,7 +1137,7 @@ async def test_recovered_limited_sync_certifies_after_nio_callback_success(
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.recovered_room_ids == frozenset({_ROOM_ID})
     assert result.unrecovered_room_ids == frozenset()
-    assert result._certified is True
+    assert result.certified is True
 
 
 @pytest.mark.asyncio
@@ -1155,7 +1155,7 @@ async def test_cache_seam_preserves_unrecovered_outcome_from_an_earlier_gap(
     assert result.limited_room_ids == ()
     assert result.recovered_room_ids == frozenset()
     assert result.unrecovered_room_ids == frozenset({_ROOM_ID})
-    assert result._certified is False
+    assert result.certified is False
     assert result.runtime_diagnostics is not None
     assert result.runtime_diagnostics["cache_backend"] in {"postgres", "sqlite"}
 

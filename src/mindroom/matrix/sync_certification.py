@@ -54,7 +54,6 @@ class SyncCacheWriteResult:
         runtime_available: bool | None = None,
         task_count: int | None = None,
         runtime_diagnostics: dict[str, object] | None = None,
-        no_recovery_needed_room_ids: frozenset[str] = frozenset(),
     ) -> SyncCacheWriteResult:
         """Build a cache result carrying nio's authoritative recovery outcome."""
         return cls(
@@ -62,7 +61,6 @@ class SyncCacheWriteResult:
             limited_room_ids=limited_room_ids,
             recovered_room_ids=response.recovered_room_ids,
             unrecovered_room_ids=response.unrecovered_room_ids,
-            no_recovery_needed_room_ids=no_recovery_needed_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=task_count,
@@ -76,14 +74,16 @@ class SyncCacheWriteResult:
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def _has_recovery_obligation(self) -> bool:
-        """Return whether nio reports unresolved recovery or misses a current limited-room classification."""
-        return bool(self._unclassified_limited_room_ids or self.unrecovered_room_ids)
+    def has_certification_blocker(self) -> bool:
+        """Return whether recovery state requires withholding this response's checkpoint."""
+        return bool(
+            self._unclassified_limited_room_ids or self.unrecovered_room_ids or self.no_recovery_needed_room_ids,
+        )
 
     @property
-    def _certified(self) -> bool:
-        """Return whether local cache work completed without errors or recovery obligations."""
-        return self.complete and not self.errors and not self._has_recovery_obligation
+    def certified(self) -> bool:
+        """Return whether local cache work and recovery state permit a checkpoint."""
+        return self.complete and not self.errors and not self.has_certification_blocker
 
 
 @dataclass(frozen=True)
@@ -134,12 +134,12 @@ def _uncertain_reason(
         reason = "limited_sync_timeline"
     elif not cache_result.complete:
         reason = "cache_write_incomplete"
-    elif cache_result.no_recovery_needed_room_ids:
-        reason = "limited_sync_join_boundary"
-    elif cache_result.unrecovered_room_ids:
+    elif cache_result.unrecovered_room_ids & unsettled_recovery_room_ids:
         reason = "sync_recovery_incomplete"
     elif unsettled_recovery_room_ids:
         reason = "sync_recovery_pending"
+    elif cache_result.no_recovery_needed_room_ids:
+        reason = "sync_recovery_boundary"
     else:
         reason = None
     return reason
@@ -154,7 +154,7 @@ def certify_sync_response(
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     settled_room_ids = cache_result.recovered_room_ids | cache_result.no_recovery_needed_room_ids
-    unsettled_recovery_room_ids = (unsettled_recovery_room_ids - settled_room_ids) | cache_result.unrecovered_room_ids
+    unsettled_recovery_room_ids = (unsettled_recovery_room_ids | cache_result.unrecovered_room_ids) - settled_room_ids
     reason = _uncertain_reason(
         cache_result,
         next_batch=next_batch,
@@ -167,7 +167,7 @@ def certify_sync_response(
         reset_client_token = (
             reason
             not in {
-                "limited_sync_join_boundary",
+                "sync_recovery_boundary",
                 "sync_recovery_incomplete",
                 "sync_recovery_pending",
             }
@@ -205,7 +205,7 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
     """Return structured log fields explaining one sync cache-write result."""
     diagnostics: dict[str, Any] = {
         "cache_write_complete": cache_result.complete,
-        "cache_write_certified": cache_result._certified,
+        "cache_write_certified": cache_result.certified,
         "cache_error_count": len(cache_result.errors),
     }
     diagnostics.update(_recovery_diagnostics(cache_result))
