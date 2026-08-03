@@ -143,6 +143,26 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     assert config.store_sync_tokens is True
 
 
+def _load_persisted_client(
+    tmp_path: Path,
+    *,
+    user_id: str,
+    device_id: str,
+    config: nio.AsyncClientConfig,
+) -> _MindRoomAsyncClient:
+    """Load one authenticated MindRoom client from its persisted nio store."""
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        user_id,
+        device_id=device_id,
+        store_path=str(tmp_path),
+        config=config,
+    )
+    client.restore_login(user_id, device_id, "access-token")
+    client.load_store()
+    return client
+
+
 @pytest.mark.asyncio
 async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) -> None:
     """Nio must durably retain a gap when MindRoom advances its own sync token."""
@@ -173,19 +193,12 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
             presence_events=[],
         )
 
-    def load_client() -> _MindRoomAsyncClient:
-        client = _MindRoomAsyncClient(
-            "https://example.org",
-            user_id,
-            device_id=device_id,
-            store_path=str(tmp_path),
-            config=config,
-        )
-        client.restore_login(user_id, device_id, "access-token")
-        client.load_store()
-        return client
-
-    client = load_client()
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
     client.next_batch = "s_before_gap"
     client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
 
@@ -198,7 +211,12 @@ async def test_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) 
     assert limited_response.unrecovered_room_ids == {room_id}
     assert later_response.unrecovered_room_ids == {room_id}
 
-    restarted = load_client()
+    restarted = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
     try:
         recovery = cast("Any", restarted)._recovery
         assert restarted.loaded_sync_token == "s_later"  # noqa: S105
@@ -216,19 +234,12 @@ async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path
     device_id = "AGENTDEVICE"
     config = matrix_client_config()
 
-    def load_client() -> _MindRoomAsyncClient:
-        client = _MindRoomAsyncClient(
-            "https://example.org",
-            user_id,
-            device_id=device_id,
-            store_path=str(tmp_path),
-            config=config,
-        )
-        client.restore_login(user_id, device_id, "access-token")
-        client.load_store()
-        return client
-
-    client = load_client()
+    client = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
     client.next_batch = "s_before_gap"
     response = nio.SyncResponse(
         "s_rejected",
@@ -260,7 +271,12 @@ async def test_rejected_sync_position_is_removed_from_nio_restart_store(tmp_path
     assert client.store is not None
     cast("Any", client.store).database.close()
 
-    restarted = load_client()
+    restarted = _load_persisted_client(
+        tmp_path,
+        user_id=user_id,
+        device_id=device_id,
+        config=config,
+    )
     try:
         assert not restarted.loaded_sync_token
         assert not cast("Any", restarted)._recovery.gaps

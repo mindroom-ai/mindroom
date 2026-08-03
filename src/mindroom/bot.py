@@ -340,6 +340,7 @@ class AgentBot:
     _room_member_join_hooks_armed: bool
     _restored_token_catchup_pending: bool
     _room_member_join_bootstrap_pending: bool
+    _room_member_join_baseline_record_pending: bool
     _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
@@ -378,6 +379,7 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._restored_token_catchup_pending = False
         self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
+        self._room_member_join_baseline_record_pending = self.agent_name == ROUTER_AGENT_NAME
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
@@ -1212,6 +1214,7 @@ class AgentBot:
         self._sync_shutting_down = False
         if self.agent_name == ROUTER_AGENT_NAME and not self._room_member_join_hooks_armed:
             self._room_member_join_bootstrap_pending = True
+            self._room_member_join_baseline_record_pending = True
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1490,16 +1493,22 @@ class AgentBot:
         room_member_join_hooks_were_armed: bool,
     ) -> tuple[_RoomMemberJoinSyncHookPlan, bool]:
         """Apply one Classic response through transport and cache owners."""
-        if self.agent_name == ROUTER_AGENT_NAME and not room_member_join_hooks_were_armed:
+        if (
+            self.agent_name == ROUTER_AGENT_NAME
+            and not room_member_join_hooks_were_armed
+            and not self._room_member_join_bootstrap_pending
+        ):
             self._room_member_join_bootstrap_pending = True
+            self._room_member_join_baseline_record_pending = True
         self._apply_transport_recovery_outcome(
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
-                if self._room_member_join_bootstrap_pending:
+                if self._room_member_join_baseline_record_pending:
                     await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+                    self._room_member_join_baseline_record_pending = False
                 await self._apply_own_room_membership_from_sync(response)
                 await cache_fenced_world_readable_join_history(
                     cast("nio.AsyncClient", self.client),
@@ -1552,7 +1561,7 @@ class AgentBot:
                 raise
             try:
                 (
-                    _decision,
+                    applied_decision,
                     room_member_join_hook_plan,
                     rejected_response,
                 ) = await self._apply_sync_response_after_dispatch_acceptance(
@@ -1570,9 +1579,10 @@ class AgentBot:
                     error_type=type(error).__name__,
                 )
                 raise
-        if _decision.state is SyncTrustState.CERTIFIED and not rejected_response:
+        if applied_decision.state is SyncTrustState.CERTIFIED and not rejected_response:
             self._restored_token_catchup_pending = False
             self._room_member_join_bootstrap_pending = False
+            self._room_member_join_baseline_record_pending = False
         self._mark_sync_progress()
         return room_member_join_hook_plan, rejected_response
 
@@ -1658,6 +1668,7 @@ class AgentBot:
                 self._room_member_join_hooks_armed = False
                 self._restored_token_catchup_pending = False
                 self._room_member_join_bootstrap_pending = self.agent_name == ROUTER_AGENT_NAME
+                self._room_member_join_baseline_record_pending = self.agent_name == ROUTER_AGENT_NAME
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -2004,6 +2015,7 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._restored_token_catchup_pending = False
         self._room_member_join_bootstrap_pending = False
+        self._room_member_join_baseline_record_pending = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)

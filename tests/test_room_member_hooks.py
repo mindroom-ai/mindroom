@@ -137,6 +137,7 @@ def _router_bot(
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
     bot._room_member_join_bootstrap_pending = False
+    bot._room_member_join_baseline_record_pending = False
     return bot
 
 
@@ -1023,7 +1024,7 @@ async def test_restored_join_catchup_survives_recovery_settlement(
 async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     tmp_path: Path,
 ) -> None:
-    """An empty recovery response must rewind without consuming catch-up state."""
+    """Recovery settlement must rewind without tombstoning later incremental state."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
@@ -1076,7 +1077,16 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     assert bot._room_member_callback_registered
     assert not bot._room_member_join_hooks_armed
 
-    recovery = _sync_response_with_state(room.room_id, [])
+    recovery = _sync_response_with_state(
+        room.room_id,
+        [
+            _room_member_event(
+                event_id="$join-during-recovery-state",
+                user_id="@carol:localhost",
+                prev_membership=None,
+            ),
+        ],
+    )
     recovery.recovered_room_ids = frozenset({gap_room_id})
     bot.client.next_batch = "s_recovered"
     await bot._on_sync_response(recovery)
@@ -1090,12 +1100,19 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
     replay = _sync_response_with_state(
         room.room_id,
         [],
-        timeline_events=[_room_member_event(event_id="$catchup-before-recovery", prev_membership=None)],
+        timeline_events=[
+            _room_member_event(event_id="$catchup-before-recovery", prev_membership=None),
+            _room_member_event(
+                event_id="$join-during-recovery",
+                user_id="@carol:localhost",
+                prev_membership=None,
+            ),
+        ],
     )
     bot.client.next_batch = "s_replay"
     await bot._on_sync_response(replay)
 
-    assert seen == ["$catchup-before-recovery"]
+    assert seen == ["$catchup-before-recovery", "$join-during-recovery"]
     assert not bot._restored_token_catchup_pending
     assert bot._first_sync_done
 
@@ -1104,7 +1121,7 @@ async def test_restored_join_catchup_waits_for_nio_gap_settlement(
         _room_member_event(event_id="$profile-update", user_id="@bob:localhost", prev_membership=None),
     )
 
-    assert seen == ["$catchup-before-recovery"]
+    assert seen == ["$catchup-before-recovery", "$join-during-recovery"]
 
 
 @pytest.mark.asyncio
