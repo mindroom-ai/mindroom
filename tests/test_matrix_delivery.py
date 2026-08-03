@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
+from mindroom.matrix.client_delivery import (
+    RoomDeliveryHydrationProof,
+    build_edit_event_content,
+    send_message_result,
+)
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -38,6 +42,50 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_result_revalidates_hydration_after_content_preparation() -> None:
+    """An awaited payload preparation must not outlive its authoritative room proof."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    remote_member_id = "@human:remote.example.org"
+    hydrated_room = nio.MatrixRoom(room_id, "@bot:localhost")
+    hydrated_room.encrypted = True
+    hydrated_room.members_synced = True
+    hydrated_room.add_member(remote_member_id, "Human", None)
+    client.rooms = {room_id: hydrated_room}
+    client.olm = MagicMock()
+    client.users_for_key_query = set()
+    proof = RoomDeliveryHydrationProof(
+        encrypted=True,
+        joined_user_ids=frozenset({remote_member_id}),
+    )
+    replacement_room = nio.MatrixRoom(room_id, "@bot:localhost")
+    replacement_room.encrypted = True
+    replacement_room.members_synced = True
+
+    async def replace_room_during_preparation(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        content: dict[str, object],
+    ) -> dict[str, object]:
+        client.rooms[room_id] = replacement_room
+        return content
+
+    with patch(
+        "mindroom.matrix.client_delivery.prepare_large_message",
+        new=AsyncMock(side_effect=replace_room_during_preparation),
+    ):
+        delivered = await send_message_result(
+            client,
+            room_id,
+            {"body": "hello", "msgtype": "m.text"},
+            delivery_proof=proof,
+        )
+
+    assert delivered is None
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
