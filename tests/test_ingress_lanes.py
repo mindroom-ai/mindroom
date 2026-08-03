@@ -24,6 +24,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -1327,7 +1328,7 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
         ready_task=asyncio.create_task(never_ready()),
     )
 
-    worker = gate.lanes._workers[("!room:localhost", "@user:localhost")]
+    worker = gate.lanes._workers[ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost")]
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
     await asyncio.sleep(0)
