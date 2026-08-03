@@ -85,7 +85,15 @@ src/mindroom/prompt_ingress_reservation.py
 src/mindroom/dispatch_callback_outcome.py
 ```
 
-Including all four Python files in `src/mindroom/dispatch_obligations/` adds 1,718 lines and produces the adjacent-recovery boundary of 24,362 lines.
+The adjacent-recovery manifest adds the following four files and 1,718 physical source lines, producing a total boundary of 24,362 lines.
+
+```text
+src/mindroom/dispatch_obligations/__init__.py
+src/mindroom/dispatch_obligations/events.py
+src/mindroom/dispatch_obligations/runner.py
+src/mindroom/dispatch_obligations/storage.py
+```
+
 The mixed-purpose composition and entity files `bot.py`, `ai.py`, and `teams.py` are excluded from this whole-file boundary because most of their contents are outside the turn pipeline, but every changed source line in them still counts toward churn and the final net `src/` delta.
 
 Expected production-code churn is 5,000 to 8,000 lines.
@@ -145,7 +153,25 @@ Shrink the current callback-heavy `BlockingTurnAdapter` and `StreamingTurnAdapte
 Do not create another lifecycle driver above them.
 
 Evolve `StreamTransportOutcome` and `FinalDeliveryOutcome` in place.
-The delivery contract must continue to distinguish physical event existence, placeholder-only visibility, substantive visibility, terminal visibility, canonical provider text, rendered Matrix text, replayable assistant text, and final response event ID.
+The delivery contract must continue to distinguish physical event existence, placeholder-only visibility, substantive visibility, terminal visibility, canonical provider-derived delivery text, rendered Matrix text, replayable assistant text, and final response event ID.
+
+Treat the text values as separate evidence.
+Canonical delivery text is the unrendered response selected by the response driver before response hooks and Matrix formatting, currently represented by blocking `response_text` or the streaming `canonical_final_body_candidate`.
+Post-hook text is a delivery transformation of canonical delivery text and does not replace the execution record.
+Rendered Matrix text is the body actually supplied to a successful send or edit and is the only source for a known `final_visible_body`.
+Replayable assistant text remains the execution-owned `CompletedAttempt.replayable_text` or streaming recorder text and must never be reconstructed from post-hook or rendered Matrix text.
+
+The Phase 5 typed mapping must preserve this branch matrix.
+
+| Delivery branch | Canonical and replay evidence | Rendered Matrix text and visibility | Terminal precedence |
+| --- | --- | --- | --- |
+| Successful blocking send or edit | Preserve canonical delivery text and the independently selected replayable assistant text. | Use the post-hook, interactively formatted body and mark it substantive only after the send or edit commits. | The committed delivery kind and event ID win. |
+| Successful streamed response or final transform | Preserve the stream's canonical final candidate and the recorder's replayable assistant text independently. | Use the committed streamed body unless a final transform edit commits, in which case use that committed formatted body. | A failed or cancelled final transform preserves the already committed streamed success. |
+| Hook suppression | Preserve execution evidence without deriving replay text from Matrix state. | Send no new body, redact a placeholder when possible, and retain an existing non-placeholder only as suppressed physical visibility. | A cleanup failure changes the terminal result to error while retaining suppression and physical-event evidence. |
+| Send or edit failure | Preserve canonical and replay evidence as attempted values. | A failed new send proves no visible body, a failed edit of a non-placeholder preserves only the prior event and known prior body, and a committed failure-note edit reports only the failure-note body. | Typed transport failure wins over attempted body text. |
+| Placeholder cleanup | Preserve canonical and replay evidence without using placeholder or failure-note chrome as replay text. | Successful redaction produces no visible event, failed redaction retains physical-event evidence, and only a committed failure-note edit proves a visible failure-note body. | Cleanup failure upgrades the terminal result to error and becomes `failure_reason`. |
+| Cancellation | Preserve canonical and replay evidence, and never treat the cancellation note as assistant replay text. | A committed cancellation-note edit reports that note, a failed edit of a non-placeholder preserves the prior visible event, and successful placeholder redaction produces no visible event. | Explicit request provenance wins, then a live `CancelledError` classification, then canonical streamed or persisted failure reason, with `interrupted` as the fallback. |
+| Retry or adoption | Reuse the immutable canonical and replay evidence from the original attempt. | Do not claim a new rendered body until a retry commits, and do not substitute an attempted body for an adopted event whose prior body is unknown. | The final committed or adopted event-ID rule is shared across streaming and blocking paths. |
 
 ### Durable ordinary-turn sequence
 
@@ -184,7 +210,7 @@ Do not require command journal milestones or other mid-turn durable records to f
 ### Changes
 
 - Add the missing glossary and corrected ordinary-turn and multi-purpose-callback diagrams to `docs/architecture/bot-runtime.md` rather than creating a second source of truth.
-- Materialize the 34-file core boundary and four-file adjacent-recovery boundary above as the exact checked pipeline manifest, and add a checked LOC-report command.
+- Materialize the 34-file core boundary and the four explicitly named adjacent-recovery files above as the exact checked pipeline manifest, and add a checked LOC-report command.
 - Create a terminal-write call-site inventory covering `turn_controller.py`, `text_ingress_dispatch.py`, `command_turn_executor.py`, `edit_regenerator.py`, reaction handling, user stop, redaction, and recovery.
 - Create a method-ownership ledger for code expected to leave `turn_controller.py` and `response_runner.py`.
 - Reuse the existing restart harnesses and injectable coalescing controls instead of adding a production seam-hook framework.
@@ -340,8 +366,10 @@ Between 100 lines added and 100 lines removed.
 
 ### Changes
 
-- Make the gateway the sole normal constructor of `FinalDeliveryOutcome`.
+- Make the gateway the sole constructor of every `FinalDeliveryOutcome`, including no-event cancellation and cleanup outcomes, through narrow named gateway methods.
 - Relocate the five current non-gateway constructions in `response_runner.py`: no-terminal-event pre-delivery finalization, missing-outcome settlement after delivery starts, late-cancellation finalization, team blocking cancellation before an event exists, and agent blocking cancellation before an event exists.
+- Preserve explicit cancellation provenance when supplied, otherwise classify the live `CancelledError`, otherwise derive provenance from the canonical streamed or persisted failure reason, and default only unknown provenance to `interrupted`.
+- When cancellation cleanup fails, return an error outcome whose `failure_reason` is the cleanup failure while retaining the cancellation provenance and physical event evidence.
 - Share one final event-ID precedence function across streaming, blocking, cancellation, placeholder adoption, and pre-delivery terminal paths.
 - Preserve `StreamTransportOutcome` as transport evidence and keep durable handledness outside `streaming.py`.
 - Centralize canonical provider text, rendered Matrix text, visible-body state, replay text, and empty-terminal reconciliation in the existing delivery types.
@@ -364,6 +392,7 @@ Between 100 lines added and 100 lines removed.
 - Replay text remains stable when rendered Matrix text differs from provider output.
 - Cancellation before placeholder, during edit, after placeholder, and after final delivery converges correctly.
 - Stale-stream recovery recognizes every terminal and interrupted marker.
+- The branch matrix above proves that suppression, delivery failure, placeholder cleanup, cancellation, retry, and adoption never substitute rendered Matrix text for replayable assistant text.
 
 ### Exit gate
 
