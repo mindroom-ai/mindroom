@@ -854,7 +854,9 @@ class CoalescingGate:
     ) -> bool:
         try:
             with turn_dispatch_recovery_scope(
-                active=any(pending_event.event.turn_dispatch_recovery for pending_event in segment_owner.pending_events),
+                active=any(
+                    pending_event.event.turn_dispatch_recovery for pending_event in segment_owner.pending_events
+                ),
             ):
                 await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:

@@ -1006,7 +1006,11 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
                 source_kind="message",
                 requester_user_id="@user:example.com",
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:example.com")),
+                coalescing_key=CoalescingKey(
+                    room.room_id,
+                    "$thread_root",
+                    RequesterCoalescingOwner("@user:example.com"),
+                ),
             )
             await asyncio.wait_for(streaming_started.wait(), timeout=wait_timeout)
 

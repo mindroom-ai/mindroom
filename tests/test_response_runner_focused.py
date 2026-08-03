@@ -1395,7 +1395,9 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         response_envelope=second_envelope,
     )
     assert reservation is not None
-    queued_signal = coordinator._thread_queued_signals[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
+    queued_signal = coordinator._thread_queued_signals[
+        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
+    ]
     assert queued_signal.pending_human_messages == 1
     # A duplicate reservation for the same queued event must not double-register.
     assert (
@@ -1474,7 +1476,9 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     queued_two = run_queued()
     for _ in range(10):
         await asyncio.sleep(0)
-    queued_signal = coordinator._thread_queued_signals[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
+    queued_signal = coordinator._thread_queued_signals[
+        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
+    ]
     assert queued_signal.pending_human_messages == 1
 
     gate.set()

@@ -1708,7 +1708,8 @@ def test_recovery_preserves_newer_routed_alias_prompt(tmp_path: Path) -> None:
         "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$human"),
         "$anchor": SourceEventMetadata(sender="@user:example.org"),
     }
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$relay", "$anchor"],
             discovery_event_ids=["$human"],
@@ -1739,7 +1740,8 @@ def test_recovery_preserves_newer_routed_alias_prompt(tmp_path: Path) -> None:
 def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -> None:
     """A delivered recovery lacking prompt metadata cannot erase durable coalesced bodies."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$first", "$anchor"],
             response_event_id="$old-response",
@@ -1765,7 +1767,8 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
 def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) -> None:
     """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$event"],
             response_event_id="$old-response",
@@ -1798,7 +1801,8 @@ def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) ->
 def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:
     """Under-lock redaction checks must recognize a physical relay tombstoned by its alias."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$relay", "$anchor"],
             discovery_event_ids=["$human"],
@@ -1821,7 +1825,8 @@ def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) ->
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
     """Second-resolution run times should still repair a later run from the same second."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=10.9),
     )
     recovery_record = TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=10)
@@ -1867,7 +1872,8 @@ def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(tmp_path: P
 def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
     """A newer run without Matrix delivery must not replace a visible response."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(["$event"], response_event_id="$response", timestamp=10),
     )
     recovery_record = TurnRecord.create(["$event"], completed=False, timestamp=20)
@@ -1887,7 +1893,8 @@ def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) ->
 def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -> None:
     """An unfinished run cannot pair its edit revision with the delivered ledger prompt."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$event"],
             response_event_id="$response",
@@ -1918,7 +1925,8 @@ def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -
 def test_recovery_does_not_adopt_revision_without_its_prompt(tmp_path: Path) -> None:
     """A ledger edit revision is unusable unless its matching durable prompt survived."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(
             ["$event"],
             response_event_id="$old-response",
@@ -1944,7 +1952,8 @@ def test_recovery_does_not_adopt_revision_without_its_prompt(tmp_path: Path) -> 
 def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) -> None:
     """A successful terminal write should become newer than its recovered input."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=1),
     )
 
@@ -2265,7 +2274,8 @@ def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
 ) -> None:
     """Slow incomplete or delivered recovery must preserve a concurrent terminal write."""
     store = _store(tmp_path)
-    _record_ledger_turn(store,
+    _record_ledger_turn(
+        store,
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=9),
     )
     recovery_started = threading.Event()

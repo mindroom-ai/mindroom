@@ -439,8 +439,14 @@ async def test_late_lane_delivery_combines_queued_text_backlog_in_receipt_order(
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id), receipt_time=1.0)
-    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id), receipt_time=1.5)
+    first_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+        receipt_time=1.0,
+    )
+    second_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+        receipt_time=1.5,
+    )
 
     gate.submit_lane_slot(
         second_slot,
@@ -912,7 +918,9 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
     )
     await active_wait_started.wait()
 
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=normal_key.room_id, physical_sender_id=normal_key.owner.requester_user_id))
+    slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=normal_key.room_id, physical_sender_id=normal_key.owner.requester_user_id),
+    )
     gate.submit_lane_slot(
         slot,
         key=normal_key,
@@ -1581,7 +1589,9 @@ async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_sp
 
     await _admit_ready(gate, first_key, _image_pending("$first:localhost", 1_000_000))
     await asyncio.sleep(0.005)
-    slot = gate.enter_lane(ReceiptLaneKey(room_id=first_key.room_id, physical_sender_id=first_key.owner.requester_user_id))
+    slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=first_key.room_id, physical_sender_id=first_key.owner.requester_user_id),
+    )
     await asyncio.sleep(0.05)
 
     assert batches == []
@@ -1621,8 +1631,14 @@ async def test_batch_order_follows_lane_receipt_order_not_readiness_order() -> N
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
     first_pending = _pending(_text_event("$first:localhost", "first", 1_000_000))
-    first_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id), receipt_time=1.0)
-    second_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id), receipt_time=1.2)
+    first_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+        receipt_time=1.0,
+    )
+    second_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+        receipt_time=1.2,
+    )
 
     gate.submit_lane_slot(
         first_slot,

@@ -3968,7 +3968,9 @@ async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
-    unresolved_front_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id))
+    unresolved_front_slot = gate.enter_lane(
+        ReceiptLaneKey(room_id=key.room_id, physical_sender_id=key.owner.requester_user_id),
+    )
     ready_task = asyncio.create_task(cancelled_ready())
     await asyncio.gather(ready_task, return_exceptions=True)
     assert ready_task.cancelled()

@@ -877,7 +877,9 @@ class TurnController:
                 dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
-                trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
+                trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(
+                    dispatch_event,
+                ),
             ),
             room=room,
         )

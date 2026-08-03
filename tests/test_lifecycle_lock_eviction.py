@@ -91,12 +91,12 @@ def test_lifecycle_key_is_shared_by_locks_signals_and_notice_metadata() -> None:
     coordinator = ResponseLifecycleCoordinator()
 
     for target in (threaded, room_level):
-        assert coordinator._response_lifecycle_lock(target) is coordinator._response_lifecycle_locks[
-            target.lifecycle_key
-        ]
-        assert coordinator._get_or_create_queued_signal(target) is coordinator._thread_queued_signals[
-            target.lifecycle_key
-        ]
+        assert (
+            coordinator._response_lifecycle_lock(target) is coordinator._response_lifecycle_locks[target.lifecycle_key]
+        )
+        assert (
+            coordinator._get_or_create_queued_signal(target) is coordinator._thread_queued_signals[target.lifecycle_key]
+        )
     assert threaded.lifecycle_key != room_level.lifecycle_key
 
     metadata = _queued_notice_dispatch_metadata(

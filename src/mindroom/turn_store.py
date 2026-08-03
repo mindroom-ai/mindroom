@@ -129,7 +129,7 @@ class TurnStore:
             raise RuntimeError(msg)
         self.record_turn(turn_record)
 
-    def record_turn_durably(self, turn_record: TurnRecord) -> None:
+    def record_turn_durably(self, turn_record: TurnRecord) -> None:  # privata: ignore — durable write surface shared by turn_store helpers and tests
         """Persist one terminal turn and wait until its exact ledger write lands."""
         self._record_terminal_turn(turn_record, wait_for_persist=True)
 

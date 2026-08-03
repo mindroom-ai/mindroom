@@ -242,11 +242,13 @@ def test_turn_record_has_no_post_init_normalization_hook() -> None:
 def test_ledger_canonicalizes_record_before_identity_resolution(temp_dir: Path) -> None:
     """The persistence boundary should compare canonical turn identities."""
     tracker = HandledTurnLedger("test_canonical_identity_boundary", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(["$source"], response_event_id="$old", timestamp=1.0),
     )
 
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord(source_event_ids=("$source",), response_event_id="$new", timestamp=2.0),
     )
 
@@ -369,7 +371,8 @@ def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
         reply_to_event_id="$reply:example.com",
     )
 
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$first", "$second"],
             response_event_id="$response",
@@ -481,7 +484,8 @@ def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> 
     """The ledger should persist an exact partial record without completing it."""
     tracker = HandledTurnLedger("test_visible_echo", base_path=temp_dir)
 
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
     )
 
@@ -498,7 +502,8 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     """Visible echoes should survive a new ledger instance on the same storage path."""
     tracker1 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
 
-    _record_exact(tracker1,
+    _record_exact(
+        tracker1,
         TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
     )
 
@@ -515,7 +520,8 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
 def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     """Coalesced source-event metadata should survive a ledger reload from disk as floats."""
     tracker1 = HandledTurnLedger("test_source_metadata_reload", base_path=temp_dir)
-    _record_exact(tracker1,
+    _record_exact(
+        tracker1,
         TurnRecord.create(
             ["$first", "$second"],
             discovery_event_ids=["$human-first"],
@@ -566,7 +572,8 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
 def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) -> None:
     """Command effect and result evidence must survive process replacement."""
     tracker = HandledTurnLedger("test_command_checkpoint", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$command"],
             completed=False,
@@ -617,7 +624,8 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
 def test_user_stop_state_persists_across_restart(temp_dir: Path) -> None:
     """Durable STOP order and visible completion survive outside run metadata."""
     tracker = HandledTurnLedger("test_user_stop_cutoff", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$source"],
             response_event_id="$response",
@@ -639,7 +647,8 @@ def test_suppressed_source_event_revisions_persist_across_restart(temp_dir: Path
     """Hook suppression must survive Matrix replay through the durable ledger."""
     suppressed_revisions = {"$source": (1_000_010, "$edit")}
     tracker = HandledTurnLedger("test_suppressed_source_revisions_reload", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$source"],
             response_event_id="$response",
@@ -722,7 +731,8 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
 def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: Path) -> None:
     """Discovery aliases should rehydrate to the canonical record without changing source semantics."""
     tracker1 = HandledTurnLedger("test_discovery_alias", base_path=temp_dir)
-    _record_exact(tracker1,
+    _record_exact(
+        tracker1,
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
@@ -744,7 +754,8 @@ def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: 
 def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) -> None:
     """Selection aliases must retain both their tombstone and owed cleanup across restart."""
     tracker = HandledTurnLedger("test_discovery_redaction", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
@@ -1308,7 +1319,8 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
     """Age retention must not discard cleanup work before the next response."""
     tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$pending"],
             redacted_source_event_ids=["$pending"],
@@ -1330,7 +1342,8 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
     """Age cleanup must not discard a turn whose durable work is unfinished."""
     tracker = HandledTurnLedger("test_incomplete_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$incomplete"],
             completed=False,
@@ -1352,7 +1365,8 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
 def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(temp_dir: Path) -> None:
     """Cross-store cleanup must retain old terminal truth while dispatch still owns it."""
     tracker = HandledTurnLedger("test_unsettled_age_cleanup", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$terminal"],
             response_event_id="$response",
@@ -1374,7 +1388,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
     """A STOP-owned turn remains until its visible terminal edit is settled."""
     tracker = HandledTurnLedger("test_unsettled_stop_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$unsettled-stop"],
             response_event_id="$unsettled-response",
@@ -1382,7 +1397,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
             timestamp=old_timestamp,
         ),
     )
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$settled-stop"],
             response_event_id="$settled-response",
@@ -1402,7 +1418,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
 def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> None:
     """A fully redacted turn without cleanup or dispatch work must not live forever."""
     tracker = HandledTurnLedger("test_redacted_age_cleanup", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$redacted"],
             redacted_source_event_ids=["$redacted"],
@@ -1420,7 +1437,8 @@ def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> 
 def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
     """Count retention may exceed its limit rather than lose owed cleanup work."""
     tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$pending"],
             redacted_source_event_ids=["$pending"],
@@ -1441,7 +1459,8 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
 def test_cleanup_by_count_retains_incomplete_turn(temp_dir: Path) -> None:
     """Count cleanup may exceed its limit rather than discard unfinished work."""
     tracker = HandledTurnLedger("test_incomplete_count_cleanup", base_path=temp_dir)
-    _record_exact(tracker,
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$incomplete"],
             completed=False,
