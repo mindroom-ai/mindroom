@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     class _DockerImagesApi(Protocol):
         def get(self, name: str) -> _DockerImage: ...
 
+        def pull(self, name: str) -> _DockerImage: ...
+
     class _DockerClient(Protocol):
         containers: _DockerContainersApi
         images: _DockerImagesApi
@@ -112,6 +114,11 @@ if TYPE_CHECKING:
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
+
+
+class _WorkerImageIncompatibleError(WorkerBackendError):
+    """A ready worker answered the health check with another protocol."""
+
 
 _TOKEN_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]
 _RUNNER_PORT_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]
@@ -456,7 +463,16 @@ class DockerWorkerBackend:
                     paths,
                     private_agent_names=spec.private_agent_names,
                 )
-                endpoint = self._wait_for_ready(container)
+                try:
+                    endpoint = self._wait_for_ready(container)
+                except _WorkerImageIncompatibleError as stale_error:
+                    container = self._relaunch_after_stale_image(
+                        metadata,
+                        paths,
+                        private_agent_names=spec.private_agent_names,
+                        stale_error=stale_error,
+                    )
+                    endpoint = self._wait_for_ready(container)
             except Exception as exc:
                 failure_reason = str(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
@@ -766,6 +782,35 @@ class DockerWorkerBackend:
             raise WorkerBackendError(msg)
         return container
 
+    def _relaunch_after_stale_image(
+        self,
+        metadata: _DockerWorkerMetadata,
+        paths: LocalWorkerStatePaths,
+        *,
+        private_agent_names: frozenset[str] | None,
+        stale_error: WorkerBackendError,
+    ) -> _DockerContainer:
+        """Pull the configured image once and relaunch after a protocol mismatch.
+
+        A stale local image otherwise fails every worker start until someone
+        pulls by hand, since tag references like ``:latest`` keep resolving to
+        the local image.
+        """
+        try:
+            self._client.images.pull(self.config.image)
+        except self._docker_errors.DockerException as exc:
+            msg = f"{stale_error} Pulling '{self.config.image}' failed: {exc}"
+            raise WorkerBackendError(msg) from exc
+        self._launch_config_hash = self._compute_launch_config_hash()
+        container = self._read_container(metadata.container_name)
+        self._stop_container(container)
+        self._remove_container(container)
+        return self._ensure_container(
+            metadata,
+            paths,
+            private_agent_names=private_agent_names,
+        )
+
     def _reload_container(self, container: _DockerContainer) -> None:
         try:
             container.reload()
@@ -800,7 +845,7 @@ class DockerWorkerBackend:
                         image=self.config.image,
                     )
                     if compatibility_error is not None:
-                        raise WorkerBackendError(compatibility_error)
+                        raise _WorkerImageIncompatibleError(compatibility_error)
                     return f"{endpoint_root}/api/sandbox-runner/execute"
 
                 if time.time() >= deadline:

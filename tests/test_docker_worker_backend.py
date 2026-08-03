@@ -202,11 +202,22 @@ class _FakeImage:
 class _FakeImagesApi:
     def __init__(self) -> None:
         self.by_name: dict[str, _FakeImage] = {}
+        self.pulls: list[str] = []
+        self.pull_image_id: str | None = None
 
     def get(self, name: str) -> _FakeImage:
         image = self.by_name.get(name)
         if image is None:
             raise _FakeNotFoundError(name)
+        return image
+
+    def pull(self, name: str) -> _FakeImage:
+        self.pulls.append(name)
+        if self.pull_image_id is None:
+            msg = f"pull failed: {name}"
+            raise _FakeDockerError(msg)
+        image = _FakeImage(self.pull_image_id)
+        self.by_name[name] = image
         return image
 
 
@@ -2048,6 +2059,90 @@ def test_docker_worker_readiness_rejects_incompatible_image(
 
     with pytest.raises(WorkerBackendError, match="expected worker protocol"):
         DockerWorkerBackend._wait_for_ready(backend, container)
+
+
+def test_docker_worker_stale_image_pulls_and_relaunches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale-image protocol mismatch pulls the configured image and relaunches once."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        DockerWorkerBackend._wait_for_ready.__get__(backend),
+    )
+
+    class _HealthByImage:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _HealthByImage:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            port = url.split(":")[2].split("/", maxsplit=1)[0]
+            container = next(
+                item
+                for item in fake_client.containers.by_name.values()
+                if item.status == "running"
+                and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
+            )
+            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthByImage)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+
+    assert fake_client.images.pulls == [backend.config.image]
+    assert handle.status == "ready"
+    created = fake_client.containers.created_containers
+    assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
+    assert created[0].removed == 1
+
+
+def test_docker_worker_stale_image_failed_pull_keeps_compatibility_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When the pull fails, the original compatibility guidance still surfaces."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        DockerWorkerBackend._wait_for_ready.__get__(backend),
+    )
+
+    class _StaleHealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _StaleHealthClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
+
+    with pytest.raises(WorkerBackendError, match="expected worker protocol"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+
+    assert fake_client.images.pulls == [backend.config.image]
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(
