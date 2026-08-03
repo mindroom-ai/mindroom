@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
+
+import nio
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -12,7 +14,7 @@ from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import with_user_stop
 from mindroom.hooks import hook_ingress_policy
-from mindroom.matrix.client_visible_messages import extract_visible_edit_body
+from mindroom.matrix.client_visible_messages import extract_visible_edit_body, resolve_visible_event_source
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
@@ -20,8 +22,6 @@ from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    import nio
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -128,7 +128,7 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
-    async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912
+    async def handle_message_edit(  # noqa: C901, PLR0911
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -203,36 +203,127 @@ class EditRegenerator:
             body=edited_content,
             source_kind=EDIT_SOURCE_KIND,
         )
-        assert turn_record.anchor_event_id is not None
-        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
-        mailbox = self._mailboxes.setdefault(key, _Mailbox())
-        reserved_revision = mailbox.reserved_revisions.get(original_event_id)
-        if reserved_revision is not None and revision <= reserved_revision:
-            return
-        mailbox.reserved_revisions[original_event_id] = revision
-        mailbox.participants += 1
-        try:
-            suppressed = revision == (turn_record.suppressed_source_event_revisions or {}).get(
-                original_event_id,
-            ) or (
-                revision != committed
-                and await self.deps.ingress_hook_runner.emit_message_received_hooks(
-                    envelope=envelope,
-                    correlation_id=event.event_id,
-                    policy=hook_ingress_policy(envelope),
-                )
-            )
-            if mailbox.reserved_revisions.get(original_event_id) != revision:
-                return
-            mailbox.pending[original_event_id] = _Edit(
+        await self._enqueue_edit(
+            room,
+            turn_record,
+            _Edit(
                 original_event_id=original_event_id,
                 body=edited_content,
                 context=context,
                 envelope=envelope,
                 revision=revision,
                 receipt_order=receipt_order,
-                suppressed=suppressed,
+                suppressed=False,
+            ),
+            committed_revision=committed,
+            emit_ingress_hook=True,
+        )
+
+    async def handle_redacted_revision(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RedactionEvent,
+        source_event_id: str,
+    ) -> None:
+        """Regenerate a turn from the source body exposed after its current edit is redacted."""
+        turn_record = self.deps.turn_store.get_turn_record(source_event_id)
+        if turn_record is None:
+            return
+        committed = (turn_record.source_event_revisions or {}).get(source_event_id)
+        if committed is None or committed[1] != event.redacts:
+            return
+        if (
+            turn_record.conversation_target is None
+            or turn_record.history_scope is None
+            or turn_record.response_owner != self.deps.agent_name
+            or turn_record.response_event_id is None
+        ):
+            return
+        requester_user_id = turn_record.requester_id_for_source(source_event_id)
+        if requester_user_id is None or source_event_id in turn_record.redacted_source_event_ids:
+            return
+
+        response = await self.deps.resolver.deps.conversation_cache.get_event(room.room_id, source_event_id)
+        if not isinstance(response, nio.RoomGetEventResponse) or not isinstance(response.event, nio.RoomMessageText):
+            msg = f"Failed to resolve source {source_event_id!r} after redacting revision {event.redacts!r}"
+            raise TypeError(msg)
+        source_event = response.event
+        _resolved_source, visible_body = await resolve_visible_event_source(
+            source_event.source,
+            self._client(),
+            fallback_body=source_event.body,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            room_id=room.room_id,
+        )
+        context = await self.deps.resolver.extract_message_context(
+            room,
+            source_event,
+            caller_label="edit_redaction_regeneration_context",
+        )
+        context = await self._edit_regeneration_context(
+            context,
+            room,
+            conversation_target=turn_record.conversation_target,
+        )
+        envelope = self.deps.resolver.build_message_envelope(
+            event=source_event,
+            requester_user_id=requester_user_id,
+            context=context,
+            target=turn_record.conversation_target,
+            body=visible_body,
+            source_kind=EDIT_SOURCE_KIND,
+        )
+        await self._enqueue_edit(
+            room,
+            turn_record,
+            _Edit(
+                original_event_id=source_event_id,
+                body=visible_body,
+                context=context,
+                envelope=envelope,
+                revision=(event.server_timestamp, event.event_id),
+                receipt_order=await self.deps.receipt_order(),
+                suppressed=False,
+            ),
+            committed_revision=committed,
+            emit_ingress_hook=False,
+        )
+
+    async def _enqueue_edit(
+        self,
+        room: nio.MatrixRoom,
+        turn_record: TurnRecord,
+        edit: _Edit,
+        *,
+        committed_revision: SourceEventRevision | None,
+        emit_ingress_hook: bool,
+    ) -> None:
+        """Reserve and drain one monotonic source revision through its response mailbox."""
+        assert turn_record.anchor_event_id is not None
+        assert turn_record.conversation_target is not None
+        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, edit.envelope.requester_id)
+        mailbox = self._mailboxes.setdefault(key, _Mailbox())
+        reserved_revision = mailbox.reserved_revisions.get(edit.original_event_id)
+        if reserved_revision is not None and edit.revision <= reserved_revision:
+            return
+        mailbox.reserved_revisions[edit.original_event_id] = edit.revision
+        mailbox.participants += 1
+        try:
+            suppressed = edit.revision == (turn_record.suppressed_source_event_revisions or {}).get(
+                edit.original_event_id,
+            ) or (
+                emit_ingress_hook
+                and edit.revision != committed_revision
+                and await self.deps.ingress_hook_runner.emit_message_received_hooks(
+                    envelope=edit.envelope,
+                    correlation_id=edit.revision[1],
+                    policy=hook_ingress_policy(edit.envelope),
+                )
             )
+            if mailbox.reserved_revisions.get(edit.original_event_id) != edit.revision:
+                return
+            mailbox.pending[edit.original_event_id] = replace(edit, suppressed=suppressed)
             async with mailbox.lock:
                 await self._drain(room, turn_record, mailbox)
         finally:

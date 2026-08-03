@@ -243,6 +243,10 @@ class TurnStore:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
 
+    def source_for_revision_event_id(self, revision_event_id: str) -> tuple[TurnRecord, str] | None:
+        """Return the durable turn source whose current revision is this event."""
+        return self._ledger.source_for_revision_event_id(revision_event_id)
+
     def _update_response_turn(
         self,
         response_event_id: str,

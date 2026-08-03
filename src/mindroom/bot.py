@@ -635,6 +635,7 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
+                regenerate_redacted_revision=self._edit_regenerator.handle_redacted_revision,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
