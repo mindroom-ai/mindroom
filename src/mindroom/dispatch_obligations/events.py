@@ -140,18 +140,26 @@ def parse_recovery_event(obligation: DispatchObligation) -> DispatchEvent:
         if invite_source_event_id(obligation.room_id, event_source_json) != obligation.source_event_id:
             msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
             raise DispatchObligationCorruptionError(msg)
-        event = nio.InviteEvent.parse_event(dict(obligation.event_source))
+        try:
+            event = nio.InviteEvent.parse_event(dict(obligation.event_source))
+        except Exception as exc:
+            msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
+            raise DispatchObligationCorruptionError(msg) from exc
         if not isinstance(event, nio.InviteEvent):
             msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
             raise DispatchObligationCorruptionError(msg)
         return event
     event_source = dict(obligation.event_source)
     security_metadata = event_source.pop(_RECOVERY_SECURITY_METADATA_KEY, None)
-    event = (
-        parse_matrix_media_event_source(event_source)
-        if obligation.callback_kind is DispatchCallbackKind.MEDIA
-        else nio.Event.parse_event(event_source)
-    )
+    try:
+        event = (
+            parse_matrix_media_event_source(event_source)
+            if obligation.callback_kind is DispatchCallbackKind.MEDIA
+            else nio.Event.parse_event(event_source)
+        )
+    except Exception as exc:
+        msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
+        raise DispatchObligationCorruptionError(msg) from exc
     if not isinstance(event, nio.Event) or event.event_id != obligation.source_event_id:
         msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
         raise DispatchObligationCorruptionError(msg)

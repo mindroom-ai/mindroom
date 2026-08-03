@@ -864,7 +864,10 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ["invalid-json", "wrong-event-type", "invalid-callback-kind"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["invalid-json", "invalid-field-type", "wrong-event-type", "invalid-callback-kind"],
+)
 async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
     tmp_path: Path,
     corruption: str,
@@ -887,10 +890,14 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
                 ("not-a-callback-kind", event.event_id),
             )
         else:
-            event_source_json = (
-                "{"
-                if corruption == "invalid-json"
-                else json.dumps(
+            if corruption == "invalid-json":
+                event_source_json = "{"
+            elif corruption == "invalid-field-type":
+                corrupt_source = dict(event.source)
+                corrupt_source["origin_server_ts"] = "not-an-integer"
+                event_source_json = json.dumps(corrupt_source)
+            else:
+                event_source_json = json.dumps(
                     {
                         "content": {"body": "not membership", "msgtype": "m.text"},
                         "event_id": event.event_id,
@@ -899,7 +906,6 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
                         "type": "m.room.message",
                     },
                 )
-            )
             connection.execute(
                 "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
                 (event_source_json, event.event_id),
@@ -913,6 +919,7 @@ async def test_corrupt_lifecycle_obligation_fences_snapshot_markers(
         ),
         record_only=True,
     )
+    await bot._dispatch_obligation_runner.drain_pending_room_lifecycle()
 
     assert event.event_id in bot._dispatch_obligation_store.unsettled_source_event_ids()
     assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
