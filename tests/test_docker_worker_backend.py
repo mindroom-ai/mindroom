@@ -633,6 +633,57 @@ def _backend(
     return backend, fake_client, sync_calls
 
 
+def _install_health_by_image(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_client: _FakeDockerClient,
+) -> None:
+    class _HealthByImage:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _HealthByImage:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            port = url.split(":")[2].split("/", maxsplit=1)[0]
+            container = next(
+                item
+                for item in fake_client.containers.by_name.values()
+                if item.status == "running"
+                and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
+            )
+            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthByImage)
+
+
+def _install_stale_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _StaleHealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _StaleHealthClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
+
+
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
     """Docker backend availability should honor the explicit runtime context."""
     config_dir = tmp_path / "cfg"
@@ -2074,36 +2125,53 @@ def test_docker_worker_stale_image_pulls_and_relaunches(
         DockerWorkerBackend._wait_for_ready.__get__(backend),
     )
 
-    class _HealthByImage:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
+    _install_health_by_image(monkeypatch, fake_client)
 
-        def __enter__(self) -> _HealthByImage:
-            return self
+    progress_events: list[WorkerReadyProgress] = []
 
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def get(self, url: str) -> httpx.Response:
-            port = url.split(":")[2].split("/", maxsplit=1)[0]
-            container = next(
-                item
-                for item in fake_client.containers.by_name.values()
-                if item.status == "running"
-                and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
-            )
-            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
-            return httpx.Response(
-                200,
-                json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
-            )
-
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthByImage)
-
-    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    handle = backend.ensure_worker(
+        WorkerSpec(_TEST_UNSCOPED_WORKER_KEY),
+        now=0.0,
+        progress_sink=progress_events.append,
+    )
 
     assert fake_client.images.pulls == [backend.config.image]
     assert handle.status == "ready"
+    assert handle.startup_count == 2
+    assert handle.last_started_at == 0.0
+    assert [event.phase for event in progress_events] == ["cold_start", "ready"]
+    created = fake_client.containers.created_containers
+    assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
+    assert created[0].removed == 1
+
+
+def test_docker_worker_stale_image_recovery_updates_reused_worker_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Replacing a previously ready stale worker records a new startup attempt."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    assert first_handle.startup_count == 1
+
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        DockerWorkerBackend._wait_for_ready.__get__(backend),
+    )
+    _install_health_by_image(monkeypatch, fake_client)
+    progress_events: list[WorkerReadyProgress] = []
+
+    recovered_handle = backend.ensure_worker(
+        WorkerSpec(_TEST_UNSCOPED_WORKER_KEY),
+        now=20.0,
+        progress_sink=progress_events.append,
+    )
+
+    assert recovered_handle.startup_count == 2
+    assert recovered_handle.last_started_at == 20.0
+    assert [event.phase for event in progress_events] == ["cold_start", "ready"]
     created = fake_client.containers.created_containers
     assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
     assert created[0].removed == 1
@@ -2120,29 +2188,36 @@ def test_docker_worker_stale_image_failed_pull_keeps_compatibility_error(
         "_wait_for_ready",
         DockerWorkerBackend._wait_for_ready.__get__(backend),
     )
+    _install_stale_health(monkeypatch)
 
-    class _StaleHealthClient:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
+    with pytest.raises(WorkerBackendError, match="expected worker protocol") as exc_info:
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
 
-        def __enter__(self) -> _StaleHealthClient:
-            return self
+    assert str(exc_info.value).endswith(
+        f"Pulling '{backend.config.image}' failed: pull failed: {backend.config.image}",
+    )
+    assert fake_client.images.pulls == [backend.config.image]
 
-        def __exit__(self, *_args: object) -> None:
-            return None
 
-        def get(self, _url: str) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0},
-            )
-
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
+def test_docker_worker_stale_replacement_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement with the same protocol mismatch fails after one pull."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        DockerWorkerBackend._wait_for_ready.__get__(backend),
+    )
+    _install_stale_health(monkeypatch)
 
     with pytest.raises(WorkerBackendError, match="expected worker protocol"):
         backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
 
     assert fake_client.images.pulls == [backend.config.image]
+    assert len(fake_client.containers.created_containers) == 2
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(

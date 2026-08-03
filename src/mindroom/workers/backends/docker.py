@@ -439,16 +439,15 @@ class DockerWorkerBackend:
                 paths,
                 private_agent_names=spec.private_agent_names,
             )
-            write_lifecycle_state(
-                metadata,
-                prepare_worker_ensure_lifecycle(
-                    read_lifecycle_state(metadata),
-                    now=timestamp,
-                    should_restart=should_restart,
-                ),
+            lifecycle_state = prepare_worker_ensure_lifecycle(
+                read_lifecycle_state(metadata),
+                now=timestamp,
+                should_restart=should_restart,
             )
+            write_lifecycle_state(metadata, lifecycle_state)
             self._save_metadata(paths, metadata)
-            if read_lifecycle_state(metadata).status == "starting":
+            cold_start_emitted = lifecycle_state.status == "starting"
+            if cold_start_emitted:
                 emit_progress("cold_start")
 
             sync_shared_credentials_to_worker(
@@ -466,6 +465,18 @@ class DockerWorkerBackend:
                 try:
                     endpoint = self._wait_for_ready(container)
                 except _WorkerImageIncompatibleError as stale_error:
+                    write_lifecycle_state(
+                        metadata,
+                        prepare_worker_ensure_lifecycle(
+                            read_lifecycle_state(metadata),
+                            now=timestamp,
+                            should_restart=True,
+                        ),
+                    )
+                    self._save_metadata(paths, metadata)
+                    if not cold_start_emitted:
+                        emit_progress("cold_start")
+                        cold_start_emitted = True
                     container = self._relaunch_after_stale_image(
                         metadata,
                         paths,
