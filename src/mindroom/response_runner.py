@@ -42,7 +42,6 @@ from mindroom.memory import (
 )
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
-    cancel_source_from_failure_reason,
     classify_cancel_source,
     log_cancelled_response,
     log_cancelled_response_source,
@@ -1216,7 +1215,7 @@ class ResponseRunner:
             or request.response_envelope.target.resolved_thread_id is None
         ):
             return False
-        cancel_source = final_outcome.cancel_source or cancel_source_from_failure_reason(final_outcome.failure_reason)
+        cancel_source = final_outcome.resolved_cancel_source
         if cancel_source == "user_stop":
             return False
         expected_note = (
@@ -1576,9 +1575,7 @@ class ResponseRunner:
             post_response_deps=post_response_deps,
         )
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
-        cancel_source = final_outcome.cancel_source
-        if cancel_source is None and final_outcome.terminal_status == "cancelled":
-            cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
+        cancel_source = final_outcome.resolved_cancel_source
         source_handled = final_outcome.mark_handled and (
             request.on_deferred_outcome_handled is None
             or cancel_source is None
@@ -2166,7 +2163,7 @@ class ResponseRunner:
             if transport_outcome.terminal_status == "cancelled":
                 log_cancelled_response_source(
                     self.deps.logger,
-                    cancel_source=cancel_source_from_failure_reason(transport_outcome.failure_reason),
+                    cancel_source=transport_outcome.resolved_cancel_source,
                     message_id=error.event_id,
                     restart_message="Team streaming response interrupted by sync restart",
                     user_stop_message="Team streaming response cancelled by user",
@@ -2769,7 +2766,7 @@ class ResponseRunner:
             if stream_transport_outcome.terminal_status == "cancelled":
                 log_cancelled_response_source(
                     self.deps.logger,
-                    cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
+                    cancel_source=stream_transport_outcome.resolved_cancel_source,
                     message_id=error.event_id,
                     restart_message="Bot streaming response interrupted by sync restart",
                     user_stop_message="Bot streaming response cancelled by user",

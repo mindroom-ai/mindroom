@@ -1513,11 +1513,7 @@ class DeliveryGateway:
                 event_id=event_id,
                 is_visible_response=event_id is not None,
                 final_visible_body=final_visible_body,
-                cancel_source=(
-                    cancel_source_from_failure_reason(stream_outcome.failure_reason)
-                    if stream_outcome.terminal_status == "cancelled"
-                    else None
-                ),
+                cancel_source=stream_outcome.resolved_cancel_source,
                 failure_reason="stream_finalize_failed",
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
