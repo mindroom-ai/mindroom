@@ -1456,6 +1456,7 @@ class _MultiAgentOrchestrator:
                     self.config,
                     start_sync_tasks=True,
                 )
+                self._schedule_ready_turn_dispatch_recovery()
                 if start_results.started_bots:
                     await self._setup_rooms_and_memberships(start_results.started_bots)
                 self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)

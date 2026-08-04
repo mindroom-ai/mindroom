@@ -84,7 +84,7 @@ Add a parameterized test whose two cases remove `@departed:localhost` and add `@
     ],
 )
 @pytest.mark.asyncio
-async def test_encrypted_hydration_rotates_shared_session_when_membership_changes(
+async def test_encrypted_hydration_retires_outbound_session_when_membership_changes(
     before: frozenset[str],
     after: frozenset[str],
 ) -> None:
@@ -115,7 +115,7 @@ async def test_encrypted_hydration_rotates_shared_session_when_membership_change
 Run:
 
 ```bash
-nix-shell shell.nix --run 'uv run pytest -n 0 --no-cov tests/test_matrix_delivery.py::test_encrypted_hydration_rotates_shared_session_when_membership_changes -vv'
+nix-shell shell.nix --run 'uv run pytest -n 0 --no-cov tests/test_matrix_delivery.py::test_encrypted_hydration_retires_outbound_session_when_membership_changes -vv'
 ```
 
 Expected: both cases fail because the shared session remains in `outbound_group_sessions`.
@@ -480,7 +480,7 @@ Generate one transaction ID per logical message delivery and reuse it across eve
 ### Task 4: Verify The Complete PR-Owned Change
 
 **Files:**
-- Verify: every Python and documentation file changed from `origin/fix/recovery-restart-boundaries` through `HEAD`.
+- Verify: every Python and documentation file changed from `origin/main` through `HEAD`.
 
 **Interfaces:**
 - Consumes: the complete PR-owned diff.
@@ -501,7 +501,7 @@ Expected: all selected tests pass.
 Run:
 
 ```bash
-nix-shell shell.nix --run 'uv run pytest -n auto --no-cov tests/test_restart_recovery.py tests/test_matrix_delivery.py tests/test_stale_stream_cleanup.py tests/test_sync_task_cancellation.py tests/test_orchestrator_runtime.py tests/test_dynamic_config_update.py tests/test_startup_maintenance.py tests/test_matrix_client_session.py tests/test_nio_recovery_consumer_contract.py tests/test_sync_cache_trust.py tests/test_sync_certification.py tests/test_matrix_sync_continuity.py tests/test_dispatch_obligations.py tests/test_cold_history_fence.py tests/test_room_member_hooks.py tests/test_room_member_hook_lifecycle.py tests/test_bot_sync_event_cache.py tests/test_matrix_cache_interaction_contract.py tests/test_matrix_event_cache_fuzz.py tests/test_import_graph.py tests/test_external_trigger_runtime_binding.py tests/test_hook_sender.py tests/test_ingress_validation.py tests/test_large_messages_integration.py tests/test_mcp_orchestrator.py tests/test_turn_policy.py tests/test_room_invites.py'
+nix-shell shell.nix --run 'uv run pytest -n auto --no-cov tests/test_restart_recovery.py tests/test_matrix_delivery.py tests/test_stale_stream_cleanup.py tests/test_sync_task_cancellation.py tests/test_orchestrator_runtime.py tests/test_dynamic_config_update.py tests/test_startup_maintenance.py tests/test_matrix_client_session.py tests/test_nio_recovery_consumer_contract.py tests/test_sync_cache_trust.py tests/test_sync_certification.py tests/test_matrix_sync_continuity.py tests/test_dispatch_obligations.py tests/test_cold_history_fence.py tests/test_room_member_hooks.py tests/test_bot_sync_event_cache.py tests/test_matrix_cache_interaction_contract.py tests/test_matrix_event_cache_fuzz.py tests/test_import_graph.py tests/test_external_trigger_runtime_binding.py tests/test_hook_sender.py tests/test_ingress_validation.py tests/test_large_messages_integration.py tests/test_mcp_orchestrator.py tests/test_turn_policy.py tests/test_room_invites.py'
 ```
 
 Expected: all selected tests pass, with only their established skips.
@@ -511,10 +511,10 @@ Expected: all selected tests pass, with only their established skips.
 Run:
 
 ```bash
-git diff --check origin/fix/recovery-restart-boundaries..HEAD
-git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- '*.py' | xargs -0 uv run ruff check
-git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- '*.py' | xargs -0 uv run ruff format --check
-git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- 'src/**/*.py' | xargs -0 -r uv run ty check
+git diff --check origin/main..HEAD
+git diff --name-only -z origin/main..HEAD -- '*.py' | xargs -0 uv run ruff check
+git diff --name-only -z origin/main..HEAD -- '*.py' | xargs -0 uv run ruff format --check
+git diff --name-only -z origin/main..HEAD -- 'src/**/*.py' | xargs -0 -r uv run ty check
 uv run vulture
 uv run tach check --dependencies --interfaces
 uv run privata --methods .
@@ -540,7 +540,7 @@ Run:
 ```bash
 git status --short --branch
 git log -3 --oneline --decorate
-git diff origin/fix/recovery-restart-boundaries..HEAD --stat
+git diff origin/main..HEAD --stat
 ```
 
 Expected: the worktree is clean and only intended commits are ahead of the remote branch.
@@ -557,24 +557,24 @@ Expected: the worktree is clean and only intended commits are ahead of the remot
 - Consumes: verified local commits and exact verification output.
 - Produces: updated remote head, accurate PR description, and two independent approvals on the same SHA.
 
-- [ ] **Step 1: Push the named branch without force**
+- [ ] **Step 1: Push the rewritten branch with lease protection**
 
 Run:
 
 ```bash
-git push origin fix/restart-recovery-coordinator
+git push --force-with-lease origin fix/restart-recovery-coordinator
 ```
 
-Expected: the remote branch advances by fast-forward to local `HEAD`.
+Expected: the remote branch is replaced only if it still points at the previously inspected head.
 
 - [ ] **Step 2: Update the pull-request description**
 
-Use `gh pr edit 1759` to replace the stale current-head SHA, owned diff totals, verification totals, and review state with facts from the pushed head.
-Keep the dependency and landing-order warning because PR #1783 remains the stacked base until its merge and restack complete.
+Use `gh pr edit 1759` to target `main` and replace the stale current-head SHA, owned diff totals, verification totals, and review state with facts from the pushed head.
+State that the restart-recovery coordinator now lands independently of the abandoned stacked implementation.
 
 - [ ] **Step 3: Launch two fresh read-only native reviewers**
 
-Give each reviewer the repo path, PR number, exact base ref, branch, head SHA, `origin/fix/recovery-restart-boundaries..HEAD` diff, and the `pr-review` skill.
+Give each reviewer the repo path, PR number, exact base ref, branch, head SHA, `origin/main..HEAD` diff, and the `pr-review` skill.
 Do not mention prior findings or desired outcomes.
 Tell each reviewer not to edit, commit, push, or inspect CI.
 

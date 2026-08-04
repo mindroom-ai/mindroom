@@ -11,6 +11,7 @@ import yaml
 
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
@@ -581,6 +582,36 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
     assert {args.args[0] for args in mock_cancel.await_args_list} == {"code", "dev_team"}
     mock_schedule_retry.assert_awaited_once_with("code")
     mock_clear_snapshot_cache.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_handle_mcp_catalog_change_recovers_ready_dispatch_obligations(tmp_path: Path) -> None:
+    """An MCP replacement must retry durable dispatch work for ready runtimes."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    orchestrator.running = True
+    ready_bot = MagicMock(spec=AgentBot)
+    ready_bot.running = True
+    ready_bot.first_sync_complete = True
+    ready_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    orchestrator.agent_bots = {"plain": ready_bot}
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
+        patch.object(
+            orchestrator,
+            "_create_and_start_entities",
+            new=AsyncMock(return_value=EntityStartResults()),
+        ),
+    ):
+        await orchestrator._handle_mcp_catalog_change("demo")
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+
+    ready_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
