@@ -514,7 +514,7 @@ Run:
 git diff --check origin/fix/recovery-restart-boundaries..HEAD
 git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- '*.py' | xargs -0 uv run ruff check
 git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- '*.py' | xargs -0 uv run ruff format --check
-git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- '*.py' | xargs -0 uv run ty check
+git diff --name-only -z origin/fix/recovery-restart-boundaries..HEAD -- 'src/**/*.py' | xargs -0 -r uv run ty check
 uv run vulture
 uv run tach check --dependencies --interfaces
 uv run privata --methods .
