@@ -4516,7 +4516,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.34.1" },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=fix%2Fsingle-checkpoint-startup-rewind" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4610,7 +4610,7 @@ dev = [
     { name = "markdown-gfm-admonition" },
     { name = "pre-commit", specifier = ">=4.2" },
     { name = "pre-commit-uv", specifier = ">=4.1.4" },
-    { name = "privata", specifier = ">=0.8.0" },
+    { name = "privata", specifier = ">=0.8" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", specifier = ">=1.1" },
     { name = "pytest-cov", specifier = ">=6.2.1" },
@@ -4628,7 +4628,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.34.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=fix%2Fsingle-checkpoint-startup-rewind#85c3d5ff481854fb2382310084fd1fe2a047775e" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -4638,10 +4638,6 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b7/bf/2922e1bfd166bb15e1f7bdf988b6a673593ed32e4352ceba02d83b342e7b/mindroom_nio-0.34.1.tar.gz", hash = "sha256:eea33859bc08eafafff0043c785a920006d7a7b59f9611c08f5780f7a8161a6c", size = 204676, upload-time = "2026-08-02T05:35:12.274Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/13/7d9d612fb51c9b8aa142dc7ba39b44c0b72c5e89c196e33c39c758841833/mindroom_nio-0.34.1-py3-none-any.whl", hash = "sha256:50cab80ac6eb4dd9f2f58bc1e1a080619c9d3572283a4bc93a422cd43c490ad0", size = 234875, upload-time = "2026-08-02T05:35:10.849Z" },
 ]
 
 [package.optional-dependencies]

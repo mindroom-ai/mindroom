@@ -87,6 +87,10 @@ Recovery intent travels with queued ingress so pre-existing lane and coalescing 
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+Classic startup uses the cache-generation-validated MindRoom checkpoint as its only transport cursor authority.
+When that checkpoint is absent or differs from nio's stored token, a guarded nio startup operation atomically rewinds the token, removes completed replay-suppression markers and Sliding Sync window tokens, and preserves every unsettled recovery generation.
+An equal non-null token is left untouched so nio can finish admission work that may exist at or below the certified checkpoint.
+The first Classic request then uses full state and replays from the trusted checkpoint through the existing recovery, cache, and certification path.
 `SyncCacheTrust` certifies a complete recovered response, rewinds every locally incomplete, failed, or nio-unrecovered response to the retained pre-gap checkpoint, and relies on nio's persisted aggregate gap state instead of duplicating it.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 When no generation-safe checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.

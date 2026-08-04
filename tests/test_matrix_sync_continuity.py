@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import nio
 import pytest
+from nio.client.sync_recovery import PendingTimelineEvent, RecoveryGap
+from nio.sliding_sync_tokens import SlidingWindowToken
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -871,6 +873,90 @@ def _sync_response(
     response.recovered_room_ids = frozenset()
     response.unrecovered_room_ids = frozenset()
     return cast("nio.SyncResponse", response)
+
+
+def _persisting_nio_client(tmp_path: Path, user_id: str) -> nio.AsyncClient:
+    store_path = tmp_path / "nio-recovery-store"
+    store_path.mkdir(exist_ok=True)
+    client = nio.AsyncClient(
+        "https://localhost",
+        user_id,
+        device_id="MINDROOMDEVICE",
+        store_path=str(store_path),
+        config=nio.AsyncClientConfig(
+            store_sync_tokens=True,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=True,
+        ),
+    )
+    client.restore_login(user_id, "MINDROOMDEVICE", "access-token")
+    return client
+
+
+def _pending_nio_event(
+    room_id: str,
+    event_id: str,
+    *,
+    sequence: int,
+) -> PendingTimelineEvent:
+    pending = PendingTimelineEvent.from_event(
+        room_id,
+        1,
+        sequence,
+        _nio_message_event(room_id, event_id),
+        True,
+    )
+    assert pending is not None
+    return pending
+
+
+def _nio_message_event(room_id: str, event_id: str) -> nio.RoomMessageText:
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "event_id": event_id,
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "sender": "@alice:localhost",
+            "type": "m.room.message",
+        },
+    )
+    assert isinstance(event, nio.RoomMessageText)
+    return event
+
+
+def _empty_real_sync(
+    room_id: str,
+    next_batch: str,
+    *,
+    timeline_events: list[nio.Event] | None = None,
+) -> nio.SyncResponse:
+    return nio.SyncResponse(
+        next_batch=next_batch,
+        rooms=nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(
+                        events=timeline_events or [],
+                        limited=False,
+                        prev_batch=None,
+                    ),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(
+            curve25519=0,
+            signed_curve25519=0,
+        ),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
 
 
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
@@ -2313,8 +2399,8 @@ async def test_gap_cache_cancellation_defers_rewind_across_loop_exit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_recovery_replay_rewinds_nio_memory_to_safe_checkpoint(tmp_path: Path) -> None:
-    """After NIO recovery settles, both in-memory cursor fallbacks must replay safely."""
+async def test_classic_startup_rewind_avoids_two_pass_cache_replay(tmp_path: Path) -> None:
+    """A divergent nio cursor rewinds before sync and may certify its replay directly."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.loaded_sync_token = "s_nio_live"  # noqa: S105
@@ -2326,14 +2412,252 @@ async def test_recovery_replay_rewinds_nio_memory_to_safe_checkpoint(tmp_path: P
     )
 
     await bot._prepare_matrix_sync_continuity()
+    bot.client.rewind_sync_recovery_for_startup.assert_called_once_with("s_safe")
+    assert bot.client.next_batch == "s_safe"
+
     decision = await bot._certify_sync_response(
         next_batch="s_after_recovery",
         cache_result=SyncCacheWriteResult(complete=True),
     )
 
-    assert decision.reason == "sync_cache_replay_required"
-    assert bot.client.next_batch == "s_safe"
-    assert bot.client.loaded_sync_token == "s_safe"  # noqa: S105
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.reason is None
+
+
+@pytest.mark.asyncio
+async def test_sliding_startup_keeps_nio_transport_resume_cursor(tmp_path: Path) -> None:
+    """The Classic-only rewind must not change Sliding Sync startup semantics."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.loaded_sync_token = "s_nio_live"  # noqa: S105
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_safe",
+        cache_generation=_CACHE_GENERATION,
+    )
+
+    await bot._prepare_matrix_sync_continuity()
+
+    bot.client.rewind_sync_recovery_for_startup.assert_not_called()
+    assert bot.client.next_batch == "s_nio_live"
+    assert bot.client.loaded_sync_token == "s_nio_live"  # noqa: S105
+    assert bot._sync_cache_trust.rewind_is_deferred_until_recovery()
+
+
+@pytest.mark.asyncio
+async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(
+    tmp_path: Path,
+) -> None:
+    """Classic restart must replay from cache trust without deleting unsettled intake."""
+    room_id = "!restart:localhost"
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_safe",
+        cache_generation=_CACHE_GENERATION,
+    )
+    first = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    assert first.store is not None
+    gap = RecoveryGap(room_id, 1, "s_advanced", "s_cursor")
+    first.store.save_recovery(
+        "s_advanced",
+        set(),
+        [gap],
+        [
+            _pending_nio_event(room_id, "$pending", sequence=0),
+            _pending_nio_event(room_id, "$completed", sequence=1),
+        ],
+        None,
+    )
+    first.store.finish_recovery(room_id, 1, "$completed", False)
+    first.store.save_sliding_window_tokens(
+        {room_id: SlidingWindowToken("w1", "$join")},
+    )
+    await first.close()
+    first.store.database.close()
+
+    restarted = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    bot.client = restarted
+    try:
+        assert restarted.loaded_sync_token == "s_advanced"  # noqa: S105
+
+        await bot._prepare_matrix_sync_continuity()
+
+        assert restarted.loaded_sync_token == "s_safe"  # noqa: S105
+        assert restarted.next_batch == "s_safe"
+        assert restarted.store is not None
+        assert restarted.store.load_sync_token() == "s_safe"
+        gaps, events = restarted.store.load_sync_recovery()
+        assert [(item.room_id, item.generation) for item in gaps] == [
+            (room_id, 1),
+        ]
+        assert [(item.event_id, item.generation) for item in events] == [
+            ("$pending", 1),
+        ]
+        assert restarted.store.load_sliding_window_tokens() == {}
+        decision = await bot._certify_sync_response(
+            next_batch="s_after_replay",
+            cache_result=SyncCacheWriteResult(complete=True),
+        )
+        assert decision.state is SyncTrustState.CERTIFIED
+        assert decision.reason is None
+    finally:
+        await restarted.close()
+        assert restarted.store is not None
+        restarted.store.database.close()
+
+
+@pytest.mark.asyncio
+async def test_classic_startup_leaves_equal_token_unadmitted_work_to_nio(
+    tmp_path: Path,
+) -> None:
+    """An event at the certified token must survive until durable admission completes."""
+    room_id = "!equal:localhost"
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_equal",
+        cache_generation=_CACHE_GENERATION,
+    )
+    first = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    assert first.store is not None
+    first.store.save_recovery(
+        "s_equal",
+        set(),
+        [RecoveryGap(room_id, 1, "", None)],
+        [_pending_nio_event(room_id, "$pending", sequence=0)],
+        None,
+    )
+    await first.close()
+    first.store.database.close()
+
+    restarted = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    bot.client = restarted
+    admitted: list[str] = []
+
+    async def admit(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        _provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        admitted.append(event.event_id)
+
+    restarted.add_event_admission_callback(admit, nio.RoomMessageText)
+    try:
+        with patch.object(
+            restarted,
+            "rewind_sync_recovery_for_startup",
+            wraps=restarted.rewind_sync_recovery_for_startup,
+        ) as rewind:
+            await bot._prepare_matrix_sync_continuity()
+
+        rewind.assert_not_called()
+        assert restarted.store is not None
+        assert [item.event_id for item in restarted.store.load_sync_recovery()[1]] == ["$pending"]
+
+        await restarted.receive_response(_empty_real_sync(room_id, "s_after"))
+
+        assert admitted == ["$pending"]
+        gaps, events = restarted.store.load_sync_recovery()
+        assert gaps == []
+        assert [(item.event_id, item.generation) for item in events] == [
+            ("$pending", 0),
+        ]
+    finally:
+        await restarted.close()
+        assert restarted.store is not None
+        restarted.store.database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
+    tmp_path: Path,
+) -> None:
+    """A rejected cursor must not suppress room-state rebuilding after restart."""
+    room_id = "!cold:localhost"
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_rejected",
+        cache_generation=_CACHE_GENERATION,
+    )
+    seed = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    assert seed.store is not None
+    seed.store.save_recovery(
+        "s_rejected",
+        set(),
+        [RecoveryGap(room_id, 1, "", None)],
+        [_pending_nio_event(room_id, "$completed", sequence=0)],
+        None,
+    )
+    seed.store.finish_recovery(room_id, 1, "$completed", False)
+    seed.store.save_sliding_window_tokens(
+        {room_id: SlidingWindowToken("w1", "$join")},
+    )
+    await seed.close()
+    seed.store.database.close()
+
+    rejected = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
+    bot.client = rejected
+    assert (
+        await bot._sync_cache_trust.prepare_startup(
+            transport_resume_token=rejected.loaded_sync_token,
+        )
+        == "s_rejected"
+    )
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+    assert rejected.store is not None
+    assert rejected.store.load_sync_token() == "s_rejected"
+    assert [(item.event_id, item.generation) for item in rejected.store.load_sync_recovery()[1]] == [("$completed", 0)]
+    await rejected.close()
+    rejected.store.database.close()
+
+    restarted_bot = _agent_bot(tmp_path)
+    restarted = _persisting_nio_client(tmp_path, restarted_bot.agent_user.user_id)
+    restarted_bot.client = restarted
+    try:
+        assert restarted.loaded_sync_token == "s_rejected"  # noqa: S105
+
+        await restarted_bot._prepare_matrix_sync_continuity()
+
+        assert restarted.next_batch in (None, "")
+        assert restarted.loaded_sync_token in (None, "")
+        assert restarted.store is not None
+        gaps, events = restarted.store.load_sync_recovery()
+        assert [(item.room_id, item.generation) for item in gaps] == [
+            (room_id, 1),
+        ]
+        assert events == []
+        assert restarted.store.load_sliding_window_tokens() == {}
+        redelivered = _nio_message_event(room_id, "$completed")
+        seen: list[str] = []
+
+        async def record(_room: nio.MatrixRoom, event: nio.Event) -> None:
+            seen.append(event.event_id)
+
+        restarted.add_event_callback(record, nio.RoomMessageText)
+        await restarted.receive_response(
+            _empty_real_sync(
+                room_id,
+                "s_rebuilt",
+                timeline_events=[redelivered],
+            ),
+        )
+        assert seen == ["$completed"]
+    finally:
+        await restarted.close()
+        assert restarted.store is not None
+        restarted.store.database.close()
 
 
 @pytest.mark.asyncio

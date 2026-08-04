@@ -1218,9 +1218,16 @@ class AgentBot:
         """Apply cache-trust startup output to the authenticated Matrix client."""
         client = self.client
         assert client is not None
+        classic = self.config.matrix_sync.mode == "classic"
+        transport_token = client.loaded_sync_token or None
         sync_token = await self._sync_cache_trust.prepare_startup(
-            transport_resume_token=cast("Any", client).loaded_sync_token,
+            transport_resume_token=None if classic else transport_token,
         )
+        if classic and (sync_token is None or transport_token != sync_token):
+            await asyncio.to_thread(
+                client.rewind_sync_recovery_for_startup,
+                sync_token,
+            )
         cast("Any", client).next_batch = sync_token
 
     async def _certify_sync_response(
