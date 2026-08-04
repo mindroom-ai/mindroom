@@ -930,11 +930,32 @@ def _nio_message_event(room_id: str, event_id: str) -> nio.RoomMessageText:
     return event
 
 
+def _nio_room_name_event(
+    room_id: str,
+    event_id: str,
+    name: str,
+) -> nio.RoomNameEvent:
+    event = nio.RoomNameEvent.from_dict(
+        {
+            "content": {"name": name},
+            "event_id": event_id,
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "sender": "@alice:localhost",
+            "state_key": "",
+            "type": "m.room.name",
+        },
+    )
+    assert isinstance(event, nio.RoomNameEvent)
+    return event
+
+
 def _empty_real_sync(
     room_id: str,
     next_batch: str,
     *,
     timeline_events: list[nio.Event] | None = None,
+    state_events: list[nio.Event] | None = None,
 ) -> nio.SyncResponse:
     return nio.SyncResponse(
         next_batch=next_batch,
@@ -947,7 +968,7 @@ def _empty_real_sync(
                         limited=False,
                         prev_batch=None,
                     ),
-                    state=[],
+                    state=state_events or [],
                     ephemeral=[],
                     account_data=[],
                 ),
@@ -2612,11 +2633,11 @@ async def test_classic_startup_rewinds_and_replays_from_checkpoint(  # noqa: PLR
 
 
 @pytest.mark.asyncio
-async def test_classic_startup_leaves_equal_token_unadmitted_work_to_nio(
+async def test_classic_startup_resets_equal_token_sliding_state(
     tmp_path: Path,
 ) -> None:
-    """An event at the certified token must survive until durable admission completes."""
-    room_id = "!equal:localhost"
+    """Newer Sliding markers cannot suppress state when Classic resumes."""
+    room_id = "!equal-sliding:localhost"
     bot = _agent_bot(tmp_path)
     save_sync_token(
         tmp_path,
@@ -2624,30 +2645,27 @@ async def test_classic_startup_leaves_equal_token_unadmitted_work_to_nio(
         "s_equal",
         cache_generation=_CACHE_GENERATION,
     )
+    later = _nio_room_name_event(room_id, "$later", "Later")
+    baseline = _nio_room_name_event(room_id, "$baseline", "Baseline")
     first = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
     assert first.store is not None
-    first.store.save_recovery(
-        "s_equal",
-        set(),
-        [RecoveryGap(room_id, 1, "", None)],
-        [_pending_nio_event(room_id, "$pending", sequence=0)],
-        None,
+    first.store.save_sync_token("s_equal")
+    first.loaded_sync_token = "s_equal"  # noqa: S105
+    sliding = _timeline_response("sliding", room_id, later)
+    assert isinstance(sliding, nio.SlidingSyncResponse)
+    await first.receive_response(sliding)
+    _, sliding_events = first.store.load_sync_recovery()
+    assert [(item.event_id, item.generation) for item in sliding_events] == [
+        ("$later", 0),
+    ]
+    first.store.save_sliding_window_tokens(
+        {room_id: SlidingWindowToken("w1", "$join")},
     )
     await first.close()
     first.store.database.close()
 
     restarted = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
     bot.client = restarted
-    admitted: list[str] = []
-
-    async def admit(
-        _room: nio.MatrixRoom,
-        event: nio.Event,
-        _provenance: nio.TimelineEventProvenance,
-    ) -> None:
-        admitted.append(event.event_id)
-
-    restarted.add_event_admission_callback(admit, nio.RoomMessageText)
     try:
         with patch.object(
             restarted,
@@ -2656,18 +2674,21 @@ async def test_classic_startup_leaves_equal_token_unadmitted_work_to_nio(
         ) as rewind:
             await bot._prepare_matrix_sync_continuity()
 
-        rewind.assert_not_called()
+        rewind.assert_called_once_with("s_equal")
         assert restarted.store is not None
-        assert [item.event_id for item in restarted.store.load_sync_recovery()[1]] == ["$pending"]
+        assert restarted.store.load_sync_recovery() == ([], [])
+        assert restarted.store.load_sliding_window_tokens() == {}
 
-        await restarted.receive_response(_empty_real_sync(room_id, "s_after"))
+        await restarted.receive_response(
+            _empty_real_sync(
+                room_id,
+                "s_after",
+                timeline_events=[later],
+                state_events=[baseline],
+            ),
+        )
 
-        assert admitted == ["$pending"]
-        gaps, events = restarted.store.load_sync_recovery()
-        assert gaps == []
-        assert [(item.event_id, item.generation) for item in events] == [
-            ("$pending", 0),
-        ]
+        assert restarted.rooms[room_id].name == "Later"
     finally:
         await restarted.close()
         assert restarted.store is not None
@@ -2675,10 +2696,10 @@ async def test_classic_startup_leaves_equal_token_unadmitted_work_to_nio(
 
 
 @pytest.mark.asyncio
-async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
+async def test_unknown_pos_crash_restart_replays_tokenless_in_server_order(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """A rejected cursor must not suppress room-state rebuilding after restart."""
+    """A tokenless rebuild replaces stale ordering with the server timeline."""
     room_id = "!cold:localhost"
     bot = _agent_bot(tmp_path)
     save_sync_token(
@@ -2687,16 +2708,34 @@ async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
         "s_rejected",
         cache_generation=_CACHE_GENERATION,
     )
+    earlier = _nio_room_name_event(room_id, "$earlier", "Earlier")
+    later = _nio_room_name_event(room_id, "$later", "Later")
     seed = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
     assert seed.store is not None
+    pending_earlier = PendingTimelineEvent.from_event(
+        room_id,
+        1,
+        0,
+        earlier,
+        True,
+    )
+    pending_later = PendingTimelineEvent.from_event(
+        room_id,
+        1,
+        1,
+        later,
+        True,
+    )
+    assert pending_earlier is not None
+    assert pending_later is not None
     seed.store.save_recovery(
         "s_rejected",
         set(),
         [RecoveryGap(room_id, 1, "", None)],
-        [_pending_nio_event(room_id, "$completed", sequence=0)],
+        [pending_earlier, pending_later],
         None,
     )
-    seed.store.finish_recovery(room_id, 1, "$completed", False)
+    seed.store.finish_recovery(room_id, 1, "$earlier", False)
     seed.store.save_sliding_window_tokens(
         {room_id: SlidingWindowToken("w1", "$join")},
     )
@@ -2719,7 +2758,10 @@ async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert rejected.store is not None
     assert rejected.store.load_sync_token() == "s_rejected"
-    assert [(item.event_id, item.generation) for item in rejected.store.load_sync_recovery()[1]] == [("$completed", 0)]
+    assert [(item.event_id, item.generation) for item in rejected.store.load_sync_recovery()[1]] == [
+        ("$earlier", 0),
+        ("$later", 1),
+    ]
     await rejected.close()
     rejected.store.database.close()
 
@@ -2736,21 +2778,22 @@ async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
         assert restarted.store is not None
         assert restarted.store.load_sync_recovery() == ([], [])
         assert restarted.store.load_sliding_window_tokens() == {}
-        redelivered = _nio_message_event(room_id, "$completed")
         seen: list[str] = []
 
         async def record(_room: nio.MatrixRoom, event: nio.Event) -> None:
             seen.append(event.event_id)
 
-        restarted.add_event_callback(record, nio.RoomMessageText)
+        restarted.add_event_callback(record, nio.RoomNameEvent)
         await restarted.receive_response(
             _empty_real_sync(
                 room_id,
                 "s_rebuilt",
-                timeline_events=[redelivered],
+                timeline_events=[earlier, later],
+                state_events=[earlier],
             ),
         )
-        assert seen == ["$completed"]
+        assert seen == ["$earlier", "$later"]
+        assert restarted.rooms[room_id].name == "Later"
     finally:
         await restarted.close()
         assert restarted.store is not None

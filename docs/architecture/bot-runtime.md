@@ -88,9 +88,12 @@ The registered `DispatchObligationRunner` source callback durably accepts each r
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Classic startup uses the cache-generation-validated MindRoom checkpoint as its only transport cursor authority.
-When that checkpoint is absent or differs from nio's stored token, a guarded nio startup operation atomically rewinds the token and removes the superseded recovery gaps, callback rows, replay-suppression markers, and Sliding Sync window tokens.
+Classic startup always runs a guarded nio reset so equal-token state left by Sliding Sync cannot suppress Classic replay.
+When that checkpoint is non-null, the reset removes every superseded recovery gap, callback row, replay-suppression marker, and Sliding Sync window token, even when nio's Classic token is equal.
+MindRoom publishes a Classic checkpoint only after every source callback reaches durable admission, while Sliding work created after an equal Classic token remains above that checkpoint and is returned by Classic replay.
+When no checkpoint is trusted, the reset clears the invalid cursor and recovery lane so the cold server timeline is the only ordering authority.
+That cold reset can lose an event that never crossed MindRoom admission and is omitted from the initial sync, which is the explicit pre-admission durability boundary chosen instead of merging incomparable generations.
 Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obligation store, while Matrix replay idempotently re-admits returned events in checkpoint order.
-An equal non-null token is left untouched so nio can finish admission work that may exist at or below the certified checkpoint.
 The first Classic request then uses full state and replays from the trusted checkpoint through the existing recovery, cache, and certification path.
 `SyncCacheTrust` certifies a complete recovered response, rewinds every locally incomplete, failed, or nio-unrecovered response to the retained pre-gap checkpoint, and relies on nio's persisted aggregate gap state instead of duplicating it.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
