@@ -208,6 +208,10 @@ class SyncCacheTrust:
         """Return whether NIO must advance retained work before a safe replay."""
         return bool(self._unresolved_recovery_room_ids or self._replay_required_after_recovery)
 
+    def tokenless_baseline_pending(self) -> bool:
+        """Return whether the next accepted response establishes a tokenless baseline."""
+        return self._tokenless_baseline_pending
+
     def acknowledge_dispatch_persist_failures(self) -> None:
         """Settle source failures irrelevant to non-checkpointed transports."""
         self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch

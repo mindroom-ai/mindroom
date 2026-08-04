@@ -99,6 +99,7 @@ Checkpoint mutations serialize their epoch check, durable transform, and runtime
 Malformed or future continuity records are durably repaired to an empty cold record before startup room lifecycle restoration.
 Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+The tokenless room-member baseline remains pending across rejected response attempts and records membership from both the state block and the timeline, while a restored-token timeline remains a catch-up stream that may emit missed joins.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 Current invite callbacks bypass cold-history admission because they represent live membership work, while their callback runner still provides exact durable retry.

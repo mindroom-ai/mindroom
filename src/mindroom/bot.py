@@ -188,6 +188,7 @@ class _RoomMemberJoinSyncHookPlan:
     emit_state: bool = False
     emit_timeline: bool = False
     record_state_seen: bool = False
+    record_timeline_seen: bool = False
 
 
 def _create_best_effort_task_wrapper(
@@ -1444,11 +1445,15 @@ class AgentBot:
         emit_certified_state = (
             decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
         )
+        tokenless_baseline = self._sync_cache_trust.tokenless_baseline_pending()
         return _RoomMemberJoinSyncHookPlan(
             arm_after_response=True,
             emit_state=emit_certified_state,
             emit_timeline=restored_token_first_sync_response,
-            record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
+            record_state_seen=(
+                tokenless_baseline or (decision.state is SyncTrustState.CERTIFIED and not emit_certified_state)
+            ),
+            record_timeline_seen=tokenless_baseline,
         )
 
     async def _run_pre_certification_sync_response_side_effects(
@@ -1459,7 +1464,11 @@ class AgentBot:
     ) -> None:
         """Finish source-backed lifecycle work before certifying its sync position."""
         if room_member_join_hook_plan.record_state_seen:
-            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+            await self._emit_room_member_joined_sync_state_hooks(
+                response,
+                record_only=True,
+                include_timeline_baseline=room_member_join_hook_plan.record_timeline_seen,
+            )
         if room_member_join_hook_plan.emit_timeline:
             await self._emit_room_member_joined_sync_timeline_hooks(response)
         if room_member_join_hook_plan.emit_state:
@@ -2314,6 +2323,7 @@ class AgentBot:
         response: nio.SyncResponse,
         *,
         record_only: bool = False,
+        include_timeline_baseline: bool = False,
     ) -> None:
         """Expose or record human joins that matrix-nio delivers through sync room state."""
         if self.agent_name != ROUTER_AGENT_NAME:
@@ -2330,6 +2340,7 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             record_only=record_only,
+            include_timeline_baseline=include_timeline_baseline,
         )
         for room, event in plan.dispatch_events:
             await self._dispatch_obligation_runner.dispatch(

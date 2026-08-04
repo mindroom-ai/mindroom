@@ -659,6 +659,61 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
 
 
 @pytest.mark.asyncio
+async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first-sync timeline member is existing state, even without state duplication."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    assert await bot._sync_cache_trust.prepare_startup() is None
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = None
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._maybe_start_startup_thread_prewarm = MagicMock()
+    bot._maybe_start_deferred_overdue_task_drain = MagicMock()
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[
+                _room_member_event(
+                    event_id="$timeline-baseline",
+                    prev_membership=None,
+                ),
+            ],
+        ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(
+            event_id="$later-profile",
+            prev_membership=None,
+        ),
+    )
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_restored_token_first_sync_full_state_member_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -909,13 +964,32 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
-            [_room_member_event(event_id="$state-snapshot")],
+            [],
+            timeline_events=[
+                _room_member_event(
+                    event_id="$timeline-snapshot",
+                    prev_membership=None,
+                ),
+            ],
         ),
     )
 
     assert seen == []
 
-    await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+    await bot._on_room_member(
+        room,
+        _room_member_event(
+            event_id="$later-profile",
+            prev_membership=None,
+        ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$live", user_id="@bob:localhost"),
+    )
 
     assert seen == ["$live"]
 
@@ -1053,13 +1127,32 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
-            [_room_member_event(event_id="$state-snapshot")],
+            [],
+            timeline_events=[
+                _room_member_event(
+                    event_id="$timeline-snapshot",
+                    prev_membership=None,
+                ),
+            ],
         ),
     )
 
     assert seen == []
 
-    await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+    await bot._on_room_member(
+        room,
+        _room_member_event(
+            event_id="$later-profile",
+            prev_membership=None,
+        ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$live", user_id="@bob:localhost"),
+    )
 
     assert seen == ["$live"]
 
