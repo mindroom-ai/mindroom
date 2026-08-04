@@ -1143,8 +1143,10 @@ class TestMultiAgentOrchestrator:
 
         bot = AsyncMock()
         bot.agent_name = "general"
+        bot.agent_user.user_id = "@general:localhost"
         bot.rooms = []
         bot.ensure_rooms = AsyncMock()
+        orchestrator._restart_recovery.owner_ready = MagicMock()
 
         with (
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
@@ -1159,6 +1161,9 @@ class TestMultiAgentOrchestrator:
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
         assert bot.ensure_rooms.await_count == 2
+        orchestrator._restart_recovery.owner_ready.assert_called_once_with(
+            "@general:localhost",
+        )
 
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:
@@ -1578,7 +1583,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
@@ -1612,7 +1616,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
             patch.object(
                 orchestrator,
@@ -1680,7 +1683,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
-            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch(
                 "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
@@ -2470,7 +2472,6 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
             patch.object(orchestrator, "_start_sync_task"),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
         ):
             await orchestrator._run_bot_start_retry("general")
 
@@ -2520,7 +2521,6 @@ class TestMultiAgentOrchestrator:
                 side_effect=lambda *_args: order.append("sync_started"),
             ),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         ):
             await orchestrator._run_bot_start_retry("general")

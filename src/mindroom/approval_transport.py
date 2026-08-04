@@ -11,7 +11,11 @@ import nio
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
-from mindroom.matrix.client_delivery import can_send_to_encrypted_room
+from mindroom.matrix.client_delivery import (
+    RoomDeliveryHydrationProof,
+    ensure_room_delivery_ready,
+    send_room_event_result,
+)
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
@@ -61,6 +65,8 @@ async def _offload_oversized_full_arguments(
     client: nio.AsyncClient,
     room_id: str,
     send_content: dict[str, Any],
+    *,
+    room_encrypted: bool,
 ) -> dict[str, Any]:
     """Move full arguments that would overflow the card event into an uploaded JSON sidecar.
 
@@ -72,8 +78,12 @@ async def _offload_oversized_full_arguments(
         return send_content
 
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
-    room_encrypted = room_id in client.rooms and client.rooms[room_id].encrypted
-    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments)
+    mxc_uri, file_info = await upload_json_sidecar(
+        client,
+        room_id,
+        full_arguments,
+        room_encrypted=room_encrypted,
+    )
     if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
         logger.warning(
             "approval_full_arguments_sidecar_unavailable",
@@ -200,8 +210,6 @@ class ApprovalMatrixTransport:
             return None
         if not self._bot_has_approval_room(bot, room_id):
             raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_event"):
-            return None
         send_content = dict(content)
         if thread_id is not None:
             send_content["m.relates_to"] = await self._approval_thread_relation(
@@ -209,12 +217,29 @@ class ApprovalMatrixTransport:
                 thread_id,
                 _approval_relation_agent_name(send_content, fallback=bot.agent_name),
             )
-        send_content = await _offload_oversized_full_arguments(bot.client, room_id, send_content)
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=send_content,
-            ignore_unverified_devices=True,
+        delivery_proof: RoomDeliveryHydrationProof | None = None
+        full_arguments = send_content.get("full_arguments")
+        if isinstance(full_arguments, dict) and not content_fits_normal_event(send_content):
+            delivery_proof = await ensure_room_delivery_ready(
+                bot.client,
+                room_id,
+                operation="prepare_approval_event",
+            )
+            if delivery_proof is None:
+                return None
+            send_content = await _offload_oversized_full_arguments(
+                bot.client,
+                room_id,
+                send_content,
+                room_encrypted=delivery_proof.encrypted,
+            )
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "io.mindroom.tool_approval",
+            send_content,
+            operation="send_approval_event",
+            delivery_proof=delivery_proof,
         )
         if isinstance(response, nio.RoomSendResponse):
             sender_user_id = bot.client.user_id
@@ -299,15 +324,13 @@ class ApprovalMatrixTransport:
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             return False
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
-            return False
-
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=build_matrix_edit_content(event_id, replacement_content),
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "io.mindroom.tool_approval",
+            build_matrix_edit_content(event_id, replacement_content),
+            operation="edit_approval_event",
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -386,20 +409,18 @@ class ApprovalMatrixTransport:
                 approval_event_id=approval_event_id,
             )
             return False
-        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_notice"):
-            return False
-
         content = build_message_content(
             reason,
             thread_event_id=thread_id,
             reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "m.room.message",
+            content,
+            operation="send_approval_notice",
         )
         if isinstance(response, nio.RoomSendResponse):
             return True

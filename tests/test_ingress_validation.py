@@ -60,17 +60,18 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
         ),
     )
     human_sender = "@human:localhost"
-    content = stale_stream_cleanup._build_auto_resume_content(
-        stale_stream_cleanup._InterruptedThread(
+    content = stale_stream_cleanup.build_auto_resume_content(
+        stale_stream_cleanup.InterruptedThread(
             room_id="!room:localhost",
             thread_id="$thread",
             target_event_id="$target",
             partial_text="partial",
             agent_name="test_agent",
+            owner_user_id=ids["test_agent"].full_id,
             original_sender_id=human_sender,
         ),
         config=config,
-        runtime_paths=runtime_paths,
+        intended_responder_user_id=ids["test_agent"].full_id,
     )
 
     assert content[ORIGINAL_SENDER_KEY] == human_sender

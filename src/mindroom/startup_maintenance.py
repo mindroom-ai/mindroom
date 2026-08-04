@@ -23,7 +23,6 @@ logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int, set[str]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
@@ -33,18 +32,15 @@ type _RunningBots = Callable[[], list[_StartupBot]]
 class StartupMaintenanceController:
     """Own detached post-sync startup maintenance task lifecycle."""
 
-    recover_stale_streams: _RecoverStaleStreams
     setup_rooms_and_memberships: _SetupRooms
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
-    startup_cutoff_ms: int | None = field(default=None, init=False)
 
-    def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
+    def start(self, bots: list[_StartupBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
-        self.startup_cutoff_ms = startup_cutoff_ms
         self.task = create_logged_task(
-            self._run(bots, config, startup_cutoff_ms),
+            self._run(bots, config),
             name="startup_maintenance",
             failure_message="Startup maintenance task failed",
         )
@@ -64,49 +60,19 @@ class StartupMaintenanceController:
         running_bots: _RunningBots,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
-        if self.startup_cutoff_ms is None or self.task is not None:
+        if self.task is not None:
             return
         bots = running_bots()
         if not bots:
             return
-        self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
+        self.start(bots, config)
 
-    async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
-        scanned_room_ids: set[str] = set()
-        room_setup_task = asyncio.create_task(
-            self._run_phase(
-                "startup_maintenance.rooms_and_memberships",
-                lambda: self.setup_rooms_and_memberships(bots),
-                failure_message="Startup room and membership maintenance failed",
-            ),
-            name="startup_rooms_and_memberships",
+    async def _run(self, bots: list[_StartupBot], config: Config) -> None:
+        await self._run_phase(
+            "startup_maintenance.rooms_and_memberships",
+            lambda: self.setup_rooms_and_memberships(bots),
+            failure_message="Startup room and membership maintenance failed",
         )
-        try:
-            await self._run_phase(
-                "startup_maintenance.stale_stream_recovery.initial",
-                lambda: self.recover_stale_streams(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                ),
-                failure_message="Initial startup stale stream recovery failed",
-            )
-            await room_setup_task
-            await self._run_phase(
-                "startup_maintenance.stale_stream_recovery.joined_room_delta",
-                lambda: self.recover_stale_streams(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                ),
-                failure_message="Joined-room delta stale stream recovery failed",
-            )
-        finally:
-            if not room_setup_task.done():
-                room_setup_task.cancel()
-                await asyncio.gather(room_setup_task, return_exceptions=True)
         runtime_support_ready = await self._run_phase(
             "startup_maintenance.runtime_support",
             lambda: self.sync_runtime_support(config),

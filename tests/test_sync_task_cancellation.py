@@ -1987,12 +1987,14 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     router_bot.agent_name = "router"
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
+    router_bot.client = None
     router_bot.stop = AsyncMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
+    general_bot.client = None
     general_bot.stop = AsyncMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
@@ -2016,7 +2018,6 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
             new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_completed_sync_task),
     ):
@@ -2053,12 +2054,14 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     router_bot.agent_name = "router"
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
+    router_bot.client = None
     router_bot.stop = AsyncMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
+    general_bot.client = None
     general_bot.stop = AsyncMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
@@ -2090,7 +2093,6 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
             new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
         ),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
     ):
@@ -2115,7 +2117,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
 
 @pytest.mark.asyncio
 async def test_update_config_replays_cancelled_startup_maintenance_and_runs_approval_cleanup(tmp_path: Path) -> None:
-    """Hot reload during startup maintenance must not lose one-shot restart cleanup."""
+    """Hot reload must replay interrupted one-shot startup maintenance."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = Config()
     new_config = Config()
@@ -2139,11 +2141,10 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     orchestrator.agent_bots = {"router": router_bot}
     orchestrator.config = current_config
     orchestrator.running = True
-    orchestrator._startup_maintenance.startup_cutoff_ms = 123456
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
-    replayed: list[tuple[list[object], object, int]] = []
+    replayed: list[tuple[list[object], object]] = []
 
     async def blocked_startup_maintenance() -> None:
         maintenance_started.set()
@@ -2154,8 +2155,8 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
-            replayed.append((bots, config, startup_cutoff_ms))
+        def replay_startup_maintenance(bots: list[object], config: object) -> None:
+            replayed.append((bots, config))
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -2177,7 +2178,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
         assert updated is False
         assert old_maintenance_task.cancelled()
-        assert replayed == [([router_bot], new_config, 123456)]
+        assert replayed == [([router_bot], new_config)]
         mark_startup_runtime_support_ready.assert_awaited_once()
     finally:
         maintenance_released.set()
@@ -2421,14 +2422,21 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
-    """Test that stop() cancels all sync tasks."""
+    """Process shutdown must fence recovery before awaits and drain after sync."""
     shutdown_order: list[str] = []
+
+    async def track_approval_shutdown() -> None:
+        shutdown_order.append("approval_shutdown")
 
     async def track_catalog_drain(*_args: object, **_kwargs: object) -> None:
         shutdown_order.append("catalog_drain")
 
     with (
         patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel,
+        patch(
+            "mindroom.orchestrator.shutdown_approval_runtime",
+            new=AsyncMock(side_effect=track_approval_shutdown),
+        ),
         patch(
             "mindroom.orchestrator.wait_for_background_tasks",
             new=AsyncMock(side_effect=track_catalog_drain),
@@ -2440,6 +2448,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         cancelled = []
 
         async def track_cancel(name: str, tasks: dict) -> None:
+            assert all(bot.running for bot in orchestrator.agent_bots.values())
             cancelled.append(name)
             tasks.pop(name, None)
 
@@ -2467,10 +2476,30 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             "router": mock_bot2,
         }
 
+        def track_recovery_admission_close() -> None:
+            shutdown_order.append("recovery_admission_closed")
+
+        async def track_recovery_stop() -> None:
+            shutdown_order.append("recovery_drain")
+            assert not orchestrator._sync_tasks
+            assert all(not bot.running for bot in orchestrator.agent_bots.values())
+
         async def track_mcp_stop() -> None:
             shutdown_order.append("mcp_teardown")
 
-        with patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=track_mcp_stop)):
+        with (
+            patch.object(
+                orchestrator._restart_recovery,
+                "begin_shutdown",
+                new=MagicMock(side_effect=track_recovery_admission_close),
+            ),
+            patch.object(
+                orchestrator._restart_recovery,
+                "stop",
+                new=AsyncMock(side_effect=track_recovery_stop),
+            ),
+            patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=track_mcp_stop)),
+        ):
             await orchestrator.stop()
 
         # Verify all tasks were cancelled
@@ -2497,6 +2526,9 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             ],
         )
         assert mock_wait.await_count == 2
+        assert shutdown_order.index("recovery_admission_closed") < shutdown_order.index("approval_shutdown")
+        assert shutdown_order.index("recovery_admission_closed") < shutdown_order.index("catalog_drain")
+        assert shutdown_order.index("recovery_drain") < shutdown_order.index("entity_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
 

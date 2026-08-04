@@ -33,6 +33,7 @@ from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -627,7 +628,7 @@ class ConversationResolver:
     ) -> EventInfo | None:
         target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
         if not isinstance(target_event, nio.RoomGetEventResponse):
-            if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
+            if isinstance(target_event, RoomGetEventError) and matrix_response_is_not_found(target_event):
                 return None
             detail = (
                 target_event.message

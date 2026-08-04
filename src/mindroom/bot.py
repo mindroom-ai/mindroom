@@ -790,6 +790,20 @@ class AgentBot:
         return self._first_sync_done
 
     @property
+    def conversation_cache(self) -> MatrixConversationCache:
+        """Return the live Matrix conversation cache."""
+        return self._conversation_cache
+
+    @property
+    def restart_recovery_room_ids(self) -> frozenset[str]:
+        """Return in-memory room hints that seed restart recovery."""
+        room_ids = set(self._room_lifecycle.desired_room_ids)
+        client = self.client
+        if client is not None:
+            room_ids.update(room_id for room_id in client.rooms if room_id.startswith("!"))
+        return frozenset(room_ids)
+
+    @property
     def config(self) -> Config:
         """Return the canonical live config."""
         return self._runtime_view.config

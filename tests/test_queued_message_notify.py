@@ -89,6 +89,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_matrix_client_mock,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
@@ -155,8 +156,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         user_id="@mindroom_general:localhost",
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
@@ -1544,7 +1544,6 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
 async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
     """Team delivery/session setup must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
-    bot.client = MagicMock()
     cached_room = MagicMock(encrypted=False)
     bot.client.rooms = {"!room:localhost": cached_room}
     bot.client.room_send = AsyncMock()
@@ -1612,7 +1611,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
 async def test_generate_team_response_keeps_locked_target_when_payload_preparation_retargets(tmp_path: Path) -> None:
     """Team response setup and delivery should keep the target selected before lock acquisition."""
     bot = _bot(tmp_path)
-    bot.client = MagicMock()
     cached_room = MagicMock(encrypted=False)
     bot.client.rooms = {"!room:localhost": cached_room}
     bot.client.room_send = AsyncMock()

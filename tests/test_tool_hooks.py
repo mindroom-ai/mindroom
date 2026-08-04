@@ -69,6 +69,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_event_cache_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -165,13 +166,12 @@ def _initialize_router_approval_store(
     *,
     room_send: AsyncMock | None = None,
     editor: AsyncMock | None = None,
-) -> tuple[MagicMock, AsyncMock]:
+) -> tuple[AsyncMock, AsyncMock]:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
+    client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     client.room_send = room_send or AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
@@ -1285,7 +1285,10 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
 
     runtime_context = _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)
     runtime_context.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
-    runtime_context.client.room_put_state.return_value = object()
+    runtime_context.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
 
     with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
@@ -1293,9 +1296,9 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
     assert result == {"echo": "notes.txt"}
     runtime_context.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     runtime_context.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$resolved-thread",
     )
     assert sent == [
@@ -1328,7 +1331,10 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.rooms = {}
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
-    router_bot.client.room_put_state.return_value = object()
+    router_bot.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
@@ -1370,16 +1376,16 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     assert seen == [({"name": "Router Lobby"}, True)]
     bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     bot.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$resolved-thread",
     )
     router_bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     router_bot.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$resolved-thread",
     )
 

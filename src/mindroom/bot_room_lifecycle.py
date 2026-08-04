@@ -126,6 +126,14 @@ class BotRoomLifecycle:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
+    @property
+    def desired_room_ids(self) -> frozenset[str]:
+        """Return configured and retained invited rooms for this bot."""
+        room_ids = set(self.deps.get_configured_rooms())
+        if self._should_persist_invited_rooms():
+            room_ids.update(self.invited_rooms)
+        return frozenset(room_ids)
+
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
         return room_id in self._decrypt_notice_fenced_room_ids
@@ -251,11 +259,8 @@ class BotRoomLifecycle:
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
-        desired_rooms = set(self.deps.get_configured_rooms())
-        if self._should_persist_invited_rooms():
-            desired_rooms.update(self.invited_rooms)
 
-        for room_id in desired_rooms:
+        for room_id in self.desired_room_ids:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 await self._on_configured_room_joined(room_id)
@@ -285,9 +290,7 @@ class BotRoomLifecycle:
             return []
 
         current_rooms = set(joined_rooms)
-        configured_rooms = set(self.deps.get_configured_rooms())
-        if self._should_persist_invited_rooms():
-            configured_rooms.update(self.invited_rooms)
+        configured_rooms = set(self.desired_room_ids)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
             if root_space_id is not None:

@@ -464,7 +464,10 @@ async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) 
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
-    client.room_put_state.return_value = object()
+    client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
 
     await execute_scheduled_workflow(
         client,
@@ -477,8 +480,8 @@ async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) 
     assert seen == [({"name": "Lobby"}, True)]
     client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"pending": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"pending": True}},
         state_key="$thread",
     )

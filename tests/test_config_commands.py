@@ -154,8 +154,15 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
 async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations() -> None:
     """Config confirmation should add canonical Matrix annotation reactions."""
     client = AsyncMock()
-    response = MagicMock(spec=nio.RoomSendResponse)
-    client.room_send.return_value = response
+    client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", "@bot:example.org")}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
+    client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$reaction",
+        room_id="!room:example.org",
+    )
     await _add_confirmation_reactions(client, "!room:example.org", "$preview")
 
     assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [
@@ -192,6 +199,11 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
         await config_confirmation._store_pending_change_in_matrix(state_client, "$preview", pending_change)
 
     reaction_client = AsyncMock()
+    reaction_client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", "@bot:example.org")}
+    reaction_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
     reaction_client.room_send.return_value = nio.RoomSendError.from_dict(
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!room:example.org",
@@ -204,6 +216,11 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
 async def test_confirmation_setup_adopts_existing_duplicate_reaction() -> None:
     """A replayed setup should accept the homeserver's duplicate-annotation proof."""
     client = AsyncMock()
+    client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", "@bot:example.org")}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
     client.room_send.side_effect = [
         nio.RoomSendError("already exists", "M_DUPLICATE_ANNOTATION"),
         nio.RoomSendResponse("$cancel-reaction", "!room:example.org"),

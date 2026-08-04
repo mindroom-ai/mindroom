@@ -154,6 +154,14 @@ def _client() -> AsyncMock:
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = BOT_USER
     client.device_id = BOT_DEVICE
+    client.rooms = {ROOM_ID: nio.MatrixRoom(ROOM_ID, BOT_USER)}
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+    )
     client.get_openid_token.return_value = nio.responses.GetOpenIDTokenResponse(
         "opaque-token",
         3600,
@@ -2689,7 +2697,7 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
     await asyncio.gather(*list(manager._background_tasks))
 
     client.room_send.assert_awaited_once_with(
-        ROOM_ID,
+        room_id=ROOM_ID,
         message_type="m.room.message",
         content={
             "msgtype": "m.notice",

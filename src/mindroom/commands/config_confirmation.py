@@ -14,8 +14,10 @@ import nio
 from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -261,7 +263,7 @@ async def _resolve_pending_change(
         _PENDING_CONFIG_EVENT_TYPE,
         event_id,
     )
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to resolve pending config change from Matrix state: {response}"
@@ -392,12 +394,13 @@ async def _add_confirmation_reactions(
                 f"{event_id}\0{reaction_key}".encode(),
             ).hexdigest()
         )
-        response = await client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=build_reaction_content(event_id, reaction_key),
-            tx_id=transaction_id,
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            client,
+            room_id,
+            "m.reaction",
+            build_reaction_content(event_id, reaction_key),
+            operation="add_config_confirmation_reaction",
+            transaction_id=transaction_id,
         )
         if isinstance(response, nio.RoomSendError) and response.status_code == "M_DUPLICATE_ANNOTATION":
             continue

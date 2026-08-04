@@ -247,6 +247,35 @@ async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_encryption_write_marks_delivery_state(tmp_path: Path) -> None:
+    """The generic hook admin must publish successful encryption transitions locally."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    room = nio.MatrixRoom(room_id, "@bot:localhost")
+    room.members_synced = True
+    client.homeserver = "http://localhost:8008"
+    client.rooms = {room_id: room}
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=room_id)
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    wrote_state = await admin.put_room_state(
+        room_id,
+        "m.room.encryption",
+        "",
+        {"algorithm": "m.megolm.v1.aes-sha2"},
+    )
+
+    assert wrote_state is True
+    assert room_id in client.encrypted_rooms
+    assert room.encrypted is True
+    assert room.members_synced is False
+
+
+@pytest.mark.asyncio
 async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite(tmp_path: Path) -> None:
     """Single-user invite should not run managed private-room reconciliation."""
     module = _matrix_admin_module()

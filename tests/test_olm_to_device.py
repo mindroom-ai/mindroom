@@ -141,7 +141,8 @@ async def test_first_contact_queries_exact_device_and_claims_olm_session() -> No
                 sender.handle_response(claim_response)
                 return claim_response
 
-            client._send = AsyncMock(side_effect=query_keys)
+            client.keys_query = AsyncMock(side_effect=query_keys)
+            client._send = AsyncMock()
             client.keys_claim = AsyncMock(side_effect=claim_keys)
             client.to_device = AsyncMock(side_effect=lambda message: nio.ToDeviceResponse(message))
             target = PinnedMatrixDevice(RECIPIENT, "DESKTOP", recipient_device.ed25519)
@@ -153,7 +154,8 @@ async def test_first_contact_queries_exact_device_and_claims_olm_session() -> No
                 content={"first": "contact"},
             )
 
-            client._send.assert_awaited_once()
+            client.keys_query.assert_awaited_once()
+            client._send.assert_not_awaited()
             client.keys_claim.assert_awaited_once_with({RECIPIENT: ["DESKTOP"]})
             client.to_device.assert_awaited_once()
             assert sender.session_store.get(recipient_device.curve25519) is not None

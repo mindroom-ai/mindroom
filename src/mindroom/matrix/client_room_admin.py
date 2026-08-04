@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, MutableMapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.delivery_lock import room_delivery_lock
+from mindroom.matrix.encryption_recipients import (
+    mark_room_encrypted_for_delivery,
+    room_encryption_state_from_response,
+)
+from mindroom.matrix.response_status import matrix_response_transport_succeeded
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -130,10 +136,9 @@ async def create_room(
 async def room_encryption_enabled(client: nio.AsyncClient, room_id: str) -> bool | None:
     """Return whether a room has encryption enabled, or None when the state is unreadable."""
     response = await client.room_get_state_event(room_id, _ROOM_ENCRYPTION_EVENT_TYPE)
-    if isinstance(response, nio.RoomGetStateEventResponse):
-        return True
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
-        return False
+    enabled = room_encryption_state_from_response(response)
+    if enabled is not None:
+        return enabled
     logger.warning("matrix_room_encryption_state_unreadable", room_id=room_id, error=str(response))
     return None
 
@@ -144,23 +149,82 @@ async def ensure_room_encryption_enabled(client: nio.AsyncClient, room_id: str) 
     Enabling encryption is irreversible; this helper never disables it.
     Returns whether the room is encrypted after the call.
     """
+    async with room_delivery_lock(client, room_id):
+        return await _ensure_room_encryption_enabled_locked(client, room_id)
+
+
+async def _ensure_room_encryption_enabled_locked(client: nio.AsyncClient, room_id: str) -> bool:
+    """Enable room encryption while holding the application delivery lock."""
     enabled = await room_encryption_enabled(client, room_id)
     if enabled:
+        mark_room_encrypted_for_delivery(client, room_id)
         return True
     if enabled is None:
         return False
-    response = await client.room_put_state(room_id, _ROOM_ENCRYPTION_EVENT_TYPE, dict(_ROOM_ENCRYPTION_CONTENT))
-    if isinstance(response, nio.RoomPutStateResponse):
-        cached_room = client.rooms.get(room_id)
-        if cached_room is not None:
-            # nio only encrypts sends once the cached room flips encrypted, which
-            # normally happens on the next sync; flip it now so replies sent inside
-            # the sync window (e.g. the `!encrypt` confirmation) are not plaintext.
-            cached_room.encrypted = True
+    response = await _put_room_state_locked(
+        client,
+        room_id,
+        _ROOM_ENCRYPTION_EVENT_TYPE,
+        dict(_ROOM_ENCRYPTION_CONTENT),
+    )
+    if room_state_write_succeeded(response):
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return True
     logger.error("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
     return False
+
+
+def room_state_write_succeeded(response: object) -> TypeGuard[nio.RoomPutStateResponse]:
+    """Return whether a room-state write has a success type and HTTP status."""
+    return isinstance(response, nio.RoomPutStateResponse) and matrix_response_transport_succeeded(response)
+
+
+async def _put_room_state_locked(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_type: str,
+    content: dict[str, Any],
+    *,
+    state_key: str = "",
+) -> nio.RoomPutStateResponse | nio.RoomPutStateError:
+    """Write room state while the caller owns the room delivery lock."""
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=event_type,
+        content=content,
+        state_key=state_key,
+    )
+    if event_type == _ROOM_ENCRYPTION_EVENT_TYPE and state_key == "" and room_state_write_succeeded(response):
+        # nio normally observes this state on the next sync, so publish the
+        # irreversible transition locally before any later send can proceed.
+        mark_room_encrypted_for_delivery(client, room_id)
+    return response
+
+
+async def put_room_state_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_type: str,
+    content: dict[str, Any],
+    *,
+    state_key: str = "",
+) -> nio.RoomPutStateResponse | nio.RoomPutStateError:
+    """Write room state, serializing irreversible encryption transitions with delivery."""
+    if event_type != _ROOM_ENCRYPTION_EVENT_TYPE:
+        return await client.room_put_state(
+            room_id=room_id,
+            event_type=event_type,
+            content=content,
+            state_key=state_key,
+        )
+    async with room_delivery_lock(client, room_id):
+        return await _put_room_state_locked(
+            client,
+            room_id,
+            event_type,
+            content,
+            state_key=state_key,
+        )
 
 
 def _with_event_power_level(
@@ -714,6 +778,8 @@ __all__ = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "put_room_state_result",
     "room_admin_power_user",
     "room_encryption_enabled",
+    "room_state_write_succeeded",
 ]

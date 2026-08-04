@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from collections import defaultdict, deque
@@ -17,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
+from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -48,7 +50,9 @@ def _make_context(
     )
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     client.room_send = AsyncMock()
-    client.room_get_state_event = AsyncMock()
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
     client.room_get_event = AsyncMock()
@@ -1555,6 +1559,53 @@ async def test_matrix_api_put_state_allow_dangerous_succeeds() -> None:
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$power:localhost"
     ctx.client.room_put_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_encryption_write_waits_for_active_plaintext_delivery() -> None:
+    """The generic Matrix API must serialize encryption writes with room delivery."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    room = ctx.client.rooms[ctx.room_id]
+    room.members_synced = True
+    ctx.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$encryption:localhost",
+        room_id=ctx.room_id,
+    )
+    transport_started = asyncio.Event()
+    release_transport = asyncio.Event()
+
+    async def send_plaintext(**_kwargs: object) -> nio.RoomSendResponse:
+        transport_started.set()
+        await release_transport.wait()
+        return nio.RoomSendResponse(event_id="$message:localhost", room_id=ctx.room_id)
+
+    ctx.client.room_send.side_effect = send_plaintext
+    with tool_runtime_context(ctx):
+        send_task = asyncio.create_task(
+            send_message_result(ctx.client, ctx.room_id, {"body": "before encryption", "msgtype": "m.text"}),
+        )
+        await transport_started.wait()
+        write_task = asyncio.create_task(
+            tool.matrix_api(
+                action="put_state",
+                event_type="m.room.encryption",
+                content={"algorithm": "m.megolm.v1.aes-sha2"},
+                allow_dangerous=True,
+            ),
+        )
+        await asyncio.sleep(0)
+        put_count_while_send_blocked = ctx.client.room_put_state.await_count
+        release_transport.set()
+        delivered = await send_task
+        payload = json.loads(await write_task)
+
+    assert delivered is not None
+    assert payload["status"] == "ok"
+    assert put_count_while_send_blocked == 0
+    assert ctx.room_id in ctx.client.encrypted_rooms
+    assert room.encrypted is True
+    assert room.members_synced is False
 
 
 @pytest.mark.asyncio

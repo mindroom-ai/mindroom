@@ -776,11 +776,17 @@ async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallb
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Agent Lobby"})
-    bot.client.room_put_state.return_value = object()
+    bot.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
     router_bot = _agent_bot(tmp_path, agent_name="router")
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
-    router_bot.client.room_put_state.return_value = object()
+    router_bot.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
@@ -805,9 +811,9 @@ async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallb
     assert results == [({"name": "Agent Lobby"}, True)]
     bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     bot.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$thread",
     )
     router_bot.client.room_get_state_event.assert_not_awaited()
@@ -828,7 +834,10 @@ async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_ca
     router_bot = _agent_bot(tmp_path, agent_name="router")
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
-    router_bot.client.room_put_state.return_value = object()
+    router_bot.client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
@@ -853,16 +862,16 @@ async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_ca
     assert results == [({"name": "Router Lobby"}, True)]
     bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     bot.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$thread",
     )
     router_bot.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     router_bot.client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"queued": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"queued": True}},
         state_key="$thread",
     )
 

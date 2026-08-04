@@ -121,6 +121,11 @@ def _make_matrix_client_mock() -> AsyncMock:
     return client
 
 
+def _room_send_response(event_id: str) -> nio.RoomSendResponse:
+    """Return a successful Matrix send response for streaming tests."""
+    return nio.RoomSendResponse(event_id=event_id, room_id="!test:localhost")
+
+
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield
@@ -204,9 +209,7 @@ async def test_delivery_queue_bounds_optional_updates() -> None:
 async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_path: Path) -> None:
     """Queued optional work reads live state, so dropped superseded requests cannot strand text."""
     mock_client = _make_matrix_client_mock()
-    mock_response = MagicMock()
-    mock_response.__class__ = nio.RoomSendResponse
-    mock_response.event_id = "$latest_visible_text"
+    mock_response = _room_send_response("$latest_visible_text")
     mock_client.room_send.return_value = mock_response
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     streaming = StreamingResponse(
@@ -359,9 +362,7 @@ class TestStreamingBehavior:
         calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send responses
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$helper_response_123"
+        mock_send_response = _room_send_response("$helper_response_123")
         helper_bot.client.room_send.return_value = mock_send_response
         calc_bot.client.room_send.return_value = mock_send_response
 
@@ -480,8 +481,7 @@ class TestStreamingBehavior:
         calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response = _room_send_response("$calculator_response")
         calc_bot.client.room_send.return_value = mock_send_response
 
         # Mock AI response
@@ -544,9 +544,7 @@ class TestStreamingBehavior:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$stream_123"
+        mock_send_response = _room_send_response("$stream_123")
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
@@ -794,9 +792,7 @@ class TestStreamingBehavior:
     async def test_throttled_send_uses_ramp_interval(self) -> None:
         """Integration test: _throttled_send respects the ramped interval."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_456"
+        mock_response = _room_send_response("$stream_456")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -818,9 +814,7 @@ class TestStreamingBehavior:
     async def test_char_threshold_can_trigger_before_time_interval(self) -> None:
         """Large enough text chunks should trigger an update even before time interval elapses."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_char_1"
+        mock_response = _room_send_response("$stream_char_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -845,9 +839,7 @@ class TestStreamingBehavior:
 
         async def run_case(*, show_tool_calls: bool) -> list[str]:
             mock_client = _make_matrix_client_mock()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = "$stream_tool_1"
+            mock_response = _room_send_response("$stream_tool_1")
             mock_client.room_send.return_value = mock_response
 
             streaming = StreamingResponse(
@@ -891,9 +883,7 @@ class TestStreamingBehavior:
     async def test_pre_tool_flush_does_not_double_emit_after_idle_gap(self) -> None:
         """Tool-start after an idle gap should not emit an extra edit before finalization."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_tool_gap_1"
+        mock_response = _room_send_response("$stream_tool_gap_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -941,10 +931,7 @@ class TestStreamingBehavior:
             _ = (args, kwargs)
             first_send_started.set()
             await allow_send_to_finish.wait()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = "$tool_start_backpressure"
-            return mock_response
+            return _room_send_response("$tool_start_backpressure")
 
         mock_client.room_send.side_effect = slow_room_send
 
@@ -986,9 +973,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         first_send_started = asyncio.Event()
         allow_send_to_finish = asyncio.Event()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$tool_start_burst"
+        mock_response = _room_send_response("$tool_start_burst")
 
         async def slow_room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
             _ = (args, kwargs)
@@ -1047,10 +1032,7 @@ class TestStreamingBehavior:
             if send_count == 1:
                 first_send_started.set()
                 await allow_first_send_to_finish.wait()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = f"$tool_start_inflight_{send_count}"
-            return mock_response
+            return _room_send_response(f"$tool_start_inflight_{send_count}")
 
         mock_client.room_send.side_effect = slow_room_send
 
@@ -1105,10 +1087,7 @@ class TestStreamingBehavior:
             nonlocal send_count
             _ = (args, kwargs)
             send_count += 1
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = f"$tool_start_post_delta_{send_count}"
-            return mock_response
+            return _room_send_response(f"$tool_start_post_delta_{send_count}")
 
         mock_client.room_send.side_effect = room_send
 
@@ -1153,9 +1132,7 @@ class TestStreamingBehavior:
     async def test_visible_tool_start_after_intervening_edit_refreshes_immediately(self) -> None:
         """A later visible tool start should refresh immediately once another edit has already landed."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$tool_start_after_text"
+        mock_response = _room_send_response("$tool_start_after_text")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1218,10 +1195,7 @@ class TestStreamingBehavior:
             _ = (args, kwargs)
             first_send_started.set()
             await allow_send_to_finish.wait()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = event_id
-            return mock_response
+            return _room_send_response(event_id)
 
         mock_client.room_send.side_effect = slow_room_send
 
@@ -1265,9 +1239,7 @@ class TestStreamingBehavior:
     async def test_visible_tool_start_after_unsent_text_refreshes_immediately(self) -> None:
         """A same-tick visible tool start should still bypass the boundary refresh gate."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$tool_start_after_unsent_text"
+        mock_response = _room_send_response("$tool_start_after_unsent_text")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1317,9 +1289,7 @@ class TestStreamingBehavior:
     async def test_idle_flush_fires_on_tool_completion_after_pause(self) -> None:
         """A paused tool completion should emit before finalization via the idle trigger."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_tool_complete_1"
+        mock_response = _room_send_response("$stream_tool_complete_1")
         first_send_seen = asyncio.Event()
 
         async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
@@ -1400,9 +1370,7 @@ class TestStreamingBehavior:
     async def test_phase_boundary_flush_ignores_whitespace_only_buffer(self) -> None:
         """Whitespace-only pre-tool flushes should not consume the first visible send window."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_whitespace_1"
+        mock_response = _room_send_response("$stream_whitespace_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1455,10 +1423,7 @@ class TestStreamingBehavior:
             if send_count == 1:
                 first_send_started.set()
                 await allow_first_send_to_finish.wait()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = f"$stale_send_{send_count}"
-            return mock_response
+            return _room_send_response(f"$stale_send_{send_count}")
 
         mock_client.room_send.side_effect = room_send
 
@@ -1507,9 +1472,7 @@ class TestStreamingBehavior:
     async def test_boundary_refresh_initializes_stream_started_at(self) -> None:
         """Boundary-refresh sends should anchor the ramp window before later throttled edits."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$boundary_refresh_start"
+        mock_response = _room_send_response("$boundary_refresh_start")
         mock_client.room_send.return_value = mock_response
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -1701,9 +1664,7 @@ class TestStreamingBehavior:
     async def test_progress_hint_uses_shorter_interval(self) -> None:
         """Tool progress hints should allow faster keepalive edits than steady-state interval."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$stream_progress_1"
+        mock_response = _room_send_response("$stream_progress_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1765,9 +1726,7 @@ class TestStreamingBehavior:
     async def test_progress_hint_creates_initial_message_on_cold_start(self) -> None:
         """Tool-first streams with hidden tool calls should create an initial placeholder message."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$cold_start_1"
+        mock_response = _room_send_response("$cold_start_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1794,9 +1753,7 @@ class TestStreamingBehavior:
     async def test_placeholder_progress_hint_does_not_resend_after_commit(self) -> None:
         """Whitespace-only placeholder sends should advance throttle state after committing."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$placeholder_progress_1"
+        mock_response = _room_send_response("$placeholder_progress_1")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -1822,9 +1779,7 @@ class TestStreamingBehavior:
     async def test_finalize_strips_marker_from_placeholder_only_stream(self) -> None:
         """Finalize should edit out the in-progress marker even when no text was ever emitted."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$placeholder_msg"
+        mock_response = _room_send_response("$placeholder_msg")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -2210,9 +2165,7 @@ class TestStreamingBehavior:
             agent=mock_helper_agent,
             base_id=base_id,
         )
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$thinking"
+        mock_send_response = _room_send_response("$thinking")
         bot.client.room_send.return_value = mock_send_response
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
 
@@ -2342,9 +2295,7 @@ class TestStreamingBehavior:
         """Test that in-progress marker is shown during streaming but not in final message."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$stream_123"
+        mock_send_response = _room_send_response("$stream_123")
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
@@ -3252,9 +3203,7 @@ class TestStreamingBehavior:
     async def test_force_refresh_merge_preserves_boundary_refresh_capture_completion(self) -> None:
         """Merged force-refresh sends must still resolve boundary-refresh capture waiters."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$merged_force_refresh"
+        mock_response = _room_send_response("$merged_force_refresh")
         mock_client.room_send.return_value = mock_response
 
         streaming = ReplacementStreamingResponse(
@@ -3424,9 +3373,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_suffix_renders_and_clears_without_touching_accumulated_text(self) -> None:
         """Warmup notices should render as side-band text and disappear on ready."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_123"
+        mock_response = _room_send_response("$warmup_123")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3484,9 +3431,7 @@ class TestStreamingBehavior:
     async def test_send_streaming_response_keeps_warmup_side_band_out_of_accumulated_text(self) -> None:
         """Returned accumulated text should never contain worker warmup notices."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_stream_123"
+        mock_response = _room_send_response("$warmup_stream_123")
         mock_client.room_send.return_value = mock_response
 
         async def stream() -> AsyncIterator[str]:
@@ -3536,9 +3481,7 @@ class TestStreamingBehavior:
     async def test_hidden_tool_mode_worker_warmup_uses_generic_copy(self) -> None:
         """Hidden-tool mode should never expose worker tool labels in warmup text."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_hidden_tools"
+        mock_response = _room_send_response("$warmup_hidden_tools")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3572,9 +3515,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_suffix_renders_outside_partial_markdown(self) -> None:
         """Warmup notices should append outside partially open markdown blocks."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_markdown"
+        mock_response = _room_send_response("$warmup_markdown")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3610,9 +3551,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_visible_body_uses_canonical_matrix_body(self) -> None:
         """Warmup metadata should preserve the canonical Matrix body, not the pre-mention display text."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_visible_body"
+        mock_response = _room_send_response("$warmup_visible_body")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3850,9 +3789,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_coalesces_parallel_calls_on_same_worker_key(self) -> None:
         """Multiple tool calls sharing one worker should render as one warmup line."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_same_worker"
+        mock_response = _room_send_response("$warmup_same_worker")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3888,9 +3825,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_renders_multiple_lines_for_distinct_workers(self) -> None:
         """Distinct warming workers should each render their own status line."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_two_workers"
+        mock_response = _room_send_response("$warmup_two_workers")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3921,9 +3856,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_retry_clears_stale_failure_notice_before_text(self) -> None:
         """A new retry should replace the old failed notice for the same tool before normal text arrives."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_retry"
+        mock_response = _room_send_response("$warmup_retry")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -3967,9 +3900,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_failed_status_renders_exact_visible_copy(self) -> None:
         """Visible failed warmups should pin exact plain-text and HTML formatting."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_failed_visible"
+        mock_response = _room_send_response("$warmup_failed_visible")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -4294,9 +4225,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_failure_notice_clears_before_visible_tool_start(self) -> None:
         """A visible tool-start marker should clear stale worker failure suffixes before sending."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_tool_start"
+        mock_response = _room_send_response("$warmup_tool_start")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -4334,9 +4263,7 @@ class TestStreamingBehavior:
     async def test_worker_warmup_failure_notice_clears_before_hidden_tool_start(self) -> None:
         """A hidden tool-start keepalive should drop stale worker failure suffixes before sending."""
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$warmup_hidden_tool_start"
+        mock_response = _room_send_response("$warmup_hidden_tool_start")
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
@@ -4388,10 +4315,7 @@ class TestStreamingBehavior:
             if send_count == 1:
                 first_send_started.set()
                 await allow_first_send_to_finish.wait()
-            mock_response = MagicMock()
-            mock_response.__class__ = nio.RoomSendResponse
-            mock_response.event_id = f"$warmup_hidden_refresh_{send_count}"
-            return mock_response
+            return _room_send_response(f"$warmup_hidden_refresh_{send_count}")
 
         mock_client.room_send.side_effect = room_send
 
@@ -4479,9 +4403,7 @@ class TestStreamingConfig:
         persist_entity_accounts(config, runtime_paths)
 
         mock_client = _make_matrix_client_mock()
-        mock_response = MagicMock()
-        mock_response.__class__ = nio.RoomSendResponse
-        mock_response.event_id = "$cfg_test"
+        mock_response = _room_send_response("$cfg_test")
         mock_client.room_send.return_value = mock_response
 
         async def empty_stream() -> AsyncIterator[str]:

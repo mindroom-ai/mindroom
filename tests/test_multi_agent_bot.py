@@ -1144,8 +1144,8 @@ class TestAgentBot(AgentBotTestBase):
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
         )
+        bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        bot.client = AsyncMock()
 
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()

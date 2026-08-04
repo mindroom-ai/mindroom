@@ -86,10 +86,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
 
     # Mock room send to return a response event ID
-    mock_send_response = MagicMock()
-    mock_send_response.__class__ = nio.RoomSendResponse
-    mock_send_response.event_id = "$response123"
-    bot.client.room_send.return_value = mock_send_response
+    bot.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$response123",
+        room_id="!test:localhost",
+    )
 
     # Mock room messages for thread history
     bot.client.room_messages = AsyncMock(

@@ -15,6 +15,9 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import send_room_event_result
+from mindroom.matrix.client_room_admin import put_room_state_result, room_state_write_succeeded
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
@@ -799,11 +802,12 @@ class MatrixApiTools(Toolkit):
             )
 
         try:
-            response = await context.client.room_send(
-                room_id=room_id,
-                message_type=normalized_event_type,
-                content=normalized_content,
-                ignore_unverified_devices=True,
+            response = await send_room_event_result(
+                context.client,
+                room_id,
+                normalized_event_type,
+                normalized_content,
+                operation="matrix_api_send_event",
             )
         except Exception as exc:
             self._audit_write(
@@ -909,7 +913,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
             return self._payload(
                 "ok",
                 action="get_state",
@@ -1024,7 +1028,8 @@ class MatrixApiTools(Toolkit):
             )
 
         try:
-            response = await context.client.room_put_state(
+            response = await put_room_state_result(
+                context.client,
                 room_id=room_id,
                 event_type=normalized_event_type,
                 state_key=resolved_state_key,
@@ -1051,7 +1056,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, nio.RoomPutStateResponse):
+        if room_state_write_succeeded(response):
             self._audit_write(
                 context=context,
                 room_id=room_id,
@@ -1249,7 +1254,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetEventError) and matrix_response_is_not_found(response):
             return self._payload(
                 "ok",
                 action="get_event",

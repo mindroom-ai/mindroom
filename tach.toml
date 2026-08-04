@@ -163,6 +163,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_obligations",
     "mindroom.entity_resolution",
+    "mindroom.interactive",
     "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
@@ -978,9 +979,25 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.matrix_api"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.response_status",
+    "mindroom.matrix.thread_bookkeeping",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.tools.matrix_api"]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_helpers"
 depends_on = []
 visibility = [
+    "mindroom.custom_tools.matrix_api",
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.matrix_room",
@@ -1073,6 +1090,7 @@ path = "mindroom.delivery_gateway"
 depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.interactive",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
@@ -1283,7 +1301,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.hooks.state"
-depends_on = []
+depends_on = ["mindroom.matrix.client_room_admin"]
 
 [[modules]]
 path = "mindroom.hooks.types"
@@ -1334,6 +1352,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
@@ -1409,7 +1428,6 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
@@ -1422,6 +1440,8 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
+    "mindroom.restart_recovery",
+    "mindroom.restart_recovery_operations",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1460,6 +1480,30 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.restart_recovery"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestration.runtime",
+    "mindroom.restart_recovery_operations",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.restart_recovery_operations"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.stale_stream_cleanup",
+]
+visibility = [
+    "mindroom.orchestrator",
+    "mindroom.restart_recovery",
 ]
 
 [[modules]]
@@ -2224,6 +2268,35 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.interactive"
+depends_on = [
+    "mindroom.entity_resolution",
+    "mindroom.file_locks",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.delivery_gateway",
+    "mindroom.post_response_effects",
+    "mindroom.reaction_dispatch",
+    "mindroom.streaming",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.stop"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.matrix.client"
 depends_on = [
     "mindroom.matrix.client_delivery",
@@ -2235,22 +2308,66 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = []
+depends_on = [
+    "mindroom.matrix.delivery_lock",
+    "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.response_status",
+]
 visibility = [
     "mindroom.approval_transport",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.matrix_api",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.custom_tools.subagents",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
+    "mindroom.interactive",
     "mindroom.matrix.client",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix_rtc.call_manager",
+    "mindroom.restart_recovery_operations",
     "mindroom.scheduling",
+    "mindroom.stop",
     "mindroom.streaming",
     "mindroom.thread_summary",
+]
+
+[[modules]]
+path = "mindroom.matrix.delivery_lock"
+depends_on = []
+visibility = [
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+]
+
+[[modules]]
+path = "mindroom.matrix.encryption_recipients"
+depends_on = ["mindroom.matrix.response_status"]
+visibility = [
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
+]
+
+[[modules]]
+path = "mindroom.matrix.response_status"
+depends_on = []
+visibility = [
+    "mindroom.commands.config_confirmation",
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.matrix_api",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
+    "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_room_scan",
+    "mindroom.scheduling",
 ]
 
 [[modules]]
@@ -2261,6 +2378,9 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
 depends_on = [
+    "mindroom.matrix.delivery_lock",
+    "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.response_status",
     "mindroom.thread_tags",
 ]
 visibility = [
@@ -2269,14 +2389,17 @@ visibility = [
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.custom_tools.matrix_api",
     "mindroom.external_triggers.executor",
     "mindroom.hooks.matrix_admin",
+    "mindroom.hooks.state",
     "mindroom.matrix.client",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestrator",
+    "mindroom.restart_recovery_operations",
 ]
 
 [[modules]]
@@ -2303,7 +2426,12 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_session"
-depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.response_status",
+    "mindroom.matrix.to_device",
+]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
@@ -2720,6 +2848,7 @@ path = "mindroom.matrix.thread_room_scan"
 depends_on = [
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_membership",
 ]
 
@@ -2729,10 +2858,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_projection",
     "mindroom.matrix.visible_body",
     "mindroom.streaming",
@@ -2750,6 +2879,7 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.to_device",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
@@ -2835,6 +2965,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
@@ -2874,6 +3005,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.interactive",
     "mindroom.knowledge",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
@@ -2899,6 +3031,7 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
+    "mindroom.stop",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
     "mindroom.timestamp_formatting",
@@ -3145,7 +3278,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.response_status",
     "mindroom.runtime_protocols",
 ]
 
@@ -3217,6 +3352,7 @@ path = "mindroom.scheduling"
 depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
+    "mindroom.matrix.response_status",
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
 ]
@@ -3476,6 +3612,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.interactive",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
@@ -3639,6 +3776,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.interactive",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.event_info",
@@ -4288,8 +4426,10 @@ expose = [
     "invite_to_room",
     "join_room",
     "leave_room",
+    "put_room_state_result",
     "room_admin_power_user",
     "room_encryption_enabled",
+    "room_state_write_succeeded",
 ]
 from = ["mindroom.matrix.client_room_admin"]
 
@@ -4316,14 +4456,18 @@ from = ["mindroom.matrix.to_device"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "RoomDeliveryHydrationProof",
     "build_edit_event_content",
     "build_threaded_edit_content",
-    "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "delivery_hydration_is_current",
+    "ensure_room_delivery_ready",
+    "hydrate_joined_room_for_delivery",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_room_event_result",
     "send_runtime_encrypted_media_message",
 ]
 from = ["mindroom.matrix.client_delivery"]

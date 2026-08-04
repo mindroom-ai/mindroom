@@ -1748,6 +1748,24 @@ async def test_get_scheduled_task_raises_on_transient_matrix_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_scheduled_task_rejects_not_found_from_failed_transport() -> None:
+    """A non-404 M_NOT_FOUND read must remain retryable instead of deleting work."""
+    client = AsyncMock()
+    response = nio.RoomGetStateEventError(
+        "not found",
+        status_code="M_NOT_FOUND",
+        room_id="!test:server",
+    )
+    transport = MagicMock()
+    transport.status = 502
+    response.transport_response = transport
+    client.room_get_state_event.return_value = response
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await get_scheduled_task(client, "!test:server", "task123")
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
     """Test cancel_all_scheduled_tasks when no tasks exist."""
     # Create mock client

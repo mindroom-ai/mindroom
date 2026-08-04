@@ -26,6 +26,7 @@ from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
@@ -639,7 +640,7 @@ async def _read_scheduled_task_state(
     except Exception as exc:
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
         raise _ScheduledTaskStateReadError(msg) from exc
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"

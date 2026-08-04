@@ -8,12 +8,23 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix_identifiers import agent_username_localpart
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _DEFAULT_TEST_PASSWORD = "mock_test_password"  # noqa: S105
+
+
+def agent_matrix_user(agent_name: str, *, domain: str = "example.org") -> AgentMatrixUser:
+    """Build one typed Matrix user for tests that only need entity identity."""
+    return AgentMatrixUser(
+        agent_name=agent_name,
+        user_id=f"@{agent_name}:{domain}",
+        display_name=agent_name,
+        password=None,
+    )
 
 
 class MindRoomUserLike(Protocol):

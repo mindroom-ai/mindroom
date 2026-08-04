@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
+from mindroom.matrix.client_room_admin import (
+    add_room_to_space,
+    create_room,
+    get_room_members,
+    invite_to_room,
+    put_room_state_result,
+    room_state_write_succeeded,
+)
 from mindroom.matrix.identity import managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import (
     invited_room_entity_names,
@@ -88,13 +95,14 @@ class _BoundHookMatrixAdmin:
         content: dict[str, Any],
     ) -> bool:
         """Write one room state event using the bound admin-capable client."""
-        response = await self.client.room_put_state(
+        response = await put_room_state_result(
+            self.client,
             room_id=room_id,
             event_type=event_type,
             content=content,
             state_key=state_key,
         )
-        return isinstance(response, nio.RoomPutStateResponse)
+        return room_state_write_succeeded(response)
 
     def _persist_created_room_for_creator(self, room_id: str) -> None:
         """Record a room the bound managed entity created so cleanup preserves it.
