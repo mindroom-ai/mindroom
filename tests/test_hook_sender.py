@@ -23,7 +23,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import TurnRecord
@@ -1106,7 +1106,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path) -> None:
     """Hook-envelope assembly should go through the extracted resolver owner."""
     bot = _agent_bot(tmp_path)
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$event",
         body="hello",
@@ -1814,7 +1814,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    prepared_text_event = PreparedTextEvent(
+    prepared_text_event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-hook-dispatch",
         body="1",
@@ -1895,7 +1895,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    prepared_text_event = PreparedTextEvent(
+    prepared_text_event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-deep-hook-dispatch",
         body="follow-up",
@@ -1946,7 +1946,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     """Prepared synthetic text should keep first-hop hook dispatch behavior."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$prepared-hook-dispatch",
         body="@mindroom_code:localhost follow up",
@@ -1981,7 +1981,7 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     """Prepared synthetic text should stop at the same deep-relay boundary as raw text."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$prepared-deep-hook-dispatch",
         body="follow-up automation",

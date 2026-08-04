@@ -11,7 +11,7 @@ from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
-from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
@@ -264,7 +264,7 @@ class ConversationResolver:
             source_kind
             if source_kind is not None
             else event.source_kind_override
-            if isinstance(event, PreparedTextEvent)
+            if isinstance(event, PreparedIngress)
             else None
         )
         source_kind_sender_is_trusted = self._sender_is_managed_entity(event.sender)

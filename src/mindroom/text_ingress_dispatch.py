@@ -16,18 +16,8 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_handoff import (
-    DispatchEvent,
-    DispatchIngressMetadata,
-    DispatchPayloadMetadata,
-    MediaDispatchEvent,
-    TextDispatchEvent,
-    merge_payload_metadata,
-    payload_metadata_from_source,
-)
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.handled_turns import TurnRecord
-from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -50,6 +40,13 @@ if TYPE_CHECKING:
 
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.commands.parsing import Command
+    from mindroom.dispatch_handoff import (
+        DispatchEvent,
+        DispatchIngressMetadata,
+        DispatchPayloadMetadata,
+        MediaDispatchEvent,
+        PreparedIngress,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
@@ -75,7 +72,7 @@ class _ReplayGuard(Protocol):
 
 @dataclass(frozen=True)
 class _PreparedTextDispatch:
-    event: TextDispatchEvent
+    event: PreparedIngress
     payload_metadata: DispatchPayloadMetadata | None
     handled_turn: TurnRecord
     command: Command | None
@@ -87,7 +84,7 @@ class _PreparedTextDispatch:
 async def dispatch_text_message(
     controller: TurnController,
     room: nio.MatrixRoom,
-    raw_event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     *,
     command_executor: CommandTurnExecutor,
@@ -97,11 +94,10 @@ async def dispatch_text_message(
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
-    trust_hydrated_internal_metadata: bool | None = None,
     current_prompt_is_structured: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
-    turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
+    turn_claim = handled_turn or TurnRecord.create([event.event_id], completed=False)
     if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
     claim_transferred = False
@@ -112,17 +108,16 @@ async def dispatch_text_message(
 
     timing_scope_token = None
     try:
-        dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
         prepared = await _prepare_text_dispatch(
             controller,
             room,
-            raw_event,
+            event,
             requester_user_id,
             media_events=media_events,
             handled_turn=handled_turn,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
-            trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
             current_prompt_is_structured=current_prompt_is_structured,
             dispatch_timing=dispatch_timing,
         )
@@ -156,7 +151,7 @@ async def dispatch_text_message(
             media_events=media_events,
             router_event=media_events[0]
             if media_events and len(prepared.handled_turn.source_event_ids) == 1
-            else raw_event,
+            else event,
         )
         if dispatch_timing is not None:
             dispatch_timing.mark("dispatch_plan_ready")
@@ -198,37 +193,16 @@ def _try_claim_turn(
 async def _prepare_text_dispatch(
     controller: TurnController,
     room: nio.MatrixRoom,
-    raw_event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     *,
     media_events: list[MediaDispatchEvent] | None,
     handled_turn: TurnRecord | None,
     ingress_metadata: DispatchIngressMetadata | None,
     payload_metadata: DispatchPayloadMetadata | None,
-    trust_hydrated_internal_metadata: bool | None,
     current_prompt_is_structured: bool,
     dispatch_timing: DispatchPipelineTiming | None,
 ) -> _PreparedTextDispatch | None:
-    event = await controller.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=raw_event))
-    hydrated_payload_metadata = payload_metadata_from_source(
-        event.source,
-        trust_internal_metadata=(
-            controller.deps.ingress.should_trust_internal_payload_metadata(event)
-            if trust_hydrated_internal_metadata is None
-            else trust_hydrated_internal_metadata
-        ),
-    )
-    payload_metadata = (
-        hydrated_payload_metadata
-        if payload_metadata is None
-        else merge_payload_metadata(
-            payload_metadata,
-            hydrated_payload_metadata,
-            trust_hydrated_internal_metadata=trust_hydrated_internal_metadata
-            if trust_hydrated_internal_metadata is not None
-            else controller.deps.ingress.should_trust_internal_payload_metadata(event),
-        )
-    )
     attach_dispatch_pipeline_timing(event.source, dispatch_timing)
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_start")
@@ -236,10 +210,6 @@ async def _prepare_text_dispatch(
 
     if handled_turn is None:
         handled_turn = TurnRecord.create([event.event_id])
-    elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
-        refreshed_prompts = dict(handled_turn.source_event_prompts or {})
-        refreshed_prompts[event.event_id] = event.body
-        handled_turn = canonicalize_turn_record(handled_turn, source_event_prompts=refreshed_prompts)
     routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
     if routed_original_event_id is not None:
         # Keep the routed turn discoverable by the human message the router
@@ -292,7 +262,7 @@ async def _prepare_text_dispatch(
 
 def _parsed_command_for_event(
     controller: TurnController,
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     *,
     media_events: list[MediaDispatchEvent] | None,
     ingress_metadata: DispatchIngressMetadata | None,

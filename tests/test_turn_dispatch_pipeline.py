@@ -13,7 +13,7 @@ import pytest
 
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -33,7 +33,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -89,6 +89,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
+    make_pending_event,
     message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
@@ -135,7 +136,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-root",
             reply_to_event_id=voice_event.event_id,
         )
-        fallback_event = PreparedTextEvent(
+        fallback_event = PreparedIngress(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 [Attached voice message]",
@@ -145,9 +146,9 @@ class TestAgentBot(AgentBotTestBase):
         fallback = _ReadyVoiceFallback(
             event=fallback_event,
             ready=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=fallback_event,
-                    room=room,
+                pending_event=make_pending_event(
+                    fallback_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     requester_user_id=voice_event.sender,
                     dispatch_metadata=(
@@ -353,7 +354,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
         with (
-            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(return_value=None)),
             pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
         ):
             await bot._turn_controller._execute_response_action(
@@ -1148,7 +1149,13 @@ class TestAgentBot(AgentBotTestBase):
         ):
             reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
-                event,
+                PreparedIngress(
+                    sender=event.sender,
+                    event_id=event.event_id,
+                    body=event.body,
+                    source=event.source,
+                    server_timestamp=event.server_timestamp,
+                ),
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@user:localhost",
@@ -1162,10 +1169,12 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, None, "@user:localhost")
+        assert key == CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
-        assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
+        assert pending_event.event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @staticmethod
     def _router_relay_event(
@@ -1520,7 +1529,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$followup",
             body="stop right now!",
@@ -1593,12 +1602,14 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is event
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert {item.kind for item in pending_event.dispatch_metadata} == {
             "pending_turn_claim",
             "queued_notice_reservation",
@@ -1638,7 +1649,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             },
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@mindroom_general:localhost",
             event_id=f"${source_kind}",
             body=f"@mindroom_calculator:localhost {source_kind} says hello",
@@ -1674,8 +1685,10 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
-        assert pending_event.source_kind == source_kind
+        assert isinstance(pending_event.event, PreparedIngress)
+        assert pending_event.event.event_id == event.event_id
+        assert pending_event.event.body == event.body
+        assert pending_event.event.source_kind == source_kind
 
     @pytest.mark.asyncio
     async def test_voice_preview_reserves_active_thread_follow_up(
@@ -1693,7 +1706,7 @@ class TestAgentBot(AgentBotTestBase):
         room.users = {"@user:localhost": MagicMock()}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$voice-followup",
             body="please stop",
@@ -1742,7 +1755,7 @@ class TestAgentBot(AgentBotTestBase):
             await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+            assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -1753,10 +1766,11 @@ class TestAgentBot(AgentBotTestBase):
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == VOICE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 2
         metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
@@ -1801,7 +1815,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="full long text",
@@ -1855,11 +1869,12 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
@@ -1896,7 +1911,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        prepared_event = PreparedTextEvent(
+        prepared_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar-followup",
             body="please stop",
@@ -1966,12 +1981,13 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.event.event_id == prepared_event.event_id
+        assert pending_event.event.body == prepared_event.body
+        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.dispatch_policy_source_kind is None
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -2968,7 +2984,7 @@ class TestAgentBot(AgentBotTestBase):
                 emit_cancelled_response=AsyncMock(),
             ),
         )
-        with patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock(return_value=None)):
+        with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock(return_value=None)):
             outcome = await gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),

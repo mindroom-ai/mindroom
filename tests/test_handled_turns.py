@@ -101,6 +101,11 @@ def _write_responses_file(
     )
 
 
+def _record_exact(tracker: HandledTurnLedger, record: TurnRecord) -> None:
+    """Persist one exact record directly in the ledger as test setup."""
+    tracker.update_handled_turn(record.indexed_event_ids, lambda _existing_records: record)
+
+
 def _record_handled_turn(
     tracker: HandledTurnLedger,
     source_event_ids: list[str],
@@ -114,17 +119,19 @@ def _record_handled_turn(
     conversation_target: MessageTarget | None = None,
 ) -> None:
     """Record one normalized handled turn through the typed carrier."""
-    tracker.record_handled_turn(
-        TurnRecord.create(
-            source_event_ids,
-            response_event_id=response_event_id,
-            source_event_prompts=source_event_prompts,
-            response_owner=response_owner,
-            requester_id=requester_id,
-            correlation_id=correlation_id,
-            history_scope=history_scope,
-            conversation_target=conversation_target,
-        ),
+    record = TurnRecord.create(
+        source_event_ids,
+        response_event_id=response_event_id,
+        source_event_prompts=source_event_prompts,
+        response_owner=response_owner,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        history_scope=history_scope,
+        conversation_target=conversation_target,
+    )
+    tracker.update_handled_turn(
+        record.indexed_event_ids,
+        lambda _existing_records: record,
     )
 
 
@@ -184,7 +191,7 @@ def test_durable_lookup_does_not_hold_state_lock_across_persist_barrier(temp_dir
         lookup_done.set()
 
     with patch.object(tracker, "_persist_records", side_effect=persist_with_barrier):
-        tracker.record_handled_turn(TurnRecord.create(["$source"]))
+        _record_exact(tracker, TurnRecord.create(["$source"]))
         assert persist_started.wait(timeout=5)
         durable_thread = threading.Thread(target=check_durable)
         durable_thread.start()
@@ -235,11 +242,13 @@ def test_turn_record_has_no_post_init_normalization_hook() -> None:
 def test_ledger_canonicalizes_record_before_identity_resolution(temp_dir: Path) -> None:
     """The persistence boundary should compare canonical turn identities."""
     tracker = HandledTurnLedger("test_canonical_identity_boundary", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(["$source"], response_event_id="$old", timestamp=1.0),
     )
 
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord(source_event_ids=("$source",), response_event_id="$new", timestamp=2.0),
     )
 
@@ -362,7 +371,8 @@ def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
         reply_to_event_id="$reply:example.com",
     )
 
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$first", "$second"],
             response_event_id="$response",
@@ -474,7 +484,8 @@ def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> 
     """The ledger should persist an exact partial record without completing it."""
     tracker = HandledTurnLedger("test_visible_echo", base_path=temp_dir)
 
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
     )
 
@@ -491,7 +502,8 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     """Visible echoes should survive a new ledger instance on the same storage path."""
     tracker1 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
 
-    tracker1.record_handled_turn(
+    _record_exact(
+        tracker1,
         TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
     )
 
@@ -508,7 +520,8 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
 def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     """Coalesced source-event metadata should survive a ledger reload from disk as floats."""
     tracker1 = HandledTurnLedger("test_source_metadata_reload", base_path=temp_dir)
-    tracker1.record_handled_turn(
+    _record_exact(
+        tracker1,
         TurnRecord.create(
             ["$first", "$second"],
             discovery_event_ids=["$human-first"],
@@ -540,7 +553,7 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     redacted = canonicalize_turn_record(turn_record, redacted_source_event_ids=("$human-first",))
     assert redacted.replay_source_event_ids == ("$second",)
     assert redacted.source_event_prompts == {"$second": "second"}
-    tracker2.record_handled_turn(redacted)
+    _record_exact(tracker2, redacted)
 
     reloaded = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$human-first")
     assert reloaded is not None
@@ -559,7 +572,8 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
 def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) -> None:
     """Command effect and result evidence must survive process replacement."""
     tracker = HandledTurnLedger("test_command_checkpoint", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$command"],
             completed=False,
@@ -590,7 +604,7 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
         requester_id="@user:example.com",
     )
     tracker = HandledTurnLedger("test_source_revisions_reload", base_path=temp_dir)
-    tracker.record_handled_turn(record)
+    _record_exact(tracker, record)
 
     reloaded = _reload_ledger("test_source_revisions_reload", temp_dir).get_turn_record("$second")
 
@@ -610,7 +624,8 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
 def test_user_stop_state_persists_across_restart(temp_dir: Path) -> None:
     """Durable STOP order and visible completion survive outside run metadata."""
     tracker = HandledTurnLedger("test_user_stop_cutoff", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$source"],
             response_event_id="$response",
@@ -632,7 +647,8 @@ def test_suppressed_source_event_revisions_persist_across_restart(temp_dir: Path
     """Hook suppression must survive Matrix replay through the durable ledger."""
     suppressed_revisions = {"$source": (1_000_010, "$edit")}
     tracker = HandledTurnLedger("test_suppressed_source_revisions_reload", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$source"],
             response_event_id="$response",
@@ -715,7 +731,8 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
 def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: Path) -> None:
     """Discovery aliases should rehydrate to the canonical record without changing source semantics."""
     tracker1 = HandledTurnLedger("test_discovery_alias", base_path=temp_dir)
-    tracker1.record_handled_turn(
+    _record_exact(
+        tracker1,
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
@@ -737,7 +754,8 @@ def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: 
 def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) -> None:
     """Selection aliases must retain both their tombstone and owed cleanup across restart."""
     tracker = HandledTurnLedger("test_discovery_redaction", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$question"],
             discovery_event_ids=["$selection"],
@@ -763,7 +781,7 @@ def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
     tracker = HandledTurnLedger("test_persist_failure", base_path=temp_dir)
 
     with patch.object(tracker, "_write_responses_file_locked", side_effect=OSError("disk full")):
-        tracker.record_handled_turn(TurnRecord.create(["$source"], completed=False))
+        _record_exact(tracker, TurnRecord.create(["$source"], completed=False))
         with pytest.raises(OSError, match="disk full"):
             tracker.flush()
 
@@ -800,7 +818,7 @@ def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) ->
         first_thread = threading.Thread(target=record_first_and_wait)
         first_thread.start()
         assert first_started.wait(timeout=5)
-        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
+        _record_exact(tracker, TurnRecord.create(["$later"], completed=False))
         release_first.set()
         assert second_started.wait(timeout=5)
         assert first_waiter_done.wait(timeout=1)
@@ -974,7 +992,7 @@ def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_di
         patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist),
         patch.object(tracker, "_schedule_persist_locked", side_effect=schedule_and_signal),
     ):
-        tracker.record_handled_turn(TurnRecord.create(["$retry"], completed=False))
+        _record_exact(tracker, TurnRecord.create(["$retry"], completed=False))
         assert second_attempt_started.wait(timeout=5)
         waiter = threading.Thread(target=record_later_and_wait)
         waiter.start()
@@ -1034,9 +1052,9 @@ def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> 
         real_slow_persist(turn_records)
 
     with patch.object(slow_tracker, "_persist_records", side_effect=blocked_persist):
-        slow_tracker.record_handled_turn(TurnRecord.create(["$slow"], completed=False))
+        _record_exact(slow_tracker, TurnRecord.create(["$slow"], completed=False))
         assert slow_started.wait(timeout=5)
-        fast_tracker.record_handled_turn(TurnRecord.create(["$fast"], completed=False))
+        _record_exact(fast_tracker, TurnRecord.create(["$fast"], completed=False))
         fast_tracker.flush()
         assert "$fast" in _read_persisted_records(fast_tracker)
         release_slow.set()
@@ -1060,10 +1078,10 @@ def test_concurrent_records_coalesce_into_one_follow_up_ledger_write(temp_dir: P
         real_persist(turn_records)
 
     with patch.object(tracker, "_persist_records", side_effect=persist_with_barrier):
-        tracker.record_handled_turn(TurnRecord.create(["$event-0"], completed=False))
+        _record_exact(tracker, TurnRecord.create(["$event-0"], completed=False))
         assert first_started.wait(timeout=5)
         for index in range(1, 100):
-            tracker.record_handled_turn(TurnRecord.create([f"$event-{index}"], completed=False))
+            _record_exact(tracker, TurnRecord.create([f"$event-{index}"], completed=False))
         release_first.set()
         tracker.flush()
 
@@ -1301,7 +1319,8 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
     """Age retention must not discard cleanup work before the next response."""
     tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$pending"],
             redacted_source_event_ids=["$pending"],
@@ -1309,7 +1328,7 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
             timestamp=old_timestamp,
         ),
     )
-    tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
+    _record_exact(tracker, TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
     tracker.flush()
 
     tracker._cleanup_old_events(max_events=100, max_age_days=30)
@@ -1323,7 +1342,8 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
     """Age cleanup must not discard a turn whose durable work is unfinished."""
     tracker = HandledTurnLedger("test_incomplete_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$incomplete"],
             completed=False,
@@ -1331,7 +1351,7 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
             timestamp=old_timestamp,
         ),
     )
-    tracker.record_handled_turn(TurnRecord.create(["$terminal"], timestamp=old_timestamp))
+    _record_exact(tracker, TurnRecord.create(["$terminal"], timestamp=old_timestamp))
     tracker.flush()
 
     tracker._cleanup_old_events(max_events=100, max_age_days=30)
@@ -1345,7 +1365,8 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
 def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(temp_dir: Path) -> None:
     """Cross-store cleanup must retain old terminal truth while dispatch still owns it."""
     tracker = HandledTurnLedger("test_unsettled_age_cleanup", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$terminal"],
             response_event_id="$response",
@@ -1367,7 +1388,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
     """A STOP-owned turn remains until its visible terminal edit is settled."""
     tracker = HandledTurnLedger("test_unsettled_stop_age_cleanup", base_path=temp_dir)
     old_timestamp = time.time() - (40 * 24 * 60 * 60)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$unsettled-stop"],
             response_event_id="$unsettled-response",
@@ -1375,7 +1397,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
             timestamp=old_timestamp,
         ),
     )
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$settled-stop"],
             response_event_id="$settled-response",
@@ -1395,7 +1418,8 @@ def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None
 def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> None:
     """A fully redacted turn without cleanup or dispatch work must not live forever."""
     tracker = HandledTurnLedger("test_redacted_age_cleanup", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$redacted"],
             redacted_source_event_ids=["$redacted"],
@@ -1413,7 +1437,8 @@ def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> 
 def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
     """Count retention may exceed its limit rather than lose owed cleanup work."""
     tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$pending"],
             redacted_source_event_ids=["$pending"],
@@ -1421,7 +1446,7 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
             timestamp=time.time() - 2,
         ),
     )
-    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    _record_exact(tracker, TurnRecord.create(["$newest"], timestamp=time.time()))
     tracker.flush()
 
     tracker._cleanup_old_events(max_events=1, max_age_days=30)
@@ -1434,7 +1459,8 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
 def test_cleanup_by_count_retains_incomplete_turn(temp_dir: Path) -> None:
     """Count cleanup may exceed its limit rather than discard unfinished work."""
     tracker = HandledTurnLedger("test_incomplete_count_cleanup", base_path=temp_dir)
-    tracker.record_handled_turn(
+    _record_exact(
+        tracker,
         TurnRecord.create(
             ["$incomplete"],
             completed=False,
@@ -1442,7 +1468,7 @@ def test_cleanup_by_count_retains_incomplete_turn(temp_dir: Path) -> None:
             timestamp=time.time() - 2,
         ),
     )
-    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    _record_exact(tracker, TurnRecord.create(["$newest"], timestamp=time.time()))
     tracker.flush()
 
     tracker._cleanup_old_events(max_events=1, max_age_days=30)

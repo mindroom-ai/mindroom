@@ -13,12 +13,13 @@ import pytest
 from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
@@ -27,6 +28,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_generate_response_mock,
+    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -76,9 +78,9 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
 
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
     """Wrap one Matrix event as pending user ingress."""
-    return PendingEvent(
-        event=event,
-        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+    return make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=MESSAGE_SOURCE_KIND,
     )
 
@@ -125,7 +127,7 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
 
     with pytest.raises(IngressAdmissionClosedError):
         await owner.admit(
-            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
             ready_task=ready_task,
             source_event_id="$late:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
@@ -170,7 +172,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
     owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
@@ -199,7 +201,7 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", physical_sender_id="@user:localhost"))
     owner = PromptIngressReservationOwner(gate=gate, slot=slot)
     ready_task = asyncio.create_task(never_ready())
     owner.ready_task = ready_task
@@ -571,7 +573,7 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
         "type": "m.room.message",
         "room_id": "!test:localhost",
     }
-    prepared_event = PreparedTextEvent(
+    prepared_event = PreparedIngress(
         sender="@user:localhost",
         event_id="$sidecar-selection:localhost",
         body="1",
@@ -629,4 +631,3 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
     assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
     mock_enqueue.assert_awaited_once()
     assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event
-    assert mock_enqueue.await_args.kwargs["dispatch_event"] is prepared_event

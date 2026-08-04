@@ -2191,7 +2191,7 @@ class AgentBot:
         for pending_event in pending_events:
             self._retry_pending_dispatch_source(
                 pending_event.event.event_id,
-                pending_event.callback_source_kind or pending_event.source_kind,
+                pending_event.event.callback_source_kind or pending_event.event.source_kind,
             )
 
     def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:

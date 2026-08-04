@@ -412,13 +412,6 @@ class HandledTurnLedger:
         with self._state.lock:
             self._wait_for_pending_persists_locked()
 
-    def record_handled_turn(self, turn_record: TurnRecord) -> None:
-        """Persist one exact record for every source event in the turn."""
-        self.update_handled_turn(
-            turn_record.indexed_event_ids,
-            lambda _existing_records: turn_record,
-        )
-
     def update_handled_turn(
         self,
         lookup_event_ids: Sequence[str],

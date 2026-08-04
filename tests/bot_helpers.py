@@ -29,7 +29,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
@@ -178,8 +178,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
 
 def _assert_ready_voice_text_fallback(ready_event: ReadyPendingEvent | None) -> None:
     assert ready_event is not None
-    assert ready_event.pending_event.source_kind == VOICE_SOURCE_KIND
-    assert isinstance(ready_event.pending_event.event, PreparedTextEvent)
+    assert ready_event.pending_event.event.source_kind == VOICE_SOURCE_KIND
+    assert isinstance(ready_event.pending_event.event, PreparedIngress)
     assert ready_event.pending_event.event.body == "🎤 [Attached voice message]"
     assert ready_event.pending_event.event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 

@@ -1,0 +1,46 @@
+# Turn pipeline manifest.
+# Exact production file boundary for the turn-pipeline lifecycle refactor tracked in
+# docs/superpowers/plans/2026-08-02-turn-pipeline-lifecycle-refactor.md.
+# One repo-relative path per line; `# group: <name>` starts a group; other `#` lines are comments.
+# Report line counts with: uv run python scripts/testing/turn_pipeline_loc.py
+# group: core
+src/mindroom/turn_controller.py
+src/mindroom/response_runner.py
+src/mindroom/response_turn.py
+src/mindroom/response_lifecycle.py
+src/mindroom/response_terminal.py
+src/mindroom/response_attempt.py
+src/mindroom/response_payload_preparation.py
+src/mindroom/execution_preparation.py
+src/mindroom/ingress_validation.py
+src/mindroom/inbound_turn_normalizer.py
+src/mindroom/conversation_resolver.py
+src/mindroom/ingress_lanes.py
+src/mindroom/coalescing.py
+src/mindroom/coalescing_batch.py
+src/mindroom/text_ingress_dispatch.py
+src/mindroom/turn_policy.py
+src/mindroom/router_relay.py
+src/mindroom/dispatch_handoff.py
+src/mindroom/dispatch_replay_guard.py
+src/mindroom/command_turn_executor.py
+src/mindroom/reaction_dispatch.py
+src/mindroom/user_stop_reconciliation.py
+src/mindroom/visible_response_reconciliation.py
+src/mindroom/turn_store.py
+src/mindroom/handled_turns.py
+src/mindroom/redacted_turn_cleanup.py
+src/mindroom/sync_restart_retry.py
+src/mindroom/turn_settlement_retry.py
+src/mindroom/delivery_gateway.py
+src/mindroom/final_delivery.py
+src/mindroom/streaming.py
+src/mindroom/edit_regenerator.py
+src/mindroom/message_target.py
+src/mindroom/prompt_ingress_reservation.py
+src/mindroom/dispatch_callback_outcome.py
+# group: adjacent-recovery
+src/mindroom/dispatch_obligations/__init__.py
+src/mindroom/dispatch_obligations/events.py
+src/mindroom/dispatch_obligations/runner.py
+src/mindroom/dispatch_obligations/storage.py

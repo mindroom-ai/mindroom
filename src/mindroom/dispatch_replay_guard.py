@@ -13,7 +13,7 @@ from mindroom.matrix.event_info import EventInfo
 if TYPE_CHECKING:
     import structlog
 
-    from mindroom.dispatch_handoff import TextDispatchEvent
+    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 type _RequesterResolver = Callable[[str, object], str]
@@ -33,7 +33,7 @@ class _CachedEventView:
 
 
 def has_newer_unresponded_in_thread(
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -182,7 +182,7 @@ async def _newer_unresponded_cached_thread_event_id(
 async def has_newer_unresponded_cached_thread_event(
     *,
     room_id: str,
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,

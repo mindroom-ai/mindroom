@@ -238,7 +238,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,

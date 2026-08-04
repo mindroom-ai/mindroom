@@ -70,6 +70,21 @@ class _FinalizedVisibleEcho:
     is_fallback: bool
 
 
+def record_deferred_outcome_response(turn_store: TurnStore, record: TurnRecord, response_event_id: str) -> None:
+    """Record one deferred visible outcome as the terminal responded turn."""
+    turn_store.record_responded_turn(canonicalize_turn_record(record, response_event_id=response_event_id))
+
+
+def record_user_stop_terminal(
+    turn_store: TurnStore,
+    record: TurnRecord,
+    response_event_id: str,
+    stop_receipt_order: int,
+) -> None:
+    """Record one settled user-stop as the terminal turn for the response owner."""
+    turn_store.record_turn_durably(with_user_stop(record, response_event_id, stop_receipt_order, delivery_settled=True))
+
+
 @dataclass
 class TurnStore:
     """Own replication, precedence, backfill, and repair for one entity's turns.
@@ -114,7 +129,7 @@ class TurnStore:
             raise RuntimeError(msg)
         self.record_turn(turn_record)
 
-    def record_turn_durably(self, turn_record: TurnRecord) -> None:
+    def record_turn_durably(self, turn_record: TurnRecord) -> None:  # privata: ignore — durable write surface shared by turn_store helpers and tests
         """Persist one terminal turn and wait until its exact ledger write lands."""
         self._record_terminal_turn(turn_record, wait_for_persist=True)
 

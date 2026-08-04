@@ -28,7 +28,12 @@ from mindroom import constants, interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    RequesterCoalescingOwner,
+    build_coalesced_batch,
+)
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
@@ -74,6 +79,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_matrix_client_mock,
+    make_pending_event,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -85,7 +91,7 @@ if TYPE_CHECKING:
     from unittest.mock import AsyncMock
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
-    from mindroom.dispatch_handoff import PreparedTextEvent
+    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -900,11 +906,11 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
         )
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=event,
-                room=room,
+            make_pending_event(
+                event,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
@@ -958,11 +964,11 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
         ),
     ]
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=event,
-                room=room,
+            make_pending_event(
+                event,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
@@ -1004,11 +1010,11 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
         origin_server_ts=1_000_000,
     )
     batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER)),
         [
-            PendingEvent(
-                event=relay,
-                room=room,
+            make_pending_event(
+                relay,
+                room,
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
@@ -1124,7 +1130,7 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     async def resolve_with_barrier(
         _normalizer: InboundTurnNormalizer,
         request: TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         if request.event.event_id == first.event_id:
             normalization_started.set()
             await release_normalization.wait()
@@ -1573,7 +1579,7 @@ async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     async def normalize_with_barrier(
         normalizer: InboundTurnNormalizer,
         request: TextNormalizationRequest,
-    ) -> PreparedTextEvent:
+    ) -> PreparedIngress:
         normalization_started.set()
         await release_normalization.wait()
         return await resolve_text_event(normalizer, request)
@@ -1620,7 +1626,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     async def _route_to_general(*_args: object, **_kwargs: object) -> str:
         return "general"
 
-    monkeypatch.setattr("mindroom.turn_controller.suggest_responder_for_message", _route_to_general)
+    monkeypatch.setattr("mindroom.router_relay.suggest_responder_for_message", _route_to_general)
 
     await router_harness.deliver(room, scheduled_event)
 

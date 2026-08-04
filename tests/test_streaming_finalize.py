@@ -579,7 +579,7 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
     gateway = _delivery_gateway(tmp_path)
     barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
     with patch(
-        "mindroom.delivery_gateway.edit_message_result",
+        "mindroom.delivery_gateway.edit_message_outcome",
         new=AsyncMock(side_effect=[barrier_error, None]),
     ) as edit:
         outcome = await gateway.deliver_final(
@@ -612,7 +612,7 @@ async def test_persistent_sync_recovery_barrier_returns_new_send_delivery_failur
     gateway = _delivery_gateway(tmp_path)
     barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
     with patch(
-        "mindroom.delivery_gateway.send_message_result",
+        "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(side_effect=barrier_error),
     ) as send:
         outcome = await gateway.deliver_final(

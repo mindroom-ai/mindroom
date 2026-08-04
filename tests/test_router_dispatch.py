@@ -349,7 +349,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -426,7 +426,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -563,7 +563,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=TeamResolution.none(),
             ),
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -744,7 +744,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
-                "mindroom.turn_controller.suggest_responder_for_message",
+                "mindroom.router_relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),

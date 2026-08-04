@@ -106,7 +106,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
@@ -219,7 +219,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     bot.orchestrator.thread_specific_agents = {}
 
     with (
-        patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
+        patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message),
         patch(
             "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
             AsyncMock(return_value=thread_history_result([], is_full_history=True)),
@@ -328,7 +328,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 

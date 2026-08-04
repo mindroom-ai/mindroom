@@ -35,7 +35,7 @@ from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing_batch import (
     CoalescingKey,
-    PendingEvent,
+    RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
@@ -45,7 +45,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -64,7 +64,7 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
+from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -89,6 +89,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_pending_event,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
@@ -189,8 +190,8 @@ def _envelope(
     )
 
 
-def _prepared_text_event(*, event_id: str = "$event") -> PreparedTextEvent:
-    return PreparedTextEvent(
+def _prepared_text_event(*, event_id: str = "$event") -> PreparedIngress:
+    return PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body="hello",
@@ -252,7 +253,7 @@ def _reserved_follow_up_case(
         source_event_id=event_id,
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id=event_id,
         body=body,
@@ -508,41 +509,41 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
     pending_events = [
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a1",
                 body="A first",
                 source={"content": {"body": "A first"}},
                 server_timestamp=1,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@bob:localhost",
                 event_id="$b1",
                 body="B <context> & more",
                 source={"content": {"body": "B <context> & more"}},
                 server_timestamp=2,
             ),
-            room=room,
+            room,
             requester_user_id="@bob:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        PendingEvent(
-            event=PreparedTextEvent(
+        make_pending_event(
+            PreparedIngress(
                 sender="@alice:localhost",
                 event_id="$a2",
                 body="A follow-up",
                 source={"content": {"body": "A follow-up"}},
                 server_timestamp=3,
             ),
-            room=room,
+            room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -1447,8 +1448,8 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1536,8 +1537,8 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1604,8 +1605,8 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$plain_root") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1686,8 +1687,8 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert observed_delivery_targets == [stable_target]
     assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
-    assert ("!room:localhost", None) in lock_keys
-    assert ("!room:localhost", "$other_thread") not in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
+    assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -2140,7 +2141,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         source_event_id="$command",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$command",
         body="!help",
@@ -2200,7 +2201,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         source_event_id="$older",
         target=target,
     )
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$older",
         body="older follow-up",
@@ -2421,48 +2422,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
 
 
 @pytest.mark.asyncio
-async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
-    bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$normalize",
-        target=target,
-    )
-    event = _prepared_text_event(event_id="$normalize")
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
-    try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        with (
-            patch.object(
-                type(bot._turn_controller.deps.normalizer),
-                "resolve_text_event",
-                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
-            ),
-            pytest.raises(RuntimeError, match="normalization failed"),
-        ):
-            await bot._turn_controller._dispatch_text_message(
-                room,
-                event,
-                "@user:localhost",
-                queued_notice_reservation=reservation,
-            )
-    finally:
-        queued_signal.finish_response_turn()
-
-    assert not queued_signal.is_set()
-
-
-@pytest.mark.asyncio
 async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path: Path) -> None:
-    """Reserved follow-ups should clean up when dispatch preparation fails."""
+    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2523,11 +2484,11 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=event,
-                    room=room,
+                make_pending_event(
+                    event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_queued_notice_metadata(reservation),
@@ -2593,18 +2554,18 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
         assert pre_reservation is not None
         assert post_reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, "$post_stt_thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$post_stt_thread", RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=typed_event,
-                    room=room,
+                make_pending_event(
+                    typed_event,
+                    room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(pre_reservation, pre_target),
                 ),
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
@@ -2664,11 +2625,11 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
         voice_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert voice_reservation is not None
         batch = build_coalesced_batch(
-            CoalescingKey(room.room_id, None, "@user:localhost"),
+            CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             [
-                PendingEvent(
-                    event=voice_event,
-                    room=room,
+                make_pending_event(
+                    voice_event,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_targeted_queued_notice_metadata(voice_reservation, target),
@@ -2716,7 +2677,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
                     prepared_event=event,
-                    dispatch_event=event,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
@@ -2859,18 +2819,18 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
         assert reservation is not None
         with pytest.raises(ValueError, match="solo batches"):
             build_coalesced_batch(
-                CoalescingKey(room.room_id, "$thread", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner("@user:localhost")),
                 [
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$reserved"),
-                        room=room,
+                    make_pending_event(
+                        _prepared_text_event(event_id="$reserved"),
+                        room,
                         source_kind=MESSAGE_SOURCE_KIND,
                         dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                         dispatch_metadata=_queued_notice_metadata(reservation),
                     ),
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$normal"),
-                        room=room,
+                    make_pending_event(
+                        _prepared_text_event(event_id="$normal"),
+                        room,
                         source_kind=MESSAGE_SOURCE_KIND,
                     ),
                 ],

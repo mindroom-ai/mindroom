@@ -28,7 +28,7 @@ It is still coupled to the current persistence split, but its workflow boundary 
 
 ## Current Problems
 
-`TurnController` is the real turn owner now, but it is still too large.
+`TurnController` is the real turn owner now, but it is still too large; the method-ownership ledger in `docs/superpowers/plans/2026-08-02-turn-pipeline-method-ownership-ledger.md` maps what still leaves it.
 `TurnPolicy` is pure now, but `ResponseRunner` still owns too much execution detail.
 `IngressHookRunner` is a thin hook adapter with a vague name.
 `TurnStore` gives the runtime one durable turn boundary, but it still has to reconcile ledger state with persisted run metadata under the hood.
@@ -80,6 +80,7 @@ Router delivery failure raises back into that same retry path instead of complet
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
 Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
+Retained corrupt rows are operator-visible as quarantined state: `DispatchObligationStorage.quarantined()` lists them, and recovery emits one `dispatch_obligation_quarantined` summary with the retained source IDs.
 To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
@@ -105,6 +106,98 @@ Current invite callbacks bypass cold-history admission because they represent li
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
+
+## Turn Lifecycle Vocabulary
+
+### Ordering identities
+
+Receipt ordering, batching, and response serialization use three different identities because they protect different invariants.
+
+- Physical sender: the Matrix user ID that physically sent the event.
+- Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
+- Receipt lane: the per-(room, physical sender) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
+- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built only through `derive_coalescing_key` (or `requester_coalescing_key` for the common requester case); the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
+- Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it as `ResponseLifecycleKey` via `MessageTarget.lifecycle_key`.
+
+### Prepared ingress
+
+`PreparedIngress` is the sole canonical prepared value.
+Ordinary text is normalized exactly once at admission, before the coalescing gate; dispatch never re-normalizes.
+Per-source evidence travels as named frozen fields on the value: effective requester, source kind, policy source kind, hook source, message depth, trust evidence, discovery alias, callback settlement source kind, and the recovery flag.
+Raw Matrix media events are wrapped at enqueue with their caption as body and the protocol object retained on `raw_event` for attachment registration and media planning.
+`PendingEvent` carries one `PreparedIngress` plus only queue-local state (enqueue timing and opaque dispatch metadata); the busy-reroute policy stamp is a `dataclasses.replace` on the frozen value.
+Synthetic interactive-selection and edit-regeneration inputs construct prepared values without a live nio event.
+
+### Durable turn and callback states
+
+An ordinary callback sits in exactly one of these states.
+
+- Obligation pending: the durable acceptance row exists and the callback body has not completed.
+- Executing in-process: the non-durable execution claim marks one process running the persisted callback.
+- Downstream-owned (deferred): the callback body handed the source to lane, coalescing, or dispatch work, and the obligation row is marked deferred.
+- Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
+- Terminal turn: `TurnStore._record_terminal_turn` merged the final record (`completed=True`); `TurnSettlementRetry` then settles the obligation into a permanent tombstone.
+
+Two claim types cross these states.
+
+- Pending turn claim: the in-memory exclusive claim on one physical source event ID (`TurnStore.try_claim_turn`); it is acquired before normalization, released on every non-admission or failure path, and transferred into dispatch metadata across the coalescing gate.
+- Semantic consumer: `DispatchSemanticConsumer`, the durable single-consumer claim used only for multi-purpose callbacks (approval replies and reactions); it is not the ordinary message-turn ownership token.
+- Obligation tombstone: the settled permanent row that blocks re-execution when Matrix redelivers an old event.
+
+### Delivery text evidence
+
+The delivery contract keeps three text values separate.
+
+- Canonical delivery text: the unrendered response selected by the response driver before response hooks and Matrix formatting, currently the blocking `response_text` or the streaming `canonical_final_body_candidate`.
+- Rendered Matrix text: the post-hook formatted body actually supplied to a successful send or edit; it is the only source for a known `final_visible_body`.
+- Replayable assistant text: the execution-owned `CompletedAttempt.replayable_text` or streaming recorder text; it is never reconstructed from post-hook or rendered Matrix text.
+
+### Ordinary-turn durable sequence
+
+The ordinary message and media path follows this sequence.
+
+```text
+dispatch obligation pending
+  -> in-process callback execution claim
+  -> pending physical-source turn claim
+  -> normalization and ingress admission under that claim
+  -> callback obligation deferred while downstream owns work
+  -> durable pending TurnStore record when response ownership begins
+  -> durable terminal TurnStore record notifies TurnSettlementRetry
+  -> TurnSettlementRetry queues source IDs and calls obligation-storage settlement
+  -> obligation storage verifies terminal truth and writes the tombstone
+```
+
+The pending claim must be acquired before normalization and released on every non-admission or failure path.
+The exact crash guarantee is durable callback acceptance with retryable callback execution, followed by durable turn ownership and terminal deduplication once the turn record exists.
+
+### Multi-purpose callback sequence
+
+Approval replies and reactions can have several semantic consumers, so they follow a different sequence.
+
+```text
+dispatch obligation pending
+  -> in-process callback execution claim
+  -> DispatchSemanticConsumer durable claim selects exactly one consumer
+  -> claimed consumer runs its side effects (own replay semantics)
+  -> obligation settled to a permanent tombstone by the claimed consumer
+```
+
+For those callback families only, `DispatchSemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+
+### Deferred result enums and the persisted deferred state
+
+Three similarly named concepts are distinct.
+
+| Concept | Home | Meaning |
+| --- | --- | --- |
+| `TurnDispatchOutcome` | `dispatch_callback_outcome.py` | The turn pipeline's ownership disposition for one message or media callback: `DEFERRED` (downstream owns the work) or `INTENTIONALLY_IGNORED` (settled without a response). |
+| `DispatchCallbackResult` | `dispatch_obligations/events.py` | The callback-visible outcome at the durable boundary: `SUCCEEDED`, `INTENTIONALLY_IGNORED`, or `DEFERRED` (the callback body completed and downstream turn work owns the source). |
+| Persisted `deferred` obligation state | `dispatch_obligations/storage.py` | The durable row state marking that downstream turn work owns the source; it settles only from terminal `TurnStore` truth, never from queue acceptance. |
+
+`TurnDispatchOutcome.DEFERRED` is translated into `DispatchCallbackResult.DEFERRED`, which the obligation runner persists as the `deferred` row state.
+A pending row whose callback body never ran must never be compacted by the terminal-settlement path.
 
 ## Completed Simplifications
 
@@ -175,11 +268,17 @@ Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `Resp
 The runner acquires the lifecycle lock, refreshes thread history, then calls `ResponsePayloadPreparer.prepare` as a first-class execution step to assemble the final payload, run enrichment hooks, and log startup latency.
 The old `prepare_after_lock` callback that ran payload building back inside `TurnController` is deleted; data crosses the seam as values, not closures.
 
+Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union (with `derive_coalescing_key`) for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
+Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
+`DeliveryGateway` is the sole constructor of `FinalDeliveryOutcome`, translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary, and the delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
+Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
+Corrupt dispatch-obligation rows are operator-visible quarantined state (`DispatchObligationStorage.quarantined()` plus one `dispatch_obligation_quarantined` recovery summary) and stay retained for repair.
+The router relay lives in `router_relay.py` behind `RouterRelayDeps`.
+
 ## Next Simplification Work
 
-Shrink `ResponseRunner` further.
-It keeps locking, streaming, AI or team execution, and post-response effects.
-The under-lock payload-assembly side path now lives in `ResponsePayloadPreparer`; the remaining follow-up is to fold `execution_preparation.py` into the execution side and move any other side paths that belong to ingress or delivery out of `ResponseRunner`.
+The remaining composition-root extractions follow the method-ownership ledger in `docs/superpowers/plans/2026-08-02-turn-pipeline-method-ownership-ledger.md`.
+The router relay already lives in `router_relay.py`; the voice readiness cluster, interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

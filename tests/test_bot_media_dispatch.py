@@ -14,14 +14,14 @@ from agno.media import Image
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
@@ -61,6 +61,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
+    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -258,13 +260,12 @@ class TestAgentBot(AgentBotTestBase):
         original_enter_lane = bot._coalescing_gate.enter_lane
 
         def record_enter_lane(
+            lane_key: ReceiptLaneKey,
             *,
-            room_id: str,
-            sender_id: str,
             receipt_time: float | None = None,
         ) -> LaneSlot:
             call_order.append("reserve")
-            return original_enter_lane(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return original_enter_lane(lane_key, receipt_time=receipt_time)
 
         def record_submit(
             slot: LaneSlot,
@@ -278,7 +279,7 @@ class TestAgentBot(AgentBotTestBase):
             assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
@@ -403,7 +404,7 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = "@user:localhost"
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
-        def reject_lane_reservation(**_kwargs: object) -> None:
+        def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
             assert bot._turn_store.try_claim_turn(competing_claim) is False
             msg = "lane unavailable"
             raise RuntimeError(msg)
@@ -491,13 +492,13 @@ class TestAgentBot(AgentBotTestBase):
                     reply_to_event_id=voice_event.event_id,
                     event_source=voice_event.source,
                 ),
-                CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost")),
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
             return_value=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=PreparedTextEvent(
+                pending_event=make_pending_event(
+                    PreparedIngress(
                         sender="@user:localhost",
                         event_id="$voice",
                         body="voice second",
@@ -510,7 +511,7 @@ class TestAgentBot(AgentBotTestBase):
                         },
                         source_kind_override=VOICE_SOURCE_KIND,
                     ),
-                    room=room,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                 ),
             ),
@@ -520,7 +521,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed first",
@@ -590,7 +591,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",
@@ -642,7 +643,7 @@ class TestAgentBot(AgentBotTestBase):
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "typed second"},
         }
-        prepared_sidecar = PreparedTextEvent(
+        prepared_sidecar = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="sidecar first",
@@ -659,7 +660,7 @@ class TestAgentBot(AgentBotTestBase):
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
-        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedTextEvent:
+        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
             await release_preview_normalization.wait()
             return prepared_sidecar
 
@@ -682,7 +683,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",

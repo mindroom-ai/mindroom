@@ -44,11 +44,18 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingDrainResult
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_handoff import (
+    MediaDispatchEvent,
+    PendingDispatchMetadata,
+    PreparedIngress,
+    prepare_media_ingress,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -78,6 +85,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
@@ -399,6 +407,60 @@ def request_envelope(
         agent_name=agent_name,
         origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
+
+
+def make_pending_event(
+    event: PreparedIngress | nio.RoomMessageText | MediaDispatchEvent,
+    room: nio.MatrixRoom,
+    *,
+    source_kind: str,
+    dispatch_policy_source_kind: str | None = None,
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
+    trust_internal_payload_metadata: bool = False,
+    requester_user_id: str | None = None,
+    discovery_event_id: str | None = None,
+    callback_source_kind: str | None = None,
+    turn_dispatch_recovery: bool = False,
+    enqueue_time: float | None = None,
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = (),
+) -> PendingEvent:
+    """Build one PendingEvent with per-source evidence stamped on its PreparedIngress.
+
+    Mirrors the pre-refactor PendingEvent constructor: raw nio text events are
+    normalized into PreparedIngress form and raw nio media events are wrapped
+    with their caption and retained protocol reference.
+    """
+    if isinstance(event, PreparedIngress):
+        prepared = event
+    elif is_matrix_media_dispatch_event(event):
+        prepared = prepare_media_ingress(event)
+    elif isinstance(event, nio.RoomMessageText):
+        prepared = PreparedIngress(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=event.body,
+            source=event.source,
+            server_timestamp=event.server_timestamp,
+        )
+    else:
+        msg = f"Unsupported pending event type: {type(event).__name__}"
+        raise TypeError(msg)
+    prepared = replace(
+        prepared,
+        source_kind=source_kind,
+        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        hook_source=hook_source,
+        message_received_depth=message_received_depth,
+        trust_internal_payload_metadata=trust_internal_payload_metadata,
+        requester_user_id=requester_user_id,
+        discovery_event_id=discovery_event_id,
+        callback_source_kind=callback_source_kind,
+        turn_dispatch_recovery=turn_dispatch_recovery,
+    )
+    if enqueue_time is None:
+        return PendingEvent(event=prepared, room=room, dispatch_metadata=dispatch_metadata)
+    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, dispatch_metadata=dispatch_metadata)
 
 
 def requires_linux(

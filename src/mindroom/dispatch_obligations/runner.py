@@ -508,6 +508,14 @@ class DispatchObligationRunner:
                 failed_keys.append(obligation.key)
         for key in failed_keys:
             self._schedule_retry(key)
+        quarantined = await asyncio.to_thread(self.store.quarantined)
+        if quarantined:
+            logger.error(
+                "dispatch_obligation_quarantined",
+                quarantined_count=len(quarantined),
+                quarantined_sources=[source_event_id for source_event_id, _callback_kind in quarantined],
+                hint="Corrupt dispatch obligation rows are retained for repair; stop MindRoom, back up the database, and restore a known-good copy before restarting.",
+            )
 
     def _schedule_retry(self, key: DispatchObligationKey) -> None:
         """Ensure one failed exact callback remains autonomously retry-owned."""

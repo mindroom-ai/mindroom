@@ -13,7 +13,7 @@ import pytest
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -181,8 +181,8 @@ def _request(source_event_id: str) -> VisibleVoiceEchoRequest:
     )
 
 
-def _normalized_event(source_event_id: str) -> PreparedTextEvent:
-    return PreparedTextEvent(
+def _normalized_event(source_event_id: str) -> PreparedIngress:
+    return PreparedIngress(
         sender=_REQUESTER_ID,
         event_id=source_event_id,
         body="🎤 test transcript",

@@ -441,7 +441,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.delivery_gateway.edit_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ) as mock_edit,
     ):
