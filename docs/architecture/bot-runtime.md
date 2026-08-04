@@ -170,8 +170,8 @@ Hydration retires every existing outbound Megolm session as soon as the prior re
 While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must re-establish key readiness instead of reusing incomplete encryption state.
 Sync responses preapply membership, encryption, summary-count, and device-list invalidations at `receive_response` entry before recovery dispatch or callbacks can await.
 Every runtime joined-members request is generation-ordered before nio may mutate its room roster, and success-typed non-2xx responses are rejected at the same boundary.
-Delivery-owned membership generations remain bound through any hidden-room full-state await until publication.
-Every runtime key query, including pinned-device discovery, is globally sequenced so an older response or a response predating a device-list invalidation cannot roll nio's device store backward.
+Delivery-owned joined-members generations remain bound through hidden-room full-state and device-key awaits until publication.
+Every runtime key query, including pinned-device discovery, is globally sequenced so an older response, a response predating a device-list invalidation, or a success-typed non-2xx response cannot roll nio's device store backward.
 Hidden-room full state and joined-members results must agree on the joined roster before either can publish a cache entry.
 An encrypted cache replacement that disagrees with the hydration snapshot is likewise marked membership-unsynchronized before hydration retries.
 One unavailable owner cannot block discovery or recovery for joined peers.

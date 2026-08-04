@@ -289,7 +289,7 @@ class _JoinedMembersHydrationSnapshot:
     """One joined-members response retained with its accepted generation."""
 
     response: nio.JoinedMembersResponse
-    membership_epoch: int
+    is_current: Callable[[], bool]
 
 
 def _joined_room_user_ids(room: nio.MatrixRoom) -> frozenset[str]:
@@ -340,7 +340,7 @@ async def _encrypted_room_for_hydration(
     room_id: str,
     members: nio.JoinedMembersResponse,
     joined_user_ids: frozenset[str],
-    membership_epoch: int,
+    members_are_current: Callable[[], bool],
 ) -> _EncryptedRoomHydration | None:
     """Return a complete candidate or an authoritative encrypted sync room."""
     room = cached_room(client, room_id)
@@ -352,7 +352,7 @@ async def _encrypted_room_for_hydration(
         return _EncryptedRoomHydration(room, joined_user_ids, unpublished_candidate=False)
 
     state = await client.room_get_state(room_id)
-    if room_membership_epoch(client, room_id) != membership_epoch:
+    if not members_are_current():
         _fence_superseded_joined_members(client, room_id)
         return None
     if not isinstance(state, nio.RoomGetStateResponse):
@@ -492,15 +492,17 @@ async def _joined_members_for_hydration(
     """Return a joined roster only when no newer membership state superseded it."""
     with joined_members_query(client, room_id) as query_is_current:
         members = await client.joined_members(room_id)
-    if (
-        isinstance(members, nio.JoinedMembersResponse)
-        and cached_room(client, room_id) is expected_room
-        and query_is_current(members)
-    ):
-        return _JoinedMembersHydrationSnapshot(
-            response=members,
-            membership_epoch=room_membership_epoch(client, room_id),
-        )
+
+    if isinstance(members, nio.JoinedMembersResponse):
+
+        def response_is_current() -> bool:
+            return query_is_current(members)
+
+        if cached_room(client, room_id) is expected_room and response_is_current():
+            return _JoinedMembersHydrationSnapshot(
+                response=members,
+                is_current=response_is_current,
+            )
 
     _fence_superseded_joined_members(client, room_id)
     return None
@@ -548,14 +550,18 @@ async def _hydrate_encrypted_joined_room(
         room_id,
         members,
         joined_user_ids,
-        members_snapshot.membership_epoch,
+        members_snapshot.is_current,
     )
     if hydration is None:
         return None
     room = hydration.room
     if client.olm is not None:
         client.olm.update_tracked_users(room)
-    if not await _room_device_keys_are_ready(client, room_id, room):
+    device_keys_are_ready = await _room_device_keys_are_ready(client, room_id, room)
+    members_are_current = members_snapshot.is_current()
+    if not members_are_current:
+        _fence_superseded_joined_members(client, room_id)
+    if not members_are_current or not device_keys_are_ready:
         return None
 
     room = _current_encrypted_room_after_hydration(client, room_id, hydration)

@@ -19,6 +19,7 @@ from mindroom.matrix.client_delivery import (
     send_room_event_result,
 )
 from mindroom.matrix.client_session import _MindRoomAsyncClient
+from mindroom.matrix.encryption_recipients import joined_members_query
 from tests.conftest import TEST_ACCESS_TOKEN
 
 
@@ -715,8 +716,11 @@ async def test_hidden_room_hydration_rejects_newer_full_state_membership() -> No
     client.store.save_encrypted_rooms.assert_not_called()
 
 
+@pytest.mark.parametrize("supersession", ["membership_update", "newer_query"])
 @pytest.mark.asyncio
-async def test_hidden_room_hydration_rejects_membership_change_during_full_state_query() -> None:
+async def test_hidden_room_hydration_rejects_supersession_during_full_state_query(
+    supersession: str,
+) -> None:
     """The joined roster must remain current until hidden-room state is validated."""
     room_id = "!room:localhost"
     bot_user_id = "@bot:localhost"
@@ -782,8 +786,12 @@ async def test_hidden_room_hydration_rejects_membership_change_during_full_state
 
     hydration = asyncio.create_task(hydrate_joined_room_for_delivery(client, room_id))
     await state_query_started.wait()
-    client._handle_joined_members(newer_members)
-    release_state_query.set()
+    if supersession == "membership_update":
+        client._handle_joined_members(newer_members)
+        release_state_query.set()
+    else:
+        with joined_members_query(client, room_id):
+            release_state_query.set()
 
     assert await hydration is None
     assert room_id not in client.rooms
@@ -909,6 +917,49 @@ async def test_membership_change_fences_sends_before_failed_key_query() -> None:
     assert await hydration is None
     assert room_id not in client.olm.outbound_group_sessions
     assert room.members_synced is False
+
+
+@pytest.mark.asyncio
+async def test_encrypted_hydration_rejects_newer_joined_query_during_key_query() -> None:
+    """A joined-members proof must remain current through device-key readiness."""
+    room_id = "!room:localhost"
+    joined_user_ids = frozenset({"@bot:localhost", "@joined:localhost"})
+    client, room = _encrypted_client_with_outbound_session(
+        room_id=room_id,
+        user_ids=joined_user_ids,
+    )
+    response = nio.JoinedMembersResponse(
+        [nio.RoomMember(user_id, user_id, "") for user_id in sorted(joined_user_ids)],
+        room_id,
+    )
+    assert client.olm is not None
+    client.olm.users_for_key_query = {"@joined:localhost"}
+    client.olm.should_query_keys = True
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        client._handle_joined_members(response)
+        return response
+
+    async def keys_query() -> nio.KeysQueryResponse:
+        query_started.set()
+        await release_query.wait()
+        client.olm.users_for_key_query.clear()
+        client.olm.should_query_keys = False
+        return nio.KeysQueryResponse(device_keys={}, failures={})
+
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    client.keys_query = AsyncMock(side_effect=keys_query)
+
+    hydration = asyncio.create_task(hydrate_joined_room_for_delivery(client, room_id))
+    await query_started.wait()
+    with joined_members_query(client, room_id):
+        release_query.set()
+        assert await hydration is None
+
+    assert room.members_synced is False
+    client.store.save_encrypted_rooms.assert_not_called()
 
 
 @pytest.mark.asyncio

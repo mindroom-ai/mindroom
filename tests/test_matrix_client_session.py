@@ -658,6 +658,33 @@ async def test_newer_key_query_response_supersedes_older_background_response() -
 
 
 @pytest.mark.asyncio
+async def test_key_query_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx device-key response must not mutate nio's crypto store."""
+    user_id = "@human:example.org"
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    client.access_token = "token"  # noqa: S105
+    client.device_id = "DEVICE"
+    client.store = Mock()
+    client.olm = Mock()
+    client.olm.users_for_key_query = {user_id}
+    response = nio.KeysQueryResponse({user_id: {}}, {})
+    transport = Mock()
+    transport.status = 502
+    response.transport_response = transport
+
+    async def send_query(*_args: object, **_kwargs: object) -> nio.KeysQueryResponse:
+        await client.receive_response(response)
+        return response
+
+    client._send = AsyncMock(side_effect=send_query)
+
+    result = await client.keys_query()
+
+    assert isinstance(result, nio.KeysQueryError)
+    client.olm.handle_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_device_invalidation_supersedes_background_key_query_response() -> None:
     """A sync device delta must reject an older background key response globally."""
     user_id = "@human:example.org"

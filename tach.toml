@@ -2357,6 +2357,7 @@ depends_on = []
 visibility = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.encryption_recipients",
 ]
 
@@ -2419,6 +2420,7 @@ path = "mindroom.matrix.client_session"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.to_device",
 ]
 visibility = [

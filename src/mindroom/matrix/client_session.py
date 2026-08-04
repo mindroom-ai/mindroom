@@ -37,6 +37,7 @@ from mindroom.matrix.encryption_recipients import (
     room_delivery_guard_is_current,
 )
 from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
+from mindroom.matrix.response_status import matrix_response_transport_succeeded
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
@@ -260,7 +261,10 @@ class _MindRoomAsyncClient(nio.AsyncClient):
     async def keys_query(self) -> nio.KeysQueryResponse | nio.KeysQueryError:
         """Order device-key responses across concurrent runtime queries."""
         with key_query_request(self, frozenset(self.users_for_key_query)):
-            return await super().keys_query()
+            response = await super().keys_query()
+        if isinstance(response, nio.KeysQueryResponse) and not matrix_response_transport_succeeded(response):
+            return nio.KeysQueryError("Device-key response transport failed.")
+        return response
 
     async def joined_members(self, room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
         """Order every joined-members response before nio may publish its roster."""
@@ -407,7 +411,9 @@ class _MindRoomAsyncClient(nio.AsyncClient):
 
     async def receive_response(self, response: nio.Response) -> None:
         """Fence delivery invalidations before sync recovery or callbacks can await."""
-        if isinstance(response, nio.KeysQueryResponse) and not key_query_response_is_current(self):
+        if isinstance(response, nio.KeysQueryResponse) and (
+            not matrix_response_transport_succeeded(response) or not key_query_response_is_current(self)
+        ):
             return
         if isinstance(response, (nio.SyncResponse, nio.SlidingSyncResponse)):
             self._preapply_delivery_invalidations(response)
