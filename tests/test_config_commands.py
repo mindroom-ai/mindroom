@@ -159,8 +159,10 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
         "not found",
         status_code="M_NOT_FOUND",
     )
-    response = MagicMock(spec=nio.RoomSendResponse)
-    client.room_send.return_value = response
+    client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$reaction",
+        room_id="!room:example.org",
+    )
     await _add_confirmation_reactions(client, "!room:example.org", "$preview")
 
     assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [

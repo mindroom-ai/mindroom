@@ -306,11 +306,9 @@ def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> M
     return resolve_for_agent
 
 
-def _room_send_response(event_id: str) -> MagicMock:
-    """Return a RoomSendResponse-shaped mock for Matrix send/edit tests."""
-    response = MagicMock(spec=nio.RoomSendResponse, event_id=event_id)
-    response.__class__ = nio.RoomSendResponse
-    return response
+def _room_send_response(event_id: str) -> nio.RoomSendResponse:
+    """Return a successful Matrix send response for delivery tests."""
+    return nio.RoomSendResponse(event_id=event_id, room_id="!test:localhost")
 
 
 def _matrix_room(

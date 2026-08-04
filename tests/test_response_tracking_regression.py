@@ -95,10 +95,10 @@ class TestResponseTrackingRegression:
         install_runtime_cache_support(bot)
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_123"
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response_123",
+            room_id=test_room_id,
+        )
 
         # Create a help command
         command = Command(type=CommandType.HELP, args={"topic": None}, raw_text="!help")
@@ -185,10 +185,10 @@ class TestResponseTrackingRegression:
         install_runtime_cache_support(bot)
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_456"
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response_456",
+            room_id=test_room_id,
+        )
 
         # Create unknown command event
         unknown_command_event = MagicMock(spec=nio.RoomMessageText)
@@ -268,10 +268,10 @@ class TestResponseTrackingRegression:
         install_runtime_cache_support(bot)
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$router_response_123"
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$router_response_123",
+            room_id=test_room_id,
+        )
 
         # Mock suggest_responder to return "research"
         mock_suggest_responder.return_value = "research"

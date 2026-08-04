@@ -94,6 +94,41 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
 
 
 @pytest.mark.asyncio
+async def test_send_message_result_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx transport must not finalize a success-typed message response."""
+    client = _mock_client()
+    response = nio.RoomSendResponse(event_id="$phantom", room_id="!room:localhost")
+    transport = MagicMock()
+    transport.status = 502
+    response.transport_response = transport
+    client.room_send.return_value = response
+
+    delivered = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+    assert delivered is None
+
+
+@pytest.mark.asyncio
+async def test_send_room_event_result_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx transport must not expose a success-typed raw event response."""
+    client = _mock_client()
+    response = nio.RoomSendResponse(event_id="$phantom", room_id="!room:localhost")
+    transport = MagicMock()
+    transport.status = 502
+    response.transport_response = transport
+    client.room_send.return_value = response
+
+    delivered = await send_room_event_result(
+        client,
+        "!room:localhost",
+        "m.reaction",
+        {"m.relates_to": {"event_id": "$target", "key": "👍", "rel_type": "m.annotation"}},
+    )
+
+    assert delivered is None
+
+
+@pytest.mark.asyncio
 async def test_cached_plaintext_room_is_hydrated_before_encrypted_delivery() -> None:
     """A pre-sync join cache cannot make an encrypted room send plaintext."""
     room_id = "!room:localhost"

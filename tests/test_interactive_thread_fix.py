@@ -35,12 +35,9 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 
-def _room_send_response(event_id: str) -> MagicMock:
-    """Return a RoomSendResponse-shaped mock with one event id."""
-    response = MagicMock(spec=nio.RoomSendResponse)
-    response.event_id = event_id
-    response.__class__ = nio.RoomSendResponse
-    return response
+def _room_send_response(event_id: str) -> nio.RoomSendResponse:
+    """Return a successful Matrix send response with one event id."""
+    return nio.RoomSendResponse(event_id=event_id, room_id="!test:localhost")
 
 
 def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:

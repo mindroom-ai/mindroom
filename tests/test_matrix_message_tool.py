@@ -1344,9 +1344,10 @@ async def test_matrix_message_react_happy_path() -> None:
     """React action should send a Matrix annotation event to the target event."""
     tool = MatrixMessageTools()
     ctx = _make_context()
-    response = MagicMock(spec=nio.RoomSendResponse)
-    response.event_id = "$react"
-    ctx.client.room_send.return_value = response
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$react",
+        room_id=ctx.room_id,
+    )
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="react", message="🔥", target="$target"))
@@ -1373,9 +1374,10 @@ async def test_matrix_message_react_skips_interactive_processing() -> None:
     """React action should not touch interactive-question helpers."""
     tool = MatrixMessageTools()
     ctx = _make_context()
-    response = MagicMock(spec=nio.RoomSendResponse)
-    response.event_id = "$react"
-    ctx.client.room_send.return_value = response
+    ctx.client.room_send.return_value = nio.RoomSendResponse(
+        event_id="$react",
+        room_id=ctx.room_id,
+    )
 
     with (
         patch(

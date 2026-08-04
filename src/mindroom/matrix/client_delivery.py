@@ -32,6 +32,7 @@ from mindroom.matrix.encryption_recipients import (
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
+from mindroom.matrix.response_status import matrix_response_transport_succeeded
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -186,7 +187,7 @@ async def _send_prepared_room_message(
 
     try:
         with room_delivery_guard(client, room_id):
-            return await send_once()
+            response = await send_once()
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -199,6 +200,16 @@ async def _send_prepared_room_message(
             cache_bypass=cache_bypass,
         )
         return None
+    else:
+        if isinstance(response, nio.RoomSendResponse) and not matrix_response_transport_succeeded(response):
+            logger.error(
+                "matrix_message_delivery_transport_failed",
+                room_id=room_id,
+                operation=operation,
+                cache_bypass=cache_bypass,
+            )
+            return None
+        return response
 
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:

@@ -3303,6 +3303,71 @@ async def test_requester_retry_does_not_fence_same_target_after_resolution(
 
 
 @pytest.mark.asyncio
+async def test_requester_retry_preserves_newest_same_thread_target(
+    tmp_path: Path,
+) -> None:
+    """A transiently unresolved newest target must fence an older same-thread target."""
+    owner = _owner()
+    router = _owner(
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    unresolved_newest = _target(
+        "$new",
+        timestamp_ms=20,
+        original_sender_id=None,
+    )
+    resolved_newest = _target("$new", timestamp_ms=20)
+    resolved_older = _target("$old", timestamp_ms=10)
+    scans = 0
+    second_scan_finished = asyncio.Event()
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            return RoomRecoveryResult(
+                interrupted_threads=(unresolved_newest, resolved_older),
+                retry_owner_user_ids=frozenset({owner.user_id}),
+            )
+        second_scan_finished.set()
+        return RoomRecoveryResult(interrupted_threads=(resolved_newest,))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+        await _wait_until(
+            lambda: not coordinator._room_jobs and all(task.done() for task in coordinator._active_attempts),
+        )
+    finally:
+        await coordinator.stop()
+
+    assert scans == 2
+    assert delivered_targets == ["$new"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_unresolved_requester_warns_before_settlement(
     tmp_path: Path,
 ) -> None:

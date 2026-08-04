@@ -66,6 +66,11 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
+def _room_send_response(event_id: str) -> nio.RoomSendResponse:
+    """Return a successful Matrix send response for routing tests."""
+    return nio.RoomSendResponse(event_id=event_id, room_id="!test:localhost")
+
+
 def _policy_dispatch(
     *,
     agent_name: str,
@@ -731,9 +736,7 @@ class TestRoutingRegression:
         mock_suggest_responder.return_value = "news"  # Router would pick news
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_123"
+        mock_send_response = _room_send_response("$response_123")
         research_bot.client.room_send.return_value = mock_send_response
         news_bot.client.room_send.return_value = mock_send_response
 
@@ -829,9 +832,7 @@ class TestRoutingRegression:
         mock_suggest_responder.return_value = "research"  # Router picks research
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_123"
+        mock_send_response = _room_send_response("$response_123")
         router_bot.client.room_send.return_value = mock_send_response
         research_bot.client.room_send.return_value = mock_send_response
         news_bot.client.room_send.return_value = mock_send_response
@@ -924,9 +925,7 @@ class TestRoutingRegression:
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not run for one candidate")
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_789"
+        mock_send_response = _room_send_response("$response_789")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1011,9 +1010,7 @@ class TestRoutingRegression:
         )
 
         mock_suggest_responder.return_value = "beta"
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$managed_requester_response"
+        mock_send_response = _room_send_response("$managed_requester_response")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1087,9 +1084,7 @@ class TestRoutingRegression:
         )
 
         mock_suggest_responder.return_value = None
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$router_failure_response"
+        mock_send_response = _room_send_response("$router_failure_response")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1250,9 +1245,7 @@ class TestRoutingRegression:
         router_bot.orchestrator = orchestrator
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_live_filter"
+        mock_send_response = _room_send_response("$response_live_filter")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1511,9 +1504,7 @@ class TestRoutingRegression:
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = "news"
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_789_multi"
+        mock_send_response = _room_send_response("$response_789_multi")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1595,9 +1586,7 @@ class TestRoutingRegression:
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = "research"
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_791"
+        mock_send_response = _room_send_response("$response_791")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1677,9 +1666,7 @@ class TestRoutingRegression:
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
         mock_suggest_responder.return_value = "research"
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_790"
+        mock_send_response = _room_send_response("$response_790")
         router_bot.client.room_send.return_value = mock_send_response
 
         mock_room = MagicMock()
@@ -1807,9 +1794,7 @@ class TestRoutingRegression:
         mock_team_arun.return_value = "Team response"
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$response_123"
+        mock_send_response = _room_send_response("$response_123")
         research_bot.client.room_send.return_value = mock_send_response
         news_bot.client.room_send.return_value = mock_send_response
 
@@ -1886,9 +1871,7 @@ class TestRoutingRegression:
         mock_ai_response.return_value = "I can help with that research question!"
 
         # Mock successful room_send
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        mock_send_response.event_id = "$router_msg"
+        mock_send_response = _room_send_response("$router_msg")
         router_bot.client.room_send.return_value = mock_send_response
         research_bot.client.room_send.return_value = mock_send_response
 

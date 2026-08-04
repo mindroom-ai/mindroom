@@ -211,6 +211,7 @@ After preparation, every encrypted delivery refreshes joined membership and devi
 All application room events, including reactions and custom events, use the same delivery lock instead of calling nio directly.
 The runtime Matrix client removes invitees from encrypted crypto rosters after membership processing and rejects nio send preparation when membership, joined-member device keys, the recipient generation, or the room identity is stale.
 Request-scoped transport validation binds room identity, encryption mode, recipient and membership generations, joined roster, and pending device keys after dynamic header preparation and on every HTTP retry.
+Success-typed nio send and encryption-state responses are accepted only when their attached HTTP transport status is successful.
 Application retry sleeps release the room lock, rehydrate after reacquiring it, and reuse one transaction ID for the complete logical delivery.
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.

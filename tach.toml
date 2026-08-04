@@ -2309,6 +2309,7 @@ path = "mindroom.matrix.client_delivery"
 depends_on = [
     "mindroom.matrix.delivery_lock",
     "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.response_status",
 ]
 visibility = [
     "mindroom.approval_transport",
@@ -2354,6 +2355,7 @@ visibility = [
 path = "mindroom.matrix.response_status"
 depends_on = []
 visibility = [
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.encryption_recipients",
 ]

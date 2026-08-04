@@ -80,17 +80,17 @@ class MockClient:
         *,
         tx_id: str | None = None,
         ignore_unverified_devices: bool = False,
-    ) -> MagicMock:
+    ) -> nio.RoomSendResponse:
         """Mock sending a message."""
         assert message_type == "m.room.message"
         assert tx_id is None or isinstance(tx_id, str)
         assert ignore_unverified_devices is True
         self.messages_sent.append(("send", room_id, content))
 
-        # Create a mock that passes isinstance check
-        response = MagicMock(spec=nio.RoomSendResponse)
-        response.event_id = f"$event_{len(self.messages_sent)}"
-        return response
+        return nio.RoomSendResponse(
+            event_id=f"$event_{len(self.messages_sent)}",
+            room_id=room_id,
+        )
 
     async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
         """Mock file upload - returns tuple like nio."""

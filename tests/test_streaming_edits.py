@@ -136,9 +136,10 @@ class TestStreamingEdits:
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response",
+            room_id="!test:localhost",
+        )
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -243,9 +244,10 @@ class TestStreamingEdits:
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response",
+            room_id="!test:localhost",
+        )
 
         # Mock AI response
         mock_ai_response.return_value = "Here's the answer!"
@@ -288,9 +290,10 @@ class TestStreamingEdits:
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response",
+            room_id="!test:localhost",
+        )
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -359,9 +362,10 @@ class TestStreamingEdits:
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
-        mock_send_response = MagicMock()
-        mock_send_response.__class__ = nio.RoomSendResponse
-        bot.client.room_send.return_value = mock_send_response
+        bot.client.room_send.return_value = nio.RoomSendResponse(
+            event_id="$response",
+            room_id="!test:localhost",
+        )
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"

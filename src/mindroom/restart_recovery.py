@@ -135,7 +135,16 @@ def _newest_targets(targets: tuple[InterruptedThread, ...]) -> tuple[Interrupted
     newest: dict[str, InterruptedThread] = {}
     for target in targets:
         current = newest.get(target.thread_id)
-        if current is None or _target_version(target) > _target_version(current):
+        if current is None:
+            newest[target.thread_id] = target
+            continue
+        target_version = _target_version(target)
+        current_version = _target_version(current)
+        if target_version > current_version or (
+            target_version == current_version
+            and current.original_sender_id is None
+            and target.original_sender_id is not None
+        ):
             newest[target.thread_id] = target
     return tuple(
         sorted(
@@ -708,8 +717,6 @@ class RestartRecoveryCoordinator:
         recovered_by_owner: dict[str, list[InterruptedThread]] = {owner_user_id: [] for owner_user_id in ready}
         for target in recovered.interrupted_threads:
             owner = ready[target.owner_user_id]
-            if target.original_sender_id is None and owner.user_id in recovered.retry_owner_user_ids:
-                continue
             recovered_by_owner[owner.user_id].append(target)
 
         for work in lease.jobs:
@@ -797,6 +804,9 @@ class RestartRecoveryCoordinator:
         cancelled = False
         eligible_targets = self._eligible_targets(owner, targets)
         for index, target in enumerate(eligible_targets):
+            if scan_failed and target.original_sender_id is None:
+                retry_targets.append(target)
+                continue
             try:
                 attempt = await self._process_target(owner, target, config)
             except asyncio.CancelledError:
