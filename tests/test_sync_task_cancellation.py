@@ -2422,14 +2422,21 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
-    """Process shutdown must stop sync admission before one orderly bot drain."""
+    """Process shutdown must fence recovery before awaits and drain after sync."""
     shutdown_order: list[str] = []
+
+    async def track_approval_shutdown() -> None:
+        shutdown_order.append("approval_shutdown")
 
     async def track_catalog_drain(*_args: object, **_kwargs: object) -> None:
         shutdown_order.append("catalog_drain")
 
     with (
         patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel,
+        patch(
+            "mindroom.orchestrator.shutdown_approval_runtime",
+            new=AsyncMock(side_effect=track_approval_shutdown),
+        ),
         patch(
             "mindroom.orchestrator.wait_for_background_tasks",
             new=AsyncMock(side_effect=track_catalog_drain),
@@ -2469,6 +2476,9 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             "router": mock_bot2,
         }
 
+        def track_recovery_admission_close() -> None:
+            shutdown_order.append("recovery_admission_closed")
+
         async def track_recovery_stop() -> None:
             shutdown_order.append("recovery_drain")
             assert not orchestrator._sync_tasks
@@ -2478,6 +2488,11 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             shutdown_order.append("mcp_teardown")
 
         with (
+            patch.object(
+                orchestrator._restart_recovery,
+                "begin_shutdown",
+                new=MagicMock(side_effect=track_recovery_admission_close),
+            ),
             patch.object(
                 orchestrator._restart_recovery,
                 "stop",
@@ -2511,6 +2526,8 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             ],
         )
         assert mock_wait.await_count == 2
+        assert shutdown_order.index("recovery_admission_closed") < shutdown_order.index("approval_shutdown")
+        assert shutdown_order.index("recovery_admission_closed") < shutdown_order.index("catalog_drain")
         assert shutdown_order.index("recovery_drain") < shutdown_order.index("entity_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")

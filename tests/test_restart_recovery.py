@@ -5780,3 +5780,90 @@ async def test_resume_before_start_does_not_snapshot_owners(
         await coordinator.stop()
 
     current_owners.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_begin_shutdown_fences_delivery_released_from_inflight_scan(
+    tmp_path: Path,
+) -> None:
+    """A scan finishing after shutdown starts must not admit a new relay."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    scan_started = asyncio.Event()
+    release_scan = asyncio.Event()
+    deliver = AsyncMock(return_value=True)
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        scan_started.set()
+        await release_scan.wait()
+        return RoomRecoveryResult(interrupted_threads=(_target("$after-shutdown", timestamp_ms=10),))
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(scan_started.wait(), timeout=1.0)
+
+    coordinator.begin_shutdown()
+    release_scan.set()
+    try:
+        await _wait_until(lambda: not coordinator._active_attempts)
+        await asyncio.sleep(0)
+    finally:
+        await coordinator.stop()
+
+    deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_begin_shutdown_preserves_later_drain_of_admitted_delivery(
+    tmp_path: Path,
+) -> None:
+    """The admission fence must not abandon a relay admitted before shutdown."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(_target("$admitted", timestamp_ms=10),))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivery_started.set()
+        await release_delivery.wait()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+
+    coordinator.begin_shutdown()
+    stop_task = asyncio.create_task(coordinator.stop())
+    try:
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+        release_delivery.set()
+        await asyncio.wait_for(stop_task, timeout=1.0)
+    finally:
+        release_delivery.set()
+        await asyncio.gather(stop_task, return_exceptions=True)

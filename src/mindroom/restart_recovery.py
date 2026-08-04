@@ -201,11 +201,13 @@ class RestartRecoveryCoordinator:
         self._startup_cutoff_ms: int | None = None
         self._paused = True
         self._stopped = False
+        self._admission_closed = False
 
     def start(self, *, startup_cutoff_ms: int) -> None:
         """Start recovery and enqueue current owners' desired rooms."""
         self._startup_cutoff_ms = startup_cutoff_ms
         self._stopped = False
+        self._admission_closed = False
         self._paused = False
         for owner in self._current_owners().values():
             self._enqueue_desired_rooms(owner)
@@ -214,7 +216,7 @@ class RestartRecoveryCoordinator:
 
     def owner_ready(self, owner_user_id: str) -> None:
         """Refresh one owner and grant retained work a fresh bounded budget."""
-        if self._stopped:
+        if self._stopped or self._admission_closed:
             return
         self._settle_finished_attempts()
         owners = self._current_owners()
@@ -232,7 +234,7 @@ class RestartRecoveryCoordinator:
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
-        if self._stopped:
+        if self._stopped or self._admission_closed:
             return
         owner = self._current_owners().get(owner_user_id)
         generation = None if owner is None else owner.generation
@@ -273,7 +275,7 @@ class RestartRecoveryCoordinator:
 
     def resume(self) -> None:
         """Resume retained work against current config and owner generations."""
-        if self._stopped:
+        if self._stopped or self._admission_closed:
             return
         if not self._require_config().defaults.auto_resume_after_restart:
             self._room_jobs = {
@@ -289,8 +291,14 @@ class RestartRecoveryCoordinator:
             self._start_owner_room_discovery(owner)
         self._ensure_worker()
 
+    def begin_shutdown(self) -> None:
+        """Fence new recovery delivery admission before the asynchronous drain."""
+        self._admission_closed = True
+        self._wake.set()
+
     async def stop(self) -> None:
         """Stop recovery and release current membership snapshots."""
+        self.begin_shutdown()
         self._stopped = True
         self._paused = True
         self._wake.set()
@@ -370,6 +378,8 @@ class RestartRecoveryCoordinator:
         generation: object | None,
         grant_fresh_budget: bool = False,
     ) -> None:
+        if self._admission_closed:
+            return
         if not request.room_id.startswith("!"):
             return
         key = request.key, owner_user_id
@@ -394,7 +404,7 @@ class RestartRecoveryCoordinator:
         self._wake.set()
 
     def _ensure_worker(self) -> None:
-        if self._paused or self._stopped:
+        if self._paused or self._stopped or self._admission_closed:
             return
         task = self._worker_task
         if task is not None and not task.done():
@@ -417,6 +427,8 @@ class RestartRecoveryCoordinator:
             await self._drain_inflight_work()
 
     def _start_owner_room_discovery(self, owner: RecoveryOwner) -> None:
+        if self._admission_closed:
+            return
         self._cancel_owner_room_discoveries(owner.user_id)
         task = asyncio.create_task(
             self._discover_owner_rooms(owner),
@@ -538,6 +550,8 @@ class RestartRecoveryCoordinator:
         return tuple(leases)
 
     def _start_due_attempts(self) -> None:
+        if self._admission_closed:
+            return
         now = asyncio.get_running_loop().time()
         for lease in self._due_room_leases(now):
             task = asyncio.create_task(
@@ -547,6 +561,8 @@ class RestartRecoveryCoordinator:
             self._active_attempts[task] = lease
 
     def _next_start_delay(self) -> float | None:
+        if self._admission_closed:
+            return None
         eligible = self._eligible_work()
         if not eligible:
             return None
@@ -918,12 +934,16 @@ class RestartRecoveryCoordinator:
     ) -> RestartDeliveryOutcome:
         """Drain one exact delivery through repeated coordinator cancellation."""
         async with self._delivery_lock:
+            if self._admission_closed:
+                return RestartDeliveryOutcome.RETRY
             async with self._matrix_read_slots:
                 freshness = await self._operations.target_freshness(owner, target, config)
             if freshness is InterruptedTargetFreshness.RETRY:
                 return RestartDeliveryOutcome.RETRY
             if freshness is not InterruptedTargetFreshness.CURRENT:
                 return RestartDeliveryOutcome.TERMINAL
+            if self._admission_closed:
+                return RestartDeliveryOutcome.RETRY
 
             # Matrix may commit before cancellation is observable.
             # Drain the exact outcome so pause can settle its watermark; the

@@ -221,6 +221,7 @@ Application retry sleeps release the room lock, rehydrate after reacquiring it, 
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
 Pause also cancels and drains shared membership snapshots before configuration mutation can replace their Matrix clients.
+Orderly shutdown closes recovery admission synchronously before its first await, then stops sync admission before cancelling and draining already-admitted recovery.
 Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its owned lifecycle state.
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
 Matrix event IDs are opaque, so equal-timestamp target ordering uses exact predecessor evidence from the homeserver's reverse-chronological history rather than lexical event-ID order or a scan-relative rank.
