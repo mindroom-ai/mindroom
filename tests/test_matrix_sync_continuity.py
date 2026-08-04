@@ -34,7 +34,11 @@ from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_obligations.events import DispatchCallbackResult
-from mindroom.dispatch_obligations.storage import DispatchObligationCorruptionError
+from mindroom.dispatch_obligations.storage import (
+    DispatchCreateResult,
+    DispatchObligation,
+    DispatchObligationCorruptionError,
+)
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -2467,13 +2471,23 @@ async def test_sliding_startup_keeps_nio_transport_resume_cursor(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(  # noqa: PLR0915
+async def test_classic_startup_rewinds_and_replays_from_checkpoint(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first real sync replays from cache trust and admits retained nio work."""
+    """The trusted checkpoint replaces stale nio order without losing admitted work."""
     room_id = "!restart:localhost"
     bot = _agent_bot(tmp_path)
+    earlier = _nio_message_event(room_id, "$earlier")
+    later = _nio_message_event(room_id, "$later")
+    room = nio.MatrixRoom(room_id, bot.agent_user.user_id)
+    retained_obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        later,
+        DispatchCallbackKind.MESSAGE,
+        nio.TimelineEventProvenance.LIVE,
+    )
+    assert retained_obligation is not None
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -2488,12 +2502,13 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
         set(),
         [gap],
         [
-            _pending_nio_event(room_id, "$pending", sequence=0),
-            _pending_nio_event(room_id, "$completed", sequence=1),
+            _pending_nio_event(room_id, "$earlier", sequence=0),
+            _pending_nio_event(room_id, "$later", sequence=1),
         ],
         None,
     )
-    first.store.finish_recovery(room_id, 1, "$completed", False)
+    first.store.accept_recovery_event(room_id, 1, "$later")
+    first.store.finish_recovery(room_id, 1, "$earlier", False)
     first.store.save_sliding_window_tokens(
         {room_id: SlidingWindowToken("w1", "$join")},
     )
@@ -2503,15 +2518,32 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
     restarted = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
     bot.client = restarted
     requested_since: list[str | None] = []
-    recovery_bounds: list[tuple[str | None, str | None]] = []
     admitted: list[str] = []
+    create_results: dict[str, DispatchCreateResult] = {}
+    create_pending = bot._dispatch_obligation_store.create_pending
+
+    def record_create_pending(obligation: DispatchObligation) -> DispatchCreateResult:
+        result = create_pending(obligation)
+        create_results[obligation.source_event_id] = result
+        return result
+
+    monkeypatch.setattr(
+        bot._dispatch_obligation_store,
+        "create_pending",
+        record_create_pending,
+    )
 
     async def admit(
-        _room: nio.MatrixRoom,
+        event_room: nio.MatrixRoom,
         event: nio.Event,
-        _provenance: nio.TimelineEventProvenance,
+        provenance: nio.TimelineEventProvenance,
     ) -> None:
         admitted.append(event.event_id)
+        await bot._dispatch_obligation_runner._admit_source_event(
+            event_room,
+            event,
+            provenance,
+        )
 
     async def send_sync(
         _response_class: object,
@@ -2520,20 +2552,14 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
         *_args: object,
         **_kwargs: object,
     ) -> nio.Response:
+        assert _response_class is not nio.RoomMessagesResponse
         query = parse_qs(urlparse(path).query)
-        if _response_class is nio.RoomMessagesResponse:
-            recovery_bounds.append(
-                (
-                    query.get("from", [None])[0],
-                    query.get("to", [None])[0],
-                ),
-            )
-            return nio.RoomMessagesResponse.from_dict(
-                {"start": "s_cursor", "end": "s_advanced", "chunk": []},
-                room_id,
-            )
         requested_since.append(query.get("since", [None])[0])
-        response = _empty_real_sync(room_id, "s_safe")
+        response = _empty_real_sync(
+            room_id,
+            "s_safe",
+            timeline_events=[earlier, later],
+        )
         await restarted.receive_response(response)
         return response
 
@@ -2548,20 +2574,25 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
         assert restarted.next_batch == ""
         assert restarted.store is not None
         assert restarted.store.load_sync_token() == "s_safe"
-        gaps, events = restarted.store.load_sync_recovery()
-        assert [(item.room_id, item.generation) for item in gaps] == [
-            (room_id, 1),
-        ]
-        assert [(item.event_id, item.generation) for item in events] == [
-            ("$pending", 1),
-        ]
+        assert restarted.store.load_sync_recovery() == ([], [])
         assert restarted.store.load_sliding_window_tokens() == {}
 
         response = await restarted.sync()
 
         assert requested_since == ["s_safe"]
-        assert recovery_bounds == [("s_cursor", "s_advanced")]
-        assert admitted == ["$pending"]
+        assert admitted == ["$earlier", "$later"]
+        assert create_results == {
+            "$earlier": DispatchCreateResult.CREATED,
+            "$later": DispatchCreateResult.ALREADY_PENDING,
+        }
+        assert bot._dispatch_obligation_store.has_pending(
+            "$earlier",
+            DispatchCallbackKind.MESSAGE,
+        )
+        assert bot._dispatch_obligation_store.has_pending(
+            "$later",
+            DispatchCallbackKind.MESSAGE,
+        )
         checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
         assert checkpoint is not None
         assert checkpoint.token == "s_safe"  # noqa: S105
@@ -2700,14 +2731,10 @@ async def test_unknown_pos_crash_restart_clears_stale_completed_markers(
 
         await restarted_bot._prepare_matrix_sync_continuity()
 
-        assert restarted.next_batch in (None, "")
-        assert restarted.loaded_sync_token in (None, "")
+        assert restarted.next_batch == ""
+        assert restarted.loaded_sync_token == ""
         assert restarted.store is not None
-        gaps, events = restarted.store.load_sync_recovery()
-        assert [(item.room_id, item.generation) for item in gaps] == [
-            (room_id, 1),
-        ]
-        assert events == []
+        assert restarted.store.load_sync_recovery() == ([], [])
         assert restarted.store.load_sliding_window_tokens() == {}
         redelivered = _nio_message_event(room_id, "$completed")
         seen: list[str] = []
