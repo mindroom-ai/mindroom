@@ -302,9 +302,9 @@ async def test_put_hook_room_state_helper_returns_false_on_matrix_error() -> Non
 
     assert result is False
     client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={},
         state_key="$thread1",
     )
 
@@ -313,7 +313,7 @@ async def test_put_hook_room_state_helper_returns_false_on_matrix_error() -> Non
 async def test_putter_success_returns_true() -> None:
     """Successful room_put_state returns True."""
     client = AsyncMock(spec=nio.AsyncClient)
-    resp = MagicMock(spec=nio.RoomPutStateResponse)
+    resp = nio.RoomPutStateResponse(event_id="$state", room_id="!room:localhost")
     client.room_put_state.return_value = resp
 
     putter = build_hook_room_state_putter(client)
@@ -321,9 +321,9 @@ async def test_putter_success_returns_true() -> None:
 
     assert result is True
     client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {}},
         state_key="$thread1",
     )
 
@@ -338,6 +338,33 @@ async def test_putter_error_returns_false() -> None:
     result = await putter("!room:localhost", "com.mindroom.thread.tags", "$thread1", {"tags": {}})
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_hook_state_putter_encryption_write_marks_delivery_state() -> None:
+    """The generic hook state putter must publish successful encryption transitions locally."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    room = nio.MatrixRoom(room_id, "@bot:localhost")
+    room.members_synced = True
+    client.rooms = {room_id: room}
+    client.encrypted_rooms = set()
+    client.sharing_session = {}
+    client.olm = None
+    client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=room_id)
+    putter = build_hook_room_state_putter(client)
+
+    result = await putter(
+        room_id,
+        "m.room.encryption",
+        "",
+        {"algorithm": "m.megolm.v1.aes-sha2"},
+    )
+
+    assert result is True
+    assert room_id in client.encrypted_rooms
+    assert room.encrypted is True
+    assert room.members_synced is False
 
 
 @pytest.mark.asyncio

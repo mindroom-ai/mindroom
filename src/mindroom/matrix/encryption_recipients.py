@@ -9,10 +9,12 @@ from threading import Lock
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
+import nio
+
+from mindroom.matrix.response_status import matrix_response_transport_succeeded
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-    import nio
 
 
 @dataclass(slots=True)
@@ -117,6 +119,15 @@ def room_is_known_encrypted(
 ) -> bool:
     """Return whether nio has monotonic local proof that one room is encrypted."""
     return room_id in client.encrypted_rooms or (room is not None and room.encrypted)
+
+
+def room_encryption_state_from_response(response: object) -> bool | None:
+    """Interpret one state-event response only when its transport succeeded."""
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        return True if matrix_response_transport_succeeded(response) else None
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return False
+    return None
 
 
 def mark_room_encrypted_for_delivery(client: nio.AsyncClient, room_id: str) -> bool:
@@ -361,6 +372,7 @@ __all__ = [
     "retire_outbound_group_session",
     "room_delivery_guard",
     "room_delivery_guard_is_current",
+    "room_encryption_state_from_response",
     "room_is_known_encrypted",
     "room_membership_epoch",
     "room_recipient_epoch",

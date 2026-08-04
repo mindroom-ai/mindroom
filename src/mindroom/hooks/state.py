@@ -57,10 +57,21 @@ async def _put_hook_room_state(
     content: dict[str, Any],
 ) -> bool:
     """Write Matrix room state with hook adapter semantics."""
-    import nio  # noqa: PLC0415
+    # Imported only when a live hook writes state so the tool-registry import
+    # chain stays free of the nio matrix-client import (#1436).
+    from mindroom.matrix.client_room_admin import (  # noqa: PLC0415
+        put_room_state_result,
+        room_state_write_succeeded,
+    )
 
-    resp = await client.room_put_state(room_id, event_type, content, state_key=state_key)
-    return not isinstance(resp, nio.RoomPutStateError)
+    response = await put_room_state_result(
+        client,
+        room_id=room_id,
+        event_type=event_type,
+        content=content,
+        state_key=state_key,
+    )
+    return room_state_write_succeeded(response)
 
 
 def build_hook_room_state_putter(

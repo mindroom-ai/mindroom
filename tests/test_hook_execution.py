@@ -544,7 +544,10 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
-    client.room_put_state.return_value = object()
+    client.room_put_state.return_value = nio.RoomPutStateResponse(
+        event_id="$state",
+        room_id="!room:localhost",
+    )
     client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
         room_alias="#todo-room:localhost",
         room_id="!todo-room:localhost",
@@ -578,9 +581,9 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
     assert expected_root.is_dir()
     client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     client.room_put_state.assert_awaited_once_with(
-        "!room:localhost",
-        "com.mindroom.thread.tags",
-        {"tags": {"wip": True}},
+        room_id="!room:localhost",
+        event_type="com.mindroom.thread.tags",
+        content={"tags": {"wip": True}},
         state_key="$thread",
     )
     client.room_resolve_alias.assert_awaited_once_with("#todo-room:localhost")

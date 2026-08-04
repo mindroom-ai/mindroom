@@ -7,7 +7,7 @@ import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import nio
@@ -25,6 +25,7 @@ from mindroom.matrix.encryption_recipients import (
     mark_room_encrypted_for_delivery,
     retire_outbound_group_session,
     room_delivery_guard,
+    room_encryption_state_from_response,
     room_is_known_encrypted,
     room_membership_epoch,
 )
@@ -34,8 +35,6 @@ from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
-    from aiohttp import ClientResponse
-
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
@@ -232,16 +231,7 @@ async def _authoritative_cached_room_encryption(
 async def _remote_room_encrypted(client: nio.AsyncClient, room_id: str) -> bool | None:
     """Return authoritative room encryption state when readable."""
     response = await client.room_get_state_event(room_id, "m.room.encryption")
-    if isinstance(response, nio.RoomGetStateEventResponse):
-        # nio success-types every non-404 response for this endpoint, including
-        # transport failures. AsyncClient always attaches the aiohttp response.
-        transport: ClientResponse | None = cast("Any", response.transport_response)
-        if transport is not None and transport.status not in range(200, 300):
-            return None
-        return True
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
-        return False
-    return None
+    return room_encryption_state_from_response(response)
 
 
 def _room_from_remote_state(

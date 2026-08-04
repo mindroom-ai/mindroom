@@ -204,7 +204,8 @@ Proof-bound delivery validates encryption before large-message, file, audio, or 
 File delivery completes local file I/O before establishing that proof so an encryption transition during the read cannot leave a plaintext upload behind.
 An encryption-state probe rechecks the room cache after its network await so a stale plaintext response cannot authorize a plaintext upload after sync has enabled encryption.
 Nio's monotonic encrypted-room record always overrides a later negative encryption-state probe.
-Local room-encryption enablement holds the room delivery lock across its state read, write, monotonic membership fence, and outbound-session retirement so it cannot overlap a same-client plaintext send.
+Every supported local `m.room.encryption` state writer holds the room delivery lock across its write and any canonical monotonic membership fence and outbound-session retirement, so it cannot overlap a same-client plaintext send.
+Managed room-encryption enablement also holds that lock across its preceding state read.
 Sync-discovered encryption uses the same monotonic fence and retirement transition.
 After preparation, every encrypted delivery refreshes joined membership and device-key readiness, rotates a stale outbound session, and retains one per-client, per-room application delivery lock through nio's send path.
 All application room events, including reactions and custom events, use the same delivery lock instead of calling nio directly.
