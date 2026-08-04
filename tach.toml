@@ -4295,6 +4295,8 @@ from = ["mindroom.matrix.client_room_admin"]
 
 [[interfaces]]
 expose = [
+    "DEFAULT_MATRIX_SYNC_STORAGE",
+    "MatrixSyncStorage",
     "PermanentMatrixStartupError",
     "create_authenticated_client",
     "login",

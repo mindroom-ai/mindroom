@@ -67,39 +67,12 @@ async def test_matching_checkpoint_restores_without_cold_cleanup(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("safe_token", ["s_safe", None], ids=["warm", "cold"])
-async def test_startup_resumes_nio_transport_then_requires_safe_replay(
-    tmp_path: Path,
-    safe_token: str | None,
-) -> None:
-    """A newer NIO cursor may drain persisted gaps but cannot certify cache state."""
-    trust, _cache, _runtime = _trust(tmp_path)
-    if safe_token is not None:
-        save_sync_token(tmp_path, "code", safe_token, cache_generation=_GENERATION)
-
-    token = await trust.prepare_startup(
-        transport_resume_token="s_nio_live",  # noqa: S106
-    )
-    replay = await trust.certify_response(
-        next_batch="s_after_recovery",
-        cache_result=SyncCacheWriteResult(complete=True),
-    )
-
-    assert token == "s_nio_live"  # noqa: S105
-    assert replay.reason == "sync_cache_replay_required"
-    assert replay.reset_client_token is True
-    assert trust.retry_token() == safe_token
-
-
-@pytest.mark.asyncio
-async def test_startup_matching_nio_and_safe_tokens_need_no_replay(tmp_path: Path) -> None:
-    """An already certified NIO transport position remains ordinary warm startup."""
+async def test_startup_uses_only_the_cache_certified_checkpoint(tmp_path: Path) -> None:
+    """MindRoom continuity is the sole durable Classic startup position."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_safe", cache_generation=_GENERATION)
 
-    token = await trust.prepare_startup(
-        transport_resume_token="s_safe",  # noqa: S106
-    )
+    token = await trust.prepare_startup()
     decision = await trust.certify_response(
         next_batch="s_after",
         cache_result=SyncCacheWriteResult(complete=True),
@@ -289,8 +262,8 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_cache_scope_invalidation_preserves_pending_nio_recovery(tmp_path: Path) -> None:
-    """Room cleanup clears the checkpoint but not NIO's in-flight recovery handoff."""
+async def test_cache_scope_invalidation_resets_transient_recovery(tmp_path: Path) -> None:
+    """Room cleanup clears the checkpoint and replays transient nio work."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -301,11 +274,10 @@ async def test_cache_scope_invalidation_preserves_pending_nio_recovery(tmp_path:
             unrecovered_room_ids=frozenset({"!gap:localhost"}),
         ),
     )
-    assert gap.reset_client_token is False
+    assert gap.reset_client_token is True
 
     assert await trust.invalidate_for_cache_scope_cleanup()
 
-    assert trust.rewind_is_deferred_until_recovery()
     assert trust.retry_token() is None
     recovery = await trust.certify_response(
         next_batch="s_recovered",
@@ -315,16 +287,19 @@ async def test_cache_scope_invalidation_preserves_pending_nio_recovery(tmp_path:
         ),
     )
 
-    assert recovery.reason == "sync_cache_replay_required"
-    assert recovery.reset_client_token is True
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert recovery.state is SyncTrustState.CERTIFIED
+    assert recovery.reset_client_token is False
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_recovered",
+        cache_generation=_GENERATION,
+    )
 
 
 @pytest.mark.asyncio
-async def test_stale_gap_plan_keeps_recovery_handoff_after_cache_invalidation(
+async def test_stale_gap_plan_resets_after_cache_invalidation(
     tmp_path: Path,
 ) -> None:
-    """A cleanup racing plan application cannot rewind beneath NIO's open gap."""
+    """A cleanup racing plan application discards its transient nio gap."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -345,10 +320,7 @@ async def test_stale_gap_plan_keeps_recovery_handoff_after_cache_invalidation(
 
     assert applied.reason == "cache_scope_invalidated"
     assert applied.clear_saved_token is True
-    assert applied.reset_client_token is False
-    assert applied.unresolved_recovery_room_ids == frozenset({"!gap:localhost"})
-    assert applied.replay_required_after_recovery is True
-    assert trust.rewind_is_deferred_until_recovery()
+    assert applied.reset_client_token is True
     assert trust.retry_token() is None
 
 
@@ -489,8 +461,8 @@ async def test_positioned_limited_response_resets_live_cursor_and_preserves_chec
 
 
 @pytest.mark.asyncio
-async def test_positioned_outcomes_drain_gap_then_replay_unresolved_window(tmp_path: Path) -> None:
-    """Outcome disappearance rewinds only after nio had a chance to drain the gap."""
+async def test_unrecovered_outcome_rewinds_before_clean_replay(tmp_path: Path) -> None:
+    """An unrecovered in-memory gap never advances the durable checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -502,37 +474,27 @@ async def test_positioned_outcomes_drain_gap_then_replay_unresolved_window(tmp_p
             unrecovered_room_ids=frozenset({"!room:localhost"}),
         ),
     )
-    unresolved = await trust.certify_response(
+    replayed = await trust.certify_response(
         next_batch="s_unclassified",
         cache_result=SyncCacheWriteResult(
             complete=True,
             limited_room_ids=("!room:localhost",),
         ),
     )
-    replayed = await trust.certify_response(
-        next_batch="s_replayed",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            limited_room_ids=("!room:localhost",),
-        ),
-    )
-
-    assert unrecovered.reset_client_token is False
-    assert unresolved.reason == "sync_recovery_unresolved"
-    assert unresolved.reset_client_token is True
+    assert unrecovered.reset_client_token is True
     assert replayed.reset_client_token is False
-    assert trust.retry_token() == "s_replayed"
+    assert trust.retry_token() == "s_unclassified"
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        "s_replayed",
+        "s_unclassified",
         cache_generation=_GENERATION,
     )
 
 
 @pytest.mark.asyncio
-async def test_terminal_unrecovered_gap_rewinds_after_outcome_disappears(
+async def test_repeated_unrecovered_gap_keeps_rewinding(
     tmp_path: Path,
 ) -> None:
-    """NIO ending an abandoned gap must replay from safe continuity once."""
+    """Every failed transient recovery retries from the same safe continuity."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -549,25 +511,19 @@ async def test_terminal_unrecovered_gap_rewinds_after_outcome_disappears(
         next_batch="s_after_gap_2",
         cache_result=gap_result,
     )
-    unresolved = await trust.certify_response(
+    clean = await trust.certify_response(
         next_batch="s_after_clean_delta",
         cache_result=SyncCacheWriteResult(complete=True),
     )
-    clean = await trust.certify_response(
-        next_batch="s_after_clean_replay",
-        cache_result=SyncCacheWriteResult(complete=True),
-    )
 
-    assert first.reset_client_token is False
-    assert second.reset_client_token is False
-    assert unresolved.reason == "sync_recovery_unresolved"
-    assert unresolved.reset_client_token is True
+    assert first.reset_client_token is True
+    assert second.reset_client_token is True
     assert clean.reset_client_token is False
     assert clean.state is SyncTrustState.CERTIFIED
     assert clean.reason is None
-    assert trust.retry_token() == "s_after_clean_replay"
+    assert trust.retry_token() == "s_after_clean_delta"
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        "s_after_clean_replay",
+        "s_after_clean_delta",
         cache_generation=_GENERATION,
     )
 

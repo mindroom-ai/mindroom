@@ -90,8 +90,8 @@ def test_leave_without_nio_gap_certifies_checkpoint() -> None:
     assert decision.checkpoint_to_save == SyncCheckpoint("s_after_leave")
 
 
-def test_unrecovered_boundary_waits_for_outcome_before_clean_retry_certifies() -> None:
-    """Nio may drain a pending gap before outcome disappearance forces replay."""
+def test_unrecovered_boundary_replays_before_a_clean_retry_certifies() -> None:
+    """An open transient gap cannot advance the application-owned cursor."""
     room_id = "!joined:localhost"
     boundary = certify_sync_response(
         next_batch="s_join",
@@ -100,14 +100,6 @@ def test_unrecovered_boundary_waits_for_outcome_before_clean_retry_certifies() -
             limited_room_ids=(room_id,),
             unrecovered_room_ids=frozenset({room_id}),
         ),
-    )
-    unresolved = certify_sync_response(
-        next_batch="s_clean",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            limited_room_ids=(room_id,),
-        ),
-        unresolved_recovery_room_ids=boundary.unresolved_recovery_room_ids,
     )
     clean = certify_sync_response(
         next_batch="s_replayed_clean",
@@ -119,10 +111,7 @@ def test_unrecovered_boundary_waits_for_outcome_before_clean_retry_certifies() -
 
     assert boundary.state is SyncTrustState.UNCERTAIN
     assert boundary.reason == "sync_recovery_incomplete"
-    assert boundary.reset_client_token is False
-    assert boundary.unresolved_recovery_room_ids == frozenset({room_id})
-    assert unresolved.reason == "sync_recovery_unresolved"
-    assert unresolved.reset_client_token is True
+    assert boundary.reset_client_token is True
     assert clean.state is SyncTrustState.CERTIFIED
     assert clean.checkpoint_to_save == SyncCheckpoint("s_replayed_clean")
 
@@ -268,8 +257,8 @@ def test_limited_cache_failure_preserves_positioned_continuity() -> None:
     assert decision.reset_client_token is True
 
 
-def test_unrecovered_gap_withholds_checkpoint_without_replanning() -> None:
-    """An open nio gap must retain safe continuity while its live recovery drains."""
+def test_unrecovered_gap_resets_to_the_committed_checkpoint() -> None:
+    """An open in-memory gap must be rebuilt from the committed checkpoint."""
     decision = certify_sync_response(
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(
@@ -282,23 +271,21 @@ def test_unrecovered_gap_withholds_checkpoint_without_replanning() -> None:
     assert decision.reason == "sync_recovery_incomplete"
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is False
-    assert decision.reset_client_token is False
-    assert decision.unresolved_recovery_room_ids == frozenset({"!room:localhost"})
+    assert decision.reset_client_token is True
 
 
-def test_tokenless_unclassified_limited_window_advances_without_certifying() -> None:
-    """The first limited window positions nio without publishing an unsafe checkpoint."""
+def test_tokenless_initial_snapshot_certifies_its_baseline() -> None:
+    """A limited initial snapshot is a valid baseline, not an incremental gap."""
     decision = certify_sync_response(
         next_batch="s_baseline",
         cache_result=SyncCacheWriteResult(
             complete=True,
             limited_room_ids=("!room:localhost",),
         ),
-        tokenless_baseline_pending=True,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.reason == "limited_sync_timeline"
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint("s_baseline")
     assert decision.reset_client_token is False
 
 

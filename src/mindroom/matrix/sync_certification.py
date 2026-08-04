@@ -86,9 +86,6 @@ class SyncCertificationDecision:
     checkpoint_to_save: SyncCheckpoint | None = None
     clear_saved_token: bool = False
     reset_client_token: bool = False
-    # Runtime-only certification handoff; nio remains the recovery-gap owner.
-    unresolved_recovery_room_ids: frozenset[str] = frozenset()
-    replay_required_after_recovery: bool = False
     reason: str | None = None
     cache_scope_epoch: int | None = None
 
@@ -98,16 +95,12 @@ def _uncertain_decision(
     reason: str,
     clear_saved_token: bool = False,
     reset_client_token: bool = False,
-    unresolved_recovery_room_ids: frozenset[str] = frozenset(),
-    replay_required_after_recovery: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
         state=SyncTrustState.UNCERTAIN,
         clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
-        unresolved_recovery_room_ids=unresolved_recovery_room_ids,
-        replay_required_after_recovery=replay_required_after_recovery,
         reason=reason,
     )
 
@@ -116,7 +109,6 @@ def _uncertain_reason(
     cache_result: SyncCacheWriteResult,
     *,
     token: str | None,
-    tokenless_baseline_pending: bool,
 ) -> str | None:
     """Return why one sync response cannot certify a checkpoint."""
     if token is None:
@@ -127,8 +119,6 @@ def _uncertain_reason(
         reason = "cache_write_incomplete"
     elif cache_result.unrecovered_room_ids:
         reason = "sync_recovery_incomplete"
-    elif tokenless_baseline_pending and cache_result._unclassified_limited_room_ids:
-        reason = "limited_sync_timeline"
     else:
         reason = None
     return reason
@@ -138,50 +128,17 @@ def certify_sync_response(
     *,
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
-    tokenless_baseline_pending: bool = False,
-    unresolved_recovery_room_ids: frozenset[str] = frozenset(),
-    replay_required_after_recovery: bool = False,
 ) -> SyncCertificationDecision:
     """Return the certifier decision for one sync response."""
     token = normalize_sync_token(next_batch)
-    unresolved_recovery_room_ids = (
-        unresolved_recovery_room_ids - cache_result.recovered_room_ids
-    ) | cache_result.unrecovered_room_ids
     reason = _uncertain_reason(
         cache_result,
         token=token,
-        tokenless_baseline_pending=tokenless_baseline_pending,
     )
-    replay_required_after_recovery = replay_required_after_recovery or bool(
-        cache_result.errors or not cache_result.complete,
-    )
-    if cache_result.unrecovered_room_ids and token is not None:
-        return _uncertain_decision(
-            reason=reason or "sync_recovery_incomplete",
-            unresolved_recovery_room_ids=unresolved_recovery_room_ids,
-            replay_required_after_recovery=replay_required_after_recovery,
-        )
-
-    if unresolved_recovery_room_ids:
-        return _uncertain_decision(
-            reason="sync_recovery_unresolved",
-            reset_client_token=True,
-        )
-
-    if replay_required_after_recovery:
-        return _uncertain_decision(
-            reason=reason or "sync_cache_replay_required",
-            reset_client_token=True,
-        )
-
     if reason is not None:
-        tokenless_limited_baseline = (
-            tokenless_baseline_pending and cache_result.complete and reason == "limited_sync_timeline"
-        )
-        reset_client_token = not tokenless_limited_baseline
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=reset_client_token,
+            reset_client_token=True,
         )
 
     checkpoint = SyncCheckpoint(token=cast("str", token))

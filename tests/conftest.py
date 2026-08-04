@@ -732,11 +732,13 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
-    def rewind_sync_recovery_for_startup(token: str | None) -> None:
-        client.loaded_sync_token = token or ""
+    async def reset_classic_sync_state() -> None:
         client.next_batch = ""
+        client.loaded_sync_token = ""
+        client.rooms.clear()
 
-    client.rewind_sync_recovery_for_startup.side_effect = rewind_sync_recovery_for_startup
+    client.clear_persisted_sync_recovery = MagicMock()
+    client.reset_classic_sync_state.side_effect = reset_classic_sync_state
     return client
 
 

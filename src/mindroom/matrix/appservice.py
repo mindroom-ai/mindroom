@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn
 import httpx
 
 from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
-from mindroom.matrix.client_session import create_authenticated_client, matrix_startup_error
+from mindroom.matrix.client_session import (
+    DEFAULT_MATRIX_SYNC_STORAGE,
+    MatrixSyncStorage,
+    create_authenticated_client,
+    matrix_startup_error,
+)
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.runtime_env_policy import (
     MATRIX_APPSERVICE_TOKEN_ENV,
@@ -184,6 +189,7 @@ async def login_appservice_user(
     user_id: str,
     token: str,
     runtime_paths: RuntimePaths,
+    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Create an ordinary per-user Matrix device through application-service login."""
     response = await _post(
@@ -214,4 +220,5 @@ async def login_appservice_user(
         device_id,
         access_token,
         runtime_paths=runtime_paths,
+        sync_storage=sync_storage,
     )

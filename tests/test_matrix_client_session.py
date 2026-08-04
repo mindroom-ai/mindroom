@@ -20,6 +20,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix import client_session
 from mindroom.matrix.client_session import (
+    MatrixSyncStorage,
     PermanentMatrixStartupError,
     _MindRoomAsyncClient,
     login_flows,
@@ -141,6 +142,20 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is True
     assert config.store_sync_tokens is True
+
+
+def test_matrix_client_config_supports_application_owned_classic_sync() -> None:
+    """Classic ingress can disable nio's durable cursor and recovery journal."""
+    config = matrix_client_config(
+        sync_storage=MatrixSyncStorage(
+            store_tokens=False,
+            persist_recovery=False,
+        ),
+    )
+
+    assert config.backfill_limited_timelines is True
+    assert config.backfill_persist_recovery is False
+    assert config.store_sync_tokens is False
 
 
 @pytest.mark.asyncio

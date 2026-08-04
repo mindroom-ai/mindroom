@@ -87,17 +87,17 @@ Recovery intent travels with queued ingress so pre-existing lane and coalescing 
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
-Classic startup uses the cache-generation-validated MindRoom checkpoint as its only transport cursor authority.
-Classic startup always runs a guarded nio reset so equal-token state left by Sliding Sync cannot suppress Classic replay.
-When that checkpoint is non-null, the reset removes every superseded recovery gap, callback row, replay-suppression marker, and Sliding Sync window token, even when nio's Classic token is equal.
-MindRoom publishes a Classic checkpoint only after every source callback reaches durable admission, while Sliding work created after an equal Classic token remains above that checkpoint and is returned by Classic replay.
-When no checkpoint is trusted, the reset clears the invalid cursor and recovery lane so the cold server timeline is the only ordering authority.
-That cold reset can lose an event that never crossed MindRoom admission and is omitted from the initial sync, which is the explicit pre-admission durability boundary chosen instead of merging incomparable generations.
-Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obligation store, while Matrix replay idempotently re-admits returned events in checkpoint order.
-The first Classic request then uses full state and replays from the trusted checkpoint through the existing recovery, cache, and certification path.
-`SyncCacheTrust` certifies a complete recovered response, rewinds every locally incomplete, failed, or nio-unrecovered response to the retained pre-gap checkpoint, and relies on nio's persisted aggregate gap state instead of duplicating it.
+Classic clients disable nio token and recovery persistence, so the cache-generation-validated MindRoom checkpoint is the only durable Classic cursor.
+nio parses one Classic response and stages its room, recovery, and completion state in memory.
+MindRoom advances the checkpoint only after cache writes, exact source admission, and response-owned lifecycle effects complete.
+Any failed, cancelled, or nio-unrecovered response discards nio's transient world and replays from the retained MindRoom checkpoint with full state.
+Classic startup clears legacy nio cursor, recovery, and Sliding window rows so a previous transport mode cannot later resurrect them.
+Sliding Sync retains its own persisted recovery lane but does not become a Classic cursor authority.
+Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obligation store, and Matrix replay idempotently re-admits returned events by event ID.
+`SyncCacheTrust` certifies only locally complete responses and requests a transient nio reset for every rejected Classic response.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
-When no generation-safe checkpoint exists, `SyncCacheTrust` lets one locally complete and error-free limited response advance without a token reset so nio can position itself and classify that gap.
+A complete tokenless initial snapshot may establish the first MindRoom checkpoint even when its timeline is limited.
+An event that never crossed MindRoom admission and later falls outside Matrix replay is the explicit pre-admission loss boundary.
 Classic receive-loop exit also reconciles nio's live cursor with the last certified checkpoint, covering cancellation after nio applies a response but before its response callback starts.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.

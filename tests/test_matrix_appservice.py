@@ -16,6 +16,7 @@ from mindroom.matrix.appservice import (
     resolve_managed_account_auth,
 )
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -242,6 +243,7 @@ async def test_login_appservice_user_returns_per_user_device_client(tmp_path: Pa
         "DEVICE",
         "device-token",
         runtime_paths=runtime_paths,
+        sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
     )
 
 

@@ -486,11 +486,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert checkpoint.token == "s_after_complete"  # noqa: S105
 
     @pytest.mark.asyncio
-    async def test_limited_restored_first_sync_withholds_checkpoint_while_nio_drains(
+    async def test_limited_restored_first_sync_resets_nio_to_checkpoint(
         self,
         bot: AgentBot,
     ) -> None:
-        """Limited catch-up keeps safe continuity while nio drains the live gap."""
+        """An unrecovered limited response discards nio staging and replays safely."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
         assert await bot._sync_cache_trust.prepare_startup() == "s_before_limited"
@@ -503,7 +503,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch == "s_after_limited"
+        assert bot.client.next_batch == "s_before_limited"
+        bot.client.reset_classic_sync_state.assert_awaited_once_with()
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_limited"
         bot.event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
