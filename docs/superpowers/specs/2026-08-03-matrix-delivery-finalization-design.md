@@ -42,7 +42,8 @@ Device-key work must keep a cached room marked membership-unsynchronized until e
 No second application room send may overlap hydration or final delivery for the same client room.
 Nio must fail closed instead of performing its own member or key refresh when encrypted readiness is stale at its send boundary.
 The runtime client must remove invitees after joined-member and sync processing so Megolm session sharing sees joined recipients only.
-Request-owned membership generations must reject older joined-members responses before they mutate the cache and remain valid through hidden-room full-state publication.
+Every runtime joined-members request must reject older responses before they mutate the cache, while delivery-owned generations remain valid through hidden-room full-state publication.
+Success-typed joined-members responses attached to non-successful HTTP transports must be rejected before cache mutation.
 Global key-query sequences and device-list generations must reject responses that finish after a newer query or invalidation without rejecting the query's own session retirement.
 Recipient and membership generations must invalidate a prepared transport when its exact room state changes.
 Nio's monotonic encrypted-room record must dominate a later negative state-event response.
@@ -60,7 +61,7 @@ The same hydration operation will refresh tracked users, query required device k
 Hidden-room candidates retain full non-membership state but intentionally omit invite membership from nio's encryption roster.
 Weakly client-owned membership and device-list generations order hydration network responses against concurrent Classic Sync and Sliding Sync invalidations.
 Sync processing preapplies membership events, encryption events, joined-count mismatches, and device-list changes before recovery dispatch or callbacks can await.
-Each delivery-owned joined-members request records whether its own response advanced the membership generation and refuses an older response before it can overwrite the cache.
+Each runtime joined-members request records whether its own response advanced the membership generation and refuses any response superseded by a later-started request before it can overwrite the cache.
 The accepted joined-members generation remains bound across a hidden-room full-state await so an uncached candidate cannot publish a superseded roster.
 Every runtime key query, including pinned-device discovery, uses one global request sequence at the client response boundary.
 Superseded key queries restore their queried and current-room users to nio's pending key set before hydration fails closed.
@@ -113,7 +114,7 @@ A static regression will reject every production `.room_send` call outside the p
 A regression test will show that a stale plaintext proof performs zero media uploads and zero event sends.
 A regression test will show that encrypted membership is refreshed after message preparation.
 A pair of deterministic concurrency regressions will block joined-members and key-query responses, apply newer sync invalidations, and prove that neither stale response can reach session sharing or transport.
-A second joined-members ordering regression will prove that an older endpoint response cannot overwrite a newer endpoint response.
+A second joined-members ordering regression will prove under both completion orders that an older endpoint request cannot overwrite a newer endpoint request.
 A Classic Sync and Sliding Sync regression pair will prove that membership events, encryption events, and joined-count mismatches fence transport before callbacks.
 A regression test will prove that an unchanged authoritative roster preserves the existing shared session.
 A regression test will prove that a stale plaintext state-event response cannot cause an unencrypted sidecar upload after the cache becomes encrypted.

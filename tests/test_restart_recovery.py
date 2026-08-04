@@ -171,6 +171,7 @@ def _target(
     agent_name: str = "code",
     owner_user_id: str = "@code:example.org",
     original_sender_id: str | None = "@alice:example.org",
+    same_timestamp_older_event_ids: frozenset[str] = frozenset(),
 ) -> InterruptedThread:
     return InterruptedThread(
         room_id=room_id,
@@ -181,6 +182,7 @@ def _target(
         owner_user_id=owner_user_id,
         original_sender_id=original_sender_id,
         timestamp_ms=timestamp_ms,
+        same_timestamp_older_event_ids=same_timestamp_older_event_ids,
     )
 
 
@@ -4913,6 +4915,115 @@ async def test_generation_change_allows_new_interruption_in_same_thread(
 
 
 @pytest.mark.asyncio
+async def test_equal_timestamp_matrix_order_selects_newest_target(tmp_path: Path) -> None:
+    """Opaque event IDs must not override exact same-timestamp Matrix ordering proof."""
+    owner = _owner()
+    old_target = _target("$z-old", timestamp_ms=10)
+    new_target = _target(
+        "$a-new",
+        timestamp_ms=10,
+        same_timestamp_older_event_ids=frozenset({old_target.target_event_id}),
+    )
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(new_target, old_target))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+    finally:
+        await coordinator.stop()
+
+    assert delivered_targets == [new_target.target_event_id]
+
+
+@pytest.mark.asyncio
+async def test_recovered_equal_timestamp_target_supersedes_retained_target(tmp_path: Path) -> None:
+    """A current scan may replace retained work only with exact predecessor proof."""
+    owner = _owner()
+    old_target = _target("$z-old", timestamp_ms=10)
+    new_target = _target(
+        "$a-new",
+        timestamp_ms=10,
+        same_timestamp_older_event_ids=frozenset({old_target.target_event_id}),
+    )
+    delivered_targets: list[str] = []
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=_operations(
+            recover_room=AsyncMock(return_value=RoomRecoveryResult(interrupted_threads=(new_target,))),
+            deliver=deliver,
+        ),
+    )
+    request = RoomRecoveryRequest(old_target.room_id, 123, False)
+    work = RoomWork(
+        request,
+        owner.user_id,
+        owner.generation,
+        targets=(old_target,),
+        due_at=None,
+    )
+
+    await coordinator._process_room(RoomLease(request, (work,)))
+
+    assert delivered_targets == [new_target.target_event_id]
+
+
+def test_open_watermark_requires_exact_equal_timestamp_predecessor_proof(tmp_path: Path) -> None:
+    """Ambiguous equal-timestamp targets cannot advance a monotonic watermark."""
+    owner = _owner()
+    old_target = _target("$z-old", timestamp_ms=10)
+    ambiguous_target = _target("$ambiguous", timestamp_ms=10)
+    new_target = _target(
+        "$a-new",
+        timestamp_ms=10,
+        same_timestamp_older_event_ids=frozenset({old_target.target_event_id}),
+    )
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=_operations(recover_room=AsyncMock(return_value=RoomRecoveryResult())),
+    )
+    coordinator._advance_watermark(owner, TargetSettlement(old_target, closed=False))
+
+    assert coordinator._eligible_targets(owner, (ambiguous_target,)) == ()
+    assert coordinator._eligible_targets(owner, (new_target,)) == (new_target,)
+
+    coordinator._advance_watermark(owner, TargetSettlement(new_target, closed=False))
+
+    assert coordinator._eligible_targets(owner, (old_target,)) == ()
+
+
+@pytest.mark.asyncio
 async def test_target_watermark_prevents_older_resurrection(tmp_path: Path) -> None:
     """Rescanning an older target after the newest succeeds must not resume it."""
     owner = _owner()
@@ -5425,9 +5536,11 @@ async def test_target_exception_retries_only_failed_target_and_continues_shared_
 async def test_exhausted_target_is_parked_and_owner_ready_grants_fresh_budget(
     tmp_path: Path,
 ) -> None:
-    """Exhaustion remains discoverable and a later readiness edge re-enrolls it."""
+    """Exhaustion retains its exact target when bounded rediscovery no longer finds it."""
     owner = _owner()
     owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    scan_attempts = 0
     delivery_attempts = 0
     seventh_delivery = asyncio.Event()
 
@@ -5437,7 +5550,9 @@ async def test_exhausted_target_is_parked_and_owner_ready_grants_fresh_budget(
         _owner_user_ids: frozenset[str],
         _config: Config,
     ) -> RoomRecoveryResult:
-        return RoomRecoveryResult(interrupted_threads=(_target("$target", timestamp_ms=10),))
+        nonlocal scan_attempts
+        scan_attempts += 1
+        return RoomRecoveryResult(interrupted_threads=(target,) if scan_attempts == 1 else ())
 
     async def deliver(
         _owner: RecoveryOwner,
@@ -5464,7 +5579,7 @@ async def test_exhausted_target_is_parked_and_owner_ready_grants_fresh_budget(
     parked = tuple(coordinator._room_jobs.values())
     assert len(parked) == 1
     assert parked[0].due_at is None
-    assert not parked[0].targets
+    assert parked[0].targets == (target,)
 
     coordinator.owner_ready(owner.user_id)
     try:
@@ -5473,6 +5588,7 @@ async def test_exhausted_target_is_parked_and_owner_ready_grants_fresh_budget(
         await coordinator.stop()
 
     assert delivery_attempts == 7
+    assert scan_attempts == 7
 
 
 @pytest.mark.asyncio

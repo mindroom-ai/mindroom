@@ -29,6 +29,7 @@ from mindroom.matrix.client_session import (
     login_with_token,
     matrix_client_config,
 )
+from mindroom.matrix.encryption_recipients import joined_members_query, room_membership_epoch
 
 
 @pytest.mark.asyncio
@@ -840,6 +841,130 @@ async def test_newer_joined_members_response_supersedes_in_flight_roster() -> No
     assert not room.members_synced
     assert set(room.users) == {bot_user_id}
     client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_completes_first", [True, False], ids=["newer-first", "older-first"])
+async def test_newer_ordinary_joined_members_request_supersedes_older_request(
+    newer_completes_first: bool,
+) -> None:
+    """Request generation must own the runtime roster regardless of completion order."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    departed_user_id = "@departed:example.org"
+    client = _MindRoomAsyncClient("https://example.org", bot_user_id)
+    client.access_token = "token"  # noqa: S105
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    room.add_member(departed_user_id, "Departed", None)
+    client.rooms[room_id] = room
+    stale_response = nio.JoinedMembersResponse(
+        [
+            nio.RoomMember(bot_user_id, "Bot", ""),
+            nio.RoomMember(departed_user_id, "Departed", ""),
+        ],
+        room_id,
+    )
+    current_response = nio.JoinedMembersResponse(
+        [nio.RoomMember(bot_user_id, "Bot", "")],
+        room_id,
+    )
+    query_started = [asyncio.Event(), asyncio.Event()]
+    release_query = [asyncio.Event(), asyncio.Event()]
+    query_count = 0
+
+    async def send_query(*_args: object, **_kwargs: object) -> nio.JoinedMembersResponse:
+        nonlocal query_count
+        index = query_count
+        query_count += 1
+        query_started[index].set()
+        await release_query[index].wait()
+        response = (stale_response, current_response)[index]
+        await client.receive_response(response)
+        return response
+
+    client._send = AsyncMock(side_effect=send_query)
+    stale_query = asyncio.create_task(client.joined_members(room_id))
+    await query_started[0].wait()
+    current_query = asyncio.create_task(client.joined_members(room_id))
+    await query_started[1].wait()
+    if newer_completes_first:
+        release_query[1].set()
+        assert await current_query is current_response
+        assert set(room.users) == {bot_user_id}
+        release_query[0].set()
+        assert isinstance(await stale_query, nio.JoinedMembersError)
+    else:
+        release_query[0].set()
+        assert isinstance(await stale_query, nio.JoinedMembersError)
+        assert set(room.users) == {bot_user_id, departed_user_id}
+        release_query[1].set()
+        assert await current_query is current_response
+    assert set(room.users) == {bot_user_id}
+
+
+@pytest.mark.asyncio
+async def test_joined_members_query_reuses_runtime_client_generation() -> None:
+    """An explicit delivery guard must nest around the runtime client without self-invalidating."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    client = _MindRoomAsyncClient("https://example.org", bot_user_id)
+    client.access_token = "token"  # noqa: S105
+    client.rooms[room_id] = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    response = nio.JoinedMembersResponse(
+        [nio.RoomMember(bot_user_id, "Bot", "")],
+        room_id,
+    )
+
+    async def send_query(*_args: object, **_kwargs: object) -> nio.JoinedMembersResponse:
+        await client.receive_response(response)
+        return response
+
+    client._send = AsyncMock(side_effect=send_query)
+
+    with joined_members_query(client, room_id) as response_is_current:
+        result = await client.joined_members(room_id)
+
+    assert result is response
+    assert response_is_current(response)
+
+
+@pytest.mark.asyncio
+async def test_joined_members_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx joined-members response must not mutate the runtime room cache."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    departed_user_id = "@departed:example.org"
+    client = _MindRoomAsyncClient("https://example.org", bot_user_id)
+    client.access_token = "token"  # noqa: S105
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    client.rooms[room_id] = room
+    response = nio.JoinedMembersResponse(
+        [
+            nio.RoomMember(bot_user_id, "Bot", ""),
+            nio.RoomMember(departed_user_id, "Departed", ""),
+        ],
+        room_id,
+    )
+    transport = Mock()
+    transport.status = 502
+    response.transport_response = transport
+
+    async def send_query(*_args: object, **_kwargs: object) -> nio.JoinedMembersResponse:
+        await client.receive_response(response)
+        return response
+
+    client._send = AsyncMock(side_effect=send_query)
+    prior_membership_epoch = room_membership_epoch(client, room_id)
+
+    result = await client.joined_members(room_id)
+
+    assert isinstance(result, nio.JoinedMembersError)
+    assert set(room.users) == {bot_user_id}
+    assert room_membership_epoch(client, room_id) == prior_membership_epoch
 
 
 @pytest.mark.asyncio

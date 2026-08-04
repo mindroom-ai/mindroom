@@ -688,6 +688,60 @@ async def test_cleanup_orders_interrupted_targets_by_original_event_not_later_ed
 
 
 @pytest.mark.asyncio
+async def test_cleanup_preserves_matrix_order_for_equal_timestamp_targets(tmp_path: Path) -> None:
+    """Reverse-chronological Matrix order must break equal server-timestamp ties."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    root_timestamp = NOW_MS - (STALE_AGE_MS + 20_000)
+    response_timestamp = NOW_MS - STALE_AGE_MS
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$z-old-edit",
+            body="* Old partial edited",
+            timestamp_ms=response_timestamp + 1_000,
+            relates_to={"rel_type": "m.replace", "event_id": "$z-old"},
+            new_content={
+                "body": "Old partial edited",
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: "streaming",
+            },
+        ),
+        _make_message_event(
+            event_id="$a-new",
+            body="New partial",
+            timestamp_ms=response_timestamp,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$z-old",
+            body="Old partial",
+            timestamp_ms=response_timestamp,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=root_timestamp,
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 2
+    targets_by_event_id = {target.target_event_id: target for target in interrupted}
+    assert targets_by_event_id["$a-new"].same_timestamp_older_event_ids == frozenset({"$z-old"})
+    assert not targets_by_event_id["$z-old"].same_timestamp_older_event_ids
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(tmp_path: Path) -> None:
     """Cleanup must trust persisted stream status over a stale visible marker."""
     config = _make_config(tmp_path)

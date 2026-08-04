@@ -78,7 +78,7 @@ class _TargetWatermark:
     """Monotonic settled state for one owner-room-thread."""
 
     generation: object
-    version: tuple[int, str]
+    target: InterruptedThread
     closed: bool = False
 
 
@@ -127,8 +127,29 @@ async def _cancel_and_drain_tasks[T](tasks: tuple[asyncio.Task[T], ...]) -> None
     await _drain_future(drain)
 
 
-def _target_version(target: InterruptedThread) -> tuple[int, str]:
-    return target.timestamp_ms, target.target_event_id
+def _target_is_newer(candidate: InterruptedThread, current: InterruptedThread) -> bool:
+    """Return whether Matrix history proves that one target supersedes another."""
+    if candidate.target_event_id == current.target_event_id:
+        return False
+    if candidate.timestamp_ms != current.timestamp_ms:
+        return candidate.timestamp_ms > current.timestamp_ms
+    return current.target_event_id in candidate.same_timestamp_older_event_ids
+
+
+def _merge_exact_target(current: InterruptedThread, candidate: InterruptedThread) -> InterruptedThread:
+    """Merge refreshed metadata for one exact Matrix event identity."""
+    original_sender_id = candidate.original_sender_id or current.original_sender_id
+    older_event_ids = current.same_timestamp_older_event_ids | candidate.same_timestamp_older_event_ids
+    if (
+        candidate.original_sender_id == original_sender_id
+        and candidate.same_timestamp_older_event_ids == older_event_ids
+    ):
+        return candidate
+    return replace(
+        candidate,
+        original_sender_id=original_sender_id,
+        same_timestamp_older_event_ids=older_event_ids,
+    )
 
 
 def _newest_targets(targets: tuple[InterruptedThread, ...]) -> tuple[InterruptedThread, ...]:
@@ -138,18 +159,14 @@ def _newest_targets(targets: tuple[InterruptedThread, ...]) -> tuple[Interrupted
         if current is None:
             newest[target.thread_id] = target
             continue
-        target_version = _target_version(target)
-        current_version = _target_version(current)
-        if target_version > current_version or (
-            target_version == current_version
-            and current.original_sender_id is None
-            and target.original_sender_id is not None
-        ):
+        if target.target_event_id == current.target_event_id:
+            newest[target.thread_id] = _merge_exact_target(current, target)
+        elif _target_is_newer(target, current):
             newest[target.thread_id] = target
     return tuple(
         sorted(
             newest.values(),
-            key=lambda target: (target.thread_id, _target_version(target)),
+            key=lambda target: target.thread_id,
         ),
     )
 
@@ -667,7 +684,7 @@ class RestartRecoveryCoordinator:
         if attempt >= _MAX_MATRIX_ATTEMPTS:
             self._room_jobs[work.key] = replace(
                 work,
-                targets=(),
+                targets=_newest_targets(retry_targets),
                 matrix_attempt=attempt,
                 readiness_probe=0,
                 membership_probe=0,
@@ -693,12 +710,24 @@ class RestartRecoveryCoordinator:
     def _advance_watermark(self, owner: RecoveryOwner, settlement: _TargetSettlement) -> None:
         target = settlement.target
         key = owner.user_id, target.room_id, target.thread_id
-        version = _target_version(target)
         current = self._target_watermarks.get(key)
-        if current is None or current.generation is not owner.generation or version > current.version:
-            self._target_watermarks[key] = _TargetWatermark(owner.generation, version, settlement.closed)
-        elif version == current.version and settlement.closed and not current.closed:
-            self._target_watermarks[key] = replace(current, closed=True)
+        if current is None or current.generation is not owner.generation:
+            self._target_watermarks[key] = _TargetWatermark(
+                owner.generation,
+                target,
+                settlement.closed,
+            )
+            return
+        current_target = current.target
+        if target.target_event_id == current_target.target_event_id:
+            current_target = _merge_exact_target(current_target, target)
+        elif _target_is_newer(target, current_target):
+            current_target = target
+        self._target_watermarks[key] = replace(
+            current,
+            target=current_target,
+            closed=current.closed or settlement.closed,
+        )
 
     async def _process_room(self, lease: _RoomLease) -> tuple[_OwnerAttemptResult, ...]:
         config = self._require_config()
@@ -852,7 +881,7 @@ class RestartRecoveryCoordinator:
             if (
                 watermark is None
                 or watermark.generation is not owner.generation
-                or (not watermark.closed and _target_version(target) > watermark.version)
+                or (not watermark.closed and _target_is_newer(target, watermark.target))
             ):
                 eligible.append(target)
         return tuple(eligible)

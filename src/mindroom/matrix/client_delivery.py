@@ -495,7 +495,7 @@ async def _joined_members_for_hydration(
     if (
         isinstance(members, nio.JoinedMembersResponse)
         and cached_room(client, room_id) is expected_room
-        and query_is_current()
+        and query_is_current(members)
     ):
         return _JoinedMembersHydrationSnapshot(
             response=members,

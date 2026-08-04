@@ -25,6 +25,7 @@ from mindroom.matrix.encryption_recipients import (
     advance_room_membership_epoch,
     apply_authoritative_joined_roster,
     complete_deferred_outbound_group_session_retirement,
+    joined_members_query,
     joined_only_recipient_user_ids,
     key_query_request,
     key_query_response_is_current,
@@ -261,6 +262,17 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         with key_query_request(self, frozenset(self.users_for_key_query)):
             return await super().keys_query()
 
+    async def joined_members(self, room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
+        """Order every joined-members response before nio may publish its roster."""
+        with joined_members_query(self, room_id) as response_is_current:
+            response = await super().joined_members(room_id)
+        if isinstance(response, nio.JoinedMembersResponse) and not response_is_current(response):
+            return nio.JoinedMembersError(
+                "Joined-members response was rejected as stale or transport-failed.",
+                room_id=room_id,
+            )
+        return response
+
     def invalidate_outbound_session(self, room_id: str) -> None:
         """Retire every session invalidated by a membership transition."""
         room = self.rooms.get(room_id)
@@ -297,7 +309,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
 
     def _handle_joined_members(self, response: nio.JoinedMembersResponse) -> None:
         """Apply joined membership without retaining encrypted-room invitees."""
-        if not record_joined_members_response(self, response.room_id):
+        if not record_joined_members_response(self, response):
             return
         room = self.rooms.get(response.room_id)
         if room is None:

@@ -24,6 +24,7 @@ class _ClientEncryptionState:
     deferred_session_retirements: set[str] = field(default_factory=set)
     recipient_epochs: dict[str, int] = field(default_factory=dict)
     membership_epochs: dict[str, int] = field(default_factory=dict)
+    joined_members_query_sequences: dict[str, int] = field(default_factory=dict)
     device_key_epoch: int = 0
     key_query_sequence: int = 0
     applied_key_query_sequence: int = 0
@@ -50,8 +51,10 @@ class _JoinedMembersQuery:
 
     client: nio.AsyncClient
     room_id: str
+    sequence: int
     start_epoch: int
-    response_recorded: bool = False
+    response: nio.JoinedMembersResponse | None = None
+    response_accepted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,36 +171,75 @@ def advance_room_membership_epoch(client: nio.AsyncClient, room_id: str) -> None
         state.membership_epochs[room_id] = state.membership_epochs.get(room_id, 0) + 1
 
 
-def record_joined_members_response(client: nio.AsyncClient, room_id: str) -> bool:
+def record_joined_members_response(client: nio.AsyncClient, response: nio.JoinedMembersResponse) -> bool:
     """Order one joined-members response and return whether it may update the cache."""
+    room_id = response.room_id
     query = _ACTIVE_JOINED_MEMBERS_QUERY.get()
-    query_start_epoch = (
-        query.start_epoch if query is not None and query.client is client and query.room_id == room_id else None
-    )
+    matching_query = query if query is not None and query.client is client and query.room_id == room_id else None
     with _CLIENT_ENCRYPTION_STATES_GUARD:
         state = _client_encryption_state(client)
         current_epoch = state.membership_epochs.get(room_id, 0)
-        response_is_current = query_start_epoch is None or current_epoch == query_start_epoch
-        state.membership_epochs[room_id] = current_epoch + 1
-        if query_start_epoch is not None and query is not None:
-            query.response_recorded = True
-    return response_is_current
+        transport_succeeded = matrix_response_transport_succeeded(response)
+        response_is_current = transport_succeeded and (
+            matching_query is None
+            or (
+                matching_query.sequence == state.joined_members_query_sequences.get(room_id, 0)
+                and matching_query.start_epoch == current_epoch
+            )
+        )
+        if matching_query is not None:
+            matching_query.response = response
+            matching_query.response_accepted = response_is_current
+        if response_is_current:
+            state.membership_epochs[room_id] = current_epoch + 1
+        return response_is_current
+
+
+def _joined_members_response_is_current(
+    client: nio.AsyncClient,
+    response: nio.JoinedMembersResponse,
+    query: _JoinedMembersQuery,
+) -> bool:
+    """Return whether one exact query still owns its accepted response."""
+    if not matrix_response_transport_succeeded(response):
+        return False
+    with _CLIENT_ENCRYPTION_STATES_GUARD:
+        state = _client_encryption_state(client)
+        sequence_is_current = state.joined_members_query_sequences.get(query.room_id, 0) == query.sequence
+        current_epoch = state.membership_epochs.get(query.room_id, 0)
+    if query.response is None:
+        return sequence_is_current and current_epoch == query.start_epoch
+    return (
+        query.response is response
+        and query.response_accepted
+        and sequence_is_current
+        and current_epoch == query.start_epoch + 1
+    )
 
 
 @contextmanager
 def joined_members_query(
     client: nio.AsyncClient,
     room_id: str,
-) -> Iterator[Callable[[], bool]]:
+) -> Iterator[Callable[[nio.JoinedMembersResponse], bool]]:
     """Bind one joined-members request and expose its final generation check."""
-    query = _JoinedMembersQuery(
-        client=client,
-        room_id=room_id,
-        start_epoch=room_membership_epoch(client, room_id),
-    )
+    active_query = _ACTIVE_JOINED_MEMBERS_QUERY.get()
+    if active_query is not None and active_query.client is client and active_query.room_id == room_id:
+        yield lambda response: _joined_members_response_is_current(client, response, active_query)
+        return
+    with _CLIENT_ENCRYPTION_STATES_GUARD:
+        state = _client_encryption_state(client)
+        sequence = state.joined_members_query_sequences.get(room_id, 0) + 1
+        state.joined_members_query_sequences[room_id] = sequence
+        query = _JoinedMembersQuery(
+            client=client,
+            room_id=room_id,
+            sequence=sequence,
+            start_epoch=state.membership_epochs.get(room_id, 0),
+        )
     token = _ACTIVE_JOINED_MEMBERS_QUERY.set(query)
     try:
-        yield lambda: room_membership_epoch(client, room_id) == query.start_epoch + int(query.response_recorded)
+        yield lambda response: _joined_members_response_is_current(client, response, query)
     finally:
         _ACTIVE_JOINED_MEMBERS_QUERY.reset(token)
 

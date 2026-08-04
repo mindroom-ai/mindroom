@@ -169,7 +169,8 @@ Invite membership is intentionally omitted from encrypted delivery caches becaus
 Hydration retires every existing outbound Megolm session as soon as the prior recipient roster is unknown, invite-polluted, or differs from authoritative joined membership, while preserving a shared session when the authoritative roster is unchanged.
 While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must re-establish key readiness instead of reusing incomplete encryption state.
 Sync responses preapply membership, encryption, summary-count, and device-list invalidations at `receive_response` entry before recovery dispatch or callbacks can await.
-Membership request generations reject an older joined-members response before it can overwrite a newer roster and remain bound through any hidden-room full-state await until publication.
+Every runtime joined-members request is generation-ordered before nio may mutate its room roster, and success-typed non-2xx responses are rejected at the same boundary.
+Delivery-owned membership generations remain bound through any hidden-room full-state await until publication.
 Every runtime key query, including pinned-device discovery, is globally sequenced so an older response or a response predating a device-list invalidation cannot roll nio's device store backward.
 Hidden-room full state and joined-members results must agree on the joined roster before either can publish a cache entry.
 An encrypted cache replacement that disagrees with the hydration snapshot is likewise marked membership-unsynchronized before hydration retries.
@@ -184,9 +185,9 @@ Due selection gives each due owner cohort a read-queue position before repeated-
 | --- | --- |
 | Owner has not finished first sync | Back off through six readiness probes without consuming the Matrix failure budget, then park. |
 | Desired room is absent from authoritative membership | Refresh membership once after the shared membership delay, then park quietly. |
-| Room scan or target freshness has a transient Matrix failure | Retry until the sixth actual Matrix failure, then park and emit one terminal warning. |
+| Room scan or target freshness has a transient Matrix failure | Retry until the sixth actual Matrix failure, then park the exact retained targets and emit one terminal warning. |
 | Authoritative owner-room discovery fails six times | Park discovery and emit one terminal warning until owner readiness or configuration resume restarts it. |
-| Owner readiness or configuration resume arrives | Invalidate retained membership state, refresh authoritative room scope, and re-enroll parked work with fresh budgets. |
+| Owner readiness or configuration resume arrives | Invalidate retained membership state, refresh authoritative room scope, and re-enroll the exact parked work with fresh budgets. |
 | Owner is removed | Delete its jobs, target watermarks, discovery task, and membership snapshot. |
 
 Each lease merges the outcomes from every ready owner's Matrix history view before newest-target selection, freshness checks, and resume delivery.
@@ -218,6 +219,7 @@ Pause cancels delivery waiters before admission and drains the admitted send bec
 Pause also cancels and drains shared membership snapshots before configuration mutation can replace their Matrix clients.
 Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its owned lifecycle state.
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
+Matrix event IDs are opaque, so equal-timestamp target ordering uses exact predecessor evidence from the homeserver's reverse-chronological history rather than lexical event-ID order or a scan-relative rank.
 Object identity prevents older leases from mutating replaced work, while generation-compatible settlements may advance watermarks across a concurrent readiness refresh.
 The orchestrator pauses recovery before configuration mutation and resolves retained work only against current ready owner generations after resume.
 

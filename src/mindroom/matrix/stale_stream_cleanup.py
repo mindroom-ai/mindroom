@@ -96,6 +96,7 @@ class InterruptedThread:
     owner_user_id: str
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
+    same_timestamp_older_event_ids: frozenset[str] = field(default_factory=frozenset, compare=False)
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,8 @@ class _MessageState:
     stream_status: str | None = None
     requester_user_id: str | None = None
     bot_user_id: str | None = None
+    history_index: int | None = None
+    same_timestamp_older_event_ids: frozenset[str] = field(default_factory=frozenset)
     stop_reaction_event_ids_by_sender: dict[str, set[str]] = field(default_factory=dict)
 
 
@@ -591,6 +594,7 @@ async def _cleanup_one_stale_message(
             owner_user_id=owner_user_id,
             original_sender_id=state.requester_user_id,
             timestamp_ms=state.original_timestamp,
+            same_timestamp_older_event_ids=state.same_timestamp_older_event_ids,
         )
     await _redact_stop_reactions(
         client,
@@ -684,6 +688,7 @@ async def _scan_room_message_states(
         event_id: message for event_id, message in resolved_messages.items() if message.sender in cleanup_bot_user_ids
     }
     scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
+    history_indices_by_event_id = _history_indices_by_event_id(message_events)
     auto_resume_target_event_ids = _auto_resume_target_event_ids(
         scanned_message_data_by_event_id.values(),
         bot_user_ids=bot_user_ids | set(trusted_sender_ids),
@@ -703,7 +708,9 @@ async def _scan_room_message_states(
         bot_user_ids=cleanup_bot_user_ids,
         requester_ids_by_event_id=requester_resolution.requester_ids_by_event_id,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
+        history_indices_by_event_id=history_indices_by_event_id,
     )
+    _annotate_same_timestamp_order(message_states)
     return _ScannedRoomMessageStates(
         message_states=message_states,
         auto_resume_target_event_ids=auto_resume_target_event_ids,
@@ -800,6 +807,7 @@ def _merge_bot_resolved_message_states(
     bot_user_ids: set[str],
     requester_ids_by_event_id: dict[str, str],
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
+    history_indices_by_event_id: dict[str, int],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
     for target_event_id, message in resolved_messages.items():
@@ -814,6 +822,7 @@ def _merge_bot_resolved_message_states(
             bot_user_id=message.sender,
             requester_user_id=requester_user_id,
             fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
+            history_index=history_indices_by_event_id.get(target_event_id),
         )
 
 
@@ -825,6 +834,7 @@ def _merge_resolved_message_state(
     bot_user_id: str,
     requester_user_id: str | None,
     fallback_thread_id: str | None = None,
+    history_index: int | None = None,
 ) -> None:
     """Store one resolved message if it has the fields cleanup needs."""
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
@@ -843,6 +853,38 @@ def _merge_resolved_message_state(
     state.stream_status = message.stream_status
     state.requester_user_id = requester_user_id
     state.bot_user_id = bot_user_id
+    state.history_index = history_index
+
+
+def _history_indices_by_event_id(
+    message_events: list[nio.RoomMessageText | nio.RoomMessageNotice],
+) -> dict[str, int]:
+    """Return exact discovery positions from reverse-chronological Matrix history."""
+    indices_by_event_id: dict[str, int] = {}
+    for index, event in enumerate(message_events):
+        event_id = event.event_id
+        if isinstance(event_id, str):
+            indices_by_event_id.setdefault(event_id, index)
+    return indices_by_event_id
+
+
+def _annotate_same_timestamp_order(message_states: dict[str, _MessageState]) -> None:
+    """Attach exact predecessor proof without persisting a scan-relative rank."""
+    grouped_states: dict[tuple[str, int], list[tuple[str, _MessageState]]] = {}
+    for event_id, state in message_states.items():
+        if state.thread_id is None or state.history_index is None:
+            continue
+        grouped_states.setdefault((state.thread_id, state.original_timestamp), []).append((event_id, state))
+
+    for states in grouped_states.values():
+        older_event_ids: set[str] = set()
+        for event_id, state in sorted(
+            states,
+            key=lambda item: item[1].history_index if item[1].history_index is not None else -1,
+            reverse=True,
+        ):
+            state.same_timestamp_older_event_ids = frozenset(older_event_ids)
+            older_event_ids.add(event_id)
 
 
 async def _scanned_message_data_by_event_id(
@@ -1591,6 +1633,7 @@ def _interrupted_thread_from_terminal_state(
         owner_user_id=owner_user_id,
         original_sender_id=state.requester_user_id,
         timestamp_ms=state.original_timestamp,
+        same_timestamp_older_event_ids=state.same_timestamp_older_event_ids,
     )
 
 
