@@ -1223,9 +1223,11 @@ class AgentBot:
         sync_token = await self._sync_cache_trust.prepare_startup(
             transport_resume_token=None if classic else transport_token,
         )
-        if classic and (sync_token is None or transport_token != sync_token):
-            client.rewind_sync_recovery_for_startup(sync_token)
-        cast("Any", client).next_batch = sync_token
+        if classic:
+            if sync_token is None or transport_token != sync_token:
+                client.rewind_sync_recovery_for_startup(sync_token)
+        else:
+            cast("Any", client).next_batch = sync_token
 
     async def _certify_sync_response(
         self,

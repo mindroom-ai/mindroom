@@ -1060,7 +1060,8 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
     ):
         await bot.start()
 
-    assert client.next_batch == "s_saved"
+    assert client.loaded_sync_token == "s_saved"  # noqa: S105
+    assert client.next_batch == ""
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1092,8 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
         await bot.start()
 
     get_joined_rooms.assert_not_awaited()
-    assert client.next_batch == "s_saved"
+    assert client.loaded_sync_token == "s_saved"  # noqa: S105
+    assert client.next_batch == ""
     assert (
         await bot._cold_history_fence.admit_source(
             room_id,
@@ -1575,7 +1577,8 @@ async def test_bot_start_initializes_postgres_principal_before_restoring_checkpo
         ):
             await bot.start()
 
-        assert client.next_batch == "s_postgres_restart"
+        assert client.loaded_sync_token == "s_postgres_restart"  # noqa: S105
+        assert client.next_batch == ""
         assert bot.event_cache.cache_generation == generation
     finally:
         await reopened_root.close()
@@ -1661,7 +1664,8 @@ async def test_postgres_outage_clears_unverifiable_checkpoint_and_recovers_cold(
         ):
             await recovered_bot.start()
 
-        assert recovered_client.next_batch is None
+        assert recovered_client.loaded_sync_token == ""
+        assert recovered_client.next_batch == ""
         assert await recovered_view.get_event(room_id, event_id) is None
     finally:
         await recovered_root.close()
@@ -1719,7 +1723,8 @@ async def test_bot_start_rejects_checkpoint_from_reset_cache_generation(tmp_path
     ):
         await bot.start()
 
-    assert client.next_batch is None
+    assert client.loaded_sync_token == ""
+    assert client.next_batch == ""
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
@@ -1746,7 +1751,8 @@ async def test_bot_start_clears_checkpoint_when_cache_generation_is_unavailable(
     ):
         await bot.start()
 
-    assert client.next_batch is None
+    assert client.loaded_sync_token == ""
+    assert client.next_batch == ""
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     bot.event_cache.purge_principal.assert_awaited_once()
 
@@ -1770,7 +1776,8 @@ async def test_bot_start_purges_untrusted_cache_without_checkpoint_when_generati
     ):
         await bot.start()
 
-    assert client.next_batch is None
+    assert client.loaded_sync_token == ""
+    assert client.next_batch == ""
     bot.event_cache.purge_principal.assert_awaited_once()
 
 
@@ -1797,7 +1804,8 @@ async def test_legacy_v2_sync_token_path_is_not_parsed(tmp_path: Path) -> None:
     ):
         await bot.start()
 
-    assert client.next_batch is None
+    assert client.loaded_sync_token == ""
+    assert client.next_batch == ""
     assert token_path.exists()
 
 
@@ -2408,8 +2416,10 @@ async def test_classic_startup_rewind_stays_on_the_client_event_loop(tmp_path: P
     event_loop_thread = threading.get_ident()
     rewind_threads: list[int] = []
 
-    def record_rewind_thread(_token: str | None) -> None:
+    def record_rewind_thread(token: str | None) -> None:
         rewind_threads.append(threading.get_ident())
+        bot.client.loaded_sync_token = token or ""
+        bot.client.next_batch = ""
 
     bot.client.rewind_sync_recovery_for_startup.side_effect = record_rewind_thread
     save_sync_token(
@@ -2422,7 +2432,8 @@ async def test_classic_startup_rewind_stays_on_the_client_event_loop(tmp_path: P
     await bot._prepare_matrix_sync_continuity()
     bot.client.rewind_sync_recovery_for_startup.assert_called_once_with("s_safe")
     assert rewind_threads == [event_loop_thread]
-    assert bot.client.next_batch == "s_safe"
+    assert bot.client.loaded_sync_token == "s_safe"  # noqa: S105
+    assert bot.client.next_batch == ""
 
     decision = await bot._certify_sync_response(
         next_batch="s_after_recovery",
@@ -2522,7 +2533,7 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
                 room_id,
             )
         requested_since.append(query.get("since", [None])[0])
-        response = _empty_real_sync(room_id, "s_after_replay")
+        response = _empty_real_sync(room_id, "s_safe")
         await restarted.receive_response(response)
         return response
 
@@ -2534,7 +2545,7 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
         await bot._prepare_matrix_sync_continuity()
 
         assert restarted.loaded_sync_token == "s_safe"  # noqa: S105
-        assert restarted.next_batch == "s_safe"
+        assert restarted.next_batch == ""
         assert restarted.store is not None
         assert restarted.store.load_sync_token() == "s_safe"
         gaps, events = restarted.store.load_sync_recovery()
@@ -2562,7 +2573,7 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work( 
         assert decision.reason is None
         checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
         assert checkpoint is not None
-        assert checkpoint.token == "s_after_replay"  # noqa: S105
+        assert checkpoint.token == "s_safe"  # noqa: S105
     finally:
         await restarted.close()
         assert restarted.store is not None

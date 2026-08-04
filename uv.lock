@@ -4628,7 +4628,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.34.1"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=fix%2Fsingle-checkpoint-startup-rewind#85c3d5ff481854fb2382310084fd1fe2a047775e" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=fix%2Fsingle-checkpoint-startup-rewind#b0f0183869e1c1ce8bc4f65e5e6c884b3b42666d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

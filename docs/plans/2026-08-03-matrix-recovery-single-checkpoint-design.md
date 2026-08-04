@@ -74,7 +74,7 @@ The store transaction will replace or delete the stored sync token, clear comple
 
 It will retain all generation-positive recovery gaps and pending callback rows, including rows whose admission has not completed.
 
-The client operation will reload that retained recovery state, clear the matching in-memory window state, and set `loaded_sync_token` and `next_batch` to the supplied token.
+The client operation will reload that retained recovery state, clear the matching in-memory window state, install the supplied token as `loaded_sync_token`, and clear `next_batch` so the first equal-token response is still applied.
 
 The operation will reject use after any sync request has started or while response execution or recovery dispatch tasks are active.
 
