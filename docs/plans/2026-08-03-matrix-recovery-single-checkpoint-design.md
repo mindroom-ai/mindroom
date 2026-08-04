@@ -88,6 +88,8 @@ If no checkpoint validates, the authoritative token is `None` and the principal 
 
 In Classic Sync mode, MindRoom invokes nio's atomic startup rewind before registering callbacks or starting sync when the loaded nio token differs from the authoritative token or the authoritative token is absent.
 
+MindRoom runs that startup-only client mutation on the owning event-loop thread so cancellation cannot leave an off-loop rewind mutating nio or its Peewee-bound store after startup has exited.
+
 The tokenless rewind clears completed markers even when both stored tokens are absent, so a fresh baseline cannot inherit stale suppression state.
 
 An equal non-null token is left untouched so nio can drain any retained admission work at or below the certified checkpoint.

@@ -11,6 +11,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import aiosqlite
 import nio
@@ -2399,11 +2400,18 @@ async def test_gap_cache_cancellation_defers_rewind_across_loop_exit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_classic_startup_rewind_avoids_two_pass_cache_replay(tmp_path: Path) -> None:
-    """A divergent nio cursor rewinds before sync and may certify its replay directly."""
+async def test_classic_startup_rewind_stays_on_the_client_event_loop(tmp_path: Path) -> None:
+    """A divergent nio cursor rewinds on its owning loop before sync starts."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.loaded_sync_token = "s_nio_live"  # noqa: S105
+    event_loop_thread = threading.get_ident()
+    rewind_threads: list[int] = []
+
+    def record_rewind_thread(_token: str | None) -> None:
+        rewind_threads.append(threading.get_ident())
+
+    bot.client.rewind_sync_recovery_for_startup.side_effect = record_rewind_thread
     save_sync_token(
         tmp_path,
         bot.agent_name,
@@ -2413,6 +2421,7 @@ async def test_classic_startup_rewind_avoids_two_pass_cache_replay(tmp_path: Pat
 
     await bot._prepare_matrix_sync_continuity()
     bot.client.rewind_sync_recovery_for_startup.assert_called_once_with("s_safe")
+    assert rewind_threads == [event_loop_thread]
     assert bot.client.next_batch == "s_safe"
 
     decision = await bot._certify_sync_response(
@@ -2447,10 +2456,11 @@ async def test_sliding_startup_keeps_nio_transport_resume_cursor(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(
+async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(  # noqa: PLR0915
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Classic restart must replay from cache trust without deleting unsettled intake."""
+    """The first real sync replays from cache trust and admits retained nio work."""
     room_id = "!restart:localhost"
     bot = _agent_bot(tmp_path)
     save_sync_token(
@@ -2481,6 +2491,43 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(
 
     restarted = _persisting_nio_client(tmp_path, bot.agent_user.user_id)
     bot.client = restarted
+    requested_since: list[str | None] = []
+    recovery_bounds: list[tuple[str | None, str | None]] = []
+    admitted: list[str] = []
+
+    async def admit(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        _provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        admitted.append(event.event_id)
+
+    async def send_sync(
+        _response_class: object,
+        _method: str,
+        path: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> nio.Response:
+        query = parse_qs(urlparse(path).query)
+        if _response_class is nio.RoomMessagesResponse:
+            recovery_bounds.append(
+                (
+                    query.get("from", [None])[0],
+                    query.get("to", [None])[0],
+                ),
+            )
+            return nio.RoomMessagesResponse.from_dict(
+                {"start": "s_cursor", "end": "s_advanced", "chunk": []},
+                room_id,
+            )
+        requested_since.append(query.get("since", [None])[0])
+        response = _empty_real_sync(room_id, "s_after_replay")
+        await restarted.receive_response(response)
+        return response
+
+    restarted.add_event_admission_callback(admit, nio.RoomMessageText)
+    monkeypatch.setattr(restarted, "_send", send_sync)
     try:
         assert restarted.loaded_sync_token == "s_advanced"  # noqa: S105
 
@@ -2498,12 +2545,24 @@ async def test_classic_startup_rewinds_divergent_nio_cursor_and_preserves_work(
             ("$pending", 1),
         ]
         assert restarted.store.load_sliding_window_tokens() == {}
+
+        response = await restarted.sync()
+
+        assert requested_since == ["s_safe"]
+        assert recovery_bounds == [("s_cursor", "s_advanced")]
+        assert admitted == ["$pending"]
+        checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_safe"  # noqa: S105
         decision = await bot._certify_sync_response(
-            next_batch="s_after_replay",
+            next_batch=response.next_batch,
             cache_result=SyncCacheWriteResult(complete=True),
         )
         assert decision.state is SyncTrustState.CERTIFIED
         assert decision.reason is None
+        checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+        assert checkpoint is not None
+        assert checkpoint.token == "s_after_replay"  # noqa: S105
     finally:
         await restarted.close()
         assert restarted.store is not None

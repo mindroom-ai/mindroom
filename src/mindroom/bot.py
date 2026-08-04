@@ -1224,10 +1224,7 @@ class AgentBot:
             transport_resume_token=None if classic else transport_token,
         )
         if classic and (sync_token is None or transport_token != sync_token):
-            await asyncio.to_thread(
-                client.rewind_sync_recovery_for_startup,
-                sync_token,
-            )
+            client.rewind_sync_recovery_for_startup(sync_token)
         cast("Any", client).next_batch = sync_token
 
     async def _certify_sync_response(
