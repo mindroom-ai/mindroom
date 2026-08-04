@@ -28,6 +28,7 @@ from mindroom.matrix.client_room_admin import (
     join_room,
     leave_room,
 )
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
@@ -629,7 +630,7 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
         _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
         return direct_room_ids
-    if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.DirectRoomsErrorResponse) and matrix_response_is_not_found(response):
         # No m.direct account data is a stable empty state for this user.
         _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
 

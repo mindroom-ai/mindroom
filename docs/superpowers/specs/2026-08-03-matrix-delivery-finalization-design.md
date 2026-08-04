@@ -46,8 +46,12 @@ Every runtime joined-members request must reject older responses before they mut
 Success-typed joined-members responses attached to non-successful HTTP transports must be rejected before cache mutation.
 Global key-query sequences and device-list generations must reject responses that finish after a newer query or invalidation without rejecting the query's own session retirement.
 Success-typed key-query responses attached to non-successful HTTP transports must be rejected before device-store mutation.
+Success-typed full-state responses attached to non-successful HTTP transports must be rejected before hidden-room parsing or publication.
+Every non-2xx Matrix response must become the endpoint's declared typed error before success-payload parsing, except for nio's deliberate HTTP 401 interactive-auth responses.
+Typed transport errors must retain endpoint context such as room IDs, to-device messages, intended share recipients, rate-limit delays, and soft-logout state.
 Recipient and membership generations must invalidate a prepared transport when its exact room state changes.
 Nio's monotonic encrypted-room record must dominate a later negative state-event response.
+Only an untransported internal response or an actual HTTP 404 may let `M_NOT_FOUND` prove resource absence in any runtime Matrix read.
 Full room state and joined-members results must agree on the joined-only roster before hidden-room publication.
 An unchanged authoritative joined roster must preserve its existing outbound session.
 Proof rejection must return the existing retry signal without sending an event.
@@ -61,7 +65,11 @@ Encrypted hydration will snapshot the cached encryption recipient roster before 
 The same hydration operation will refresh tracked users, query required device keys, and publish a complete hidden-room candidate only after validation succeeds.
 Hidden-room candidates retain full non-membership state but intentionally omit invite membership from nio's encryption roster.
 Weakly client-owned membership and device-list generations order hydration network responses against concurrent Classic Sync and Sliding Sync invalidations.
-Sync processing preapplies membership events, encryption events, joined-count mismatches, and device-list changes before recovery dispatch or callbacks can await.
+Ordered Classic and Sliding Sync handlers preapply membership events, encryption events, joined-count mismatches, and device-list changes before recovery dispatch or callbacks can await.
+Success-typed sync responses attached to non-successful HTTP transports are rejected before ordered ingestion.
+Sync transport failures are normalized during response creation so nio's pre-return rate-limit callbacks cannot expose a success response.
+Final nested key-claim and per-device share errors or exceptions invalidate the active Megolm sharing operation after nio's own retry loop finishes.
+The aggregate sharing wrapper retires the failed outbound session, removes only an event created by that invocation, and raises before encryption even when nio swallows a shard failure.
 Each runtime joined-members request records whether its own response advanced the membership generation and refuses any response superseded by a later-started request before it can overwrite the cache.
 The accepted joined-members generation remains bound across hidden-room full-state and device-key awaits so no candidate can publish a superseded roster.
 Every runtime key query, including pinned-device discovery, uses one global request sequence at the client response boundary.
@@ -121,6 +129,10 @@ A regression test will prove that an unchanged authoritative roster preserves th
 A regression test will prove that a stale plaintext state-event response cannot cause an unencrypted sidecar upload after the cache becomes encrypted.
 A hidden-room regression will prove that full-state membership cannot be overwritten by an older joined-members snapshot.
 A global ordering regression will prove that a newer background key query and a device-list invalidation both supersede an older response before nio mutates its device store.
+Real Classic and Sliding Sync transport regressions will prove that successful device-list invalidations reach the ordered handlers while success-typed non-2xx responses do not mutate state.
+A typed-response matrix will prove that schema-valid success bodies on failed transports retain each endpoint's declared error contract and context without breaking interactive authentication.
+A plaintext-probe regression will prove that a non-404 `M_NOT_FOUND` transport cannot authorize an unencrypted send.
+Megolm sharing regressions will cover error-shaped and success-shaped failed shards, failed prerequisite key claims, exhausted transport exceptions, and concurrent sharing-event ownership.
 A file regression will prove that an encryption transition during local file I/O occurs before upload-mode selection.
 A local-encryption regression will prove that immediate confirmation delivery cannot reuse a pre-encryption roster or Megolm session.
 A concurrency regression will prove that local encryption enablement cannot commit while a same-client plaintext delivery holds the room lock.

@@ -447,10 +447,14 @@ Use proper cached-room and crypto-state test doubles instead of weakening produc
 
 - [ ] **Step 6: Fence stale hydration responses**
 
-Preapply membership events, encryption events, joined-count mismatches, and device-list changes at `receive_response` entry before Classic Sync or Sliding Sync recovery work can await.
+Preapply membership events, encryption events, joined-count mismatches, and device-list changes at the ordered Classic Sync and Sliding Sync handlers before recovery work can await.
+Construct endpoint-specific typed errors for non-2xx Matrix responses before success-payload parsing, while preserving nio's deliberate HTTP 401 interactive-auth responses.
+Reject non-2xx sync responses before rate-limit callbacks or ordered ingestion, and reject non-2xx full-state responses before hidden-room event parsing or publication.
 Give every runtime `joined_members` request an ordering token and reject its response before cache mutation when a newer request or membership update won, or when its HTTP transport was unsuccessful.
 Retain the accepted membership generation through hidden-room full-state validation, device-key readiness, and candidate publication.
 Globally sequence every runtime `keys_query`, including pinned-device discovery, and reject an older or success-typed non-2xx response at the client response boundary before nio mutates its device store.
+Require an actual HTTP 404 before any transported `M_NOT_FOUND` response can prove resource absence across delivery, scheduling, config, room, tool, and strict thread-history reads.
+Track final key-claim and per-device share failures across nio's aggregate Megolm sharing call, retire the outbound session, clean only the current invocation's sharing event, and abort before encryption.
 Capture device-list and membership generations across delivery-owned `keys_query`, and requeue the queried and current room users before rejecting a superseded response.
 Do not use the recipient generation for key-query supersession because a successful key query legitimately retires its own obsolete outbound session.
 Require hidden-room full state and joined-members results to agree on their joined-only roster before cache publication.

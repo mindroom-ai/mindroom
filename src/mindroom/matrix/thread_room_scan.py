@@ -18,6 +18,7 @@ from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ def _event_info_from_lookup_response(
         return EventInfo.from_event(response.event.source)
     if not strict:
         return None
-    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetEventError) and matrix_response_is_not_found(response):
         return None
     detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
     msg = f"Failed to resolve Matrix event {event_id}: {detail}"

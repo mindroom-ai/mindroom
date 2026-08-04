@@ -17,6 +17,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import put_room_state_result, room_state_write_succeeded
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
@@ -912,7 +913,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
             return self._payload(
                 "ok",
                 action="get_state",
@@ -1253,7 +1254,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetEventError) and matrix_response_is_not_found(response):
             return self._payload(
                 "ok",
                 action="get_event",

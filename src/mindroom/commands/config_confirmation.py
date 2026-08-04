@@ -17,6 +17,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -262,7 +263,7 @@ async def _resolve_pending_change(
         _PENDING_CONFIG_EVENT_TYPE,
         event_id,
     )
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to resolve pending config change from Matrix state: {response}"

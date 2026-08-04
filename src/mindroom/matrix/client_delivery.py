@@ -355,7 +355,7 @@ async def _encrypted_room_for_hydration(
     if not members_are_current():
         _fence_superseded_joined_members(client, room_id)
         return None
-    if not isinstance(state, nio.RoomGetStateResponse):
+    if not isinstance(state, nio.RoomGetStateResponse) or not matrix_response_transport_succeeded(state):
         return None
     candidate = _room_from_remote_state(client, room_id, members, state)
     room = cached_room(client, room_id)

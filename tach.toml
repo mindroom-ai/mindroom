@@ -987,6 +987,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1351,6 +1352,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
@@ -2355,10 +2357,17 @@ visibility = [
 path = "mindroom.matrix.response_status"
 depends_on = []
 visibility = [
+    "mindroom.commands.config_confirmation",
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.matrix_api",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.encryption_recipients",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_room_scan",
+    "mindroom.scheduling",
 ]
 
 [[modules]]
@@ -2839,6 +2848,7 @@ path = "mindroom.matrix.thread_room_scan"
 depends_on = [
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_membership",
 ]
 
@@ -2851,6 +2861,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_projection",
     "mindroom.matrix.visible_body",
     "mindroom.streaming",
@@ -2954,6 +2965,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.response_status",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
@@ -3268,6 +3280,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.response_status",
     "mindroom.runtime_protocols",
 ]
 
@@ -3339,6 +3352,7 @@ path = "mindroom.scheduling"
 depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
+    "mindroom.matrix.response_status",
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
 ]

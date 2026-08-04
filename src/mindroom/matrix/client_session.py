@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 from nio.client.sliding_membership import sliding_room_is_invite
+from nio.responses import RegisterInteractiveResponse, RoomPutAliasError
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -45,7 +48,16 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping, MutableSequence
     from uuid import UUID
 
+    from aiohttp import ClientResponse
+    from nio.client.async_client import _SyncResponseEnvelope
+    from nio.client.sync_response_ordering import OneTimeKeyCountCommit
+
 logger = get_logger(__name__)
+
+_GROUP_SESSION_SHARE_ROOM_ID: ContextVar[str | None] = ContextVar(
+    "mindroom_group_session_share_room_id",
+    default=None,
+)
 
 _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
     {
@@ -234,6 +246,160 @@ def _preapply_device_invalidations(
         client.olm.add_changed_users(set(changed_user_ids))
 
 
+class _JsonResponseFactory(Protocol):
+    """Nio response-class surface used to construct endpoint-specific errors."""
+
+    def from_dict(self, parsed_dict: dict[str, object], *data: object) -> nio.Response:
+        """Construct a response from one Matrix JSON object."""
+        ...
+
+
+_SIMPLE_TRANSPORT_ERROR_CLASSES: dict[type[nio.Response], type[nio.ErrorResponse]] = {
+    nio.ContentRepositoryConfigResponse: nio.ContentRepositoryConfigError,
+    nio.RoomDeleteAliasResponse: nio.RoomDeleteAliasError,
+    nio.RoomPutAliasResponse: RoomPutAliasError,
+}
+
+
+@dataclass(frozen=True)
+class _MatrixErrorDetails:
+    """Validated fields retained from a failed Matrix transport body."""
+
+    message: str
+    status_code: str
+    retry_after_ms: int | None
+    soft_logout: bool
+
+
+def _matrix_error_details(body: object) -> _MatrixErrorDetails:
+    """Return safe Matrix error fields, ignoring any success-shaped payload."""
+    parsed_body = cast("dict[str, object]", body) if isinstance(body, dict) else {}
+    raw_message = parsed_body.get("error")
+    raw_status_code = parsed_body.get("errcode")
+    raw_retry_after_ms = parsed_body.get("retry_after_ms")
+    return _MatrixErrorDetails(
+        message=raw_message if isinstance(raw_message, str) else "Matrix response transport failed.",
+        status_code=raw_status_code if isinstance(raw_status_code, str) else "M_UNKNOWN",
+        retry_after_ms=(
+            raw_retry_after_ms
+            if isinstance(raw_retry_after_ms, int) and not isinstance(raw_retry_after_ms, bool)
+            else None
+        ),
+        soft_logout=parsed_body.get("soft_logout") is True,
+    )
+
+
+def _matrix_error_body(details: _MatrixErrorDetails) -> dict[str, object]:
+    """Render details through nio's normal endpoint error factories."""
+    body: dict[str, object] = {
+        "errcode": details.status_code,
+        "error": details.message,
+    }
+    if details.retry_after_ms is not None:
+        body["retry_after_ms"] = details.retry_after_ms
+    if details.soft_logout:
+        body["soft_logout"] = True
+    return body
+
+
+def _contextual_transport_error(
+    response_class: type[nio.Response],
+    data: tuple[Any, ...],
+    details: _MatrixErrorDetails,
+) -> nio.ErrorResponse | None:
+    """Return errors for nio factories that lose endpoint context."""
+    error_kwargs = {
+        "status_code": details.status_code,
+        "retry_after_ms": details.retry_after_ms,
+        "soft_logout": details.soft_logout,
+    }
+    if response_class is nio.RoomGetStateEventResponse:
+        return nio.RoomGetStateEventError(details.message, room_id=cast("str", data[-1]), **error_kwargs)
+    if response_class is nio.KeysClaimResponse:
+        room_id = cast("str", data[0]) if data else ""
+        return nio.KeysClaimError(details.message, room_id=room_id, **error_kwargs)
+    if response_class is nio.ToDeviceResponse:
+        return nio.ToDeviceError(
+            details.message,
+            to_device_message=cast("nio.ToDeviceMessage", data[0]),
+            **error_kwargs,
+        )
+    if response_class is nio.ShareGroupSessionResponse:
+        return nio.ShareGroupSessionError(
+            details.message,
+            room_id=cast("str", data[0]),
+            users_shared_with=cast("set[tuple[str, str]]", data[1]),
+            **error_kwargs,
+        )
+    if response_class is nio.RoomReadMarkersResponse:
+        return nio.RoomReadMarkersError(details.message, room_id=cast("str", data[0]), **error_kwargs)
+    return None
+
+
+def _file_transport_error(
+    response_class: type[nio.Response],
+    details: _MatrixErrorDetails,
+) -> nio.ErrorResponse | None:
+    """Return the declared error type for a failed file response."""
+    error_kwargs = {
+        "status_code": details.status_code,
+        "retry_after_ms": details.retry_after_ms,
+        "soft_logout": details.soft_logout,
+    }
+    if issubclass(response_class, nio.DownloadResponse):
+        return nio.DownloadError(details.message, **error_kwargs)
+    if issubclass(response_class, nio.ThumbnailResponse):
+        return nio.ThumbnailError(details.message, **error_kwargs)
+    if issubclass(response_class, nio.FileResponse):
+        return nio.DownloadError(details.message, **error_kwargs)
+    return None
+
+
+def _matrix_transport_error(
+    response_class: type[nio.Response],
+    data: tuple[Any, ...],
+    details: _MatrixErrorDetails,
+) -> nio.ErrorResponse:
+    """Construct a failed transport through the endpoint's typed error contract."""
+    error = _contextual_transport_error(response_class, data, details) or _file_transport_error(
+        response_class,
+        details,
+    )
+    if error is None:
+        simple_error_class = _SIMPLE_TRANSPORT_ERROR_CLASSES.get(response_class)
+        if simple_error_class is not None:
+            error = simple_error_class(
+                details.message,
+                status_code=details.status_code,
+                retry_after_ms=details.retry_after_ms,
+                soft_logout=details.soft_logout,
+            )
+    if error is None:
+        response_factory = cast(_JsonResponseFactory, response_class)  # noqa: TC006
+        parsed_error = response_factory.from_dict(_matrix_error_body(details), *data)
+        if not isinstance(parsed_error, nio.ErrorResponse):
+            message = f"{response_class.__name__} accepted a Matrix error body as a success response."
+            raise TypeError(message)
+        error = parsed_error
+    return error
+
+
+def _retire_active_group_session_share(client: nio.AsyncClient) -> None:
+    """Fence the room session owned by the current nested share request."""
+    room_id = _GROUP_SESSION_SHARE_ROOM_ID.get()
+    if room_id is not None:
+        retire_outbound_group_session(client, room_id)
+
+
+def _abort_owned_group_session_share(client: nio.AsyncClient, room_id: str) -> None:
+    """Clean nio state left behind when its sharing prerequisite raises early."""
+    event = client.sharing_session.pop(room_id, None)
+    if event is not None:
+        event.set()
+    if not complete_deferred_outbound_group_session_retirement(client, room_id):
+        retire_outbound_group_session(client, room_id)
+
+
 class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
@@ -247,6 +413,46 @@ class _AsyncRequestHeaders(Protocol):
 
 class _MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
+
+    async def create_matrix_response(
+        self,
+        response_class: type,
+        transport_response: ClientResponse,
+        data: tuple[Any, ...] | None = None,
+        save_to: os.PathLike | None = None,
+    ) -> nio.Response:
+        """Normalize failed success payloads before callbacks or endpoint handling."""
+        if transport_response.status in range(200, 300) or (
+            transport_response.status == 401
+            and response_class in (nio.DeleteDevicesResponse, RegisterInteractiveResponse)
+        ):
+            return await super().create_matrix_response(
+                response_class,
+                transport_response,
+                data=data,
+                save_to=save_to,
+            )
+        body = await self.parse_body(transport_response)
+        error = _matrix_transport_error(
+            cast("type[nio.Response]", response_class),
+            data or (),
+            _matrix_error_details(body),
+        )
+        error.transport_response = cast("Any", transport_response)
+        return error
+
+    async def _send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Record the final outcome of nested group-session requests."""
+        request_completed = False
+        try:
+            response = await super()._send(*args, **kwargs)
+            request_completed = True
+        finally:
+            if not request_completed:
+                _retire_active_group_session_share(self)
+        if isinstance(response, nio.ErrorResponse):
+            _retire_active_group_session_share(self)
+        return response
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
@@ -275,6 +481,30 @@ class _MindRoomAsyncClient(nio.AsyncClient):
                 "Joined-members response was rejected as stale or transport-failed.",
                 room_id=room_id,
             )
+        return response
+
+    async def share_group_session(
+        self,
+        room_id: str,
+        ignore_unverified_devices: bool = False,
+    ) -> nio.ShareGroupSessionResponse | nio.ShareGroupSessionError:
+        """Fail an aggregate key share when any per-device transport failed."""
+        preexisting_share_event = self.sharing_session.get(room_id)
+        token = _GROUP_SESSION_SHARE_ROOM_ID.set(room_id)
+        share_completed = False
+        try:
+            response = await super().share_group_session(
+                room_id,
+                ignore_unverified_devices=ignore_unverified_devices,
+            )
+            share_completed = True
+        finally:
+            _GROUP_SESSION_SHARE_ROOM_ID.reset(token)
+            if not share_completed and preexisting_share_event is None:
+                _abort_owned_group_session_share(self, room_id)
+        if complete_deferred_outbound_group_session_retirement(self, room_id):
+            message = "Encrypted room session sharing failed."
+            raise nio.SendRetryError(message)
         return response
 
     def invalidate_outbound_session(self, room_id: str) -> None:
@@ -409,14 +639,46 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         _preapply_encryption_invalidations(self, response)
         _preapply_device_invalidations(self, response)
 
+    async def _receive_sync_family(self, envelope: _SyncResponseEnvelope) -> None:
+        """Reject failed sync transports before ordered response ingestion."""
+        if not matrix_response_transport_succeeded(envelope.response):
+            return
+        await super()._receive_sync_family(envelope)
+
+    async def _handle_sync(
+        self,
+        envelope: _SyncResponseEnvelope,
+        *,
+        one_time_key_count_commit: OneTimeKeyCountCommit | None = None,
+    ) -> None:
+        """Fence delivery from the ordered Classic Sync response before handling awaits."""
+        response = envelope.response
+        if isinstance(response, nio.SyncResponse) and self.next_batch != response.next_batch:
+            self._preapply_delivery_invalidations(response)
+        await super()._handle_sync(
+            envelope,
+            one_time_key_count_commit=one_time_key_count_commit,
+        )
+
+    async def _handle_sliding_sync(
+        self,
+        response: nio.SlidingSyncResponse,
+        *,
+        one_time_key_count_commit: OneTimeKeyCountCommit | None = None,
+    ) -> None:
+        """Fence delivery from the ordered Sliding Sync response before handling awaits."""
+        self._preapply_delivery_invalidations(response)
+        await super()._handle_sliding_sync(
+            response,
+            one_time_key_count_commit=one_time_key_count_commit,
+        )
+
     async def receive_response(self, response: nio.Response) -> None:
         """Fence delivery invalidations before sync recovery or callbacks can await."""
         if isinstance(response, nio.KeysQueryResponse) and (
             not matrix_response_transport_succeeded(response) or not key_query_response_is_current(self)
         ):
             return
-        if isinstance(response, (nio.SyncResponse, nio.SlidingSyncResponse)):
-            self._preapply_delivery_invalidations(response)
         await super().receive_response(response)
         if isinstance(response, nio.KeysQueryResponse):
             record_key_query_response_applied(self)

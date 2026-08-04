@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import UUID
 
 import nio
 import pytest
+from aiohttp import ClientConnectionError
+from nio.responses import RegisterInteractiveResponse, RoomPutAliasError
 
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
@@ -1451,6 +1454,192 @@ async def test_membership_handler_defers_session_retirement_during_share() -> No
     assert room_id not in client.olm.outbound_group_sessions
 
 
+@pytest.mark.parametrize(
+    "transport_payload",
+    [
+        {},
+        {"errcode": "M_UNKNOWN", "error": "upstream failed"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_room_send_preparation_rejects_failed_group_session_transport(
+    transport_payload: dict[str, str],
+) -> None:
+    """A failed key-share transport must retire its session before encryption."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    human_user_id = "@human:example.org"
+    client = _MindRoomAsyncClient("https://example.org", bot_user_id)
+    client.access_token = "token"  # noqa: S105
+    client.store = MagicMock()
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    room.add_member(human_user_id, "Human", None)
+    client.rooms[room_id] = room
+    session = SimpleNamespace(
+        shared=False,
+        users_shared_with=set(),
+        users_ignored=set(),
+    )
+    client.olm = MagicMock()
+    client.olm.users_for_key_query = set()
+    client.olm.outbound_group_sessions = {room_id: session}
+    client.olm.should_share_group_session.return_value = True
+    client.get_missing_sessions = MagicMock(return_value={})
+    client.olm.share_group_session_parallel.return_value = [
+        ({(human_user_id, "DEVICE")}, {}),
+    ]
+    client.send = AsyncMock(return_value=_json_transport_response(502, transport_payload))
+    client.encrypt = MagicMock(
+        return_value=("m.room.encrypted", {"ciphertext": "must-not-send"}),
+    )
+
+    with pytest.raises(nio.SendRetryError):
+        await client._prepare_room_send(
+            room_id,
+            "m.room.message",
+            {"body": "secret", "msgtype": "m.text"},
+            UUID(int=0),
+            True,
+        )
+
+    assert room_id not in client.olm.outbound_group_sessions
+    client.encrypt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_room_send_preparation_rejects_failed_group_session_key_claim() -> None:
+    """A failed session-sharing key claim must abort before encryption."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    human_user_id = "@human:example.org"
+    client = _MindRoomAsyncClient("https://example.org", bot_user_id)
+    client.access_token = "token"  # noqa: S105
+    client.store = MagicMock()
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    room.add_member(human_user_id, "Human", None)
+    client.rooms[room_id] = room
+    client.olm = MagicMock()
+    client.olm.users_for_key_query = set()
+    client.olm.outbound_group_sessions = {
+        room_id: SimpleNamespace(
+            shared=False,
+            users_shared_with=set(),
+            users_ignored=set(),
+        ),
+    }
+    client.olm.should_share_group_session.return_value = True
+    client.get_missing_sessions = MagicMock(return_value={human_user_id: ["DEVICE"]})
+    client.olm.share_group_session_parallel.return_value = []
+    client.send = AsyncMock(
+        return_value=_json_transport_response(
+            502,
+            {"one_time_keys": {}},
+        ),
+    )
+    client.encrypt = MagicMock(
+        return_value=("m.room.encrypted", {"ciphertext": "must-not-send"}),
+    )
+
+    with pytest.raises(nio.SendRetryError):
+        await client._prepare_room_send(
+            room_id,
+            "m.room.message",
+            {"body": "secret", "msgtype": "m.text"},
+            UUID(int=0),
+            True,
+        )
+
+    assert room_id not in client.olm.outbound_group_sessions
+    client.encrypt.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_error"),
+    [
+        ("key_claim", ClientConnectionError),
+        ("session_shard", nio.SendRetryError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_group_session_transport_exception_cleans_owned_share(
+    failure_stage: str,
+    expected_error: type[BaseException],
+) -> None:
+    """Exhausted share requests must not leave a reusable session or stale event."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    human_user_id = "@human:example.org"
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        bot_user_id,
+        config=replace(matrix_client_config(), max_timeouts=0),
+    )
+    client.access_token = "token"  # noqa: S105
+    client.store = MagicMock()
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    room.add_member(human_user_id, "Human", None)
+    client.rooms[room_id] = room
+    client.olm = MagicMock()
+    client.olm.users_for_key_query = set()
+    client.olm.outbound_group_sessions = {
+        room_id: SimpleNamespace(
+            shared=False,
+            users_shared_with=set(),
+            users_ignored=set(),
+        ),
+    }
+    client.olm.should_share_group_session.return_value = True
+    client.get_missing_sessions = MagicMock(
+        return_value={human_user_id: ["DEVICE"]} if failure_stage == "key_claim" else {},
+    )
+    client.olm.share_group_session_parallel.return_value = (
+        [] if failure_stage == "key_claim" else [({(human_user_id, "DEVICE")}, {})]
+    )
+    client.send = AsyncMock(side_effect=ClientConnectionError("disconnected"))
+    client.encrypt = MagicMock(
+        return_value=("m.room.encrypted", {"ciphertext": "must-not-send"}),
+    )
+
+    with pytest.raises(expected_error):
+        await client._prepare_room_send(
+            room_id,
+            "m.room.message",
+            {"body": "secret", "msgtype": "m.text"},
+            UUID(int=0),
+            True,
+        )
+
+    assert room_id not in client.sharing_session
+    assert room_id not in client.olm.outbound_group_sessions
+    client.encrypt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_concurrent_group_share_preserves_existing_owner() -> None:
+    """A rejected second share must not clean up the first share's live event."""
+    room_id = "!room:example.org"
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    client.access_token = "token"  # noqa: S105
+    client.store = MagicMock()
+    client.rooms[room_id] = nio.MatrixRoom(room_id, client.user_id, encrypted=True)
+    client.olm = MagicMock()
+    client.olm.outbound_group_sessions = {room_id: SimpleNamespace(shared=False)}
+    existing_event = asyncio.Event()
+    client.sharing_session[room_id] = existing_event
+
+    with pytest.raises(nio.LocalProtocolError):
+        await client.share_group_session(room_id)
+
+    assert client.sharing_session[room_id] is existing_event
+    assert room_id in client.olm.outbound_group_sessions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sync_kind", ["classic", "sliding"])
 async def test_transport_guard_rejects_membership_change_during_header_refresh(
@@ -1859,6 +2048,354 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is True
     assert config.store_sync_tokens is True
+
+
+def _sync_transport_payload(
+    sync_kind: str,
+    *,
+    position: str,
+    changed_user_ids: list[str],
+) -> dict[str, Any]:
+    """Return one schema-valid Classic or Sliding Sync transport payload."""
+    device_lists = {"changed": changed_user_ids, "left": []}
+    if sync_kind == "classic":
+        return {
+            "next_batch": position,
+            "rooms": {"invite": {}, "join": {}, "leave": {}},
+            "device_one_time_keys_count": {},
+            "device_lists": device_lists,
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        }
+    return {
+        "pos": position,
+        "lists": {},
+        "rooms": {},
+        "extensions": {
+            "e2ee": {
+                "device_one_time_keys_count": {},
+                "device_lists": device_lists,
+            },
+            "to_device": {"events": []},
+            "account_data": {"global": [], "rooms": {}},
+        },
+    }
+
+
+def _json_transport_response(status: int, payload: object) -> MagicMock:
+    """Return an aiohttp-shaped JSON transport response."""
+    transport = MagicMock()
+    transport.status = status
+    transport.content_type = "application/json"
+    transport.content_disposition = None
+    transport.json = AsyncMock(return_value=payload)
+    return transport
+
+
+@pytest.mark.parametrize(
+    ("response_class", "response_data", "payload", "error_class"),
+    [
+        (nio.JoinedMembersResponse, ("!room:example.org",), {"joined": {}}, nio.JoinedMembersError),
+        (nio.KeysQueryResponse, (), {"device_keys": {}}, nio.KeysQueryError),
+        (nio.RoomGetStateResponse, ("!room:example.org",), [], nio.RoomGetStateError),
+        (
+            nio.RoomGetStateEventResponse,
+            ("m.room.encryption", "", "!room:example.org"),
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            nio.RoomGetStateEventError,
+        ),
+        (
+            nio.RoomMessagesResponse,
+            ("!room:example.org",),
+            {"chunk": [], "start": "s0", "end": "s1"},
+            nio.RoomMessagesError,
+        ),
+        (nio.UploadResponse, (), {"content_uri": "mxc://example.org/phantom"}, nio.UploadError),
+        (
+            nio.ToDeviceResponse,
+            (
+                nio.ToDeviceMessage(
+                    "m.room.encrypted",
+                    "@human:example.org",
+                    "DEVICE",
+                    {"ciphertext": "phantom"},
+                ),
+            ),
+            {},
+            nio.ToDeviceError,
+        ),
+        (nio.RoomSendResponse, ("!room:example.org",), {"event_id": "$phantom"}, nio.RoomSendError),
+        (
+            nio.ShareGroupSessionResponse,
+            ("!room:example.org", {("@human:example.org", "DEVICE")}),
+            {},
+            nio.ShareGroupSessionError,
+        ),
+        (nio.ContentRepositoryConfigResponse, (), {}, nio.ContentRepositoryConfigError),
+        (nio.RoomDeleteAliasResponse, ("#room:example.org",), {}, nio.RoomDeleteAliasError),
+        (
+            nio.RoomPutAliasResponse,
+            ("#room:example.org", "!room:example.org"),
+            {},
+            RoomPutAliasError,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_transport_preserves_endpoint_error_contract(
+    response_class: type[nio.Response],
+    response_data: tuple[object, ...],
+    payload: object,
+    error_class: type[nio.ErrorResponse],
+) -> None:
+    """Transport normalization must retain each nio endpoint's typed error union."""
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    transport = _json_transport_response(502, payload)
+
+    response = await client.create_matrix_response(
+        response_class,
+        transport,
+        data=response_data,
+    )
+
+    assert isinstance(response, error_class)
+    assert response.transport_response is transport
+
+
+@pytest.mark.parametrize(
+    ("response_class", "response_data", "error_class"),
+    [
+        (nio.KeysClaimResponse, ("!room:example.org",), nio.KeysClaimError),
+        (
+            nio.RoomGetStateEventResponse,
+            ("m.room.encryption", "", "!room:example.org"),
+            nio.RoomGetStateEventError,
+        ),
+        (nio.RoomReadMarkersResponse, ("!room:example.org",), nio.RoomReadMarkersError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_transport_repairs_endpoint_room_context(
+    response_class: type[nio.Response],
+    response_data: tuple[object, ...],
+    error_class: type[nio.ErrorResponse],
+) -> None:
+    """Broken nio error factories must retain their declared type and room."""
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    transport = _json_transport_response(
+        502,
+        {"errcode": "M_FORBIDDEN", "error": "denied", "retry_after_ms": 17},
+    )
+
+    response = await client.create_matrix_response(response_class, transport, data=response_data)
+
+    assert isinstance(response, error_class)
+    assert response.status_code == "M_FORBIDDEN"
+    assert response.retry_after_ms == 17
+    assert response.room_id == "!room:example.org"
+
+
+@pytest.mark.asyncio
+async def test_failed_transport_repairs_to_device_error_context() -> None:
+    """A failed to-device request must retain the message consumers inspect."""
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    message = nio.ToDeviceMessage(
+        "m.room.encrypted",
+        "@human:example.org",
+        "DEVICE",
+        {"ciphertext": "phantom"},
+    )
+    transport = _json_transport_response(
+        502,
+        {"errcode": "M_FORBIDDEN", "error": "denied", "retry_after_ms": 19},
+    )
+
+    response = await client.create_matrix_response(
+        nio.ToDeviceResponse,
+        transport,
+        data=(message,),
+    )
+
+    assert isinstance(response, nio.ToDeviceError)
+    assert response.to_device_message is message
+    assert response.retry_after_ms == 19
+
+
+@pytest.mark.asyncio
+async def test_failed_transport_repairs_group_session_error_context() -> None:
+    """A failed session shard must retain its room and intended devices."""
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    shared_with = {("@human:example.org", "DEVICE")}
+    transport = _json_transport_response(
+        502,
+        {"errcode": "M_FORBIDDEN", "error": "denied", "retry_after_ms": 23},
+    )
+
+    response = await client.create_matrix_response(
+        nio.ShareGroupSessionResponse,
+        transport,
+        data=("!room:example.org", shared_with),
+    )
+
+    assert isinstance(response, nio.ShareGroupSessionError)
+    assert response.room_id == "!room:example.org"
+    assert response.users_shared_with == shared_with
+    assert response.retry_after_ms == 23
+
+
+@pytest.mark.parametrize(
+    ("response_class", "expected_class"),
+    [
+        (nio.DeleteDevicesResponse, nio.DeleteDevicesAuthResponse),
+        (RegisterInteractiveResponse, RegisterInteractiveResponse),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_transport_preserves_interactive_auth_response(
+    response_class: type[nio.Response],
+    expected_class: type[nio.Response],
+) -> None:
+    """Nio's deliberate 401 UIA responses must remain available to callers."""
+    client = _MindRoomAsyncClient("https://example.org", "@bot:example.org")
+    transport = _json_transport_response(
+        401,
+        {
+            "session": "uia-session",
+            "flows": [{"stages": ["m.login.password"]}],
+            "params": {},
+        },
+    )
+
+    response = await client.create_matrix_response(response_class, transport)
+
+    assert isinstance(response, expected_class)
+    assert response.session == "uia-session"
+    assert response.transport_response is transport
+
+
+@pytest.mark.parametrize("sync_kind", ["classic", "sliding"])
+@pytest.mark.parametrize("transport_status", [200, 502])
+@pytest.mark.asyncio
+async def test_transport_sync_entrypoint_applies_only_successful_delivery_invalidations(
+    sync_kind: str,
+    transport_status: int,
+) -> None:
+    """Real sync transport ingestion must fence delivery before response handling awaits."""
+    room_id = "!room:example.org"
+    bot_user_id = "@bot:example.org"
+    human_user_id = "@human:example.org"
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        bot_user_id,
+        config=matrix_client_config(),
+    )
+    client.access_token = "token"  # noqa: S105
+    room = nio.MatrixRoom(room_id, bot_user_id, encrypted=True)
+    room.members_synced = True
+    room.add_member(bot_user_id, "Bot", None)
+    room.add_member(human_user_id, "Human", None)
+    client.rooms[room_id] = room
+    client.olm = MagicMock()
+    client.olm.outbound_group_sessions = {room_id: SimpleNamespace(shared=True)}
+    client._handle_expired_verifications = AsyncMock()
+    client._collect_key_requests = AsyncMock()
+    position = "s1" if sync_kind == "classic" else "p1"
+    payload = _sync_transport_payload(
+        sync_kind,
+        position=position,
+        changed_user_ids=[human_user_id],
+    )
+    transport = _json_transport_response(transport_status, payload)
+    client.send = AsyncMock(return_value=transport)
+
+    response = await client.sync(timeout=0) if sync_kind == "classic" else await client.sliding_sync(timeout=0)
+
+    if transport_status == 200:
+        assert isinstance(response, (nio.SyncResponse, nio.SlidingSyncResponse))
+        assert room_id not in client.olm.outbound_group_sessions
+        client.olm.add_changed_users.assert_called_once_with({human_user_id})
+    else:
+        assert isinstance(response, (nio.SyncError, nio.SlidingSyncError))
+        assert response.transport_response is transport
+        assert room_id in client.olm.outbound_group_sessions
+        client.olm.add_changed_users.assert_not_called()
+
+
+@pytest.mark.parametrize("sync_kind", ["classic", "sliding"])
+@pytest.mark.asyncio
+async def test_rate_limited_sync_callback_receives_typed_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+    sync_kind: str,
+) -> None:
+    """Nio's internal 429 callback must not expose a success-typed sync response."""
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        "@bot:example.org",
+        config=matrix_client_config(),
+    )
+    client.access_token = "token"  # noqa: S105
+    rate_limited = _json_transport_response(
+        429,
+        _sync_transport_payload(
+            sync_kind,
+            position="rate-limited",
+            changed_user_ids=["@human:example.org"],
+        ),
+    )
+    successful = _json_transport_response(
+        200,
+        _sync_transport_payload(
+            sync_kind,
+            position="success",
+            changed_user_ids=[],
+        ),
+    )
+    client.send = AsyncMock(side_effect=[rate_limited, successful])
+    client.run_response_callbacks = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    response = await client.sync(timeout=0) if sync_kind == "classic" else await client.sliding_sync(timeout=0)
+
+    assert isinstance(response, (nio.SyncResponse, nio.SlidingSyncResponse))
+    client.run_response_callbacks.assert_awaited_once()
+    callback_responses = client.run_response_callbacks.await_args.args[0]
+    assert len(callback_responses) == 1
+    callback_response = callback_responses[0]
+    assert isinstance(callback_response, nio.SyncError if sync_kind == "classic" else nio.SlidingSyncError)
+    assert callback_response.transport_response is rate_limited
+
+
+@pytest.mark.asyncio
+async def test_recovery_messages_rejects_success_typed_transport_failure() -> None:
+    """A failed recovery-page transport must not advance a timeline gap."""
+    client = _MindRoomAsyncClient(
+        "https://example.org",
+        "@bot:example.org",
+        config=matrix_client_config(),
+    )
+    client.access_token = "token"  # noqa: S105
+    transport = _json_transport_response(
+        502,
+        {
+            "start": "s0",
+            "end": "s1",
+            "chunk": [],
+        },
+    )
+    client.send = AsyncMock(return_value=transport)
+
+    response = await client._recovery_room_messages(
+        "!room:example.org",
+        "s0",
+        "s1",
+        nio.MessageDirection.back,
+        10,
+    )
+
+    assert isinstance(response, nio.ErrorResponse)
+    assert not isinstance(response, nio.RoomMessagesResponse)
+    assert response.transport_response is transport
 
 
 @pytest.mark.asyncio

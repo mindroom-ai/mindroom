@@ -20,6 +20,8 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.client_session import _MindRoomAsyncClient
 from mindroom.matrix.encryption_recipients import joined_members_query
+from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from tests.conftest import TEST_ACCESS_TOKEN
 
 
@@ -72,6 +74,28 @@ def _encrypted_client_with_outbound_session(
     client.olm.users_for_key_query = set()
     client.olm.should_query_keys = False
     return client, room
+
+
+@pytest.mark.parametrize(
+    ("transport_status", "expected"),
+    [
+        (None, True),
+        (404, True),
+        (502, False),
+    ],
+)
+def test_matrix_not_found_requires_authoritative_transport(
+    transport_status: int | None,
+    expected: bool,
+) -> None:
+    """Only internal responses and an actual HTTP 404 prove resource absence."""
+    response = nio.RoomGetEventError("not found", status_code="M_NOT_FOUND")
+    if transport_status is not None:
+        transport = MagicMock()
+        transport.status = transport_status
+        response.transport_response = transport
+
+    assert matrix_response_is_not_found(response) is expected
 
 
 @pytest.mark.asyncio
@@ -610,6 +634,113 @@ async def test_hydration_rejects_success_typed_transport_failure() -> None:
     assert room_id not in client.encrypted_rooms
     client.store.save_encrypted_rooms.assert_not_called()
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_plaintext_probe_rejects_not_found_from_failed_transport() -> None:
+    """A non-404 M_NOT_FOUND response must never authorize plaintext delivery."""
+    client = _MindRoomAsyncClient("https://localhost", "@bot:localhost")
+    client.access_token = TEST_ACCESS_TOKEN
+    room_id = "!room:localhost"
+    failed_probe = MagicMock()
+    failed_probe.status = 502
+    failed_probe.content_type = "application/json"
+    failed_probe.content_disposition = None
+    failed_probe.json = AsyncMock(
+        return_value={"errcode": "M_NOT_FOUND", "error": "not found"},
+    )
+    unsafe_send = MagicMock()
+    unsafe_send.status = 200
+    unsafe_send.content_type = "application/json"
+    unsafe_send.content_disposition = None
+    unsafe_send.json = AsyncMock(return_value={"event_id": "$plaintext"})
+    client.send = AsyncMock(side_effect=[failed_probe, unsafe_send])
+
+    response = await send_room_event_result(
+        client,
+        room_id,
+        "m.reaction",
+        {"m.relates_to": {"event_id": "$target", "key": "ok", "rel_type": "m.annotation"}},
+    )
+
+    assert response is None
+    assert client.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_hidden_room_hydration_rejects_success_typed_full_state_transport_failure() -> None:
+    """A non-2xx full-state response must not publish encrypted room readiness."""
+    client = MagicMock(spec=nio.AsyncClient)
+    room_id = "!room:localhost"
+    bot_user_id = "@bot:localhost"
+    client.user_id = bot_user_id
+    client.rooms = {}
+    client.encrypted_rooms = {room_id}
+    client.store = MagicMock()
+    client.olm = None
+    client.should_query_keys = False
+    client.users_for_key_query = set()
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            [nio.RoomMember(bot_user_id, "Bot", "")],
+            room_id,
+        ),
+    )
+    response = nio.RoomGetStateResponse(
+        [
+            {
+                "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+                "event_id": "$encryption",
+                "origin_server_ts": 1,
+                "sender": bot_user_id,
+                "state_key": "",
+                "type": "m.room.encryption",
+            },
+            {
+                "content": {"displayname": "Bot", "membership": "join"},
+                "event_id": "$bot-join",
+                "origin_server_ts": 2,
+                "sender": bot_user_id,
+                "state_key": bot_user_id,
+                "type": "m.room.member",
+            },
+        ],
+        room_id,
+    )
+    transport = MagicMock()
+    transport.status = 502
+    response.transport_response = transport
+    client.room_get_state = AsyncMock(return_value=response)
+
+    proof = await hydrate_joined_room_for_delivery(client, room_id)
+
+    assert proof is None
+    assert room_id not in client.rooms
+    client.store.save_encrypted_rooms.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_media_upload_rejects_success_typed_transport_failure() -> None:
+    """A non-2xx upload response must not expose a phantom MXC URI."""
+    client = _MindRoomAsyncClient("https://localhost", "@bot:localhost")
+    client.access_token = TEST_ACCESS_TOKEN
+    transport = MagicMock()
+    transport.status = 502
+    transport.content_type = "application/json"
+    transport.content_disposition = None
+    transport.json = AsyncMock(return_value={"content_uri": "mxc://localhost/phantom"})
+    client.send = AsyncMock(return_value=transport)
+
+    response, _encryption_info = await upload_media_bytes(
+        client,
+        b"secret",
+        content_type="application/octet-stream",
+        filename="secret.bin",
+    )
+
+    assert isinstance(response, nio.ErrorResponse)
+    assert not isinstance(response, nio.UploadResponse)
+    assert upload_content_uri(response) is None
 
 
 @pytest.mark.asyncio

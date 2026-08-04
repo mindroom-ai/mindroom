@@ -168,11 +168,13 @@ Encrypted hidden-room hydration publishes full non-membership state plus an exac
 Invite membership is intentionally omitted from encrypted delivery caches because nio uses `MatrixRoom.users` as the Megolm recipient roster.
 Hydration retires every existing outbound Megolm session as soon as the prior recipient roster is unknown, invite-polluted, or differs from authoritative joined membership, while preserving a shared session when the authoritative roster is unchanged.
 While changed device keys are unresolved, the room remains send-fenced through nio's unsynchronized-membership state so another send must re-establish key readiness instead of reusing incomplete encryption state.
-Sync responses preapply membership, encryption, summary-count, and device-list invalidations at `receive_response` entry before recovery dispatch or callbacks can await.
+Accepted Classic and Sliding Sync responses preapply membership, encryption, summary-count, and device-list invalidations at their ordered ingestion handlers before recovery dispatch or callbacks can await.
+Non-2xx Matrix responses are constructed as endpoint-specific typed errors before success-payload parsing, while nio's deliberate HTTP 401 interactive-auth responses remain intact.
+This response-creation boundary ensures nio's internal rate-limit callbacks also receive typed sync errors before response ordering or state mutation.
 Every runtime joined-members request is generation-ordered before nio may mutate its room roster, and success-typed non-2xx responses are rejected at the same boundary.
 Delivery-owned joined-members generations remain bound through hidden-room full-state and device-key awaits until publication.
 Every runtime key query, including pinned-device discovery, is globally sequenced so an older response, a response predating a device-list invalidation, or a success-typed non-2xx response cannot roll nio's device store backward.
-Hidden-room full state and joined-members results must agree on the joined roster before either can publish a cache entry.
+Successful hidden-room full state and joined-members results must agree on the joined roster before either can publish a cache entry, and non-2xx full-state responses are rejected before hidden-room event parsing or publication.
 An encrypted cache replacement that disagrees with the hydration snapshot is likewise marked membership-unsynchronized before hydration retries.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
@@ -212,7 +214,9 @@ After preparation, every encrypted delivery refreshes joined membership and devi
 All application room events, including reactions and custom events, use the same delivery lock instead of calling nio directly.
 The runtime Matrix client removes invitees from encrypted crypto rosters after membership processing and rejects nio send preparation when membership, joined-member device keys, the recipient generation, or the room identity is stale.
 Request-scoped transport validation binds room identity, encryption mode, recipient and membership generations, joined roster, and pending device keys after dynamic header preparation and on every HTTP retry.
-Success-typed nio send and encryption-state responses are accepted only when their attached HTTP transport status is successful.
+Nio sync, full-state, membership, device-key, upload, to-device, and send endpoints can expose success only when their attached HTTP transport status is successful.
+A Matrix `M_NOT_FOUND` proves resource absence only when it has no transport or came from HTTP 404, including delivery, scheduling, config, room, tool, and strict thread-history reads.
+Every final failed key-claim or per-device Megolm share request retires the aggregate outbound session, cleans only its owned sharing event, and aborts before room encryption.
 Application retry sleeps release the room lock, rehydrate after reacquiring it, and reuse one transaction ID for the complete logical delivery.
 This client-side sequence narrows the out-of-window membership race but does not claim transactional ordering against concurrent homeserver membership writes.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.

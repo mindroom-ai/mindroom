@@ -38,6 +38,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.response_status import matrix_response_is_not_found
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -1217,7 +1218,7 @@ def _requester_event_response(
     if not isinstance(response, nio.RoomGetEventError):
         msg = f"Unexpected requester Matrix event response for {event_id}"
         raise TypeError(msg)
-    if response.status_code == "M_NOT_FOUND":
+    if matrix_response_is_not_found(response):
         return None
     msg = f"Failed to resolve requester Matrix event {event_id}: {response.message}"
     raise RuntimeError(msg)

@@ -11,7 +11,10 @@ from weakref import WeakKeyDictionary
 
 import nio
 
-from mindroom.matrix.response_status import matrix_response_transport_succeeded
+from mindroom.matrix.response_status import (
+    matrix_response_is_not_found,
+    matrix_response_transport_succeeded,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -128,7 +131,7 @@ def room_encryption_state_from_response(response: object) -> bool | None:
     """Interpret one state-event response only when its transport succeeded."""
     if isinstance(response, nio.RoomGetStateEventResponse):
         return True if matrix_response_transport_succeeded(response) else None
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and matrix_response_is_not_found(response):
         return False
     return None
 
