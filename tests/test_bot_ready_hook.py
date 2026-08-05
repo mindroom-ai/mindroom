@@ -118,6 +118,23 @@ def _thread_root_event(
     return event
 
 
+def _empty_classic_sync_response(next_batch: str) -> nio.SyncResponse:
+    """Return one complete Classic response with no room events."""
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": next_batch,
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {"invite": {}, "leave": {}, "join": {}},
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
 def _bulk_refresh_stats(
     requested_threads: int,
     *,
@@ -698,10 +715,10 @@ async def test_bot_ready_does_not_repeat_after_classic_transport_rebuild(tmp_pat
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(MagicMock())
+        await bot._on_sync_response(_empty_classic_sync_response("s_before_rebuild"))
         await bot._reset_classic_sync_state(force=True)
         assert bot._first_sync_done is True
-        await bot._on_sync_response(MagicMock())
+        await bot._on_sync_response(_empty_classic_sync_response("s_after_rebuild"))
 
     assert fired_count == 1
 
