@@ -4516,7 +4516,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=1742661d6ff710c6b84eb5747cdba4e24ace8514" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.35.0" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4627,8 +4627,8 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "0.34.1"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=1742661d6ff710c6b84eb5747cdba4e24ace8514#1742661d6ff710c6b84eb5747cdba4e24ace8514" }
+version = "0.35.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -4638,6 +4638,10 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/6b/803cb852282b1b04c6aac39ebb0903dd26e60c1107cbd278843289a83b79/mindroom_nio-0.35.0.tar.gz", hash = "sha256:f6fc0bf414b8fae9569b245e51c88c2e8018c806fabc01fcc742b0c9af196585", size = 206627, upload-time = "2026-08-05T04:52:08.982Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/6e/9e21228aed977e34e794e3bfc5bb196dda2076693e60b667f72a4a0c1263/mindroom_nio-0.35.0-py3-none-any.whl", hash = "sha256:b9088191ee7146dca35283619b21fe796479276d4474f0c62b4a8d2103579ee0", size = 236889, upload-time = "2026-08-05T04:52:07.485Z" },
 ]
 
 [package.optional-dependencies]
