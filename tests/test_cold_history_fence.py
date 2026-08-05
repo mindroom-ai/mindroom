@@ -383,6 +383,8 @@ async def test_cold_room_window_reentry_message_is_dispatched(
                 },
             ),
         )
+        assert await wait_for_background_tasks(timeout=1, owner=owner)
+        assert seen == ["$warm"]
         # The room falls out of the window; nothing is delivered for it.
         await client.receive_response(sliding("s2", {}))
         # A new user message pulls the room back in. The room is initial on
@@ -400,7 +402,7 @@ async def test_cold_room_window_reentry_message_is_dispatched(
                 },
             ),
         )
-        await wait_for_background_tasks(timeout=1, owner=owner)
+        assert await wait_for_background_tasks(timeout=1, owner=owner)
     finally:
         await client.close()
 
