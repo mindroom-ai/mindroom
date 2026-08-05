@@ -333,11 +333,10 @@ async def test_cold_room_window_reentry_message_is_dispatched(
     """A cold room's window re-entry message must reach its message callback.
 
     Regression (2026-08-03, mindroom.chat "Test" room): rooms outside the
-    sliding-sync list window come back flagged ``initial`` and without
-    ``num_live`` (Tuwunel omits it), so nio classifies the delivered tail —
-    including the very message the user just sent — as HISTORY, and the
-    cold-history fence silently drops it. Every agent in every idle room
-    stops answering; the drop is only visible at debug level.
+    sliding-sync list window came back flagged ``initial`` without
+    ``num_live``, so nio correctly classified the ambiguous timeline as
+    HISTORY and the cold-history fence dropped it. Tuwunel now identifies
+    the newly arrived tail with ``num_live``, which nio must classify as LIVE.
     """
     store = DispatchObligationStore(
         tracking_path=tmp_path,
@@ -386,8 +385,8 @@ async def test_cold_room_window_reentry_message_is_dispatched(
         )
         # The room falls out of the window; nothing is delivered for it.
         await client.receive_response(sliding("s2", {}))
-        # A new user message pulls the room back in: the server flags the
-        # delivery ``initial`` and omits ``num_live``.
+        # A new user message pulls the room back in. The room is initial on
+        # this connection, while num_live identifies its newly arrived tail.
         await client.receive_response(
             sliding(
                 "s3",
@@ -395,6 +394,7 @@ async def test_cold_room_window_reentry_message_is_dispatched(
                     "!room:example.org": {
                         "initial": True,
                         "membership": "join",
+                        "num_live": 1,
                         "timeline": [_message("$cold_mention").source],
                     },
                 },
