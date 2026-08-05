@@ -16,6 +16,7 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
+    client.olm = MagicMock() if encrypted else None
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 

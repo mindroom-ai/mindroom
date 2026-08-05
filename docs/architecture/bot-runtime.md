@@ -106,7 +106,8 @@ A complete tokenless initial snapshot may establish the first MindRoom checkpoin
 An event that never crossed MindRoom admission and later falls outside Matrix replay is the explicit pre-admission loss boundary.
 Classic receive-loop exit resets only when nio reports unacknowledged staged state, source admission failed, or the live cursor differs from MindRoom's checkpoint.
 An acknowledged clean transport restart retains nio's room cache, so in-flight encrypted delivery is not interrupted by an unnecessary rebuild.
-If encrypted delivery starts while that cache is absent, the authoritative remote encryption result also controls large-message sidecar encryption before upload.
+Every outbound send uses nio's bounded transport-recovery retry, including notices, hooks, tool output, and media events that begin while the Classic room cache is rebuilding.
+The resolved encryption state is frozen before large-message or media upload, so a concurrent cache reset cannot downgrade sidecar or attachment encryption.
 Application first-sync readiness remains separate from Classic transport rebuild state, so a reset requests full state without repeating the once-only `bot:ready` lifecycle.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.

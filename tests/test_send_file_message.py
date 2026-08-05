@@ -37,7 +37,7 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
-    client.olm = None
+    client.olm = MagicMock() if encrypted else None
     return client
 
 
@@ -480,6 +480,49 @@ class TestSendFileMessage:
 
         assert result is None
         mock_upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_encrypted_file_waits_for_classic_room_cache_rebuild(self, tmp_path: Path) -> None:
+        """Encrypted file delivery should survive nio rebuilding its Classic room cache."""
+        client = _mock_client(encrypted=True)
+        room = client.rooms.pop("!room:localhost")
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            "!room:localhost",
+        )
+        client.upload.return_value = (_upload_response("mxc://localhost/recovered-file"), {})
+        client.room_send.side_effect = [
+            nio.SendRetryError("Classic Sync room state is being rebuilt."),
+            nio.RoomSendResponse("$file:localhost", "!room:localhost"),
+        ]
+        file = tmp_path / "secret.bin"
+        file.write_bytes(b"secret")
+
+        async def restore_room_cache(_delay: float) -> None:
+            client.rooms["!room:localhost"] = room
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                return_value=(
+                    b"encrypted",
+                    {
+                        "key": {"k": "key"},
+                        "iv": "iv",
+                        "hashes": {"sha256": "hash"},
+                    },
+                ),
+            ),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", file)
+
+        assert event_id == "$file:localhost"
+        client.upload.assert_awaited_once()
+        assert client.room_send.await_count == 2
 
     @pytest.mark.asyncio
     async def test_caption_overrides_body(self, tmp_path: Path) -> None:
@@ -954,8 +997,8 @@ class TestSendMessageResult:
         warning_mock.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_sync_recovery_retry_waits_for_encrypted_room_cache_rebuild(self) -> None:
-        """Durable response delivery waits while a rejected sync rebuilds room state."""
+    async def test_encrypted_send_waits_for_room_cache_rebuild_by_default(self) -> None:
+        """Every encrypted delivery waits while a rejected sync rebuilds room state."""
         client = _mock_client(encrypted=True)
         room = client.rooms.pop("!room:localhost")
         client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -983,12 +1026,48 @@ class TestSendMessageResult:
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
-                retry_sync_recovery=True,
             )
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
         assert client.room_send.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_encrypted_sidecar_keeps_cached_state_across_reset_race(self) -> None:
+        """A cache reset after inspection cannot downgrade sidecar encryption."""
+        client = _mock_client(encrypted=True)
+        room = client.rooms["!room:localhost"]
+        client.room_send.side_effect = [
+            nio.SendRetryError("Classic Sync room state is being rebuilt."),
+            nio.RoomSendResponse("$evt:localhost", "!room:localhost"),
+        ]
+
+        async def prepare(
+            _client: nio.AsyncClient,
+            _room_id: str,
+            _content: dict[str, object],
+            *,
+            room_encrypted: bool | None,
+        ) -> dict[str, str]:
+            assert room_encrypted is True
+            client.rooms.clear()
+            return {"body": "prepared", "msgtype": "m.text"}
+
+        async def restore_room_cache(_delay: float) -> None:
+            client.rooms["!room:localhost"] = room
+
+        with (
+            patch("mindroom.matrix.client_delivery.prepare_large_message", new=prepare),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache),
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+            )
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
 
     @pytest.mark.parametrize("is_edit", [False, True], ids=["send", "edit"])
     @pytest.mark.asyncio
@@ -1149,15 +1228,20 @@ class TestSendMessageResult:
 
     @pytest.mark.asyncio
     async def test_sync_recovery_error_keeps_default_send_contract(self) -> None:
-        """Ordinary sends should retain normalized failure behavior."""
+        """Ordinary sends should normalize a recovery window that expires."""
         client = _mock_client()
-        client.room_send.side_effect = nio.SendRetryError("Room timeline recovery is still pending.")
+        recovery_error = nio.SendRetryError("Room timeline recovery is still pending.")
+        client.room_send.side_effect = recovery_error
 
         with (
             patch(
                 "mindroom.matrix.client_delivery.prepare_large_message",
                 new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
             ),
+            patch(
+                "mindroom.matrix.client_delivery._retry_prepared_room_message_after_sync_recovery",
+                new=AsyncMock(side_effect=recovery_error),
+            ) as retry,
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
         ):
             result = await send_message_result(
@@ -1167,21 +1251,27 @@ class TestSendMessageResult:
             )
 
         assert result is None
+        retry.assert_awaited_once()
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["exception_type"] == "SendRetryError"
 
     @pytest.mark.asyncio
     async def test_sync_recovery_error_keeps_default_edit_contract(self) -> None:
-        """Ordinary edits should retain normalized failure behavior."""
+        """Ordinary edits should normalize a recovery window that expires."""
         client = _mock_client()
-        client.room_send.side_effect = nio.SendRetryError("Room timeline recovery is still pending.")
+        recovery_error = nio.SendRetryError("Room timeline recovery is still pending.")
+        client.room_send.side_effect = recovery_error
 
         with (
             patch(
                 "mindroom.matrix.client_delivery.prepare_large_message",
                 new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
             ),
+            patch(
+                "mindroom.matrix.client_delivery._retry_prepared_room_message_after_sync_recovery",
+                new=AsyncMock(side_effect=recovery_error),
+            ) as retry,
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
         ):
             result = await edit_message_result(
@@ -1193,6 +1283,7 @@ class TestSendMessageResult:
             )
 
         assert result is None
+        retry.assert_awaited_once()
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["operation"] == "edit_message"

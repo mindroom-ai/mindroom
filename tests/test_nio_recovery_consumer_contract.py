@@ -238,6 +238,69 @@ async def test_real_nio_retries_full_state_until_classic_rebuild_succeeds() -> N
 
 
 @pytest.mark.asyncio
+async def test_real_nio_classic_reset_ends_sync_generation_before_reentry() -> None:
+    """A Classic reset returns the old loop before reentry from the committed cursor."""
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=False,
+        ),
+    )
+    client.restore_login("@code:localhost", "DEVICEID", "token")
+    client.next_batch = "s_live"
+    sync_calls: list[tuple[bool | None, str]] = []
+    reset_done = False
+
+    async def reset_after_first_response(_response: nio.SyncResponse) -> None:
+        nonlocal reset_done
+        if reset_done:
+            return
+        reset_done = True
+        await client.reset_classic_sync_state()
+        client.next_batch = "s_committed"
+
+    async def sync(
+        _timeout: int | None,
+        _sync_filter: object,
+        _since: str | None,
+        full_state: bool | None,
+        _presence: str | None,
+    ) -> nio.SyncResponse:
+        sync_calls.append((full_state, client.next_batch))
+        if len(sync_calls) == 2:
+            client.stop_sync_forever()
+        return _sync_response(
+            limited_room_ids=(),
+            recovered_room_ids=frozenset(),
+            unrecovered_room_ids=frozenset(),
+            next_batch=f"s_response_{len(sync_calls)}",
+        )
+
+    client.add_response_callback(reset_after_first_response, nio.SyncResponse)
+    try:
+        with (
+            patch.object(client, "sync", new=sync),
+            patch.object(client, "send_to_device_messages", new=AsyncMock(return_value=[])),
+        ):
+            await asyncio.wait_for(client.sync_forever(full_state=False), timeout=1)
+            assert sync_calls == [(False, "s_live")]
+            assert client.next_batch == "s_committed"
+
+            await asyncio.wait_for(client.sync_forever(full_state=True), timeout=1)
+    finally:
+        await client.close()
+
+    assert sync_calls == [
+        (False, "s_live"),
+        (True, "s_committed"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_real_nio_acknowledges_only_fully_applied_classic_state() -> None:
     """A failed response cannot clear nio's dirty state through its advanced cursor."""
     client = nio.AsyncClient(
