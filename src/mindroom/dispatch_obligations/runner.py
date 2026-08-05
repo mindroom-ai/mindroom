@@ -274,7 +274,7 @@ class DispatchObligationRunner:
     ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
         self.observe_event_provenance(event.event_id, provenance)
-        if provenance is nio.TimelineEventProvenance.HISTORY:
+        if provenance is not nio.TimelineEventProvenance.LIVE:
             try:
                 await self.cache_historical_event(room, event)
             except asyncio.CancelledError:

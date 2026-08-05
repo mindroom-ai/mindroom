@@ -2981,8 +2981,8 @@ async def test_nio_gap_generation_is_rebuilt_after_dispatch_failure(
 
 
 @pytest.mark.asyncio
-async def test_nio_limited_recovery_caches_history_before_cold_fence(tmp_path: Path) -> None:
-    """Recovered text and media must reach the cache without becoming turns."""
+async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Path) -> None:
+    """Continuity-recovered text and media must be cached before dispatch."""
     bot = _agent_bot(tmp_path)
     cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
     await cache_root.initialize()
@@ -3031,18 +3031,18 @@ async def test_nio_limited_recovery_caches_history_before_cold_fence(tmp_path: P
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
         assert bot._dispatch_obligation_store.pending() == ()
-        turn_callback.assert_not_awaited()
+        assert turn_callback.await_count == 2
     finally:
         await client.close()
         await cache_root.close()
 
 
 @pytest.mark.asyncio
-async def test_nio_retries_history_when_cache_admission_fails(
+async def test_nio_retries_recovered_event_when_cache_admission_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed history cache write must leave nio recovery work retryable."""
+    """A failed recovered-event cache write must leave nio work retryable."""
     bot = _agent_bot(tmp_path)
     cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
     await cache_root.initialize()
@@ -3087,6 +3087,9 @@ async def test_nio_retries_history_when_cache_admission_fails(
         )
 
     monkeypatch.setattr(bot.event_cache, "store_events_batch", fail_first_cache_write)
+    turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks[DispatchCallbackKind.MESSAGE] = turn_callback
     bot._dispatch_obligation_runner.register_source_callbacks(
         client,
         owner=bot._runtime_view,
@@ -3110,6 +3113,7 @@ async def test_nio_retries_history_when_cache_admission_fails(
         assert response.recovered_room_ids == frozenset({room_id})
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert bot._dispatch_obligation_store.pending() == ()
+        turn_callback.assert_awaited_once()
     finally:
         await client.close()
         await cache_root.close()
