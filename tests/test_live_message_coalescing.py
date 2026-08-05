@@ -34,6 +34,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -7156,6 +7157,43 @@ async def test_router_caches_agent_pending_thread_placeholder_before_ignoring_di
         placeholder,
         event_info=EventInfo.from_event(placeholder.source),
     )
+
+
+@pytest.mark.asyncio
+async def test_router_skips_intermediate_agent_stream_edit_without_precheck_or_cache(tmp_path: Path) -> None:
+    """Keep progressive stream edits on the pre-existing fast ignore path."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    streaming_edit = _text_event(
+        event_id="$agent-stream-edit",
+        body="* partial response",
+        sender="@mindroom_test_agent:localhost",
+    )
+    content = streaming_edit.source["content"]
+    assert isinstance(content, dict)
+    content[STREAM_STATUS_KEY] = STREAM_STATUS_STREAMING
+    content["m.new_content"] = {
+        "msgtype": "m.text",
+        "body": "partial response",
+        STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+    }
+    content["m.relates_to"] = {
+        "rel_type": "m.replace",
+        "event_id": "$agent-placeholder",
+    }
+    assert EventInfo.from_event(streaming_edit.source).is_edit
+    conversation_cache = make_conversation_cache_mock()
+    controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
+
+    with patch(
+        "mindroom.turn_controller.TurnController._precheck_dispatch_event",
+        side_effect=AssertionError("intermediate stream edits must skip ingress precheck"),
+    ) as precheck:
+        outcome = await controller.handle_text_event(room, streaming_edit)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    precheck.assert_not_called()
+    conversation_cache.append_live_event.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

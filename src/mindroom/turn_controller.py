@@ -2103,16 +2103,17 @@ class TurnController:
     ) -> TurnDispatchOutcome:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
-        if not isinstance(event.body, str):
+        event_content = event.source.get("content") if isinstance(event.source, dict) else None
+        is_nonterminal_stream = isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+        }
+        if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        event_content = event.source.get("content") if isinstance(event.source, dict) else None
-        if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-        }:
+        if is_nonterminal_stream:
             if self.deps.ingress.managed_entity_name_for_sender(event.sender) is not None:
                 await self._append_live_event_with_timing(
                     room.room_id,
