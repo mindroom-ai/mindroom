@@ -237,6 +237,47 @@ async def test_real_nio_retries_full_state_until_classic_rebuild_succeeds() -> N
     assert full_state_requests == [True, True]
 
 
+@pytest.mark.asyncio
+async def test_real_nio_acknowledges_only_fully_applied_classic_state() -> None:
+    """A failed response cannot clear nio's dirty state through its advanced cursor."""
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=False,
+        ),
+    )
+    client.next_batch = "s_committed"
+    response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset(),
+        unrecovered_room_ids=frozenset(),
+        next_batch="s_failed",
+    )
+
+    try:
+        with (
+            patch.object(
+                client,
+                "_handle_to_device",
+                new=AsyncMock(side_effect=RuntimeError("response failed")),
+            ),
+            pytest.raises(RuntimeError, match="response failed"),
+        ):
+            await client.receive_response(response)
+
+        assert client.next_batch == "s_failed"
+        assert client.has_uncommitted_classic_sync_state
+        with pytest.raises(nio.LocalProtocolError, match="does not match"):
+            client.acknowledge_classic_sync("s_failed")
+        assert client.has_uncommitted_classic_sync_state
+    finally:
+        await client.close()
+
+
 def _cache_result(
     response: nio.SyncResponse,
     *,

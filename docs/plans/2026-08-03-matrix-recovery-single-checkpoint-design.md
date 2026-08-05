@@ -44,6 +44,8 @@ Only that MindRoom checkpoint acknowledges the Matrix response.
 
 After the checkpoint write, the same cancellation-drained publication step synchronously acknowledges that exact token in nio.
 
+nio makes a token acknowledgeable only after all internal response processing succeeds, so an old or partially advanced cursor cannot clear dirty state from a failed response.
+
 nio's acknowledgement state is volatile and can only report that a reset is required, so it is not a second durable cursor authority.
 
 If any prerequisite fails, MindRoom asks nio to discard the uncommitted in-memory world and starts the next Classic loop from the retained checkpoint.
