@@ -186,6 +186,57 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
     )
 
 
+@pytest.mark.asyncio
+async def test_real_nio_retries_full_state_until_classic_rebuild_succeeds() -> None:
+    """A transient error cannot downgrade MindRoom's requested full-state rebuild."""
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=False,
+        ),
+    )
+    client.restore_login("@code:localhost", "DEVICEID", "token")
+    full_state_requests: list[bool | None] = []
+
+    async def sync(
+        _timeout: int | None,
+        _sync_filter: object,
+        _since: str | None,
+        full_state: bool | None,
+        _presence: str | None,
+    ) -> nio.SyncResponse | nio.SyncError:
+        full_state_requests.append(full_state)
+        if len(full_state_requests) == 1:
+            return nio.SyncError.from_dict(
+                {
+                    "errcode": "M_LIMIT_EXCEEDED",
+                    "error": "retry the rebuild",
+                },
+            )
+        client.stop_sync_forever()
+        return _sync_response(
+            limited_room_ids=(),
+            recovered_room_ids=frozenset(),
+            unrecovered_room_ids=frozenset(),
+            next_batch="s_rebuilt",
+        )
+
+    try:
+        with (
+            patch.object(client, "sync", new=sync),
+            patch.object(client, "send_to_device_messages", new=AsyncMock(return_value=[])),
+        ):
+            await client.sync_forever(full_state=True)
+    finally:
+        await client.close()
+
+    assert full_state_requests == [True, True]
+
+
 def _cache_result(
     response: nio.SyncResponse,
     *,

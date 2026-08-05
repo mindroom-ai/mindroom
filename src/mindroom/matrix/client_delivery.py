@@ -255,6 +255,7 @@ async def send_message_result(
     rooms = client.rooms
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
     cache_bypass = isinstance(rooms, Mapping) and room is None
+    room_encryption_override: bool | None = None
     if cache_bypass:
         encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
         if isinstance(encryption_state, nio.RoomGetStateEventResponse):
@@ -267,13 +268,10 @@ async def send_message_result(
                 )
                 return None
             cache_bypass = False
-        if not (
-            isinstance(encryption_state, nio.RoomGetStateEventResponse)
-            or (
-                isinstance(encryption_state, nio.RoomGetStateEventError)
-                and encryption_state.status_code == "M_NOT_FOUND"
-            )
-        ):
+            room_encryption_override = True
+        elif isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND":
+            room_encryption_override = False
+        else:
             logger.error(
                 "matrix_room_send_requires_known_encryption_state",
                 room_id=room_id,
@@ -289,7 +287,12 @@ async def send_message_result(
         room_id=room_id,
         message_type=message_type,
     )
-    content_sent = await prepare_large_message(client, room_id, content)
+    content_sent = await prepare_large_message(
+        client,
+        room_id,
+        content,
+        room_encrypted=room_encryption_override,
+    )
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",

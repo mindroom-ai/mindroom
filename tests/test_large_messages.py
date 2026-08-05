@@ -311,7 +311,10 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
         _client: nio.AsyncClient,
         _room_id: str,
         _full_content: dict[str, object],
+        *,
+        room_encrypted: bool | None = None,
     ) -> tuple[str, dict[str, object] | None]:
+        assert room_encrypted is False
         return "mxc://server/missing-metadata", file_info
 
     monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", missing_file_metadata)
@@ -333,7 +336,10 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
         _client: nio.AsyncClient,
         _room_id: str,
         _full_content: dict[str, object],
+        *,
+        room_encrypted: bool | None = None,
     ) -> tuple[str, dict[str, object]]:
+        assert room_encrypted is True
         return "mxc://server/incomplete-encrypted-metadata", {
             "size": 123,
             "mimetype": "application/json",
@@ -374,7 +380,10 @@ async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
         _client: nio.AsyncClient,
         _room_id: str,
         _full_content: dict[str, object],
+        *,
+        room_encrypted: bool | None = None,
     ) -> tuple[str, dict[str, object]]:
+        assert room_encrypted is True
         return mxc_uri, file_info
 
     room = MagicMock()
@@ -402,7 +411,10 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
         _client: nio.AsyncClient,
         _room_id: str,
         _full_content: dict[str, object],
+        *,
+        room_encrypted: bool | None = None,
     ) -> tuple[str, dict[str, object]]:
+        assert room_encrypted is True
         return "mxc://server/incomplete-streaming-sidecar", {
             "size": 123,
             "mimetype": "application/json",

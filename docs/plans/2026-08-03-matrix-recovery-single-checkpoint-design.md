@@ -56,6 +56,8 @@ The reset retains Olm and encrypted-room persistence because replaying the same 
 
 The next Classic request uses `full_state=True` so the cleared nio room model is reconstructed before callbacks run.
 
+Transient sync errors retain the initial cursor, filter, and full-state request until one successful response completes the rebuild.
+
 The first response after reset bypasses same-token suppression because Matrix tokens are opaque and a valid full-state response may return the restored checkpoint unchanged.
 
 Transport rebuild state is separate from application first-sync readiness, so `bot:ready` remains once-only across replay.
@@ -63,6 +65,8 @@ Transport rebuild state is separate from application first-sync readiness, so `b
 A live rebuild from a certified checkpoint dispatches unseen state-block joins as well as catch-up timeline joins through the exact durable obligation path.
 
 Encrypted sends attempted during a real rebuild receive nio's retryable recovery error and use the existing bounded delivery retry.
+
+When the room cache is absent, the remote encryption-state check is passed through large-message preparation so an oversized JSON sidecar is encrypted before upload.
 
 At Classic startup, MindRoom removes legacy nio cursor, recovery, and Sliding-window rows left by older versions or a previous transport mode.
 
@@ -122,6 +126,8 @@ The migration test proves that legacy cursor, pending-event, gap, and Sliding-wi
 
 The MindRoom continuity tests cover cache failures, callback-admission failures, cancellation-atomic acknowledgement, loop exit before response callbacks, clean transport restarts, `M_UNKNOWN_POS`, cold startup, room-member state-only replay, once-only readiness, and Sliding-to-Classic residue.
 
-The cross-repository contract test proves an unrecovered real nio gap is rejected, reset, replayed from MindRoom's checkpoint, and certified only after the replay succeeds.
+The cross-repository contract tests prove an unrecovered real nio gap is rejected, reset, replayed from MindRoom's checkpoint, and certified only after the replay succeeds, while transient sync errors retain the requested full-state rebuild.
+
+The delivery tests prove oversized send and edit sidecars remain encrypted while nio reconstructs an encrypted room cache.
 
 Production rollout requires releasing mindroom-nio first and replacing the temporary Git pin with that released version.

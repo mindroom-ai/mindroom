@@ -303,6 +303,7 @@ async def _upload_text_as_mxc(
     room_id: str | None = None,
     *,
     mimetype: str = "text/plain",
+    room_encrypted: bool | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload text content as an MXC file.
 
@@ -311,6 +312,7 @@ async def _upload_text_as_mxc(
         text: The text content to upload
         room_id: Optional room ID to check for encryption
         mimetype: MIME type for the uploaded content (default: "text/plain")
+        room_encrypted: Authoritative encryption state when the room cache is unavailable
 
     Returns:
         Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
@@ -329,11 +331,8 @@ async def _upload_text_as_mxc(
     else:
         filename = "message.txt"
 
-    # Check if room is encrypted
-    room_encrypted = False
-    if room_id and room_id in client.rooms:
-        room = client.rooms[room_id]
-        room_encrypted = room.encrypted
+    if room_encrypted is None:
+        room_encrypted = _room_is_encrypted(client, room_id)
 
     if room_encrypted:
         # Encrypt the content for E2EE room
@@ -396,9 +395,16 @@ async def _build_file_content(
     full_content: dict[str, Any],
     preview_text: str,
     size_limit: int,
+    *,
+    room_encrypted: bool,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
-    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_content)
+    mxc_uri, file_info = await upload_json_sidecar(
+        client,
+        room_id,
+        full_content,
+        room_encrypted=room_encrypted,
+    )
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
     preview = _create_preview(preview_text, available)
@@ -470,10 +476,18 @@ async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
     payload: dict[str, Any],
+    *,
+    room_encrypted: bool | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return await _upload_text_as_mxc(client, text, room_id, mimetype="application/json")
+    return await _upload_text_as_mxc(
+        client,
+        text,
+        room_id,
+        mimetype="application/json",
+        room_encrypted=room_encrypted,
+    )
 
 
 def _build_text_fallback_content(
@@ -503,6 +517,8 @@ async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
+    *,
+    room_encrypted: bool | None = None,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -516,6 +532,7 @@ async def prepare_large_message(
         client: The Matrix client
         room_id: The room to send to
         content: The message content dictionary
+        room_encrypted: Authoritative encryption state when the room cache is unavailable
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -528,7 +545,8 @@ async def prepare_large_message(
     if current_size <= size_limit:
         return content
 
-    room_encrypted = _room_is_encrypted(client, room_id)
+    if room_encrypted is None:
+        room_encrypted = _room_is_encrypted(client, room_id)
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
@@ -537,7 +555,12 @@ async def prepare_large_message(
             room_id=room_id,
             original_size_bytes=current_size,
         )
-        mxc_uri, file_info = await upload_json_sidecar(client, room_id, content)
+        mxc_uri, file_info = await upload_json_sidecar(
+            client,
+            room_id,
+            content,
+            room_encrypted=room_encrypted,
+        )
         if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
@@ -583,6 +606,7 @@ async def prepare_large_message(
         content,
         preview_text,
         size_limit,
+        room_encrypted=room_encrypted,
     )
 
     if sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
