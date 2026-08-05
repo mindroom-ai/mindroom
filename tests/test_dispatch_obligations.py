@@ -248,6 +248,10 @@ def _encrypted_image_source(event_id: str) -> dict[str, object]:
     }
 
 
+async def _drop_historical_event(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+    """Ignore the non-live events a runner would otherwise cache."""
+
+
 def _runner(
     store: DispatchObligationStore,
     callback: Callable[[nio.MatrixRoom, nio.Event], Awaitable[DispatchCallbackResult]],
@@ -256,12 +260,14 @@ def _runner(
     background_task_owner: object | None = None,
     retry_initial_delay_seconds: float = 1.0,
     retry_max_delay_seconds: float = 30.0,
+    cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] = _drop_historical_event,
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=turn_is_terminal,
+        cache_historical_event=cache_historical_event,
         background_task_owner=background_task_owner,
         _retry_initial_delay_seconds=retry_initial_delay_seconds,
         _retry_max_delay_seconds=retry_max_delay_seconds,
@@ -1560,6 +1566,35 @@ async def test_retry_survives_contention_with_callback_marking_deferred(
 
     assert attempts == 2
     assert not store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provenance", "cached"),
+    [
+        (nio.TimelineEventProvenance.LIVE, False),
+        (nio.TimelineEventProvenance.RECOVERED, True),
+        (nio.TimelineEventProvenance.HISTORY, True),
+    ],
+)
+async def test_only_live_events_skip_the_admission_history_cache(
+    tmp_path: Path,
+    provenance: nio.TimelineEventProvenance,
+    cached: bool,
+) -> None:
+    """Live events reach the cache through sync; every other provenance must not."""
+    cache = AsyncMock(return_value=None)
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(_store(tmp_path), callback, cache_historical_event=cache)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event(f"$provenance-{provenance.value}")
+
+    await runner._admit_source_event(room, event, provenance)
+
+    assert cache.await_count == int(cached)
 
 
 @pytest.mark.asyncio

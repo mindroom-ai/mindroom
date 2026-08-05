@@ -3038,6 +3038,61 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_path: Path) -> None:
+    """A walk that never proves continuity stays cold history: cached, never answered."""
+    bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.next_batch = "s_before_gap"
+    room_id = "!room:localhost"
+    await bot._conversation_cache.mark_room_joined(room_id)
+    history_text = _text_event("$unproven-text", "old text", 1)
+    history_image = _image_event("$unproven-image", "old image", 2)
+    # An unbound walk that runs out of events without reaching the window's
+    # own token never proves the recovered events follow the held baseline.
+    client._recovery_room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[history_text, history_image],
+            start="s_before_gap",
+            end=None,
+        ),
+    )
+    turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks.update(
+        {
+            DispatchCallbackKind.MESSAGE: turn_callback,
+            DispatchCallbackKind.MEDIA: turn_callback,
+        },
+    )
+
+    try:
+        _register_counted_source_callbacks(bot, client)
+        response = _limited_empty_classic_response(room_id)
+        await client.receive_response(response)
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+        assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        assert bot._dispatch_obligation_store.pending() == ()
+        turn_callback.assert_not_awaited()
+    finally:
+        await client.close()
+        await cache_root.close()
+
+
+@pytest.mark.asyncio
 async def test_nio_retries_recovered_event_when_cache_admission_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

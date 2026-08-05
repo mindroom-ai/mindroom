@@ -150,12 +150,16 @@ async def test_history_requires_one_exact_pending_obligation() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "provenance",
-    [nio.TimelineEventProvenance.LIVE, None],
+    [
+        nio.TimelineEventProvenance.LIVE,
+        nio.TimelineEventProvenance.RECOVERED,
+        None,
+    ],
 )
 async def test_live_and_direct_dispatch_do_not_read_pending_state(
     provenance: nio.TimelineEventProvenance | None,
 ) -> None:
-    """Live nio delivery and explicit non-nio dispatch are current work."""
+    """Live delivery, proven gap recovery, and explicit non-nio dispatch are current work."""
     obligations = _PendingObligations()
     fence = ColdHistoryFence(obligations)
 
@@ -214,6 +218,9 @@ def test_best_effort_admission_requires_matching_live_event_provenance() -> None
     fence.observe_event_provenance("$history", nio.TimelineEventProvenance.HISTORY)
     assert not fence.event_is_live("$history")
     assert not fence.event_is_live("$live")
+
+    fence.observe_event_provenance("$recovered", nio.TimelineEventProvenance.RECOVERED)
+    assert not fence.event_is_live("$recovered")
 
 
 @pytest.mark.asyncio
