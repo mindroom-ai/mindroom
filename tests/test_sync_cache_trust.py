@@ -250,7 +250,7 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
     )
 
     assert await trust.invalidate_for_cache_scope_cleanup()
-    applied, _record = await trust.apply_response(decision, cache_result=cache_result)
+    applied = await trust.apply_response(decision, cache_result=cache_result)
 
     assert applied.state is SyncTrustState.UNCERTAIN
     assert applied.reset_client_token is True
@@ -313,7 +313,7 @@ async def test_stale_gap_plan_resets_after_cache_invalidation(
     )
 
     assert await trust.invalidate_for_cache_scope_cleanup()
-    applied, _record = await trust.apply_response(
+    applied = await trust.apply_response(
         decision,
         cache_result=cache_result,
     )

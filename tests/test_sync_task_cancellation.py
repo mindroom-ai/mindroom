@@ -1286,6 +1286,40 @@ async def test_full_state_only_after_successful_first_sync() -> None:
 
 
 @pytest.mark.asyncio
+async def test_classic_rebuild_reenters_receive_loop_without_supervisor_return() -> None:
+    """A requested room-world rebuild must not escape to the retry supervisor."""
+    full_state_values: list[bool] = []
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "code"
+    bot.running = True
+    bot._first_sync_done = True
+    bot._classic_sync_rebuild_pending = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
+
+    class FakeClient:
+        async def sync_forever(
+            self,
+            *,
+            timeout: int,  # noqa: ASYNC109, ARG002 - mirrors nio's long poll.
+            full_state: bool,
+            sync_filter: object = None,  # noqa: ARG002
+        ) -> None:
+            full_state_values.append(full_state)
+            if len(full_state_values) == 1:
+                bot._classic_sync_rebuild_pending = True
+                return
+            bot._classic_sync_rebuild_pending = False
+            bot.running = False
+
+    bot.client = FakeClient()
+
+    await AgentBot.sync_forever(bot)
+
+    assert full_state_values == [False, True]
+
+
+@pytest.mark.asyncio
 async def test_classic_transport_rebuild_requests_full_state_without_restarting_lifecycle() -> None:
     """A ready bot still requests full state when only nio's room world was reset."""
     full_state_values: list[bool] = []
@@ -1293,6 +1327,7 @@ async def test_classic_transport_rebuild_requests_full_state_without_restarting_
     class FakeClient:
         async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
             full_state_values.append(full_state)
+            bot._classic_sync_rebuild_pending = False
 
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True

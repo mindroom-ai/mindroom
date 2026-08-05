@@ -93,8 +93,8 @@ class SyncCertificationDecision:
 def _uncertain_decision(
     *,
     reason: str,
+    reset_client_token: bool,
     clear_saved_token: bool = False,
-    reset_client_token: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(

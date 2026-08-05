@@ -192,8 +192,7 @@ class SyncCacheTrust:
             next_batch=next_batch,
             cache_result=cache_result,
         )
-        applied, _record = await self.apply_response(decision, cache_result=cache_result)
-        return applied
+        return await self.apply_response(decision, cache_result=cache_result)
 
     def plan_response(
         self,
@@ -215,14 +214,14 @@ class SyncCacheTrust:
         cache_result: SyncCacheWriteResult,
         joined_room_ids: Iterable[str] = (),
         publish_record: Callable[[SyncContinuityRecord], None] | None = None,
-    ) -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
+    ) -> SyncCertificationDecision:
         """Apply a planned response after its prerequisite durable work completes.
 
         ``publish_record`` must stay synchronous and non-blocking because it
         runs under the mutation lock before cancellation may escape.
         """
 
-        async def apply() -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
+        async def apply() -> SyncCertificationDecision:
             nonlocal decision
             async with self._mutation_lock:
                 if decision.cache_scope_epoch != self._cache_scope_epoch:
@@ -244,7 +243,7 @@ class SyncCacheTrust:
                     self._refresh_tokenless_baseline_pending()
                 else:
                     self._tokenless_baseline_pending = False
-                return decision, record
+                return decision
 
         return await run_coroutine_until_complete(apply())
 

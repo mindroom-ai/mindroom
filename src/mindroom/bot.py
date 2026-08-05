@@ -1251,7 +1251,7 @@ class AgentBot:
     ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
         client = self.client
-        applied, _record = await self._sync_cache_trust.apply_response(
+        applied = await self._sync_cache_trust.apply_response(
             decision,
             cache_result=cache_result,
             joined_room_ids=joined_room_ids,
@@ -2184,18 +2184,21 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        try:
-            await run_matrix_sync_forever(
-                self.client,
-                config=self.config,
-                agent_name=self.agent_name,
-                room_ids=self.rooms,
-                timeout_ms=_SYNC_TIMEOUT_MS,
-                sync_filter=_SYNC_FILTER,
-                first_sync_done=self._first_sync_done and not self._classic_sync_rebuild_pending,
-            )
-        finally:
-            await self._reconcile_classic_sync_cursor_after_loop_exit()
+        while True:
+            try:
+                await run_matrix_sync_forever(
+                    self.client,
+                    config=self.config,
+                    agent_name=self.agent_name,
+                    room_ids=self.rooms,
+                    timeout_ms=_SYNC_TIMEOUT_MS,
+                    sync_filter=_SYNC_FILTER,
+                    first_sync_done=self._first_sync_done and not self._classic_sync_rebuild_pending,
+                )
+            finally:
+                await self._reconcile_classic_sync_cursor_after_loop_exit()
+            if not (self.config.matrix_sync.mode == "classic" and self._classic_sync_rebuild_pending and self.running):
+                return
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)

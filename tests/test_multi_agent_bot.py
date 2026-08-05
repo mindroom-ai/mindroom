@@ -394,9 +394,12 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_client.clear_persisted_sync_recovery = MagicMock()
+        mock_client.has_uncommitted_classic_sync_state = False
+        mock_client.next_batch = ""
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:
             call_order.append("sync")
+            bot._classic_sync_rebuild_pending = False
 
         mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
         mock_client.sliding_sync_forever = AsyncMock(side_effect=_sync_forever)
