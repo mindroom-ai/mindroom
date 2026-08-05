@@ -2110,6 +2110,12 @@ class TurnController:
             STREAM_STATUS_PENDING,
             STREAM_STATUS_STREAMING,
         }:
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
+                dispatch_timing=None,
+            )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
