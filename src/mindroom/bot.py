@@ -1267,7 +1267,7 @@ class AgentBot:
     ) -> None:
         """Publish one durable continuity record and acknowledge its exact nio state."""
         self._room_lifecycle.apply_continuity_record(record)
-        if client is not None and record.checkpoint is not None:
+        if client is not None and record.checkpoint is not None and client.has_uncommitted_classic_sync_state:
             client.acknowledge_classic_sync(record.checkpoint.token)
 
     async def _apply_client_rewind_decision(

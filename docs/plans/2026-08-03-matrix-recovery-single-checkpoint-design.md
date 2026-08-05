@@ -46,6 +46,8 @@ After the checkpoint write, the same cancellation-drained publication step synch
 
 nio makes a token acknowledgeable only after all internal response processing succeeds, so an old or partially advanced cursor cannot clear dirty state from a failed response.
 
+If nio suppresses an ordinary same-token response as a clean no-op, MindRoom may republish its continuity record but skips acknowledgement because no transient state was staged.
+
 nio's acknowledgement state is volatile and can only report that a reset is required, so it is not a second durable cursor authority.
 
 If any prerequisite fails, MindRoom asks nio to discard the uncommitted in-memory world and starts the next Classic loop from the retained checkpoint.
@@ -122,7 +124,7 @@ There is no Agno influence on the Matrix transport cursor.
 
 The nio contract tests prove that reset drains callbacks and room-state operations already started, waits membership cleanup and queued room operations, clears replay-suppression and room state, and permits the same event to be admitted on same-token replay.
 
-The acknowledgement tests prove that partially applied state stays dirty, only the exact token clears it, and clean loop exit preserves the acknowledged room cache.
+The acknowledgement tests prove that partially applied state and retained callbacks stay dirty, only the exact fully applied token clears it, and clean loop exit preserves the acknowledged room cache.
 
 The migration test proves that legacy cursor, pending-event, gap, and Sliding-window rows are removed atomically.
 

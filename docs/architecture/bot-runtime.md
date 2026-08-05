@@ -91,7 +91,8 @@ Classic clients disable nio token and recovery persistence, so the cache-generat
 nio parses one Classic response and stages its room, recovery, and completion state in memory.
 MindRoom advances the checkpoint only after cache writes, exact source admission, and response-owned lifecycle effects complete.
 The same cancellation-drained publication step then acknowledges the exact staged token in nio, so nio's volatile dirty bit can only force replay and never authorizes checkpoint progress.
-nio exposes that acknowledgeable token only after all internal response processing succeeds, so failed staging stays dirty even if its mutable cursor is old or partially advanced.
+nio exposes that acknowledgeable token only after all internal response processing succeeds with no retained recovery callback or failure, so failed or still-running staging stays dirty even if its mutable cursor is old or partially advanced.
+An ordinary same-token response that nio suppresses as a clean no-op has no dirty state, so MindRoom publishes continuity without calling the acknowledgement API.
 Any failed, cancelled, or nio-unrecovered response discards nio's transient world and replays from the retained MindRoom checkpoint with full state.
 The nio reset waits for non-sync membership cleanup plus active and queued room-state operations before clearing that world, and its one-shot rebuild marker applies the first full-state response even when Matrix returns the same opaque token.
 Transient sync errors retain the initial cursor, filter, and full-state request until a successful response completes the rebuild.

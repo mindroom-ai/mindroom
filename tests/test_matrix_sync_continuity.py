@@ -2100,6 +2100,7 @@ async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after_side_effect_failure"
+    bot.client.has_uncommitted_classic_sync_state = True
     response = _sync_response("s_after_side_effect_failure")
     bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
 
@@ -2297,6 +2298,21 @@ async def test_running_classic_loop_exit_preserves_acknowledged_room_state(tmp_p
     assert bot.client.next_batch == "s_same"
     assert bot.client.rooms[room.room_id] is room
     assert bot._first_sync_done is True
+
+
+def test_classic_checkpoint_publication_skips_ack_for_clean_duplicate(tmp_path: Path) -> None:
+    """A same-token no-op response has no newly staged nio state to acknowledge."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.has_uncommitted_classic_sync_state = False
+    record = bot._sync_continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_same", cache_generation=_CACHE_GENERATION),
+    )
+
+    bot._publish_classic_sync_commit(bot.client, record)
+
+    bot.client.acknowledge_classic_sync.assert_not_called()
+    assert bot._room_lifecycle._applied_continuity_revision == record.revision
 
 
 @pytest.mark.asyncio
