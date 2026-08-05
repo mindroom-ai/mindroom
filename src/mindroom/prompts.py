@@ -337,11 +337,9 @@ Your job is to produce one merged handoff summary as plain text.
 Return only the summary text.
 
 Rules:
-- Use <previous_summary> as context and retain the information needed to continue the current work.
-- Condense that information instead of copying previous wording verbatim.
+- Retain the information from <previous_summary> needed to continue the current work, but condense it rather than copying wording verbatim.
 - Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
-- Collapse completed work into brief outcomes while retaining current constraints, decisions, next steps, and critical context.
-- Add only the new information from <new_conversation>.
+- Incorporate relevant new information from <new_conversation>.
 - Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
 - Do not invent facts.
