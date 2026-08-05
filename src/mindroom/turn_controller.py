@@ -2105,20 +2105,21 @@ class TurnController:
         event_info = EventInfo.from_event(event.source)
         if not isinstance(event.body, str):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
+        if prechecked_event is None:
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
             STREAM_STATUS_PENDING,
             STREAM_STATUS_STREAMING,
         }:
-            await self._append_live_event_with_timing(
-                room.room_id,
-                event,
-                event_info=event_info,
-                dispatch_timing=None,
-            )
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
-        if prechecked_event is None:
+            if self.deps.ingress.managed_entity_name_for_sender(event.sender) is not None:
+                await self._append_live_event_with_timing(
+                    room.room_id,
+                    event,
+                    event_info=event_info,
+                    dispatch_timing=None,
+                )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatch_timing = create_dispatch_pipeline_timing(

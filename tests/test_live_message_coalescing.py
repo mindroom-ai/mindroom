@@ -39,6 +39,7 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchIngressMetadata,
@@ -7147,13 +7148,47 @@ async def test_router_caches_agent_pending_thread_placeholder_before_ignoring_di
     conversation_cache = make_conversation_cache_mock()
     controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
 
-    await controller.handle_text_event(room, placeholder)
+    outcome = await controller.handle_text_event(room, placeholder)
 
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     conversation_cache.append_live_event.assert_awaited_once_with(
         room.room_id,
         placeholder,
         event_info=EventInfo.from_event(placeholder.source),
     )
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        pytest.param("@user:localhost", id="accepted-human"),
+        pytest.param("@mindroom_router:localhost", id="rejected-self"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_router_does_not_cache_nonterminal_stream_without_accepted_managed_sender(
+    tmp_path: Path,
+    sender: str,
+) -> None:
+    """Reject cache writes unless ingress accepts a managed entity's stream."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    placeholder = _text_event(
+        event_id="$untrusted-placeholder",
+        body="Thinking...",
+        sender=sender,
+        thread_id="$thread",
+    )
+    content = placeholder.source["content"]
+    assert isinstance(content, dict)
+    content[STREAM_STATUS_KEY] = STREAM_STATUS_PENDING
+    conversation_cache = make_conversation_cache_mock()
+    controller = replace_turn_controller_deps(bot, conversation_cache=conversation_cache)
+
+    outcome = await controller.handle_text_event(room, placeholder)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    conversation_cache.append_live_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
