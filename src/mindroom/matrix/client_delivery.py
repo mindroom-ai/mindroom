@@ -258,15 +258,21 @@ async def send_message_result(
     if cache_bypass:
         encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
         if isinstance(encryption_state, nio.RoomGetStateEventResponse):
-            logger.error(
-                "matrix_encrypted_room_send_requires_synced_room_cache",
-                room_id=room_id,
-                operation=operation,
-                hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
-            )
-            return None
+            if not retry_sync_recovery:
+                logger.error(
+                    "matrix_encrypted_room_send_requires_synced_room_cache",
+                    room_id=room_id,
+                    operation=operation,
+                    hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
+                )
+                return None
+            cache_bypass = False
         if not (
-            isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND"
+            isinstance(encryption_state, nio.RoomGetStateEventResponse)
+            or (
+                isinstance(encryption_state, nio.RoomGetStateEventError)
+                and encryption_state.status_code == "M_NOT_FOUND"
+            )
         ):
             logger.error(
                 "matrix_room_send_requires_known_encryption_state",

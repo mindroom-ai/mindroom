@@ -431,7 +431,8 @@ async def test_classic_unrecovered_gap_resets_transient_sync_state(
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert bot.client.next_batch == ""
-    assert bot._first_sync_done is False
+    assert bot._first_sync_done is True
+    assert bot._classic_sync_rebuild_pending is True
     bot.client.reset_classic_sync_state.assert_awaited_once()
 
 
@@ -2111,6 +2112,7 @@ async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_after_side_effect_failure")
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_side_effect_failure"
+    bot.client.acknowledge_classic_sync.assert_called_once_with("s_after_side_effect_failure")
 
 
 @pytest.mark.asyncio
@@ -2245,6 +2247,7 @@ async def test_failed_reset_drain_still_restores_committed_cursor(tmp_path: Path
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_uncommitted"
+    bot._first_sync_done = True
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_committed")
     bot.client.reset_classic_sync_state.side_effect = RuntimeError("callback failed")
@@ -2253,7 +2256,8 @@ async def test_failed_reset_drain_still_restores_committed_cursor(tmp_path: Path
         await bot._reset_classic_sync_state(force=True)
 
     assert bot.client.next_batch == "s_committed"
-    assert bot._first_sync_done is False
+    assert bot._first_sync_done is True
+    assert bot._classic_sync_rebuild_pending is True
     assert bot._room_member_join_hooks_armed is False
 
 
@@ -2274,20 +2278,45 @@ async def test_rejected_equal_token_response_still_clears_nio_staging(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_running_classic_loop_exit_resets_equal_token_staging(tmp_path: Path) -> None:
-    """A restarting loop cannot infer clean transient state from token equality."""
+async def test_running_classic_loop_exit_preserves_acknowledged_room_state(tmp_path: Path) -> None:
+    """A clean transport restart must not erase acknowledged room state."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_same"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_same")
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    bot.client.rooms[room.room_id] = room
+    bot.client.has_uncommitted_classic_sync_state = False
+    bot._first_sync_done = True
+    bot.running = True
+
+    await bot._reconcile_classic_sync_cursor_after_loop_exit()
+
+    bot.client.reset_classic_sync_state.assert_not_awaited()
+    assert bot.client.next_batch == "s_same"
+    assert bot.client.rooms[room.room_id] is room
+    assert bot._first_sync_done is True
+
+
+@pytest.mark.asyncio
+async def test_running_classic_loop_exit_resets_equal_token_staging(tmp_path: Path) -> None:
+    """An unacknowledged response is dirty even when its token equals the checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_same"
+    bot.client.has_uncommitted_classic_sync_state = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_same")
+    bot._first_sync_done = True
     bot.running = True
 
     await bot._reconcile_classic_sync_cursor_after_loop_exit()
 
     bot.client.reset_classic_sync_state.assert_awaited_once_with()
     assert bot.client.next_batch == "s_same"
-    assert bot._first_sync_done is False
+    assert bot._first_sync_done is True
+    assert bot._classic_sync_rebuild_pending is True
 
 
 @pytest.mark.asyncio
@@ -3452,6 +3481,8 @@ async def test_cancelled_continuity_acceptance_publishes_runtime_fences_before_e
     room_id = "!room:localhost"
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_committed"
+    bot.client.has_uncommitted_classic_sync_state = True
     bot._room_lifecycle.apply_continuity_record(
         bot._sync_continuity_store.update_join_fences(add=(room_id,)),
     )
@@ -3498,6 +3529,7 @@ async def test_cancelled_continuity_acceptance_publishes_runtime_fences_before_e
     assert record.pending_join_decrypt_fences == frozenset()
     assert bot._room_lifecycle._applied_continuity_revision == record.revision
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+    bot.client.acknowledge_classic_sync.assert_called_once_with("s_committed")
 
 
 @pytest.mark.asyncio

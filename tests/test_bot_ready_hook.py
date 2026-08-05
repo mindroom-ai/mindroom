@@ -683,6 +683,30 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_ready_does_not_repeat_after_classic_transport_rebuild(tmp_path: Path) -> None:
+    """Rebuilding nio's transient room cache must not restart bot lifecycle."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+
+    fired_count = 0
+
+    @hook(EVENT_BOT_READY)
+    async def on_ready(_ctx: AgentLifecycleContext) -> None:
+        nonlocal fired_count
+        fired_count += 1
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(MagicMock())
+        await bot._reset_classic_sync_state(force=True)
+        assert bot._first_sync_done is True
+        await bot._on_sync_response(MagicMock())
+
+    assert fired_count == 1
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_ready_notification_retries_after_failure(tmp_path: Path) -> None:
     """A transient readiness failure must retry after the first sync was recorded."""
     bot = _agent_bot(tmp_path)

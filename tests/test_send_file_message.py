@@ -947,6 +947,43 @@ class TestSendMessageResult:
         warning_mock.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_sync_recovery_retry_waits_for_encrypted_room_cache_rebuild(self) -> None:
+        """Durable response delivery waits while a rejected sync rebuilds room state."""
+        client = _mock_client(encrypted=True)
+        room = client.rooms.pop("!room:localhost")
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            "!room:localhost",
+        )
+        client.room_send.side_effect = [
+            nio.SendRetryError("Classic Sync room state is being rebuilt."),
+            nio.RoomSendResponse("$evt:localhost", "!room:localhost"),
+        ]
+
+        async def restore_room_cache(_delay: float) -> None:
+            client.rooms["!room:localhost"] = room
+
+        with (
+            patch(
+                "mindroom.matrix.client_delivery.prepare_large_message",
+                new=AsyncMock(return_value={"body": "prepared", "msgtype": "m.text"}),
+            ),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache),
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                retry_sync_recovery=True,
+            )
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
+        assert client.room_send.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_sync_recovery_retry_bounds_a_stuck_second_send(self) -> None:
         """The recovery deadline should also bound a retry stuck in transport."""
         client = _mock_client()

@@ -42,17 +42,27 @@ MindRoom durably writes the event cache, admits exact source obligations, comple
 
 Only that MindRoom checkpoint acknowledges the Matrix response.
 
+After the checkpoint write, the same cancellation-drained publication step synchronously acknowledges that exact token in nio.
+
+nio's acknowledgement state is volatile and can only report that a reset is required, so it is not a second durable cursor authority.
+
 If any prerequisite fails, MindRoom asks nio to discard the uncommitted in-memory world and starts the next Classic loop from the retained checkpoint.
 
 The reset clears room state, invited-room state, recovery gaps, pending and completed event markers, Sliding request caches, and transient cursors.
 
-The reset first waits for every active or queued room-state operation, so it never clears a room behind an operation using an older per-room gate.
+The reset first waits for non-sync membership cleanup and every active or queued room-state operation, so it never clears a room behind an operation using an older per-room gate.
 
 The reset retains Olm and encrypted-room persistence because replaying the same encrypted event against that transport state is idempotent.
 
 The next Classic request uses `full_state=True` so the cleared nio room model is reconstructed before callbacks run.
 
 The first response after reset bypasses same-token suppression because Matrix tokens are opaque and a valid full-state response may return the restored checkpoint unchanged.
+
+Transport rebuild state is separate from application first-sync readiness, so `bot:ready` remains once-only across replay.
+
+A live rebuild from a certified checkpoint dispatches unseen state-block joins as well as catch-up timeline joins through the exact durable obligation path.
+
+Encrypted sends attempted during a real rebuild receive nio's retryable recovery error and use the existing bounded delivery retry.
 
 At Classic startup, MindRoom removes legacy nio cursor, recovery, and Sliding-window rows left by older versions or a previous transport mode.
 
@@ -73,7 +83,8 @@ Classic never resumes from that lane, and entering Classic clears its residue be
 | Before MindRoom admission | The checkpoint is unchanged and Matrix replay is requested |
 | During partial admission | Replay is absorbed by event-ID and obligation-ID idempotency |
 | After admission but before checkpoint write | The checkpoint is unchanged and replay is harmless |
-| After checkpoint write | Every required source effect is already durable |
+| After checkpoint write but before nio acknowledgement | Every required source effect is durable and an in-process loop exit conservatively rebuilds |
+| After checkpoint write and nio acknowledgement | The clean room cache survives an ordinary transport restart |
 | During Agno execution | The Matrix checkpoint is unaffected and the durable obligation can retry |
 | During transient reset | The old checkpoint remains authoritative and the next supervisor loop resets again |
 
@@ -103,11 +114,13 @@ There is no Agno influence on the Matrix transport cursor.
 
 ## Verification
 
-The nio contract tests prove that reset drains callbacks and room-state operations already started, waits queued room operations, clears replay-suppression and room state, and permits the same event to be admitted on same-token replay.
+The nio contract tests prove that reset drains callbacks and room-state operations already started, waits membership cleanup and queued room operations, clears replay-suppression and room state, and permits the same event to be admitted on same-token replay.
+
+The acknowledgement tests prove that partially applied state stays dirty, only the exact token clears it, and clean loop exit preserves the acknowledged room cache.
 
 The migration test proves that legacy cursor, pending-event, gap, and Sliding-window rows are removed atomically.
 
-The MindRoom continuity tests cover cache failures, callback-admission failures, cancellation, loop exit before response callbacks, `M_UNKNOWN_POS`, cold startup, room-member baselines, and Sliding-to-Classic residue.
+The MindRoom continuity tests cover cache failures, callback-admission failures, cancellation-atomic acknowledgement, loop exit before response callbacks, clean transport restarts, `M_UNKNOWN_POS`, cold startup, room-member state-only replay, once-only readiness, and Sliding-to-Classic residue.
 
 The cross-repository contract test proves an unrecovered real nio gap is rejected, reset, replayed from MindRoom's checkpoint, and certified only after the replay succeeds.
 

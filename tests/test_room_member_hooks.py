@@ -640,6 +640,7 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
     bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_restored")
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -661,6 +662,73 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     )
 
     assert seen == ["$catchup-join"]
+
+
+@pytest.mark.asyncio
+async def test_router_replays_failed_live_join_admission_after_classic_reset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset from a certified checkpoint must re-admit its catch-up timeline join."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = True
+    bot._room_member_join_hooks_armed = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_join")
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_join"
+    bot.client.has_uncommitted_classic_sync_state = True
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(
+            side_effect=[
+                SyncCacheWriteResult(complete=True),
+                SyncCacheWriteResult(complete=True),
+            ],
+        ),
+    )
+    join_event = _room_member_event(
+        event_id="$replayed-live-join",
+        prev_membership=None,
+    )
+    rejected_response = _sync_response_with_state(
+        room.room_id,
+        [],
+        timeline_events=[join_event],
+    )
+    rejected_response.next_batch = "s_after_join"
+
+    bot._record_dispatch_persist_failure()
+    await bot._on_sync_response(rejected_response)
+
+    assert seen == []
+    assert bot._first_sync_done is True
+    assert bot._classic_sync_rebuild_pending is True
+    assert bot.client.next_batch == "s_before_join"
+
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_join"
+    bot.client.has_uncommitted_classic_sync_state = True
+    rebuilt_response = _sync_response_with_state(
+        room.room_id,
+        [join_event],
+        timeline_events=[],
+    )
+    rebuilt_response.next_batch = "s_after_join"
+    await bot._on_sync_response(rebuilt_response)
+
+    assert seen == ["$replayed-live-join"]
+    assert bot._room_member_join_hooks_armed is True
+    assert bot._classic_sync_rebuild_pending is False
 
 
 @pytest.mark.asyncio

@@ -720,6 +720,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
+    client.has_uncommitted_classic_sync_state = False
     presence_response = MagicMock()
     presence_response.presence = "offline"
     presence_response.last_active_ago = 3_600_000
@@ -736,8 +737,13 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
         client.next_batch = ""
         client.loaded_sync_token = ""
         client.rooms.clear()
+        client.has_uncommitted_classic_sync_state = False
+
+    def acknowledge_classic_sync(_next_batch: str) -> None:
+        client.has_uncommitted_classic_sync_state = False
 
     client.clear_persisted_sync_recovery = MagicMock()
+    client.acknowledge_classic_sync = MagicMock(side_effect=acknowledge_classic_sync)
     client.reset_classic_sync_state.side_effect = reset_classic_sync_state
     return client
 

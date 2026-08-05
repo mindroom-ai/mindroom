@@ -289,6 +289,7 @@ def room_member_sync_state_plan(
     runtime_paths: RuntimePaths,
     record_only: bool = False,
     include_timeline_baseline: bool = False,
+    dispatch_snapshot_joins: bool = False,
 ) -> _RoomMemberSyncPlan:
     """Classify state events into durable hook dispatches and baseline markers."""
     dispatch_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
@@ -303,7 +304,22 @@ def room_member_sync_state_plan(
             _room_member_events_from_sync_timeline(response, rooms=rooms),
         )
     for room, event in events:
-        if record_only or room.room_id in limited_room_ids:
+        if record_only:
+            record_events.append((room, event))
+            continue
+        if dispatch_snapshot_joins and (
+            _room_member_join_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                require_previous_membership=False,
+            )
+            is not None
+        ):
+            dispatch_events.append((room, event))
+            continue
+        if room.room_id in limited_room_ids:
             record_events.append((room, event))
             continue
         if (
