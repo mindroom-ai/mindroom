@@ -177,7 +177,11 @@ async def test_live_and_direct_dispatch_do_not_read_pending_state(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "provenance",
-    [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.HISTORY],
+    [
+        nio.TimelineEventProvenance.LIVE,
+        nio.TimelineEventProvenance.RECOVERED,
+        nio.TimelineEventProvenance.HISTORY,
+    ],
 )
 async def test_invite_and_decrypt_fences_override_timeline_provenance(
     provenance: nio.TimelineEventProvenance,

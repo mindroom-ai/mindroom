@@ -22,6 +22,7 @@ from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -58,6 +59,8 @@ from tests.bot_helpers import _configured_team_test_config, _configured_team_use
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
+    install_generate_response_mock,
     install_runtime_cache_support,
     install_shutdown_drain_mocks,
     make_matrix_client_mock,
@@ -78,19 +81,20 @@ if TYPE_CHECKING:
 _CACHE_GENERATION = "test-cache-generation"
 
 
-def _config(tmp_path: Path) -> Config:
+def _config(tmp_path: Path, *, authorize_senders: bool = False) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
             models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=authorize_senders),
         ),
         runtime_paths,
     )
 
 
-def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
-    config = _config(tmp_path)
+def _agent_bot(tmp_path: Path, *, agent_name: str = "code", authorize_senders: bool = False) -> AgentBot:
+    config = _config(tmp_path, authorize_senders=authorize_senders)
     bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
@@ -672,6 +676,23 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
             "event_id": event_id,
             "sender": "@user:localhost",
             "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
+def _mention_event(event_id: str, body: str, mentioned_user_id: str) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": body,
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [mentioned_user_id]},
+            },
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
             "room_id": "!room:localhost",
             "type": "m.room.message",
         },
@@ -3009,7 +3030,17 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
             end="p_gap_start",
         ),
     )
-    turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
+    was_cached_at_dispatch: list[bool] = []
+
+    async def observe_cache_before_turn(
+        room: nio.MatrixRoom,
+        event: nio.Event,
+    ) -> DispatchCallbackResult:
+        cached = await bot.event_cache.get_event(room.room_id, event.event_id)
+        was_cached_at_dispatch.append(cached is not None)
+        return DispatchCallbackResult.SUCCEEDED
+
+    turn_callback = AsyncMock(side_effect=observe_cache_before_turn)
     callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
     callbacks.update(
         {
@@ -3031,7 +3062,57 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
         assert bot._dispatch_obligation_store.pending() == ()
-        assert turn_callback.await_count == 2
+        # Both turns ran, and each one already had its own source event cached.
+        assert was_cached_at_dispatch == [True, True]
+    finally:
+        await client.close()
+        await cache_root.close()
+
+
+@pytest.mark.asyncio
+async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_path: Path) -> None:
+    """The restart-gap message nio 0.36 proves continuous must reach a real reply."""
+    bot = _agent_bot(tmp_path, authorize_senders=True)
+    cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
+    await cache_root.initialize()
+    bot.event_cache = cache_root.for_principal(bot.matrix_id.full_id)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    client.next_batch = "s_before_gap"
+    room_id = "!room:localhost"
+    await bot._conversation_cache.mark_room_joined(room_id)
+    mention = bot.agent_user.user_id
+    gap_mention = _mention_event("$gap-mention", f"{mention}: ping", mention)
+    client._recovery_room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[gap_mention],
+            start="s_before_gap",
+            end="p_gap_start",
+        ),
+    )
+    generate_response = AsyncMock(return_value="$gap-reply")
+    install_generate_response_mock(bot, generate_response)
+
+    try:
+        _register_counted_source_callbacks(bot, client)
+        # The recovery client never logs in, so room classification cannot be served.
+        with patch("mindroom.text_ingress_dispatch.is_dm_room", AsyncMock(return_value=False)):
+            await client.receive_response(_limited_empty_classic_response(room_id))
+            await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+            await drain_coalescing(bot)
+
+        generate_response.assert_awaited_once()
+        assert generate_response.await_args.kwargs["prompt"] == f"{mention}: ping"
+        assert bot._turn_store.is_durably_handled(gap_mention.event_id)
+        assert bot._dispatch_obligation_store.pending() == ()
     finally:
         await client.close()
         await cache_root.close()
