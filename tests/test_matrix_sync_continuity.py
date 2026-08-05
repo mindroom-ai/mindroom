@@ -3053,7 +3053,7 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
         add_admission = _register_counted_source_callbacks(bot, client)
         response = _limited_empty_classic_response(room_id)
         await client.receive_response(response)
-        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
         add_admission.assert_called_once()
         assert response.recovered_room_ids == frozenset({room_id})
@@ -3106,7 +3106,7 @@ async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_pa
         # The recovery client never logs in, so room classification cannot be served.
         with patch("mindroom.text_ingress_dispatch.is_dm_room", AsyncMock(return_value=False)):
             await client.receive_response(_limited_empty_classic_response(room_id))
-            await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
             await drain_coalescing(bot)
 
         generate_response.assert_awaited_once()
@@ -3162,7 +3162,7 @@ async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_pa
         _register_counted_source_callbacks(bot, client)
         response = _limited_empty_classic_response(room_id)
         await client.receive_response(response)
-        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
