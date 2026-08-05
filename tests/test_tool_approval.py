@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tool_approval as approval_module
+from mindroom import approval_transport
 from mindroom.approval_events import parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
@@ -1421,7 +1422,12 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     client.user_id = "@mindroom_router:localhost"
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
-    bot = MagicMock(agent_name="router", running=True, client=client)
+    bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock(return_value=True)
     store = initialize_approval_store(
@@ -1467,7 +1473,12 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
     client.user_id = None
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
-    bot = MagicMock(agent_name="router", running=True, client=client)
+    bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     orchestrator.agent_bots = {"router": bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
@@ -1503,7 +1514,12 @@ def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchest
     client.user_id = "@mindroom_router:localhost"
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
-    bot = MagicMock(agent_name="router", running=True, client=client)
+    bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     orchestrator.agent_bots = {"router": bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
     return orchestrator, client
@@ -1602,6 +1618,41 @@ async def test_approval_transport_offloads_encrypted_full_arguments_to_file_side
 
 
 @pytest.mark.asyncio
+async def test_approval_sidecar_uses_remote_encryption_state_during_cache_rebuild() -> None:
+    """A Classic cache reset cannot downgrade complete approval arguments to plaintext."""
+    client = MagicMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.olm = MagicMock()
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            "!room:localhost",
+        ),
+    )
+    client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full-args"), None))
+    full_arguments = {"content": "secret " * 20_000}
+
+    offloaded = await approval_transport._offload_oversized_full_arguments(
+        client,
+        "!room:localhost",
+        {
+            "approval_id": "approval-1",
+            "full_arguments": full_arguments,
+            "approvable": True,
+        },
+    )
+
+    client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
+    assert "full_arguments_url" not in offloaded
+    assert offloaded["full_arguments_file"]["url"] == "mxc://localhost/full-args"
+    upload = client.upload.await_args.kwargs
+    assert upload["content_type"] == "application/octet-stream"
+    assert json.dumps(full_arguments).encode() not in upload["data_provider"](None, None).read()
+
+
+@pytest.mark.asyncio
 async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_fails(tmp_path: Path) -> None:
     orchestrator, client = _approval_transport_orchestrator(tmp_path)
     client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
@@ -1638,7 +1689,12 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
     client.user_id = "@mindroom_router:localhost"
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"))
-    bot = MagicMock(agent_name="router", running=True, client=client)
+    bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     orchestrator.agent_bots = {"router": bot}
 
     sent = await orchestrator._approval_transport.send_notice(
@@ -1680,7 +1736,12 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     router_client.user_id = "@mindroom_router:localhost"
     router_client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     router_client.room_send = AsyncMock(side_effect=room_send)
-    router_bot = MagicMock(agent_name="router", running=True, client=router_client)
+    router_bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=router_client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     router_bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")
 
     code_bot = MagicMock(agent_name="code", running=True)
@@ -1743,7 +1804,12 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     router_client.user_id = "@mindroom_router:localhost"
     router_client.rooms = {"!room:localhost": room}
     router_client.room_send = AsyncMock()
-    router_bot = MagicMock(agent_name="router", running=True, client=router_client)
+    router_bot = MagicMock(
+        agent_name="router",
+        running=True,
+        client=router_client,
+        approval_room_ids=frozenset({"!room:localhost"}),
+    )
     orchestrator.agent_bots = {"router": router_bot}
 
     sent = await orchestrator._approval_transport.send_approval_event_now(

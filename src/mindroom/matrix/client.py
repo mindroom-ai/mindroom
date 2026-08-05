@@ -6,8 +6,10 @@ from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     cached_room,  # noqa: F401
     edit_message_result,
+    resolve_room_encryption_for_delivery,
     send_file_message,
     send_message_result,
+    send_room_event_result,
 )
 from mindroom.matrix.client_room_admin import (
     add_room_to_space,
@@ -56,7 +58,9 @@ __all__ = [
     "matrix_client",
     "matrix_startup_error",
     "replace_visible_message",
+    "resolve_room_encryption_for_delivery",
     "restore_login",
     "send_file_message",
     "send_message_result",
+    "send_room_event_result",
 ]

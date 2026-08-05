@@ -7,7 +7,7 @@ import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -125,6 +125,7 @@ async def _send_prepared_room_message(
     cache_bypass: bool,
     operation: str,
     retry_sync_recovery: bool,
+    transaction_id: str | None = None,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
@@ -155,10 +156,18 @@ async def _send_prepared_room_message(
             )
         # Bots have no interactive device-verification flow, so encrypted sends
         # always deliver to unverified devices.
+        if transaction_id is None:
+            return await client.room_send(
+                room_id=room_id,
+                message_type=message_type,
+                content=content_sent,
+                ignore_unverified_devices=True,
+            )
         return await client.room_send(
             room_id=room_id,
             message_type=message_type,
             content=content_sent,
+            tx_id=transaction_id,
             ignore_unverified_devices=True,
         )
 
@@ -232,8 +241,13 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     )
 
 
-async def _cached_or_remote_room_encrypted(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool | None:
-    """Return authoritative room encryption state for a safe media upload."""
+async def resolve_room_encryption_for_delivery(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    operation: str,
+) -> bool | None:
+    """Return authoritative room encryption state for safe outbound preparation."""
     room = cached_room(client, room_id)
     if room is not None:
         room_encrypted = bool(room.encrypted)
@@ -266,6 +280,31 @@ def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operati
     return _can_send_to_encrypted_room(client, room_id, operation=operation)
 
 
+async def send_room_event_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    message_type: str,
+    content: dict[str, Any],
+    *,
+    transaction_id: str | None = None,
+    operation: str = "send_room_event",
+) -> nio.RoomSendResponse | nio.RoomSendError | None:
+    """Send one already-built room event through bounded sync recovery."""
+    if not _can_send_to_encrypted_room(client, room_id, operation=operation):
+        return None
+    response = await _send_prepared_room_message(
+        client,
+        room_id,
+        content,
+        message_type=message_type,
+        cache_bypass=False,
+        operation=operation,
+        retry_sync_recovery=False,
+        transaction_id=transaction_id,
+    )
+    return cast("nio.RoomSendResponse | nio.RoomSendError | None", response)
+
+
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -283,7 +322,7 @@ async def send_message_result(
     room_encryption_override: bool | None = None
     if isinstance(rooms, Mapping):
         room = rooms.get(room_id)
-        room_encryption_override = await _cached_or_remote_room_encrypted(
+        room_encryption_override = await resolve_room_encryption_for_delivery(
             client,
             room_id,
             operation=operation,
@@ -411,7 +450,7 @@ async def _upload_media_bytes_as_mxc(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload an in-memory Matrix media payload as MXC, encrypting for encrypted rooms."""
     info: dict[str, Any] = {"size": len(media_bytes), "mimetype": mimetype}
-    room_encrypted = await _cached_or_remote_room_encrypted(client, room_id, operation="upload_media_bytes")
+    room_encrypted = await resolve_room_encryption_for_delivery(client, room_id, operation="upload_media_bytes")
     if room_encrypted is None:
         return None, None
     upload_bytes = media_bytes
@@ -725,8 +764,10 @@ __all__ = [
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
+    "resolve_room_encryption_for_delivery",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_room_event_result",
     "send_runtime_encrypted_media_message",
 ]

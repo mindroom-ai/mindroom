@@ -25,7 +25,7 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
@@ -355,11 +355,12 @@ class MatrixMessageOperations:
             return self._result("error", action="react", message="target event_id is required.")
 
         reaction = message.strip() if message and message.strip() else "👍"
-        response = await context.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=build_reaction_content(target, reaction),
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            context.client,
+            room_id,
+            "m.reaction",
+            build_reaction_content(target, reaction),
+            operation="matrix_message_react",
         )
         if isinstance(response, nio.RoomSendResponse):
             return self._result(

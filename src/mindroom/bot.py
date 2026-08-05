@@ -171,6 +171,8 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+_CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
+_CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
 # Raise the per-room timeline limit above the homeserver default (~10) so a
 # room has to flood much harder before the server truncates its timeline and
 # forces a limited-sync gap backfill. This only widens the timeline window; it
@@ -178,6 +180,18 @@ _SYNC_TIMEOUT_MS = 30000
 # out.
 _SYNC_TIMELINE_LIMIT = 50
 _SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
+
+
+def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
+    """Return zero for the first reentry, then capped exponential backoff."""
+    if attempt <= 1:
+        return 0.0
+    delay = _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS
+    for _ in range(attempt - 2):
+        delay *= 2
+        if delay >= _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS:
+            return _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS
+    return delay
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +326,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _classic_sync_rebuild_pending: bool
+    _classic_sync_rebuild_attempt: int
     _sync_shutting_down: bool
 
     # Shared runtime state and extracted collaborators
@@ -372,6 +387,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._classic_sync_rebuild_pending = False
+        self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
@@ -915,6 +931,13 @@ class AgentBot:
         return self._interrupted_turn_rooms.pending_room_ids
 
     @property
+    def approval_room_ids(self) -> frozenset[str]:
+        """Return configured and durably invited rooms owned by approval transport."""
+        return frozenset(
+            room_id for room_id in (*self.rooms, *self._room_lifecycle.invited_rooms) if room_id.startswith("!")
+        )
+
+    @property
     def agent_name(self) -> str:
         """Get the agent name from username."""
         return self.agent_user.agent_name
@@ -1226,6 +1249,7 @@ class AgentBot:
         if classic:
             client.clear_persisted_sync_recovery()
             self._classic_sync_rebuild_pending = True
+            self._classic_sync_rebuild_attempt = 0
         client.next_batch = sync_token or ""
 
     async def _certify_sync_response(
@@ -1296,6 +1320,7 @@ class AgentBot:
             if reset_completed or not client.has_uncommitted_classic_sync_state:
                 client.next_batch = retry_token or ""
                 self._classic_sync_rebuild_pending = True
+                self._classic_sync_rebuild_attempt += 1
                 self._room_member_join_hooks_armed = False
         return True, retry_token is not None
 
@@ -1643,6 +1668,7 @@ class AgentBot:
             return
         if isinstance(_response, nio.SyncResponse):
             self._classic_sync_rebuild_pending = False
+            self._classic_sync_rebuild_attempt = 0
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -2020,6 +2046,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._classic_sync_rebuild_pending = False
+        self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
         self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
@@ -2199,6 +2226,14 @@ class AgentBot:
                 await self._reconcile_classic_sync_cursor_after_loop_exit()
             if not (self.config.matrix_sync.mode == "classic" and self._classic_sync_rebuild_pending and self.running):
                 return
+            retry_delay = _classic_sync_rebuild_backoff_seconds(self._classic_sync_rebuild_attempt)
+            if retry_delay > 0:
+                self.logger.warning(
+                    "matrix_sync_rebuild_retry_backoff",
+                    attempt=self._classic_sync_rebuild_attempt,
+                    retry_in_seconds=retry_delay,
+                )
+                await asyncio.sleep(retry_delay)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)

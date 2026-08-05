@@ -2616,6 +2616,7 @@ class TestMultiAgentOrchestrator:
         router_bot.agent_name = "router"
         router_bot.running = True
         router_bot.client = router_client
+        router_bot.approval_room_ids = frozenset({"!room:localhost"})
         router_bot.event_cache = make_event_cache_mock()
         router_bot.stop = AsyncMock()
 

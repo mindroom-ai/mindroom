@@ -2238,6 +2238,7 @@ path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
     "mindroom.approval_transport",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -2247,6 +2248,7 @@ visibility = [
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
     "mindroom.matrix.decrypt_failure",
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
     "mindroom.streaming",
@@ -2750,6 +2752,7 @@ depends_on = [
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.to_device",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
@@ -3145,6 +3148,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
     "mindroom.runtime_protocols",
 ]
@@ -4323,9 +4327,11 @@ expose = [
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "resolve_room_encryption_for_delivery",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_room_event_result",
     "send_runtime_encrypted_media_message",
 ]
 from = ["mindroom.matrix.client_delivery"]

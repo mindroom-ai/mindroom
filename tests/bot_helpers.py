@@ -558,6 +558,7 @@ def _mock_approval_reload_bot(
     bot.client = make_matrix_client_mock(user_id=user_id)
     bot.client.room_send = room_send
     bot.client.rooms["!room:localhost"].add_member(user_id, agent_name.capitalize(), None)
+    bot.approval_room_ids = frozenset({"!room:localhost"})
     latest_thread_event_id = "$latest-thread-event" if agent_name == "code" else None
     bot.latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     bot.cleanup = AsyncMock()

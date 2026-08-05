@@ -180,6 +180,7 @@ def _initialize_router_approval_store(
     bot.agent_name = "router"
     bot.running = True
     bot.client = client
+    bot.approval_room_ids = frozenset({"!room:localhost"})
     bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
 

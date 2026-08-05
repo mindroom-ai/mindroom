@@ -12,6 +12,7 @@ from agno.run.cancel import acancel_run
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -366,11 +367,12 @@ class StopManager:
         )
         try:
             reaction_content = build_reaction_content(message_id, "🛑")
-            response = await client.room_send(
-                room_id=tracked.target.room_id,
-                message_type="m.reaction",
-                content=reaction_content,
-                ignore_unverified_devices=True,
+            response = await send_room_event_result(
+                client,
+                tracked.target.room_id,
+                "m.reaction",
+                reaction_content,
+                operation="add_stop_button",
             )
             if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)

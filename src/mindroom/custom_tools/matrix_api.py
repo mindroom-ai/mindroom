@@ -15,6 +15,7 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
@@ -799,11 +800,12 @@ class MatrixApiTools(Toolkit):
             )
 
         try:
-            response = await context.client.room_send(
-                room_id=room_id,
-                message_type=normalized_event_type,
-                content=normalized_content,
-                ignore_unverified_devices=True,
+            response = await send_room_event_result(
+                context.client,
+                room_id,
+                normalized_event_type,
+                normalized_content,
+                operation="matrix_api_send_event",
             )
         except Exception as exc:
             self._audit_write(

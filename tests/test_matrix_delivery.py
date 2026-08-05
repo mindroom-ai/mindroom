@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import ast
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
+from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result, send_room_event_result
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -39,6 +41,52 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+@pytest.mark.asyncio
+async def test_room_event_waits_for_classic_room_cache_rebuild() -> None:
+    """Non-message events use the same bounded recovery seam as visible messages."""
+    client = _mock_client(encrypted=True)
+    room = client.rooms.pop("!room:localhost")
+    client.room_send.side_effect = [
+        nio.SendRetryError("Classic Sync room state is being rebuilt."),
+        nio.RoomSendResponse(event_id="$reaction:localhost", room_id="!room:localhost"),
+    ]
+
+    async def restore_room_cache(_delay: float) -> None:
+        client.rooms["!room:localhost"] = room
+
+    with patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache):
+        response = await send_room_event_result(
+            client,
+            "!room:localhost",
+            "m.reaction",
+            {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$event", "key": "👍"}},
+            transaction_id="reaction-1",
+            operation="test_reaction",
+        )
+
+    assert isinstance(response, nio.RoomSendResponse)
+    assert response.event_id == "$reaction:localhost"
+    assert client.room_send.await_count == 2
+    assert all(call.kwargs["tx_id"] == "reaction-1" for call in client.room_send.await_args_list)
+
+
+def test_outbound_matrix_events_use_delivery_boundary() -> None:
+    """Production code must not bypass bounded recovery with direct room_send calls."""
+    source_root = Path(__file__).parents[1] / "src" / "mindroom"
+    violations: list[str] = []
+    for source_path in source_root.rglob("*.py"):
+        if source_path.name == "client_delivery.py":
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        violations.extend(
+            f"{source_path.relative_to(source_root)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "room_send"
+        )
+
+    assert violations == []
 
 
 def test_edit_fallback_preserves_replacement_message_type() -> None:

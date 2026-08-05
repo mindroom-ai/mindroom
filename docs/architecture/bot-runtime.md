@@ -95,7 +95,8 @@ nio exposes that acknowledgeable token only after all internal response processi
 An ordinary same-token response that nio suppresses as a clean no-op has no dirty state, so MindRoom publishes continuity without calling the acknowledgement API.
 Any failed, cancelled, or nio-unrecovered response discards nio's transient world and replays from the retained MindRoom checkpoint with full state.
 The nio reset waits for non-sync membership cleanup plus active and queued room-state operations before clearing that world, and its one-shot rebuild marker applies the first full-state response even when Matrix returns the same opaque token.
-When a reset ends nio's current Classic receive loop, `AgentBot` re-enters it immediately in-process without supervisor failure classification or retry backoff.
+When a reset ends nio's current Classic receive loop, `AgentBot` re-enters the first rebuild immediately in-process without supervisor failure classification.
+Consecutive rejected rebuilds use capped exponential backoff so a persistent cache or recovery failure cannot create a tight full-state sync loop.
 Transient sync errors retain the initial cursor, filter, and full-state request until a successful response completes the rebuild.
 Classic startup clears legacy nio cursor, recovery, and Sliding window rows so a previous transport mode cannot later resurrect them.
 Sliding Sync retains its own persisted recovery lane but does not become a Classic cursor authority.

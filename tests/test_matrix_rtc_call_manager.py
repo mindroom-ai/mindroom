@@ -2673,6 +2673,7 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
 async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path: Path) -> None:
     """A connected-but-broken voice provider cannot fail as silent audio."""
     client = _client()
+    client.rooms = {ROOM_ID: _room()}
     client.room_get_state.return_value = _state_response(_remote_member_event())
     client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
     bridge = FakeBridge()
@@ -2689,7 +2690,7 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
     await asyncio.gather(*list(manager._background_tasks))
 
     client.room_send.assert_awaited_once_with(
-        ROOM_ID,
+        room_id=ROOM_ID,
         message_type="m.room.message",
         content={
             "msgtype": "m.notice",
@@ -2697,6 +2698,25 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
             "chat.mindroom.call_failure": {"version": 1},
         },
         ignore_unverified_devices=True,
+    )
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_voice_runtime_error_does_not_report_success_without_delivery(tmp_path: Path) -> None:
+    """A normalized delivery failure remains visible in call diagnostics."""
+    manager = _manager(_client(), FakeBridge(), tmp_path)
+
+    with (
+        patch("mindroom.matrix_rtc.call_manager.send_room_event_result", new=AsyncMock(return_value=None)),
+        patch("mindroom.matrix_rtc.call_manager.logger.warning") as warning,
+    ):
+        await manager._send_call_failure_notice(ROOM_ID, "Voice call failed.")
+
+    warning.assert_called_once_with(
+        "call_failure_notice_send_failed",
+        room_id=ROOM_ID,
+        error="no Matrix response",
     )
     await manager.shutdown()
 
