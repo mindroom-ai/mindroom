@@ -1246,13 +1246,12 @@ class AgentBot:
         joined_room_ids: Iterable[str] = (),
     ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
-        applied, record = await self._sync_cache_trust.apply_response(
+        applied, _record = await self._sync_cache_trust.apply_response(
             decision,
             cache_result=cache_result,
             joined_room_ids=joined_room_ids,
+            publish_record=self._room_lifecycle.apply_continuity_record,
         )
-        if record is not None:
-            self._room_lifecycle.apply_continuity_record(record)
         await self._apply_client_rewind_decision(applied)
         return applied
 
@@ -1287,7 +1286,7 @@ class AgentBot:
             return
         admission_failed = self._sync_cache_trust.reject_response_before_certification()
         rewound, has_retry_token = await self._reset_classic_sync_state(
-            force=admission_failed,
+            force=admission_failed or self.running,
         )
         if not rewound:
             return
@@ -1373,7 +1372,7 @@ class AgentBot:
         )
         if applied.reset_client_token:
             room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
-        return applied, room_member_join_hook_plan, False
+        return applied, room_member_join_hook_plan, applied.reset_client_token
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1583,7 +1582,7 @@ class AgentBot:
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
-        dispatch_persist_failure_rejected_response = False
+        rejected_response = False
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
         self._mark_sync_progress()
@@ -1594,7 +1593,7 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             (
                 room_member_join_hook_plan,
-                dispatch_persist_failure_rejected_response,
+                rejected_response,
             ) = await self._handle_classic_sync_response(
                 _response,
                 first_sync_response=first_sync_response,
@@ -1602,7 +1601,7 @@ class AgentBot:
             )
         elif isinstance(_response, nio.SlidingSyncResponse):
             await self._handle_sliding_sync_response(_response)
-        if dispatch_persist_failure_rejected_response:
+        if rejected_response:
             return
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response

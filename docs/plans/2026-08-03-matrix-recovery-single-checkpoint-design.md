@@ -46,9 +46,13 @@ If any prerequisite fails, MindRoom asks nio to discard the uncommitted in-memor
 
 The reset clears room state, invited-room state, recovery gaps, pending and completed event markers, Sliding request caches, and transient cursors.
 
+The reset first waits for every active or queued room-state operation, so it never clears a room behind an operation using an older per-room gate.
+
 The reset retains Olm and encrypted-room persistence because replaying the same encrypted event against that transport state is idempotent.
 
 The next Classic request uses `full_state=True` so the cleared nio room model is reconstructed before callbacks run.
+
+The first response after reset bypasses same-token suppression because Matrix tokens are opaque and a valid full-state response may return the restored checkpoint unchanged.
 
 At Classic startup, MindRoom removes legacy nio cursor, recovery, and Sliding-window rows left by older versions or a previous transport mode.
 
@@ -99,7 +103,7 @@ There is no Agno influence on the Matrix transport cursor.
 
 ## Verification
 
-The nio contract tests prove that reset drains callbacks already started, clears replay-suppression and room state, and permits the same event to be admitted on replay.
+The nio contract tests prove that reset drains callbacks and room-state operations already started, waits queued room operations, clears replay-suppression and room state, and permits the same event to be admitted on same-token replay.
 
 The migration test proves that legacy cursor, pending-event, gap, and Sliding-window rows are removed atomically.
 

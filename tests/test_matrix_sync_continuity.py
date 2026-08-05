@@ -431,6 +431,7 @@ async def test_classic_unrecovered_gap_resets_transient_sync_state(
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert bot.client.next_batch == ""
+    assert bot._first_sync_done is False
     bot.client.reset_classic_sync_state.assert_awaited_once()
 
 
@@ -2273,6 +2274,23 @@ async def test_rejected_equal_token_response_still_clears_nio_staging(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_running_classic_loop_exit_resets_equal_token_staging(tmp_path: Path) -> None:
+    """A restarting loop cannot infer clean transient state from token equality."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_same"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_same")
+    bot.running = True
+
+    await bot._reconcile_classic_sync_cursor_after_loop_exit()
+
+    bot.client.reset_classic_sync_state.assert_awaited_once_with()
+    assert bot.client.next_batch == "s_same"
+    assert bot._first_sync_done is False
+
+
+@pytest.mark.asyncio
 async def test_limited_cache_cancellation_rewinds_live_cursor(tmp_path: Path) -> None:
     """Cancellation must replay the interrupted cache write from durable continuity."""
     bot = _agent_bot(tmp_path)
@@ -3427,10 +3445,66 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
 
 
 @pytest.mark.asyncio
-async def test_continuity_write_failure_preserves_prior_pair_and_runtime_trust(
+async def test_cancelled_continuity_acceptance_publishes_runtime_fences_before_escape(
     tmp_path: Path,
 ) -> None:
-    """Apply failure preserves disk state without undoing clean transport continuity."""
+    """Cancellation cannot split the durable record from its runtime fence view."""
+    room_id = "!room:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(room_id,)),
+    )
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = bot._sync_cache_trust.plan_response(
+        next_batch="s_committed",
+        cache_result=cache_result,
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    accept_response = bot._sync_continuity_store.accept_classic_response
+
+    def blocking_accept(
+        checkpoint: SyncCheckpoint,
+        *,
+        joined_room_ids: Iterable[str],
+    ) -> SyncContinuityRecord:
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        return accept_response(checkpoint, joined_room_ids=joined_room_ids)
+
+    with patch.object(
+        bot._sync_continuity_store,
+        "accept_classic_response",
+        side_effect=blocking_accept,
+    ):
+        apply_task = asyncio.create_task(
+            bot._apply_sync_response_decision(
+                decision,
+                cache_result=cache_result,
+                joined_room_ids=(room_id,),
+            ),
+        )
+        assert await asyncio.to_thread(write_started.wait, 2)
+        apply_task.cancel()
+        await asyncio.sleep(0)
+        release_write.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await apply_task
+
+    record = bot._sync_continuity_store.load()
+    assert record.pending_join_decrypt_fences == frozenset()
+    assert bot._room_lifecycle._applied_continuity_revision == record.revision
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+
+
+@pytest.mark.asyncio
+async def test_continuity_write_failure_rewinds_staging_on_loop_exit(
+    tmp_path: Path,
+) -> None:
+    """Apply failure preserves the prior pair and replays from its checkpoint."""
     room_id = "!room:localhost"
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
@@ -3443,6 +3517,7 @@ async def test_continuity_write_failure_preserves_prior_pair_and_runtime_trust(
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
     bot.client.next_batch = "s_after_failure"
     bot._first_sync_done = True
+    bot.running = True
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_failure"
     response.unrecovered_room_ids = frozenset()
@@ -3463,15 +3538,18 @@ async def test_continuity_write_failure_preserves_prior_pair_and_runtime_trust(
     ):
         await bot._on_sync_response(response)
 
+    await bot._reconcile_classic_sync_cursor_after_loop_exit()
+
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
-    assert bot.client.next_batch == "s_after_failure"
+    assert bot.client.next_batch == "s_before_failure"
     assert bot._sync_continuity_store.load() == SyncContinuityRecord(
         revision=2,
         checkpoint=old_checkpoint,
         pending_join_decrypt_fences=frozenset({room_id}),
     )
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+    bot.client.reset_classic_sync_state.assert_awaited_once_with()
     assert any(entry["event"] == "matrix_sync_certification_apply_failed" for entry in logs)
     assert not any(entry["event"] == "pre_certification_sync_side_effect_failed_replaying_sync" for entry in logs)
 

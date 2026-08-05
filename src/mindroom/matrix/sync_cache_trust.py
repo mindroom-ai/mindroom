@@ -19,7 +19,7 @@ from mindroom.matrix.sync_certification import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     import structlog
 
@@ -214,8 +214,13 @@ class SyncCacheTrust:
         *,
         cache_result: SyncCacheWriteResult,
         joined_room_ids: Iterable[str] = (),
+        publish_record: Callable[[SyncContinuityRecord], None] | None = None,
     ) -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
-        """Apply a planned response after its prerequisite durable work completes."""
+        """Apply a planned response after its prerequisite durable work completes.
+
+        ``publish_record`` must stay synchronous and non-blocking because it
+        runs under the mutation lock before cancellation may escape.
+        """
 
         async def apply() -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
             nonlocal decision
@@ -233,6 +238,8 @@ class SyncCacheTrust:
                     cache_result=cache_result,
                     joined_room_ids=joined_room_ids,
                 )
+                if record is not None and publish_record is not None:
+                    publish_record(record)
                 if decision.reset_client_token:
                     self._refresh_tokenless_baseline_pending()
                 else:

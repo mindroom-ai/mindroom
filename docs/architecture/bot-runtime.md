@@ -91,6 +91,7 @@ Classic clients disable nio token and recovery persistence, so the cache-generat
 nio parses one Classic response and stages its room, recovery, and completion state in memory.
 MindRoom advances the checkpoint only after cache writes, exact source admission, and response-owned lifecycle effects complete.
 Any failed, cancelled, or nio-unrecovered response discards nio's transient world and replays from the retained MindRoom checkpoint with full state.
+The nio reset waits for active and queued room-state operations before clearing that world, and its one-shot rebuild marker applies the first full-state response even when Matrix returns the same opaque token.
 Classic startup clears legacy nio cursor, recovery, and Sliding window rows so a previous transport mode cannot later resurrect them.
 Sliding Sync retains its own persisted recovery lane but does not become a Classic cursor authority.
 Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obligation store, and Matrix replay idempotently re-admits returned events by event ID.
@@ -98,7 +99,7 @@ Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obl
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 A complete tokenless initial snapshot may establish the first MindRoom checkpoint even when its timeline is limited.
 An event that never crossed MindRoom admission and later falls outside Matrix replay is the explicit pre-admission loss boundary.
-Classic receive-loop exit also reconciles nio's live cursor with the last certified checkpoint, covering cancellation after nio applies a response but before its response callback starts.
+Classic receive-loop exit while the bot is still running always resets nio to the last certified checkpoint, regardless of token equality, covering cancellation after nio applies a response but before its response callback starts.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 The aggregate admission owner durably caches every historical event through the room-ordered sync mutation path before applying the cold-history dispatch fence, so `/messages` recovery cannot complete without its point rows and redaction effects.
 `ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
