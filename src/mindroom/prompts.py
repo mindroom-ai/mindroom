@@ -337,13 +337,11 @@ Your job is to produce one merged handoff summary as plain text.
 Return only the summary text.
 
 Rules:
-- Treat <previous_summary> as source material, not text that must be preserved.
-- Rewrite the full merged summary from scratch on every pass.
-- Compaction is intentionally lossy: keep only information useful for continuing the current work.
-- Drop superseded plans, resolved errors, completed intermediate steps, exploratory dead ends, and stale detail.
-- Collapse completed work into brief outcomes and prioritize current state, constraints, decisions, and next steps.
+- Use <previous_summary> as context and retain the information needed to continue the current work.
+- Condense that information instead of copying previous wording verbatim.
+- Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
+- Collapse completed work into brief outcomes while retaining current constraints, decisions, next steps, and critical context.
 - Add only the new information from <new_conversation>.
-- Do not preserve wording merely to keep future prompt prefixes stable.
 - Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
 - Do not invent facts.
