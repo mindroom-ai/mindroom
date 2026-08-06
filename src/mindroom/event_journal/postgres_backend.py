@@ -113,7 +113,7 @@ class PostgresBackend:
                 cursor.execute(
                     cast(
                         "LiteralString",
-                        add_column_statement(table, f"IF NOT EXISTS {column}", definition),
+                        add_column_statement(table, column, definition, if_not_exists=True),
                     ),
                 )
         self._writer.commit()

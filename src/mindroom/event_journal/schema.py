@@ -193,9 +193,14 @@ def added_columns() -> tuple[tuple[str, str, str], ...]:
     return _ADDED_COLUMNS
 
 
-def add_column_statement(table: str, column: str, definition: str) -> str:
-    """Return the DDL that adds one column to an existing table."""
-    return f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+def add_column_statement(table: str, column: str, definition: str, *, if_not_exists: bool = False) -> str:
+    """Return the DDL that adds one column to an existing table.
+
+    PostgreSQL can guard the add itself; SQLite cannot, and its caller checks
+    the existing columns first instead.
+    """
+    guard = "IF NOT EXISTS " if if_not_exists else ""
+    return f"ALTER TABLE {table} ADD COLUMN {guard}{column} {definition}"
 
 
 def schema_statements(dialect: Dialect) -> tuple[str, ...]:
