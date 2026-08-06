@@ -250,6 +250,55 @@ class TestAdmissionAdapter:
         assert _event_kind(event) is not EventKind.REDACTION
 
 
+def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> nio.Event:
+    """Return a message whose real body lives in a v2 JSON sidecar."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": preview,
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                "url": mxc,
+            },
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+class TestSidecarContent:
+    """A message too large for one Matrix event still reaches a prompt whole."""
+
+    async def test_a_strict_read_returns_the_sidecar_body_not_the_preview(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Most agent answers exceed the event size limit and live in a sidecar.
+
+        The projection stores what the event said, and a sidecar event says only
+        "[Message continues in attached file]". Serving that to a prompt would
+        feed the model a placeholder in place of its own previous answer, for
+        the majority of its own history.
+        """
+        preview = "The answer beg [Message continues in attached file]"
+        event = sidecar_event("$long", preview, "mxc://server/long-answer")
+        await alice.admit(
+            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, EventKind.MESSAGE),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$long"]
+        body = page.messages[0].content.get("body")
+        assert body != preview, "the projection served the sidecar preview as the message body"
+
+
 class TestEchoOrdering:
     """The sync echo is the route this bot's own answers take into a conversation.
 
