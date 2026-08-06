@@ -95,6 +95,10 @@ class JournalDispatcher:
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] | None = None
+    # Replaying a turn needs the agent fleet up, so the orchestrator releases
+    # turn-backed replay separately from the rest of startup. Until it does,
+    # those events stay pending; everything else drains immediately.
+    _turn_replay_released: bool = field(default=False, init=False, repr=False)
     background_task_owner: object | None = None
     _worker: PendingEventWorker = field(init=False, repr=False)
     _ingress: JournalIngress = field(init=False, repr=False)
@@ -119,6 +123,7 @@ class JournalDispatcher:
             on_admitted=self._worker.wake,
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
+            on_persist_failure=self.on_persist_failure or (lambda: None),
             **(
                 {"cache_historical_event": self.cache_historical_event}
                 if self.cache_historical_event is not None
@@ -135,8 +140,13 @@ class JournalDispatcher:
         self._ingress.register(client)
 
     def start(self) -> None:
-        """Begin draining, including work a previous process left pending."""
+        """Begin draining everything that does not need the agent fleet."""
         self._worker.start()
+
+    def release_turn_replay(self) -> None:
+        """Allow turn-backed events left by a previous process to replay."""
+        self._turn_replay_released = True
+        self._worker.wake()
 
     def wake(self) -> None:
         """Signal that newly admitted work is waiting."""
@@ -153,12 +163,13 @@ class JournalDispatcher:
     async def drain_once(self) -> int:
         """Run everything currently pending to completion.
 
-        This is the explicit recovery entry point, so it also forgets which
-        events it had handed to a turn. A turn that deferred without taking
+        This is the explicit recovery entry point, so it releases turn replay
+        and forgets which events it had handed to a turn. A turn that deferred without taking
         ownership — the router declining an unready candidate, say — would
         otherwise never be reconsidered. Duplicate turns are prevented by
         `TurnStore` claiming its sources, not by this bookkeeping.
         """
+        self._turn_replay_released = True
         self._handed_off.clear()
         return await self._worker.drain_once()
 
@@ -228,6 +239,15 @@ class JournalDispatcher:
             self._terminal_sources.discard(event.event_id)
             return SettlementOutcome.SUCCEEDED
         if event.event_id in self._handed_off:
+            return None
+        if (
+            event.kind in TURN_BACKED_KINDS
+            and not self._turn_replay_released
+            and event.event_id not in self._live_events
+        ):
+            # A turn replayed from a previous process needs responders that may
+            # not exist yet. Live events are unaffected: their responders are
+            # whatever is running now.
             return None
         live = self._live_events.pop(event.event_id, None)
         # An event the journal loaded rather than nio just delivered is a

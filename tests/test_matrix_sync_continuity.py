@@ -1087,8 +1087,10 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     bot = _agent_bot(tmp_path, agent_name=agent_name)
     bot.orchestrator = MagicMock()
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    recover_pending = AsyncMock(return_value=0)
-    bot._journal_dispatcher.drain_once = recover_pending
+    start_worker = MagicMock()
+    bot._journal_dispatcher.start = start_worker
+    release_turn_replay = MagicMock()
+    bot._journal_dispatcher.release_turn_replay = release_turn_replay
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
@@ -1100,26 +1102,27 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    recover_pending.assert_awaited_once_with(turn_backed=False)
+    # Startup drains everything that does not need the agent fleet; turn
+    # replay stays gated until the coordinator releases it.
+    start_worker.assert_called_once_with()
+    release_turn_replay.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
     tmp_path: Path,
 ) -> None:
-    """A blocked invite retry must not block bot or fleet startup."""
+    """Recovery must begin only once the bot can actually serve what it finds."""
     bot = _agent_bot(tmp_path)
     bot.orchestrator = MagicMock()
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    recovery_started = asyncio.Event()
-    release_recovery = asyncio.Event()
+    observed: dict[str, object] = {}
 
-    async def recover_pending() -> int:
-        recovery_started.set()
-        await release_recovery.wait()
-        return 0
+    def observe_start() -> None:
+        observed["running"] = bot.running
+        observed["response_callbacks"] = client.add_response_callback.call_count
 
-    bot._journal_dispatcher.drain_once = recover_pending
+    bot._journal_dispatcher.start = observe_start
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
@@ -1128,14 +1131,11 @@ async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
     ):
-        start_task = asyncio.create_task(bot.start())
-        try:
-            await asyncio.wait_for(recovery_started.wait(), timeout=1)
-            assert bot.running
-            assert client.add_response_callback.call_count == 2
-        finally:
-            release_recovery.set()
-            await start_task
+        await bot.start()
+
+    # Draining before the bot is running would run recovered work against
+    # callbacks that are not registered yet.
+    assert observed == {"running": True, "response_callbacks": 2}
 
 
 @pytest.mark.asyncio
@@ -1155,8 +1155,10 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
     install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock(running=False)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    recover_pending = AsyncMock(return_value=0)
-    bot._journal_dispatcher.drain_once = recover_pending
+    start_worker = MagicMock()
+    bot._journal_dispatcher.start = start_worker
+    release_turn_replay = MagicMock()
+    bot._journal_dispatcher.release_turn_replay = release_turn_replay
 
     with (
         patch.object(bot, "ensure_user_account", AsyncMock()),
@@ -1168,7 +1170,10 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
         await bot.start()
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    recover_pending.assert_awaited_once_with(turn_backed=False)
+    # Startup drains everything that does not need the agent fleet; turn
+    # replay stays gated until the coordinator releases it.
+    start_worker.assert_called_once_with()
+    release_turn_replay.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2974,6 +2979,7 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
         assert response.rooms.join[room_id].timeline.events == []
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
         # Both turns ran, and each one already had its own source event cached.
         assert was_cached_at_dispatch == [True, True]
@@ -3019,12 +3025,14 @@ async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_pa
         # The recovery client never logs in, so room classification cannot be served.
         with patch("mindroom.text_ingress_dispatch.is_dm_room", AsyncMock(return_value=False)):
             await client.receive_response(_limited_empty_classic_response(room_id))
+            await bot._journal_dispatcher.drain_once()
             assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
             await drain_coalescing(bot)
 
         generate_response.assert_awaited_once()
         assert generate_response.await_args.kwargs["prompt"] == f"{mention}: ping"
         assert bot._turn_store.is_durably_handled(gap_mention.event_id)
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
     finally:
         await client.close()
@@ -3077,6 +3085,7 @@ async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_pa
 
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
         turn_callback.assert_not_awaited()
     finally:
@@ -3158,6 +3167,7 @@ async def test_nio_retries_recovered_event_when_cache_admission_fails(
         assert cache_attempts == 2
         assert response.recovered_room_ids == frozenset({room_id})
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
         turn_callback.assert_awaited_once()
     finally:
@@ -3247,6 +3257,7 @@ async def test_new_world_readable_join_caches_prejoin_history_before_fence_opens
         assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
         turn_callback.assert_not_awaited()
 
@@ -3343,6 +3354,7 @@ async def test_new_world_readable_join_cache_failure_rewinds_and_keeps_fence(  #
         assert client.next_batch == "s_before_join"
         assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
 
         await client.receive_response(response)
@@ -3352,6 +3364,7 @@ async def test_new_world_readable_join_cache_failure_rewinds_and_keeps_fence(  #
         assert client.next_batch == "s_after_join"
         assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_join"
         assert await bot.event_cache.get_event(room_id, history_text.event_id) is not None
+        await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
     finally:
         await client.close()
@@ -3460,16 +3473,13 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
 
     client.add_event_callback(run_admitted, nio.RoomMessageText)
 
-    with pytest.raises(
-        nio.CallbackNotAcceptedError,
-        match="ordinary callback rejection",
-    ):
-        await client.receive_response(response)
+    # A callback cannot refuse an event that admission already accepted. The
+    # worker absorbs the rejection and leaves the event pending, so the second
+    # response neither replays it live nor loses it.
+    await client.receive_response(response)
     await client.receive_response(response)
 
     assert callback_attempts == 1
-    # The rejection arrived too late to refuse admission, so the event stays
-    # pending and the worker owns the retry.
     assert await bot._journal_dispatcher.store.is_pending(event.event_id)
 
 
@@ -3728,7 +3738,7 @@ async def test_continuity_acceptance_runs_off_event_loop(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_dispatch_creation_drains_repeated_cancellation_before_deferred_replay(
+async def test_cancelled_admission_still_commits_and_holds_the_cursor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3765,14 +3775,15 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_deferred_re
     await asyncio.sleep(0)
     task.cancel()
     await asyncio.sleep(0)
-    escaped_before_worker = task.done()
     release_create.set()
 
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert not escaped_before_worker
-    assert await bot._journal_dispatcher.store.is_pending(event.event_id)
+    # Cancellation before the write means the event was never admitted, and
+    # nio was never told it was. The cursor therefore has to stay put so the
+    # next response redelivers it.
+    assert await bot._journal_dispatcher.store.load_event(event.event_id) is None
     assert bot.client.next_batch == "s_after_cancel"
     run_persisted.assert_not_awaited()
 

@@ -239,6 +239,9 @@ class JournalIngress:
     # conversation store before admission returns, so a reader that follows
     # this sync response sees the history it was given.
     cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] = _ignore_historical_event
+    # A refused admission must also stop the sync checkpoint advancing past the
+    # event, or the next process would never see it again.
+    on_persist_failure: Callable[[], None] = lambda: None
 
     def register(self, client: nio.AsyncClient) -> None:
         """Install durable admission ahead of every other callback."""
@@ -264,6 +267,7 @@ class JournalIngress:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                self.on_persist_failure()
                 raise nio.CallbackNotAcceptedError(str(error)) from error
         kind = self.admission_kind(event)
         if kind is None:
@@ -277,6 +281,7 @@ class JournalIngress:
         except Exception as error:
             # Refusing acceptance is the whole point: nio keeps the event for
             # redelivery and does not advance the checkpoint past it.
+            self.on_persist_failure()
             raise nio.CallbackNotAcceptedError(str(error)) from error
         if event_class is EventClass.ACTIONABLE:
             self.on_event_admitted(room, event)
