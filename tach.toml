@@ -4241,7 +4241,6 @@ exclusive = true
 
 [[interfaces]]
 expose = [
-    "ThreadOutboundWritePolicy",
     "ThreadLiveWritePolicy",
     "ThreadSyncWritePolicy",
 ]
