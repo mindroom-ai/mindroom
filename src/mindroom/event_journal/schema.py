@@ -239,8 +239,15 @@ def render(sql: str, dialect: Dialect) -> str:
     if "'?" in sql or "?'" in sql:
         msg = "Event-journal SQL must not embed a literal question mark"
         raise ValueError(msg)
-    # Written as a SQL comment so an unsubstituted statement is still valid SQL
-    # and so the pin is visible where the comparison happens.
+    # Substitution is a plain string rewrite, so a marker inside an authored
+    # string literal would be rewritten as if it were an identifier. No
+    # statement has one and no user value reaches here -- values are bound
+    # separately by both backends -- but the rewriter cannot tell, so the
+    # adjacency is rejected rather than trusted, the same way a literal
+    # question mark is.
+    if f"'{_BYTE_ORDER_MARKER}" in sql or f"{_BYTE_ORDER_MARKER}'" in sql:
+        msg = "Event-journal SQL must not embed the byte-order marker in a literal"
+        raise ValueError(msg)
     sql = sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
     if dialect.placeholder == "?":
         return sql

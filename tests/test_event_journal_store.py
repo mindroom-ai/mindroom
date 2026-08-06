@@ -736,10 +736,20 @@ class TestByteOrderPinning:
         assert render(ordering, SQLITE_DIALECT) == "ORDER BY created_at_ns, turn_id, stage"
         assert render(ordering, POSTGRES_DIALECT) == ('ORDER BY created_at_ns, turn_id COLLATE "C", stage COLLATE "C"')
 
-    def test_an_unsubstituted_marker_is_still_valid_sql(self) -> None:
-        """It is written as a comment so a missed substitution cannot corrupt a query."""
-        assert "/*bytes*/" == "/*" + "bytes" + "*/"
+    def test_a_marker_inside_a_literal_is_refused(self) -> None:
+        """Substitution is a plain rewrite and cannot tell a literal from an identifier.
+
+        No statement embeds one today, and values are bound separately by both
+        backends, so nothing user-controlled reaches the rewriter. The guard is
+        there because the rewriter has no way to check that for itself.
+        """
+        with pytest.raises(ValueError, match="byte-order marker"):
+            render("SELECT '/*bytes*/'", SQLITE_DIALECT)
+
+    def test_a_statement_without_the_marker_is_untouched(self) -> None:
+        """The rewrite must not perturb the statements that do not opt in."""
         assert render("SELECT 1", SQLITE_DIALECT) == "SELECT 1"
+        assert render("SELECT 1", POSTGRES_DIALECT) == "SELECT 1"
 
 
 class TestOutboundSeeding:
