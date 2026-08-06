@@ -1631,3 +1631,78 @@ selection elsewhere.
 
 Steady state: one download per newly prompt-relevant visible revision, then
 local reads until that revision is edited or redacted.
+
+## Review of the read cutover, and what it found (2026-08-06)
+
+An independent review of the branch raised seven findings. Two were correct
+about code this cutover introduced, one was correct about the plan, and four
+attacked a design that is not being built. Recording all of them, because the
+refuted ones are the ones most likely to be raised again.
+
+### Correct, and fixed
+
+**A bounded page reported itself as full history.** `projected_thread_history`
+derived `is_full_history` from whether the caller waited and whether a refetch
+was owed, never from whether the page reached the start of the conversation. A
+read that filled its limit and left a cursor behind reported the suffix as the
+whole thread. `complete_thread_history` then marked it complete for summaries,
+which count what they receive and record that count as the thread's size. The
+cursor now participates in the answer.
+
+### Correct, and open
+
+**A first admitted event can prove an empty room.** `may_have_unread_history`
+falls back to asking whether the journal holds any other event for the room, on
+the reasoning that a room MindRoom has never seen an event in can have nothing
+behind the event it just got. That is a fact about the journal, not the room. A
+first run, or a rebuilt store, meets its first event in a room with years of
+history and concludes that the empty page it can serve is complete; thread-root
+proof reads a complete-looking empty page as "this root has no children" and
+demotes a real threaded reply to a room-level message.
+
+The hole is narrow -- it closes as soon as any second event in the room reaches
+the journal -- but it is real, and it is worst exactly at startup.
+
+**The obvious fix does not work, and this is the useful part.** Making
+hydration the only proof of freshness (`return not await
+conversation_is_hydrated(...)`) was tried and reverted. Non-blocking `read`
+never hydrates; only `read_strict` does. So "degraded unless hydrated" makes
+every dispatch read degraded forever, nothing ever hydrates on that path, and
+the dispatch-safe property collapses into a strict read: eleven tests fail,
+including one that asserts in as many words that a command must not block on a
+strict read.
+
+So the fix has to make hydration happen on the dispatch path rather than make
+the predicate stricter -- a first dispatch read that reports degraded while
+hydrating in the background, becoming complete once it lands. That is a real
+piece of work, not a predicate change, and it needs its own phase.
+
+The review instead proposed epoch-scoped projection watermarks and a durable
+journal fence. Those are not needed: projection commits in the admission
+transaction, so there is no window between admission and projection to fence,
+and hydration already carries the epoch.
+
+### Correct about the plan
+
+The consumer-budget claim, the outbound-seeding contradiction, and the
+split-projection sketch were all wrong in the plan text. All three are
+corrected above.
+
+### Refuted
+
+**"Moving projection to the worker loses cold history"** and **"admission-to-
+projection reads need a durable fence"** are both true of splitting projection
+out of admission, which is why that split is rejected above. Projection stays
+in the admission transaction, so cold history projects exactly as it always
+did, and the window those findings describe does not exist. The remedy proposed
+for them -- a second obligation kind (`projection_pending` alongside
+`semantic_pending`) plus retained source payloads -- would add the recovery
+state machine this architecture exists to remove.
+
+**"Skip revisions already superseded is not enough"** is right that a worker
+cannot know a later edit is coming, and moot: nothing downloads until a reader
+asks, so only the revision that won is ever resolved.
+
+**"Eager worker resolution contradicts the consumer budget"** describes eager
+resolution, which is not what was built. Resolution is lazy and bounded by the
+page the reader asked for.
