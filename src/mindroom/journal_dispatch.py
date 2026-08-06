@@ -106,6 +106,9 @@ class JournalDispatcher:
     # an event that is still in hand would parse every event twice and discard
     # the decryption state nio attached to the original.
     _live_events: dict[str, tuple[nio.MatrixRoom, nio.Event]] = field(default_factory=dict, init=False, repr=False)
+    # Turn-backed events whose turn reported itself terminal. Recorded by
+    # whichever thread finished the turn and settled by the worker.
+    _terminal_sources: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the worker and admission adapter this dispatcher owns."""
@@ -167,6 +170,16 @@ class JournalDispatcher:
 
     async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
         """Run one journal event's callback and report how it settled."""
+        if event.kind in TURN_BACKED_KINDS and (
+            event.event_id in self._terminal_sources or self.turn_is_terminal(event.event_id)
+        ):
+            # Checked before the in-flight guard on purpose. A turn that has
+            # already reported itself terminal owes nothing more, and running
+            # its callback again would ask the turn engine to redo work it has
+            # finished.
+            self._handed_off.discard(event.event_id)
+            self._terminal_sources.discard(event.event_id)
+            return SettlementOutcome.SUCCEEDED
         if event.event_id in self._handed_off:
             return None
         live = self._live_events.pop(event.event_id, None)
@@ -184,9 +197,6 @@ class JournalDispatcher:
                 return SettlementOutcome.INTENTIONALLY_IGNORED
         if room is None:
             room = self.room_for_id(event.room_id)
-        if event.kind in TURN_BACKED_KINDS and self.turn_is_terminal(event.event_id):
-            # The turn already finished, in this process or a previous one.
-            return SettlementOutcome.SUCCEEDED
         outcome = await self._invoke(event, room, matrix_event)
         if outcome is None:
             self._handed_off.add(event.event_id)
@@ -263,25 +273,35 @@ class JournalDispatcher:
             raise RuntimeError(msg)
         return event.receipt_order
 
-    async def settle_turn_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Settle turn-backed events whose turn became terminal."""
+    def release_terminal_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Hand turn-backed events back to the worker once their turn is terminal.
+
+        Called from wherever the turn became durable, which may be a worker
+        thread, so this only mutates in-memory state and does no I/O. The
+        worker settles them on its own loop. Settling here would mean
+        scheduling a coroutine from an arbitrary thread onto a loop nothing
+        awaits, which is how a finished turn ends up looking pending forever.
+        """
         self._handed_off.difference_update(event_ids)
-        await self.store.settle_many(event_ids, SettlementOutcome.SUCCEEDED)
+        self._terminal_sources.update(event_ids)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
         self._handed_off.difference_update(event_ids)
+        self._terminal_sources.difference_update(event_ids)
         await self.store.settle_many(event_ids, SettlementOutcome.INTENTIONALLY_IGNORED)
 
     def retry_turn_source(self, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""
         self._handed_off.discard(event_id)
+        self._terminal_sources.discard(event_id)
         self._worker.wake()
 
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
         for event_id in event_ids:
             self._handed_off.discard(event_id)
+            self._terminal_sources.discard(event_id)
         self._worker.wake()
 
     async def unsettled_event_ids(self) -> frozenset[str]:

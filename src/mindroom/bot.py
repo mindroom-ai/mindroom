@@ -2411,33 +2411,24 @@ class AgentBot:
         )
 
     def _settle_terminal_turn_sources(self, source_event_ids: tuple[str, ...]) -> None:
-        """Settle the journal events one terminal turn accounted for.
+        """Release the journal events one terminal turn accounted for.
 
         Called from wherever the turn became durable, which may be a worker
-        thread, so the settlement is scheduled onto the runtime loop rather
-        than assuming one is running here.
+        thread, so nothing here does I/O. The worker settles them on its own
+        loop; all this does is stop treating them as still in flight and ask
+        the worker to look again.
         """
         if not source_event_ids:
             return
-        settle = self._journal_dispatcher.settle_turn_sources(source_event_ids)
+        self._journal_dispatcher.release_terminal_turn_sources(source_event_ids)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             loop = self._journal_settlement_loop
-            if loop is None or loop.is_closed():
-                settle.close()
-                self.logger.error(
-                    "journal_terminal_settlement_loop_unavailable",
-                    source_event_ids=source_event_ids,
-                )
-                return
-            asyncio.run_coroutine_threadsafe(settle, loop)
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(self._journal_dispatcher.wake)
             return
-        create_background_task(
-            settle,
-            name=f"settle_terminal_turn_sources_{self.agent_name}",
-            owner=self._runtime_view,
-        )
+        self._journal_dispatcher.wake()
 
     async def _handle_decryption_failure_event(
         self,
