@@ -59,6 +59,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.threading_helpers import seed_thread_history
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -1891,6 +1892,12 @@ class TestExtractedModuleLoggerRebinding:
             is_full_history=True,
         )
 
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread-root:localhost",
+            messages=list(dispatch_history),
+        )
         bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=dispatch_history)
         bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             side_effect=AssertionError("dispatch planning should use bounded full history"),
