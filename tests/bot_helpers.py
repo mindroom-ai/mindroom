@@ -515,7 +515,7 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     bot.event_cache = None
     bot.event_cache_write_coordinator = None
     bot._set_presence_with_model_info = AsyncMock()
-    bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    bot.recover_pending_turn_journal_events = AsyncMock()
     return bot
 
 

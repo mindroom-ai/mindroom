@@ -25,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -482,10 +482,11 @@ class TestRoutingRegression:
             room_id=room_id,
         )
         mock_suggest_responder.return_value = "healthy"
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
         )
 
         await router_bot.recover_pending_turn_journal_events()
@@ -496,19 +497,17 @@ class TestRoutingRegression:
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(event.event_id)
 
         blocked_event = _router_readiness_event("$blocked-recovery")
         mock_suggest_responder.reset_mock(return_value=True)
         mock_suggest_responder.return_value = "stuck"
         router_bot.client.room_send.reset_mock()
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             blocked_event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
         )
 
         await router_bot.recover_pending_turn_journal_events()
@@ -516,11 +515,7 @@ class TestRoutingRegression:
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
-        assert not router_bot._dispatch_obligation_runner._retry_keys
+        assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
         stuck_bot._first_sync_done = True
         router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
@@ -534,10 +529,7 @@ class TestRoutingRegression:
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
     @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
