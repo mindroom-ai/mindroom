@@ -194,16 +194,11 @@ def mark_conversation_hydrated(
     room_id: str,
     thread_id: str | None,
     expected_membership_epoch: int,
-    hydrated_from_ts: int | None = None,
 ) -> bool:
     """Record a completed hydration, unless membership moved under it.
 
     Hydration and this record commit together, so a conversation is never
     marked hydrated against events that a rejoin has already invalidated.
-
-    ``hydrated_from_ts`` records the floor of the window that was actually
-    fetched, so "hydrated" never silently means "complete" for a room whose
-    history outran the walk.
     """
     row = transaction.fetchone(
         """
@@ -217,35 +212,14 @@ def mark_conversation_hydrated(
         return False
     transaction.execute(
         """
-        INSERT INTO conversation_hydration (
-            principal_id, room_id, thread_id, membership_epoch, hydrated_from_ts
-        )
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO conversation_hydration (principal_id, room_id, thread_id, membership_epoch)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
-            membership_epoch = excluded.membership_epoch,
-            hydrated_from_ts = excluded.hydrated_from_ts
+            membership_epoch = excluded.membership_epoch
         """,
-        (principal_id, room_id, encode_thread_id(thread_id), current_epoch, hydrated_from_ts),
+        (principal_id, room_id, encode_thread_id(thread_id), current_epoch),
     )
     return True
-
-
-def hydrated_from_ts(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    thread_id: str | None,
-) -> int | None:
-    """Return the oldest point hydration reached, or ``None`` if it reached the start."""
-    row = transaction.fetchone(
-        """
-        SELECT hydrated_from_ts FROM conversation_hydration
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        """,
-        (principal_id, room_id, encode_thread_id(thread_id)),
-    )
-    return None if row is None or row["hydrated_from_ts"] is None else int(row["hydrated_from_ts"])
 
 
 def _visible_message(row: Row) -> VisibleMessage:

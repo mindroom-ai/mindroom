@@ -11,7 +11,9 @@ import pytest
 
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
+    _HYDRATED_PROMPT_WINDOW_MESSAGES,
     _MAX_MESSAGES_PAGES,
+    _MESSAGES_PAGE_LIMIT,
     ConversationHydrator,
     _HydrationError,
     _projected_from_event,
@@ -354,37 +356,24 @@ class TestRoomHydration:
 
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert await bodies(alice) == ["first"]
-        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id=None) is None
 
-    async def test_a_bounded_walk_records_the_floor_it_reached(
+    async def test_hydration_stops_once_the_prompt_window_is_full(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A hydrated marker must not silently mean a complete conversation.
+        """Hydration promises the prompt window, not a mirror of the room.
 
-        A long-lived room has more history than a startup walk should read, so
-        the walk stops. What it may not do is record that partial view as the
-        whole conversation: a later reader paging back has to be able to tell
-        that there is history the projection was never given.
+        A long-lived room has more history than any startup walk should read.
+        Stopping once the window is full is the contract being met, not a
+        shortfall: a caller needing older history paginates Matrix directly.
         """
         client = FakeClient(endless_history=True)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert client.history_pages == _MAX_MESSAGES_PAGES
+        assert _MAX_MESSAGES_PAGES * _MESSAGES_PAGE_LIMIT == _HYDRATED_PROMPT_WINDOW_MESSAGES
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
-        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id=None) == 1_001
-
-    async def test_a_thread_is_always_complete(self, alice: PrincipalStore) -> None:
-        """Relations return the whole tree, so a thread has no window floor."""
-        client = FakeClient(
-            events={"$root": raw("$root", "root")},
-            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
-        )
-
-        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id="$root") is None
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:
         """Hydration does not create pending work."""

@@ -117,11 +117,6 @@ _TABLES = (
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
-        -- The oldest point the hydration walk reached, or NULL when it reached
-        -- the start of the conversation. A long-lived room has more history
-        -- than a startup walk should read, and a reader that pages past this
-        -- floor is looking at history the projection was never given.
-        hydrated_from_ts BIGINT,
         PRIMARY KEY (principal_id, room_id, thread_id)
     )
     """,

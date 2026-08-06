@@ -199,17 +199,6 @@ class PrincipalStore:
             ),
         )
 
-    async def hydrated_from_ts(self, *, room_id: str, thread_id: str | None) -> int | None:
-        """Return the floor of the hydrated window, or ``None`` if it is complete."""
-        return await self._backend.read(
-            lambda transaction: reads.hydrated_from_ts(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-
     async def install_hydrated_conversation(
         self,
         *,
@@ -217,16 +206,11 @@ class PrincipalStore:
         thread_id: str | None,
         events: tuple[ProjectedEvent, ...],
         expected_membership_epoch: int,
-        hydrated_from_ts: int | None = None,
     ) -> bool:
         """Install a completed hydration atomically, or install nothing.
 
         A partially applied hydration would look complete to the next reader,
         so the events and the completion marker share one transaction.
-
-        ``hydrated_from_ts`` is the oldest point the fetch actually reached
-        when it stopped short of the start of the room, and ``None`` when the
-        whole conversation is present.
         """
         return await self._backend.write(
             lambda transaction: _install_hydration(
@@ -236,7 +220,6 @@ class PrincipalStore:
                 thread_id=thread_id,
                 events=events,
                 expected_membership_epoch=expected_membership_epoch,
-                hydrated_from_ts=hydrated_from_ts,
             ),
         )
 
@@ -359,7 +342,6 @@ def _install_hydration(
     thread_id: str | None,
     events: tuple[ProjectedEvent, ...],
     expected_membership_epoch: int,
-    hydrated_from_ts: int | None,
 ) -> bool:
     from .projection import project  # noqa: PLC0415 - keeps the module import-light
 
@@ -369,7 +351,6 @@ def _install_hydration(
         room_id=room_id,
         thread_id=thread_id,
         expected_membership_epoch=expected_membership_epoch,
-        hydrated_from_ts=hydrated_from_ts,
     ):
         return False
     for event in events:
