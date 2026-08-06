@@ -35,7 +35,6 @@ from mindroom.hooks import (
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.outbound_projection import OutboundProjection  # noqa: TC001
 from mindroom.response_delivery import DeliveryStage, ResponseDelivery
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
@@ -328,7 +327,6 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    outbound_projection: OutboundProjection
     outbox: OutboxView
 
 
@@ -598,11 +596,6 @@ class DeliveryGateway:
                 delivered.event_id,
                 delivered.content_sent,
             )
-            await self.deps.outbound_projection.record_sent(
-                room_id=resolved_target.room_id,
-                event_id=delivered.event_id,
-                content=delivered.content_sent,
-            )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
         self.deps.logger.error(
@@ -644,11 +637,6 @@ class DeliveryGateway:
                 target.room_id,
                 delivered.event_id,
                 delivered.content_sent,
-            )
-            await self.deps.outbound_projection.record_sent(
-                room_id=target.room_id,
-                event_id=delivered.event_id,
-                content=delivered.content_sent,
             )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True

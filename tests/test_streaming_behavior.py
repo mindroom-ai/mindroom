@@ -4052,7 +4052,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                outbound_projection=MagicMock(record_sent=AsyncMock()),
                 outbox=make_outbox_mock(),
             ),
         )
@@ -4156,7 +4155,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                outbound_projection=MagicMock(record_sent=AsyncMock()),
                 outbox=make_outbox_mock(),
             ),
         )
@@ -4262,7 +4260,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                outbound_projection=MagicMock(record_sent=AsyncMock()),
                 outbox=make_outbox_mock(),
             ),
         )

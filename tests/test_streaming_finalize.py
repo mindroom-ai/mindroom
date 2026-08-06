@@ -148,7 +148,6 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
                 ),
             ),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -435,7 +434,6 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -482,7 +480,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -667,7 +664,6 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -848,7 +844,6 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -983,7 +978,6 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -1048,7 +1042,6 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -1127,7 +1120,6 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
             redact_message_event=AsyncMock(return_value=True),
             resolver=Mock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )

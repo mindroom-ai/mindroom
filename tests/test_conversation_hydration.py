@@ -932,38 +932,6 @@ class TestWindowTruncation:
         assert history.is_full_history
 
 
-class TestSeededSidecarSurvivesItsEcho:
-    """Resolving a bot's own long answer must survive the echo of it."""
-
-    async def test_the_echo_does_not_undo_a_resolved_body(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The echo carries the same preview the seed did.
-
-        Taking its body would put the truncated text back over the real one,
-        hide the message a second time, and make the next read download the
-        identical attachment again. The echo settles ordering; it knows nothing
-        about the text that this row has already resolved.
-        """
-        whole = "the whole seeded answer, at length"
-        source = TestSidecarResolution._sidecar_source("$mine", "preview [continues]", "mxc://s/mine")
-        seed = _projected(source)
-        await alice.seed_outbound_message(seed)
-        client = FakeClient(
-            events={"$mine": source},
-            sidecars={"mxc://s/mine": TestSidecarResolution._payload(whole)},
-        )
-        owed = (await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)).refresh_pending
-        await hydrator(alice, client).resolve_refreshes(owed)
-        assert await bodies(alice) == [whole], "the seeded sidecar did not resolve"
-
-        await admit_all(alice, [source])
-
-        assert await bodies(alice) == [whole], "the echo replaced the resolved body with the preview"
-        assert client.downloads == ["mxc://s/mine"], "the echo forced a second download"
-
-
 class TestRefreshStarvation:
     """A read repairs what it asked about, not the newest debts in the room."""
 

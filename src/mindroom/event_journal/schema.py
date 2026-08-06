@@ -92,13 +92,6 @@ _TABLES = (
         -- metadata is a local guess: a Matrix send response carries only the
         -- event ID, and `origin_server_ts` is the server's to assign. The
         -- self-authored sync echo replaces those values and clears this.
-        provisional INTEGER NOT NULL DEFAULT 0,
-        -- Set when the *currently installed revision* was seeded locally, which
-        -- is a different fact from the row being provisional: an authoritative
-        -- original can carry a locally seeded edit on top of it. Only this
-        -- tells a canonicalizing echo apart from a stale late seed of the same
-        -- revision, which are otherwise identical by event ID.
-        revision_provisional INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, logical_event_id)
     )
     """,
@@ -116,7 +109,6 @@ _TABLES = (
         -- bit has to survive the wait: the original may not arrive until after
         -- the edit, and installing a locally timed revision as authoritative
         -- would make the real echo look like a stale duplicate.
-        provisional INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, target_event_id, sender)
     )
     """,
@@ -197,11 +189,7 @@ _INDEXES = (
 # these columns existed keeps working right up until the first statement that
 # names it, and then fails at runtime rather than at startup. Every column added
 # to an existing table has to be listed here as well as in the table above.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("visible_messages", "provisional", "INTEGER NOT NULL DEFAULT 0"),
-    ("visible_messages", "revision_provisional", "INTEGER NOT NULL DEFAULT 0"),
-    ("unresolved_edits", "provisional", "INTEGER NOT NULL DEFAULT 0"),
-)
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
 
 
 def added_columns() -> tuple[tuple[str, str, str], ...]:

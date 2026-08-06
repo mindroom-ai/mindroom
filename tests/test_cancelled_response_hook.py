@@ -518,7 +518,6 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -651,7 +650,6 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -734,7 +732,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -818,7 +815,6 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )
@@ -892,7 +888,6 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )

@@ -422,7 +422,6 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
-            outbound_projection=MagicMock(record_sent=AsyncMock()),
             outbox=make_outbox_mock(),
         ),
     )

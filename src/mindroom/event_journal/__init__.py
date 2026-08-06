@@ -33,7 +33,6 @@ from .views import (
     OutboxView,
     ProjectionView,
     ReplayView,
-    SeedingView,
 )
 
 __all__ = [
@@ -57,7 +56,6 @@ __all__ = [
     "ProjectionView",
     "RefreshRequest",
     "ReplayView",
-    "SeedingView",
     "SemanticConsumer",
     "SettlementOutcome",
     "VisibleMessage",

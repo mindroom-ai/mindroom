@@ -113,7 +113,6 @@ from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
-from .matrix.outbound_projection import OutboundProjection
 from .matrix.room_member_joins import (
     RoomMemberJoin,
     emit_room_member_join_at_least_once,
@@ -543,10 +542,6 @@ class AgentBot:
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
-                ),
-                outbound_projection=OutboundProjection(
-                    store=self._journal_store.principal(self._journal_principal_id),
-                    sender=runtime_matrix_id.full_id,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
             ),

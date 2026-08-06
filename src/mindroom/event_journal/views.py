@@ -207,14 +207,6 @@ class OutboxView(Protocol):
         ...
 
 
-class SeedingView(Protocol):
-    """Recording a message this bot sent before the server echoes it back."""
-
-    async def seed_outbound_message(self, event: ProjectedEvent) -> None:
-        """Make a message this bot just sent readable before its echo arrives."""
-        ...
-
-
 __all__ = [
     "AdmissionView",
     "ConversationReadView",
@@ -223,5 +215,4 @@ __all__ = [
     "OutboxView",
     "ProjectionView",
     "ReplayView",
-    "SeedingView",
 ]
