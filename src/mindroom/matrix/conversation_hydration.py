@@ -312,11 +312,22 @@ class ConversationHydrator:
             if not response.end:
                 return tuple(events)
             if response.end == start:
-                # The server is handing back the position it was given. That is
-                # not exhaustion and not a full window, so completing here would
-                # install a hydration marker over a conversation nobody read.
-                msg = f"Homeserver stopped advancing history for {room_id!r} at token {start!r}"
-                raise _HydrationError(msg)
+                # The server handed back the position it was given. That is
+                # what a homeserver at the start of its history does, and it is
+                # also what a stalled one does, and nothing in the response
+                # distinguishes them. Treating it as failure would be the worse
+                # guess by far: hydration runs once per membership, so a room
+                # that hit this would never become readable at all, where
+                # treating it as the end costs a short window that live events
+                # immediately start extending.
+                logger.info(
+                    "conversation_hydration_token_did_not_advance",
+                    room_id=room_id,
+                    token=start,
+                    fetched_events=fetched,
+                    logical_messages=logical,
+                )
+                return tuple(events)
             if fetched >= self.max_fetched_events or pages >= self.max_requests:
                 # Not the window being met, so it is said out loud. A room that
                 # reaches this is one where reading further costs more than the

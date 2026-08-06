@@ -468,23 +468,20 @@ class TestRoomHydration:
         assert client.history_pages == 2
         assert await bodies(alice) == ["older"]
 
-    async def test_a_token_that_does_not_move_fails_rather_than_completing(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A server repeating the position it was given has not exhausted anything.
+    async def test_a_token_that_does_not_move_ends_the_walk(self, alice: PrincipalStore) -> None:
+        """A homeserver at the start of its history repeats the token it was given.
 
-        Returning quietly would install a hydration marker over a conversation
-        nobody managed to read, and hydration runs once per membership, so the
-        room would stay empty until the bot rejoined it.
+        So does a stalled one, and nothing in the response tells them apart.
+        Failing would be the worse guess: hydration runs once per membership,
+        so a room that hit this would never become readable, where ending the
+        walk costs a short window that live events immediately extend.
         """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        with pytest.raises(_HydrationError):
-            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert client.history_pages == 2
-        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_the_request_ceiling_is_not_the_event_ceiling(self, alice: PrincipalStore) -> None:
         """One event per page must not be mistaken for a full event budget.
