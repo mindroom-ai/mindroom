@@ -1812,3 +1812,43 @@ matrix is deleted rather than kept green against a mechanism that does not
 exist. `TestEchoOrdering` in `tests/test_journal_ingress.py` is what now pins
 that a bot's own message reaches the conversation, and it does so through
 admission, which is the only route left.
+
+## Delivery cutover status (2026-08-06)
+
+Three of the four delivery points a turn has are now durable, and startup
+resends anything whose outcome this process cannot know.
+
+| Delivery point | Route | Stage |
+| --- | --- | --- |
+| Placeholder that creates the visible message | outbox | `INITIAL` |
+| Final answer, sent (no placeholder) | outbox | `FINAL` |
+| Final answer, edited onto a placeholder | outbox | `FINAL`, with `edits_event_id` |
+| Streamed terminal text | **direct, still open** | — |
+
+Sends that are not turns stay direct, as decided above: voice echoes, command
+confirmations, reconciliation notices. So do intermediate streaming edits,
+cancellation notices, and failure updates, which are transport rather than a
+turn's answer.
+
+### What is still open, precisely
+
+A streamed answer reaches its final text through `StreamingResponse`'s own
+transport (`streaming.py`), which sends the first event and edits it directly.
+`finalize_streamed_response` then converts an already-visible stream result
+into an outcome without delivering anything, so the terminal text of a streamed
+turn never enters the outbox.
+
+The placeholder before it is durable, so a crash mid-stream recovers to the
+placeholder rather than to nothing. What is lost is the answer itself.
+
+The fix is not another direct send. Adding one would issue a second Matrix edit
+per streamed turn, for text the last stream edit already made visible. The
+shape that costs nothing in the happy path is to enqueue the terminal content
+as `FINAL` *before* the last streaming edit, let that edit go out under the
+claimed transaction ID, and acknowledge it afterwards -- so an unacknowledged
+row means the terminal edit never landed, which is exactly the condition
+recovery should act on.
+
+That requires `StreamingResponse` to know its turn and its outbox, which is a
+real change to the streaming state machine rather than a call-site edit, and it
+is the last piece of this phase.
