@@ -96,8 +96,16 @@ def admit(
     event: InboundEvent,
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
-    """Insert, deduplicate, and project one event in a single transaction."""
+    """Insert, deduplicate, and project one event in a single transaction.
+
+    A context-only event is projected here and never replayed, so it keeps no
+    payload: it is admitted already settled, and settlement is what would
+    otherwise have cleared it. Storing the source anyway would turn the journal
+    into the raw-event cache this design exists to remove, at roughly half a
+    kilobyte for every message the bot has ever seen.
+    """
     epoch = current_membership_epoch(transaction, principal_id, event.room_id)
+    actionable = event.event_class is EventClass.ACTIONABLE
     row = transaction.fetchone(
         """
         INSERT INTO journal_events (
@@ -116,9 +124,13 @@ def admit(
             event.event_class.value,
             event.sender,
             event.origin_server_ts,
-            json.dumps(dict(event.source), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            (
+                json.dumps(dict(event.source), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+                if actionable
+                else ""
+            ),
             epoch,
-            PENDING_STATE if event.event_class is EventClass.ACTIONABLE else SETTLED_STATE,
+            PENDING_STATE if actionable else SETTLED_STATE,
             time.time_ns(),
         ),
     )

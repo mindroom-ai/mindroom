@@ -637,6 +637,34 @@ class TestMembershipEpoch:
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
+    async def test_context_only_events_keep_no_payload(self, alice: PrincipalStore) -> None:
+        """Otherwise the journal becomes the raw-event cache it replaces.
+
+        A context-only event is projected at admission and never replayed, so
+        it is admitted already settled — which means settlement, the step that
+        clears a payload, never runs for it. Storing the source anyway retains
+        every message the bot has ever seen, forever.
+        """
+        body = "x" * 500
+        admission, projected = message("$history", content=text(body), event_class=EventClass.CONTEXT_ONLY)
+        await alice.admit(admission, projected)
+
+        stored = await alice.load_event("$history")
+
+        assert stored is not None
+        assert stored.source == {}
+        assert await bodies(alice) == [body]
+
+    async def test_actionable_events_keep_their_replay_payload(self, alice: PrincipalStore) -> None:
+        """Compaction must not reach the events a crash has to replay."""
+        admission, projected = message("$live", content=text("answer me"))
+        await alice.admit(admission, projected)
+
+        stored = await alice.load_event("$live")
+
+        assert stored is not None
+        assert stored.source != {}
+
     async def test_rejoining_removes_what_the_previous_membership_projected(
         self,
         alice: PrincipalStore,
