@@ -147,7 +147,7 @@ class ConversationReader:
         )
         if not page.refresh_pending:
             return page
-        await self.hydrator.resolve_refreshes(room_id=room_id, thread_id=thread_id)
+        await self.hydrator.resolve_refreshes(page.refresh_pending)
         page = await self.store.read_conversation(
             room_id=room_id,
             thread_id=thread_id,

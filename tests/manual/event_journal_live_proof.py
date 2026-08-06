@@ -402,7 +402,8 @@ async def prove_sidecar_resolution(
     )
     findings.record("an unresolved sidecar is reported as owing a fetch", bool(owed))
 
-    await hydrator.resolve_refreshes(room_id=room_id, thread_id=None)
+    owed = (await store.read_conversation(room_id=room_id, thread_id=None, limit=200)).refresh_pending
+    await hydrator.resolve_refreshes(owed)
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=200)
     resolved = [m for m in page.messages if m.logical_event_id == event_id]

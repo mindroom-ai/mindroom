@@ -35,7 +35,7 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.event_journal import HydrationView
+    from mindroom.event_journal import HydrationView, RefreshRequest
 
 logger = get_logger(__name__)
 
@@ -411,12 +411,19 @@ class ConversationHydrator:
             return None
         return resolved_content
 
-    async def resolve_refreshes(self, *, room_id: str, thread_id: str | None) -> None:
-        """Drive every owed refetch for one conversation.
+    async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
+        """Repair exactly the messages one read found missing.
+
+        The caller passes the debts from its own page rather than naming a
+        conversation, because those are not the same set. Re-selecting from the
+        conversation returns the newest debts first and stops at a fixed
+        number, so a page containing one older unresolved message behind
+        enough newer unrepairable ones would retry the newer ones on every
+        read and never once attempt the message it was actually asked for.
 
         The next strict read is what runs this. There is no background refresh
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
         """
-        for request in await self.store.pending_refreshes(room_id=room_id, thread_id=thread_id):
+        for request in requests:
             await self.refresh(request)

@@ -954,10 +954,58 @@ class TestSeededSidecarSurvivesItsEcho:
             events={"$mine": source},
             sidecars={"mxc://s/mine": TestSidecarResolution._payload(whole)},
         )
-        await hydrator(alice, client).resolve_refreshes(room_id=ROOM, thread_id=None)
+        owed = (await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)).refresh_pending
+        await hydrator(alice, client).resolve_refreshes(owed)
         assert await bodies(alice) == [whole], "the seeded sidecar did not resolve"
 
         await admit_all(alice, [source])
 
         assert await bodies(alice) == [whole], "the echo replaced the resolved body with the preview"
         assert client.downloads == ["mxc://s/mine"], "the echo forced a second download"
+
+
+class TestRefreshStarvation:
+    """A read repairs what it asked about, not the newest debts in the room."""
+
+    async def test_an_older_debt_is_repaired_behind_many_unrepairable_newer_ones(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Re-selecting the conversation's newest debts starves the page's own.
+
+        The selection this replaces returned newest-first and stopped at a
+        fixed number. A page holding one older resolvable message behind
+        enough newer unrepairable ones would spend every read retrying the
+        newer ones and never once attempt the message it was asked for, so
+        that message stayed hidden for good.
+        """
+        wanted = TestSidecarResolution._sidecar_source("$wanted", "old [continues]", "mxc://s/wanted", ts=1_000)
+        unrepairable = [
+            TestSidecarResolution._sidecar_source(
+                f"$new{index}",
+                "new [continues]",
+                f"mxc://s/gone{index}",
+                ts=2_000 + index,
+            )
+            for index in range(70)
+        ]
+        await admit_all(alice, [wanted, *unrepairable])
+        client = FakeClient(
+            events={"$wanted": wanted, **{f"$new{index}": source for index, source in enumerate(unrepairable)}},
+            # Only the older message's attachment exists; every newer one fails.
+            sidecars={"mxc://s/wanted": TestSidecarResolution._payload("the older answer")},
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        with pytest.raises(_StaleConversationError):
+            await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
+
+        assert "mxc://s/wanted" in client.downloads, "the requested message was never attempted"
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
+        assert [message.content["body"] for message in page.messages] == ["the older answer"]
