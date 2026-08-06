@@ -41,6 +41,30 @@ class SettlementOutcome(StrEnum):
     INTENTIONALLY_IGNORED = "intentionally_ignored"
 
 
+class SemanticConsumer(StrEnum):
+    """The one application consumer that claimed a multi-purpose event.
+
+    A reaction can mean several unrelated things — a stop request, a tool
+    approval, an answer to an interactive question — and only one of them may
+    act on it. The claim is durable so that a replay after a crash cannot let a
+    second consumer also act.
+    """
+
+    APPROVAL_REPLY = "approval_reply"
+    CONFIG_CONFIRMATION = "config_confirmation"
+    TOOL_APPROVAL_REACTION = "tool_approval_reaction"
+    STOP_REACTION = "stop_reaction"
+    INTERACTIVE_REACTION = "interactive_reaction"
+    REACTION_HOOKS = "reaction_hooks"
+
+    @property
+    def event_kind(self) -> EventKind:
+        """Return the only event kind allowed to claim this consumer."""
+        if self is SemanticConsumer.APPROVAL_REPLY:
+            return EventKind.MESSAGE
+        return EventKind.REACTION
+
+
 class AdmissionResult(StrEnum):
     """What durable admission did with one event."""
 
@@ -87,6 +111,7 @@ class JournalEvent:
     source: Mapping[str, object]
     receipt_order: int
     membership_epoch: int
+    semantic_consumer: SemanticConsumer | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -84,7 +84,6 @@ from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
-from .cold_history_fence import ColdHistoryFence
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
@@ -97,12 +96,11 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .dispatch_callback_outcome import TurnDispatchOutcome
-from .dispatch_obligations import (
-    DispatchCallbackKind,
-    DispatchObligationRunner,
-    DispatchObligationStore,
-    DispatchSemanticConsumer,
-    callback_kind_for_source_kind,
+from .event_journal import EventClass, EventJournalStore, EventKind, SemanticConsumer
+from .matrix.journal_ingress import event_is_live as journal_event_is_live
+from .journal_dispatch import (
+    JournalCallbacks,
+    JournalDispatcher,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
@@ -138,7 +136,6 @@ from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
-from .turn_settlement_retry import TurnSettlementRetry
 from .turn_store import TurnStore, TurnStoreDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
@@ -154,7 +151,6 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
-    from mindroom.dispatch_admission import DispatchSourceAdmission
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -361,7 +357,6 @@ class AgentBot:
     _local_departures_awaiting_sync: set[str]
     _sync_continuity_store: SyncContinuityStore
     _sync_cache_trust: SyncCacheTrust
-    _cold_history_fence: ColdHistoryFence
 
     def __init__(
         self,
@@ -448,25 +443,28 @@ class AgentBot:
         )
         self._init_runtime_components()
 
+    def _open_journal_store(self) -> EventJournalStore:
+        """Open the durable store this bot's journal, projection, and outbox share.
+
+        One database can hold every bot in the process; each receives only its
+        own principal-bound view.
+        """
+        cache_config = self.config.cache
+        if cache_config.backend == "postgres":
+            return EventJournalStore.open_postgres(
+                cache_config.resolve_postgres_database_url(self.runtime_paths),
+            )
+        return EventJournalStore.open_sqlite(self.storage_path / "tracking" / "event_journal.db")
+
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
         if not self.agent_user.user_id:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
-        self._dispatch_obligation_store = DispatchObligationStore(
-            tracking_path=self.storage_path / "tracking",
-            principal_id=runtime_matrix_id.full_id,
-            entity_name=self.agent_name,
-        )
-        self._cold_history_fence = ColdHistoryFence(
-            self._dispatch_obligation_store,
-            decrypt_notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
-        )
-        self._turn_settlement_retry = TurnSettlementRetry(
-            store=self._dispatch_obligation_store,
-            background_task_owner=self._runtime_view,
-        )
+        self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
+        self._journal_store = self._open_journal_store()
+        self._journal_settlement_loop: asyncio.AbstractEventLoop | None = None
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -555,29 +553,24 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
-                on_terminal_turn_persisted=self._turn_settlement_retry.retry,
+                on_terminal_turn_persisted=self._settle_terminal_turn_sources,
             ),
         )
-        self._dispatch_obligation_runner = DispatchObligationRunner(
-            store=self._dispatch_obligation_store,
-            callbacks=DispatchObligationRunner.callbacks_for(
+        self._journal_dispatcher = JournalDispatcher(
+            store=self._journal_store.principal(self._journal_principal_id),
+            callbacks=JournalCallbacks(
                 on_message=self._on_message,
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
                 on_approval=self._on_unknown_event,
-                on_invite=self._on_invite,
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
                 source_has_live_owner=self._coalescing_gate.has_pending_source_event,
             ),
-            room_for_id=self._room_for_dispatch_obligation,
+            room_for_id=self._room_for_journal_event,
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
-            source_admission=self._cold_history_fence.admit_source,
-            observe_event_provenance=self._cold_history_fence.observe_event_provenance,
-            cache_historical_event=self._conversation_cache.cache_historical_event,
-            on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
@@ -627,7 +620,7 @@ class AgentBot:
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
-                receipt_order=self._dispatch_obligation_runner.receipt_order,
+                receipt_order=self._journal_dispatcher.receipt_order,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
@@ -676,7 +669,7 @@ class AgentBot:
                 response_sender=runtime_matrix_id.full_id,
                 turn_store=self._turn_store,
                 delivery_gateway=self._delivery_gateway,
-                settle_ignored_sources=self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources,
+                settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         )
         self._command_turn_executor = CommandTurnExecutor(
@@ -724,7 +717,7 @@ class AgentBot:
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
-                retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -733,7 +726,7 @@ class AgentBot:
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                obligation_runner=self._dispatch_obligation_runner,
+                journal_dispatcher=self._journal_dispatcher,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 stop_manager=self.stop_manager,
@@ -1350,29 +1343,6 @@ class AgentBot:
             has_retry_token=has_retry_token,
         )
 
-    async def _handle_rejected_dispatch_source(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.Event | nio.InviteEvent,
-        callback_kind: DispatchCallbackKind,
-        reason: DispatchSourceAdmission,
-    ) -> None:
-        """Report one fenced drop and preserve encrypted-event recovery effects."""
-        source_event_id = event.event_id if isinstance(event, nio.Event) else "invite"
-        self.logger.debug(
-            "matrix_dispatch_source_fenced",
-            room_id=room.room_id,
-            source_event_id=source_event_id,
-            callback_kind=callback_kind,
-            reason=reason,
-        )
-        if callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE and isinstance(event, nio.MegolmEvent):
-            await self._handle_decryption_failure_event(
-                room,
-                event,
-                suppress_notice=True,
-            )
-
     def _apply_transport_recovery_outcome(
         self,
         *,
@@ -1445,16 +1415,11 @@ class AgentBot:
         self._room_member_callback_registered = True
 
     def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
-        """Run live join work only after its matching admission succeeds."""
-        durable_callback = self._dispatch_obligation_runner.task_wrapper(
-            DispatchCallbackKind.ROOM_LIFECYCLE,
-            owner=self._runtime_view,
-        )
+        """Wake the journal worker for a membership event it already admitted."""
 
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if not isinstance(event, nio.RoomMemberEvent):
-                return
-            await durable_callback(room, event)
+            del room, event
+            self._journal_dispatcher.wake()
 
         return wrapper
 
@@ -1792,7 +1757,7 @@ class AgentBot:
 
     def _admit_live_call_event(self, _room: nio.MatrixRoom, event: nio.Event) -> bool:
         """Admit call-runtime room state only for this live nio delivery."""
-        return self._cold_history_fence.event_is_live(event.event_id)
+        return journal_event_is_live(event.event_id)
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
@@ -1888,7 +1853,7 @@ class AgentBot:
         )
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
-            self._turn_settlement_retry.bind_event_loop()
+            self._journal_settlement_loop = asyncio.get_running_loop()
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
@@ -1907,10 +1872,7 @@ class AgentBot:
                 self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
-            self._dispatch_obligation_runner.register_source_callbacks(
-                client,
-                owner=self._runtime_view,
-            )
+            self._journal_dispatcher.register(client)
             self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
@@ -1938,11 +1900,7 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
-            create_background_task(
-                self._recover_non_turn_dispatch_obligations(),
-                name=f"recover_non_turn_dispatch_obligations_{self.agent_name}",
-                owner=self._runtime_view,
-            )
+            self._journal_dispatcher.start()
         except Exception:
             client = self.client
             self.running = False
@@ -1954,29 +1912,12 @@ class AgentBot:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
 
-    async def _recover_non_turn_dispatch_obligations(self) -> None:
-        """Retry non-turn callback discovery until the durable store is readable."""
-
-        @retry(
-            wait=wait_exponential(multiplier=1, min=1, max=30),
-            retry=retry_if_not_exception_type(asyncio.CancelledError),
-            before_sleep=before_sleep_log(self.logger, logging.WARNING),
-            reraise=True,
-        )
-        async def recover() -> None:
-            await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
-
-        await recover()
-
-    async def recover_pending_turn_dispatch_obligations(self) -> None:
+    async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
-        await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
-        unsettled_source_event_ids = await asyncio.to_thread(
-            self._dispatch_obligation_store.unsettled_source_event_ids,
-        )
+        await self._journal_dispatcher.drain_once()
         await asyncio.to_thread(
             self._turn_store.cleanup,
-            unsettled_source_event_ids=unsettled_source_event_ids,
+            unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
     async def try_start(self) -> bool:
@@ -2243,15 +2184,16 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.InviteEvent,
     ) -> None:
-        """Durably accept invite work before scheduling its network side effects."""
-        await self._dispatch_obligation_runner.dispatch_background(
-            room,
-            event,
-            DispatchCallbackKind.INVITE,
-            owner=self._runtime_view,
-        )
+        """Act on one invite without journalling it.
 
-    def _room_for_dispatch_obligation(self, room_id: str) -> nio.MatrixRoom:
+        An invite has no Matrix event ID to key durable work on, and it does
+        not need one: an invite the bot has not acted on reappears in every
+        sync response until it does, so the homeserver already provides the
+        redelivery a journal row would have.
+        """
+        create_background_task(self._on_invite(room, event), owner=self._runtime_view)
+
+    def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""
         client = self.client
         if client is not None and room_id in client.rooms:
@@ -2272,14 +2214,12 @@ class AgentBot:
 
     def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
         """Return one undelivered source to its exact durable callback owner."""
-        self._dispatch_obligation_runner.retry_pending_turn_source(
-            source_event_id,
-            callback_kind_for_source_kind(source_kind),
-        )
+        del source_kind
+        self._journal_dispatcher.retry_turn_source(source_event_id)
 
     async def _settle_ignored_dispatch_source(self, source_event_id: str, _source_kind: str) -> None:
         """Settle one asynchronously normalized source that produced no dispatch payload."""
-        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources(
+        await self._journal_dispatcher.settle_intentionally_ignored_turn_sources(
             (source_event_id,),
         )
 
@@ -2309,13 +2249,13 @@ class AgentBot:
         """Delegate one inbound text event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
-        semantic_consumer = self._dispatch_obligation_runner.semantic_consumer()
-        approval_reply_claimed = semantic_consumer is DispatchSemanticConsumer.APPROVAL_REPLY
+        semantic_consumer = self._journal_dispatcher.semantic_consumer()
+        approval_reply_claimed = semantic_consumer is SemanticConsumer.APPROVAL_REPLY
 
         async def claim_approval_reply() -> None:
             nonlocal approval_reply_claimed
-            await self._dispatch_obligation_runner.claim_semantic_consumer(
-                DispatchSemanticConsumer.APPROVAL_REPLY,
+            await self._journal_dispatcher.claim_semantic_consumer(
+                SemanticConsumer.APPROVAL_REPLY,
             )
             approval_reply_claimed = True
 
@@ -2415,13 +2355,14 @@ class AgentBot:
             dispatch_snapshot_joins=dispatch_snapshot_joins,
         )
         for room, event in plan.dispatch_events:
-            await self._dispatch_obligation_runner.dispatch(
+            await self._journal_dispatcher.admit_out_of_band(
                 room,
                 event,
-                DispatchCallbackKind.ROOM_LIFECYCLE,
+                EventKind.ROOM_LIFECYCLE,
+                EventClass.ACTIONABLE,
             )
         if plan.record_events:
-            unsettled_members = await self._dispatch_obligation_runner.unsettled_room_lifecycle_member_ids()
+            unsettled_members = await self._journal_dispatcher.unsettled_room_lifecycle_member_ids()
             record_events = tuple(
                 (room, event)
                 for room, event in plan.record_events
@@ -2455,17 +2396,47 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
         ):
-            await self._dispatch_obligation_runner.dispatch(
+            await self._journal_dispatcher.admit_out_of_band(
                 room,
                 event,
-                DispatchCallbackKind.ROOM_LIFECYCLE,
+                EventKind.ROOM_LIFECYCLE,
+                EventClass.ACTIONABLE,
             )
 
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
         await self._handle_decryption_failure_event(
             room,
             event,
-            suppress_notice=False,
+            suppress_notice=self._room_lifecycle.decrypt_notice_is_fenced(room.room_id),
+        )
+
+    def _settle_terminal_turn_sources(self, source_event_ids: tuple[str, ...]) -> None:
+        """Settle the journal events one terminal turn accounted for.
+
+        Called from wherever the turn became durable, which may be a worker
+        thread, so the settlement is scheduled onto the runtime loop rather
+        than assuming one is running here.
+        """
+        if not source_event_ids:
+            return
+        settle = self._journal_dispatcher.settle_turn_sources(source_event_ids)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._journal_settlement_loop
+            if loop is None or loop.is_closed():
+                settle.close()
+                self.logger.error(
+                    "journal_terminal_settlement_loop_unavailable",
+                    source_event_ids=source_event_ids,
+                )
+                return
+            asyncio.run_coroutine_threadsafe(settle, loop)
+            return
+        create_background_task(
+            settle,
+            name=f"settle_terminal_turn_sources_{self.agent_name}",
+            owner=self._runtime_view,
         )
 
     async def _handle_decryption_failure_event(

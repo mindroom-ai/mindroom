@@ -22,6 +22,7 @@ from .models import (
     EventClass,
     EventKind,
     JournalEvent,
+    SemanticConsumer,
     SettlementOutcome,
 )
 from .projection import ProjectedEvent, project
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
 
 _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, event_class, sender,
-    origin_server_ts, source_json, receipt_order, membership_epoch
+    origin_server_ts, source_json, receipt_order, membership_epoch, semantic_consumer
 """
 
 
@@ -178,11 +179,77 @@ def settle(
     transaction.execute(
         """
         UPDATE journal_events
-        SET state = ?, outcome = ?, settled_at_ns = ?, source_json = ''
+        SET state = ?, outcome = ?, settled_at_ns = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
         """,
         (SETTLED_STATE, outcome.value, time.time_ns(), principal_id, event_id),
     )
+
+
+def settle_many(
+    transaction: Transaction,
+    principal_id: str,
+    event_ids: tuple[str, ...],
+    outcome: SettlementOutcome,
+) -> None:
+    """Settle several events that one terminal turn accounted for."""
+    for event_id in event_ids:
+        settle(transaction, principal_id, event_id, outcome)
+
+
+def unsettled_event_ids(transaction: Transaction, principal_id: str) -> frozenset[str]:
+    """Return every event that still owes semantic work."""
+    rows = transaction.fetchall(
+        "SELECT event_id FROM journal_events WHERE principal_id = ? AND state = 'pending'",
+        (principal_id,),
+    )
+    return frozenset(row["event_id"] for row in rows)
+
+
+def pending_of_kind(
+    transaction: Transaction,
+    principal_id: str,
+    kind: EventKind,
+    *,
+    limit: int,
+) -> tuple[JournalEvent, ...]:
+    """Return pending events of one kind, in receipt order."""
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_JOURNAL_COLUMNS} FROM journal_events
+        WHERE principal_id = ? AND state = 'pending' AND kind = ?
+        ORDER BY receipt_order
+        LIMIT ?
+        """,  # noqa: S608 - a fixed column list, not interpolated input
+        (principal_id, kind.value, limit),
+    )
+    return tuple(_journal_event(row) for row in rows)
+
+
+def claim_semantic_consumer(
+    transaction: Transaction,
+    principal_id: str,
+    event_id: str,
+    consumer: SemanticConsumer,
+) -> SemanticConsumer:
+    """Record the sole consumer of one event, returning whoever holds it.
+
+    First claim wins, durably. A replay after a crash therefore cannot let a
+    second consumer act on the same reaction.
+    """
+    row = transaction.fetchone(
+        """
+        UPDATE journal_events
+        SET semantic_consumer = COALESCE(semantic_consumer, ?)
+        WHERE principal_id = ? AND event_id = ? AND state = 'pending'
+        RETURNING semantic_consumer
+        """,
+        (consumer.value, principal_id, event_id),
+    )
+    if row is None:
+        msg = f"Cannot claim a consumer for settled or missing event {event_id!r}"
+        raise RuntimeError(msg)
+    return SemanticConsumer(row["semantic_consumer"])
 
 
 def _journal_event(row: Row) -> JournalEvent:
@@ -201,4 +268,7 @@ def _journal_event(row: Row) -> JournalEvent:
         source=source,
         receipt_order=int(row["receipt_order"]),
         membership_epoch=int(row["membership_epoch"]),
+        semantic_consumer=(
+            SemanticConsumer(row["semantic_consumer"]) if row["semantic_consumer"] is not None else None
+        ),
     )

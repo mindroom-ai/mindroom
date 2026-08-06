@@ -69,8 +69,8 @@ class PostgresBackend:
     database_url: str
     _writer: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
     _writer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] = field(init=False, repr=False)
-    _all_readers: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
+    _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
+    _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     @property
@@ -79,20 +79,25 @@ class PostgresBackend:
         return POSTGRES_DIALECT
 
     @classmethod
-    async def open(cls, database_url: str) -> PostgresBackend:
-        """Create the schema and open the connections."""
+    def open(cls, database_url: str) -> PostgresBackend:
+        """Create the schema and open the connections.
+
+        Synchronous for the same reason as the SQLite backend: a bot builds
+        its collaborators before it has an event loop.
+        """
         backend = cls(database_url=database_url)
-        await backend._start()
+        backend._writer = backend._connect()
+        backend._create_schema()
+        backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
         return backend
 
-    async def _start(self) -> None:
-        self._writer = await asyncio.to_thread(self._connect)
-        await asyncio.to_thread(self._create_schema)
-        self._readers = asyncio.Queue()
-        for _ in range(_POOL_SIZE):
-            connection = await asyncio.to_thread(self._connect)
-            self._all_readers.append(connection)
-            self._readers.put_nowait(connection)
+    def _readers_queue(self) -> asyncio.Queue[psycopg.Connection[tuple[Any, ...]]]:
+        """Bind the reader pool to the loop that first reads."""
+        if self._readers is None:
+            self._readers = asyncio.Queue()
+            for connection in self._pool:
+                self._readers.put_nowait(connection)
+        return self._readers
 
     def _connect(self) -> psycopg.Connection[tuple[Any, ...]]:
         # The row factory is chosen per cursor rather than per connection: it
@@ -133,7 +138,7 @@ class PostgresBackend:
         if self._closed:
             msg = "The event-journal store is closed"
             raise RuntimeError(msg)
-        connection = await self._readers.get()
+        connection = await self._readers_queue().get()
 
         def apply() -> T:
             return self._apply_read(connection, operation)
@@ -141,7 +146,7 @@ class PostgresBackend:
         try:
             return await asyncio.to_thread(apply)
         finally:
-            self._readers.put_nowait(connection)
+            self._readers_queue().put_nowait(connection)
 
     @staticmethod
     def _apply_read[T](
@@ -159,6 +164,6 @@ class PostgresBackend:
         if self._closed:
             return
         self._closed = True
-        for connection in (self._writer, *self._all_readers):
+        for connection in (self._writer, *self._pool):
             await asyncio.to_thread(connection.close)
-        self._all_readers.clear()
+        self._pool.clear()

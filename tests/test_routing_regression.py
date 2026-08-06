@@ -488,10 +488,10 @@ class TestRoutingRegression:
             DispatchCallbackKind.MESSAGE,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
@@ -511,7 +511,7 @@ class TestRoutingRegression:
             DispatchCallbackKind.MESSAGE,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
 
         mock_suggest_responder.assert_awaited_once()
@@ -527,10 +527,10 @@ class TestRoutingRegression:
             {"event_id": "$stuck-router-response"},
             room_id=room_id,
         )
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"

@@ -690,7 +690,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator._external_trigger_runtime.api_enabled = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
@@ -793,7 +793,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False
@@ -1138,7 +1138,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False
@@ -1233,7 +1233,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.first_sync_complete = True
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot = MagicMock(spec=AgentBot)
     code_bot.running = False
     code_bot.first_sync_complete = False

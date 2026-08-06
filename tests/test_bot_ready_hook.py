@@ -203,7 +203,7 @@ async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_p
     )
     bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
 
-    await bot.recover_pending_turn_dispatch_obligations()
+    await bot.recover_pending_turn_journal_events()
 
     assert call_order == ["recover", "unsettled", "cleanup"]
     bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
@@ -221,7 +221,7 @@ async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: 
     bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
 
     with pytest.raises(OSError, match="disk unavailable"):
-        await bot.recover_pending_turn_dispatch_obligations()
+        await bot.recover_pending_turn_journal_events()
 
     bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
     bot._turn_store.cleanup.assert_called_once_with(unsettled_source_event_ids=frozenset())

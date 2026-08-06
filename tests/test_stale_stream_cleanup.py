@@ -3242,7 +3242,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.try_start = AsyncMock(return_value=True)
     router_bot.stop = AsyncMock()
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(
+    router_bot.recover_pending_turn_journal_events = AsyncMock(
         side_effect=lambda: call_order.append("turn_dispatch"),
     )
     router_bot.running = True
@@ -3300,7 +3300,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+    router_bot.recover_pending_turn_journal_events.assert_not_awaited()
     assert call_order == ["wait", "sync", "recover", "setup", "recover"]
 
 

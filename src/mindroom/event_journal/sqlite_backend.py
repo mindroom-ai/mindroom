@@ -82,21 +82,28 @@ class SqliteBackend:
         return SQLITE_DIALECT
 
     @classmethod
-    async def open(cls, database_path: Path) -> SqliteBackend:
-        """Create the schema and start the writer task."""
+    def open(cls, database_path: Path) -> SqliteBackend:
+        """Create the schema and connect.
+
+        Synchronous, because a bot builds its collaborators before it has an
+        event loop. The writer task is created on the first write instead, so
+        the store can be constructed anywhere and still own a single writer.
+        """
         backend = cls(database_path=database_path)
-        await backend._start()
+        backend.database_path.parent.mkdir(parents=True, exist_ok=True)
+        backend._readers = threading.local()
+        backend._writer = backend._connect_writer()
         return backend
 
-    async def _start(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._readers = threading.local()
-        self._queue = asyncio.Queue(maxsize=_WRITE_QUEUE_SIZE)
-        self._writer = await asyncio.to_thread(self._connect_writer)
-        self._writer_task = asyncio.create_task(
-            self._drain_writes(),
-            name=f"event_journal_sqlite_writer_{self.database_path.name}",
-        )
+    def _ensure_writer_task(self) -> asyncio.Queue[_QueuedWrite]:
+        """Start the single writer task on the loop that first writes."""
+        if self._writer_task is None or self._writer_task.done():
+            self._queue = asyncio.Queue(maxsize=_WRITE_QUEUE_SIZE)
+            self._writer_task = asyncio.create_task(
+                self._drain_writes(),
+                name=f"event_journal_sqlite_writer_{self.database_path.name}",
+            )
+        return self._queue
 
     def _connect_writer(self) -> sqlite3.Connection:
         # The writer runs on whichever pool thread `asyncio.to_thread` picks, so
@@ -163,8 +170,9 @@ class SqliteBackend:
         if self._closed:
             msg = "The event-journal store is closed"
             raise RuntimeError(msg)
+        queue = self._ensure_writer_task()
         future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
-        await self._queue.put(_QueuedWrite(operation=operation, future=future))
+        await queue.put(_QueuedWrite(operation=operation, future=future))
         return await future
 
     async def read[T](self, operation: Operation[T]) -> T:
@@ -194,11 +202,12 @@ class SqliteBackend:
                 await writer_task
             except asyncio.CancelledError:
                 pass
-        while not self._queue.empty():
-            queued = self._queue.get_nowait()
+        queue = getattr(self, "_queue", None)
+        while queue is not None and not queue.empty():
+            queued = queue.get_nowait()
             if not queued.future.done():
                 queued.future.set_exception(RuntimeError("The event-journal store is closed"))
-            self._queue.task_done()
+            queue.task_done()
         await asyncio.to_thread(self._writer.close)
         with self._reader_lock:
             readers = tuple(self._open_readers)

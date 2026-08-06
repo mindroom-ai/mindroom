@@ -56,6 +56,7 @@ _TABLES = (
         sender TEXT NOT NULL,
         origin_server_ts BIGINT NOT NULL,
         source_json TEXT NOT NULL,
+        semantic_consumer TEXT,
         membership_epoch BIGINT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
         outcome TEXT,

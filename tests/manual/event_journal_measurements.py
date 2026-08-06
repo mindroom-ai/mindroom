@@ -245,7 +245,7 @@ async def run(report: Report) -> None:
     """Run every measurement against a fresh SQLite store."""
     with tempfile.TemporaryDirectory(prefix="journal-measure-") as directory:
         database_path = Path(directory) / "journal.db"
-        store_root = await EventJournalStore.open_sqlite(database_path)
+        store_root = EventJournalStore.open_sqlite(database_path)
         store = store_root.principal(PRINCIPAL)
         try:
             await measure_admission(store, report)

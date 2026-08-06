@@ -30,7 +30,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
-from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -167,7 +167,8 @@ async def dispatch_reaction_durably(
     source.setdefault("type", "m.reaction")
     event.source = source
     event.decrypted = False
-    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+    await bot._journal_dispatcher.admit_out_of_band(room, event, EventKind.REACTION, EventClass.ACTIONABLE)
+    await bot._journal_dispatcher.drain_once()
 
 
 def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
@@ -1016,6 +1017,7 @@ class AgentBotTestBase:
             event = MagicMock(spec=nio.ReactionEvent)
             event.key = "👍"
             event.reacts_to = "$question"
+            event.server_timestamp = 1234567890
             event.source = {"content": {}}
         else:  # pragma: no cover - defensive guard for test helper misuse
             msg = f"Unsupported handler: {handler_name}"

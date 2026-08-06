@@ -9,6 +9,7 @@ inferences are what the recovery bugs were made of.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -205,12 +206,30 @@ def _restore_security_metadata(
     cast("_RoomIdEvent", event).room_id = room_id
 
 
+# The provenance of the nio delivery whose callbacks are currently running.
+# Some room-state consumers must act only on live activity, and this is the one
+# place that fact is known without re-deriving it.
+_DELIVERY_PROVENANCE: ContextVar[tuple[str, nio.TimelineEventProvenance] | None] = ContextVar(
+    "mindroom_delivery_provenance",
+    default=None,
+)
+
+
+def event_is_live(event_id: str) -> bool:
+    """Return whether the current nio fan-out belongs to this live event."""
+    return _DELIVERY_PROVENANCE.get() == (event_id, nio.TimelineEventProvenance.LIVE)
+
+
 @dataclass(slots=True)
 class JournalIngress:
     """Commit every inbound Matrix event before nio considers it delivered."""
 
     store: PrincipalStore
     on_admitted: Callable[[], None] = lambda: None
+    # Room-membership events are only MindRoom's to act on once the router is
+    # ready for them, which the timeline callback cannot decide for itself.
+    room_lifecycle_enabled: Callable[[], bool] = lambda: False
+    on_event_admitted: Callable[[nio.MatrixRoom, nio.Event], None] = lambda _room, _event: None
 
     def register(self, client: nio.AsyncClient) -> None:
         """Install durable admission ahead of every other callback."""
@@ -222,7 +241,10 @@ class JournalIngress:
         event: nio.Event,
         provenance: nio.TimelineEventProvenance,
     ) -> None:
+        _DELIVERY_PROVENANCE.set((event.event_id, provenance))
         kind = event_kind(event)
+        if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
+            kind = EventKind.ROOM_LIFECYCLE
         if kind is None:
             return
         event_class = event_class_for(provenance)
@@ -236,4 +258,5 @@ class JournalIngress:
             # redelivery and does not advance the checkpoint past it.
             raise nio.CallbackNotAcceptedError(str(error)) from error
         if event_class is EventClass.ACTIONABLE:
+            self.on_event_admitted(room, event)
             self.on_admitted()
