@@ -12,14 +12,14 @@ import pytest
 
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
-    _HYDRATED_PROMPT_WINDOW_MESSAGES,
     _MESSAGES_PAGE_LIMIT,
+    HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     _HydrationError,
     _projected_from_event,
     _reduce_current_revision,
 )
-from mindroom.matrix.conversation_reads import _ConversationReader, _StaleConversationError
+from mindroom.matrix.conversation_reads import ConversationReader, _StaleConversationError
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
@@ -406,7 +406,7 @@ class TestRoomHydration:
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
-        assert client.history_pages == _HYDRATED_PROMPT_WINDOW_MESSAGES // _MESSAGES_PAGE_LIMIT
+        assert client.history_pages == HYDRATED_PROMPT_WINDOW_MESSAGES // _MESSAGES_PAGE_LIMIT
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_the_window_counts_messages_a_prompt_can_read_not_events(
@@ -652,7 +652,7 @@ class TestReadModes:
         """A non strict read omits rather than waits."""
         await self._hidden_message(alice)
         client = FakeClient(events={}, relations={})
-        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
         page = await reader.read(room_id=ROOM, thread_id=None, limit=10)
 
@@ -672,7 +672,7 @@ class TestReadModes:
             events=(),
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
-        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
         page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
@@ -691,7 +691,7 @@ class TestReadModes:
             events=(),
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
-        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
         with pytest.raises(_StaleConversationError):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)

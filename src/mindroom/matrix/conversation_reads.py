@@ -12,12 +12,64 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+)
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import ConversationCursor, ConversationPage, ProjectionView
+    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
+
+
+def projected_thread_history(
+    page: ConversationPage,
+    *,
+    complete: bool,
+    source_degraded: bool = False,
+) -> ThreadHistoryResult:
+    """Render one projected page as the history shape the prompt path consumes.
+
+    ``complete`` is the caller's guarantee, not something the page can report:
+    a strict read has hydrated and resolved every refresh, a non-blocking read
+    has done neither. It stays separate because a page that omitted a message
+    and a conversation that never had one look identical from here.
+    """
+    messages = [
+        ResolvedVisibleMessage.from_message_data(
+            {
+                "sender": message.sender,
+                "body": str(message.content.get("body", "")),
+                "timestamp": message.created_ts,
+                "event_id": message.logical_event_id,
+                "content": dict(message.content),
+            },
+            thread_id=message.thread_id,
+            latest_event_id=message.revision_event_id,
+        )
+        for message in page.messages
+    ]
+    for message, projected in zip(messages, page.messages, strict=True):
+        if projected.revision_event_id != projected.logical_event_id:
+            message.edited_timestamp = projected.revision_ts
+    diagnostics = (
+        {
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        }
+        if source_degraded
+        else None
+    )
+    return thread_history_result(
+        messages,
+        is_full_history=complete and not page.refresh_pending,
+        diagnostics=diagnostics,
+    )
 
 
 class _StaleConversationError(RuntimeError):
@@ -25,11 +77,26 @@ class _StaleConversationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class _ConversationReader:
+class ConversationReader:
     """Bounded conversation reads, hydrated on first use."""
 
-    store: ProjectionView
+    store: ConversationReadView
     hydrator: ConversationHydrator
+
+    async def may_have_unread_history(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        source_event_id: str,
+    ) -> bool:
+        """Return whether local absence cannot prove this conversation is fresh."""
+        if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
+            return False
+        return await self.store.has_other_admitted_room_event(
+            room_id=room_id,
+            event_id=source_event_id,
+        )
 
     async def read(
         self,

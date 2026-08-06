@@ -7,7 +7,8 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -20,6 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
+from mindroom.event_journal import ConversationPage
 from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadAppendOutcome,
@@ -39,6 +41,7 @@ from mindroom.matrix.client_thread_history import (
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
+from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -60,6 +63,20 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
+
+
+def _empty_conversation_reader() -> ConversationReader:
+    """Return a reader for a harness that has no journal store behind it.
+
+    Not the same thing as stubbing a reader that does: these harnesses build a
+    resolver directly, so there is no projection to reach and a fake page is
+    the honest analogue of the conversation-cache mock they already carry.
+    """
+    page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(read=AsyncMock(return_value=page), read_strict=AsyncMock(return_value=page)),
+    )
 
 
 def _conversation_cache_for_thread_reads(
@@ -331,12 +348,10 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
     read_modes = [
         ("get_thread_history", "fetch_thread_history", True, 50.0),
         ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 75.0),
-        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 100.0),
     ]
     post_coordinator_read_starts = {
         "get_thread_history": 1.06,
         "get_dispatch_thread_snapshot": 2.08,
-        "get_dispatch_thread_history": 3.11,
     }
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
@@ -349,10 +364,6 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             patch(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
                 fetchers["fetch_dispatch_thread_snapshot"],
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-                fetchers["fetch_dispatch_thread_history"],
             ),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
@@ -378,7 +389,6 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             read_methods = {
                 "get_thread_history": conversation_cache.get_thread_history,
                 "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
-                "get_dispatch_thread_history": conversation_cache.get_dispatch_thread_history,
             }
             for method_name, _name, is_full_history, _queue_wait_ms in read_modes:
                 result = await read_methods[method_name](
@@ -581,6 +591,7 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
             agent_name="primary",
             matrix_id=route_ids["primary"],
             conversation_cache=MagicMock(),
+            conversation_reader=_empty_conversation_reader(),
         ),
     )
     degraded_history = thread_history_result(
@@ -637,6 +648,7 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
         "$thread:localhost",
         mode=ThreadReadMode.STRICT_FULL,
         caller_label="dispatch_context_strict_thread_fallback",
+        source_event_id="$incoming:localhost",
     )
     assert agent_response_should_respond(
         agent_name="primary",
@@ -960,7 +972,7 @@ async def test_live_read_does_not_wait_for_running_startup_source_refresh(
             await asyncio.wait_for(source_call_started.wait(), timeout=1.0)
 
             live_read = asyncio.create_task(
-                conversation_cache.get_dispatch_thread_history(
+                conversation_cache.get_strict_thread_history(
                     room_id,
                     thread_id,
                     caller_label="live_dispatch",

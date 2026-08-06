@@ -113,6 +113,18 @@ class ProjectionView(Protocol):
         ...
 
 
+class ConversationReadView(ProjectionView, Protocol):
+    """Reading a conversation plus the evidence needed to judge completeness."""
+
+    async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation was hydrated under current membership."""
+        ...
+
+    async def has_other_admitted_room_event(self, *, room_id: str, event_id: str) -> bool:
+        """Return whether another event from this room has reached the journal."""
+        ...
+
+
 class HydrationView(Protocol):
     """Building a conversation from the server and repairing one message of it."""
 
@@ -205,6 +217,7 @@ class SeedingView(Protocol):
 
 __all__ = [
     "AdmissionView",
+    "ConversationReadView",
     "DispatchView",
     "HydrationView",
     "OutboxView",

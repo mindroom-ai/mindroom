@@ -109,6 +109,8 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
+from .matrix.conversation_hydration import ConversationHydrator
+from .matrix.conversation_reads import ConversationReader
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
 from .matrix.outbound_projection import OutboundProjection
@@ -513,6 +515,13 @@ class AgentBot:
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
                 conversation_cache=self._conversation_cache,
+                conversation_reader=ConversationReader(
+                    store=self._journal_store.principal(self._journal_principal_id),
+                    hydrator=ConversationHydrator(
+                        store=self._journal_store.principal(self._journal_principal_id),
+                        runtime=self._runtime_view,
+                    ),
+                ),
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(

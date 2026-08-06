@@ -58,7 +58,7 @@ _MESSAGES_PAGE_LIMIT = 100
 # prompt view, not a Matrix replica, so "hydrated" means "the window a prompt
 # can read is present" rather than "this room is fully mirrored". A caller that
 # needs older history than this paginates Matrix directly.
-_HYDRATED_PROMPT_WINDOW_MESSAGES = 2_000
+HYDRATED_PROMPT_WINDOW_MESSAGES = 2_000
 # Raw Matrix events and logical messages are not the same quantity, and in this
 # product they are not even the same order of magnitude: a streamed answer is
 # one original followed by a long tail of `m.replace` edits, all of which
@@ -166,7 +166,7 @@ class ConversationHydrator:
     # the same indirection the delivery gateway uses for the same reason.
     runtime: SupportsClientConfig
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
-    prompt_window_messages: int = _HYDRATED_PROMPT_WINDOW_MESSAGES
+    prompt_window_messages: int = HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
     max_requests: int = _MAX_MESSAGES_REQUESTS
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(

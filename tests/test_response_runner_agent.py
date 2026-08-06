@@ -67,7 +67,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.bot_helpers import (
     AgentBotTestBase,
-    _empty_full_thread_history,
     _handled_response_event_id,
     _hook_envelope,
     _hook_plugin,
@@ -2611,7 +2610,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -2635,7 +2633,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),

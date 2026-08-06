@@ -29,6 +29,8 @@ from mindroom.dispatch_thread_context import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import ConversationReader, projected_thread_history
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -232,6 +234,7 @@ class ConversationResolverDeps:
     agent_name: str
     matrix_id: MatrixID
     conversation_cache: MatrixConversationCache
+    conversation_reader: ConversationReader
 
 
 @dataclass
@@ -519,6 +522,7 @@ class ConversationResolver:
                 access=self._thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="coalescing_thread_id",
+                    source_event_id=event.event_id,
                 ),
             )
         except Exception as exc:
@@ -546,6 +550,7 @@ class ConversationResolver:
         access = self._thread_membership_access(
             mode=mode,
             caller_label=caller_label,
+            source_event_id=event_id,
         )
         resolution = await resolve_event_thread_membership(
             room_id,
@@ -590,6 +595,7 @@ class ConversationResolver:
         *,
         mode: ThreadReadMode,
         caller_label: str,
+        source_event_id: str | None = None,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
         return thread_messages_thread_membership_access(
@@ -600,6 +606,7 @@ class ConversationResolver:
                 thread_id,
                 mode=mode,
                 caller_label=caller_label,
+                source_event_id=source_event_id,
             ),
         )
 
@@ -610,15 +617,53 @@ class ConversationResolver:
         *,
         mode: ThreadReadMode,
         caller_label: str,
+        source_event_id: str | None = None,
     ) -> ThreadReadResult:
-        """Resolve one thread read through the shared cache entrypoint."""
-        read_thread = {
-            ThreadReadMode.ADVISORY_FULL: self.deps.conversation_cache.get_thread_history,
-            ThreadReadMode.DISPATCH_SNAPSHOT: self.deps.conversation_cache.get_dispatch_thread_snapshot,
-            ThreadReadMode.DISPATCH_FULL: self.deps.conversation_cache.get_dispatch_thread_history,
-            ThreadReadMode.STRICT_FULL: self.deps.conversation_cache.get_strict_thread_history,
-        }[mode]
-        return await read_thread(room_id, thread_id, caller_label=caller_label)
+        """Resolve one thread read against the conversation projection.
+
+        Four cache entrypoints collapse to two, because there were only ever
+        two questions. A caller assembling a prompt must not be handed a
+        conversation with a message missing from it, so it waits for the
+        server; a caller serving a UI or a hook must not block on a homeserver,
+        so it takes whatever is already known.
+
+        The page is bounded by the window hydration guarantees, which is far
+        above what any consumer renders -- teams cut to thirty messages -- so
+        the bound removes work rather than context.
+        """
+        del caller_label
+        # A dispatch-safe mode runs before the turn is accepted, so it never
+        # waits on the homeserver; every other mode feeds a prompt or a root
+        # proof, both of which are wrong when a message is missing, so they
+        # block. That includes `ADVISORY_FULL`, which despite not being strict
+        # by name has no dispatch timeout and fetched complete history from the
+        # client before this cutover.
+        strict = not mode.dispatch_safe
+        reader = self.deps.conversation_reader
+        # A non-blocking read is still complete when the conversation was
+        # already hydrated and nothing is pending -- completeness is a property
+        # of what is known, not of how hard the caller was willing to work for
+        # it. Claiming otherwise would send every dispatch through a redundant
+        # strict re-read of a conversation it had already proven whole.
+        source_degraded = (
+            not strict
+            and source_event_id is not None
+            and await reader.may_have_unread_history(
+                room_id=room_id,
+                thread_id=thread_id,
+                source_event_id=source_event_id,
+            )
+        )
+        page = await (reader.read_strict if strict else reader.read)(
+            room_id=room_id,
+            thread_id=thread_id,
+            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
+        )
+        return projected_thread_history(
+            page,
+            complete=not source_degraded,
+            source_degraded=source_degraded,
+        )
 
     async def _event_info_for_event_id(
         self,
@@ -703,6 +748,7 @@ class ConversationResolver:
                 thread_id,
                 mode=mode,
                 caller_label=caller_label,
+                source_event_id=event_id,
             )
         if mode.dispatch_safe and is_thread_history_degraded(thread_messages):
             # Proven threads must not plan from cold-cache/degraded history; wait for Matrix-backed refill.
@@ -711,6 +757,7 @@ class ConversationResolver:
                 thread_id,
                 mode=ThreadReadMode.STRICT_FULL,
                 caller_label=f"{caller_label}_strict_thread_fallback",
+                source_event_id=event_id,
             )
         return _ThreadContextLookup.proven_thread(
             thread_id,

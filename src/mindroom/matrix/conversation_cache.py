@@ -163,15 +163,6 @@ class ConversationCacheProtocol(Protocol):
     ) -> ThreadReadResult:
         """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
 
-    async def get_dispatch_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
-
     async def get_strict_thread_history(
         self,
         room_id: str,
@@ -984,21 +975,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
-            caller_label=caller_label,
-        )
-
-    async def get_dispatch_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.DISPATCH_FULL,
             caller_label=caller_label,
         )
 

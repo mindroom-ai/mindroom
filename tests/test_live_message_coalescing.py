@@ -99,6 +99,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.threading_helpers import seed_unhydrated_room_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -1112,6 +1113,12 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         body="follow up a",
         reply_to_event_id="$root-a",
         server_timestamp=1000,
+    )
+    await seed_unhydrated_room_event(
+        bot,
+        room_id=room.room_id,
+        event_id="$root-a",
+        body="root a",
     )
 
     def root_response(event_id: str) -> nio.RoomGetEventResponse:

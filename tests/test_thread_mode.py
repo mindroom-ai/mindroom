@@ -33,8 +33,9 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -44,6 +45,8 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from mindroom.event_journal import ConversationPage
 
 from tests.conftest import (
     TEST_PASSWORD,
@@ -984,35 +987,36 @@ class TestExtractMessageContextRoomMode:
                 "type": "m.room.message",
             },
         )
-        degraded_history = ThreadHistoryResult(
-            [],
-            is_full_history=False,
-            diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+        seeded = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@assistant:localhost",
+                body="prior reply",
+                event_id="$reply:localhost",
+                thread_id="$thread-root:localhost",
+            ),
+        ]
+        # The thread's content is known but the conversation was never
+        # hydrated, so the dispatch read reports itself degraded and the
+        # resolver must fall back to a strict read before the prompt is built.
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread-root:localhost",
+            messages=seeded,
+            hydrated=False,
         )
-        strict_history = thread_history_result(
-            [
-                ResolvedVisibleMessage.synthetic(
-                    sender="@assistant:localhost",
-                    body="prior reply",
-                    event_id="$reply:localhost",
-                    thread_id="$thread-root:localhost",
-                ),
-            ],
-            is_full_history=True,
+        strict_history = thread_history_result(seeded, is_full_history=True)
+        strict_page = await bot._journal_store.principal(bot._journal_principal_id).read_conversation(
+            room_id=room.room_id,
+            thread_id="$thread-root:localhost",
+            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
 
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                AsyncMock(return_value=degraded_history),
-            ) as mock_dispatch_history,
-            patch.object(
-                bot._conversation_cache,
-                "get_strict_thread_history",
-                AsyncMock(return_value=strict_history),
-            ) as mock_strict_history,
-        ):
+        with patch.object(
+            ConversationReader,
+            "read_strict",
+            new=AsyncMock(return_value=strict_page),
+        ) as mock_strict_history:
             context_result = await bot._conversation_resolver.extract_dispatch_context(
                 room,
                 event,
@@ -1022,17 +1026,12 @@ class TestExtractMessageContextRoomMode:
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
-        assert context.thread_history is strict_history
+        assert context.thread_history == strict_history
         assert context.requires_model_history_refresh is False
-        mock_dispatch_history.assert_awaited_once_with(
-            room.room_id,
-            "$thread-root:localhost",
-            caller_label="dispatch_hydration",
-        )
         mock_strict_history.assert_awaited_once_with(
-            room.room_id,
-            "$thread-root:localhost",
-            caller_label="dispatch_hydration_strict_thread_fallback",
+            room_id=room.room_id,
+            thread_id="$thread-root:localhost",
+            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
 
     @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
@@ -1898,12 +1897,22 @@ class TestExtractedModuleLoggerRebinding:
             thread_id="$thread-root:localhost",
             messages=list(dispatch_history),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=dispatch_history)
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
-            side_effect=AssertionError("dispatch planning should use bounded full history"),
-        )
+        observed_limits: list[int] = []
+        real_read = ConversationReader.read
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        async def spy_read(reader: ConversationReader, **kwargs: object) -> ConversationPage:
+            observed_limits.append(kwargs["limit"])
+            return await real_read(reader, **kwargs)
+
+        with (
+            patch.object(ConversationReader, "read", new=spy_read),
+            patch.object(
+                ConversationReader,
+                "read_strict",
+                new=AsyncMock(side_effect=AssertionError("dispatch planning should not block on the homeserver")),
+            ),
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
         context = context_result.context
 
         assert context.is_thread is True
@@ -1913,12 +1922,7 @@ class TestExtractedModuleLoggerRebinding:
             "$thread-msg:localhost",
         ]
         assert context.requires_model_history_refresh is False
-        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with(
-            room.room_id,
-            "$thread-root:localhost",
-            caller_label="dispatch_context",
-        )
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
+        assert observed_limits == [HYDRATED_PROMPT_WINDOW_MESSAGES]
 
 
 class TestConversationCacheArchitecture:

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
 import nio
@@ -21,18 +22,13 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.logging_config import get_logger
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DEGRADED,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-)
-from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_matrix_client_mock,
-    make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -65,10 +61,62 @@ def config(tmp_path: Path) -> Config:
     )
 
 
+def _conversation_reader(*messages: VisibleMessage) -> ConversationReader:
+    """Return a reader over a fixed page, for a harness with no journal store.
+
+    Not the same thing as stubbing a reader that has a real store behind it:
+    these harnesses build a resolver directly, so there is no projection to
+    reach and a fixed page is the honest analogue of the conversation-cache
+    mock they already carry.
+    """
+    page = ConversationPage(messages=messages, refresh_pending=(), next_cursor=None)
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            read=AsyncMock(return_value=page),
+            read_strict=AsyncMock(return_value=page),
+        ),
+    )
+
+
+def _projected(event_id: str, body: str) -> VisibleMessage:
+    """Return one projected message in the thread the reply targets."""
+    return VisibleMessage(
+        logical_event_id=event_id,
+        room_id=_ROOM_ID,
+        thread_id=_PARENT,
+        sender=_SENDER,
+        created_ts=1_000,
+        revision_event_id=event_id,
+        revision_ts=1_000,
+        content={"msgtype": "m.text", "body": body},
+    )
+
+
+def _empty_conversation_reader() -> ConversationReader:
+    """Return a reader for a harness that has no journal store behind it.
+
+    Not the same thing as stubbing a reader that does: these harnesses build a
+    resolver directly, so there is no projection to reach and a fake page is
+    the honest analogue of the conversation-cache mock they already carry.
+    """
+    page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            read=AsyncMock(return_value=page),
+            read_strict=AsyncMock(return_value=page),
+        ),
+    )
+
+
 def _resolver(
     config: Config,
     *,
     conversation_cache: AsyncMock | None = None,
+    conversation_reader: ConversationReader | None = None,
 ) -> ConversationResolver:
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
@@ -80,6 +128,7 @@ def _resolver(
             agent_name="general",
             matrix_id=registry.current_id("general"),
             conversation_cache=conversation_cache or make_conversation_cache_mock(),
+            conversation_reader=conversation_reader or _empty_conversation_reader(),
         ),
     )
 
@@ -131,7 +180,6 @@ async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> N
     assert result.context.requires_model_history_refresh is False
     assert result.thread_context is not None
     assert result.thread_context.stable_target.resolved_thread_id == _THREAD_ROOT
-    cache.get_dispatch_thread_history.assert_awaited_once_with(_ROOM_ID, _THREAD_ROOT, caller_label="dispatch_context")
 
 
 @pytest.mark.asyncio
@@ -154,57 +202,16 @@ async def test_reply_chain_falls_back_to_cached_thread_membership(config: Config
 @pytest.mark.asyncio
 async def test_reply_to_proven_thread_root_joins_that_thread(config: Config) -> None:
     """Replying to an event that provably has thread children resolves to that thread."""
-    cache = make_conversation_cache_mock()
-    cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result(
-            [make_visible_message(sender=_SENDER, body="child", event_id="$child:localhost")],
-            is_full_history=True,
-        ),
+    resolver = _resolver(
+        config,
+        conversation_reader=_conversation_reader(_projected("$child:localhost", "child")),
     )
-    resolver = _resolver(config, conversation_cache=cache)
 
     result = await resolver.extract_dispatch_context(_room(), _reply_event())
 
     assert result.context.is_thread is True
     assert result.context.thread_id == _PARENT
     assert [message.event_id for message in result.context.thread_history] == ["$child:localhost"]
-
-
-@pytest.mark.asyncio
-async def test_reply_to_candidate_retries_strictly_after_degraded_dispatch_proof(config: Config) -> None:
-    """A dispatch backoff must not demote a candidate that strict history proves is a thread."""
-    cache = make_conversation_cache_mock()
-    degraded_history = thread_history_result(
-        [],
-        is_full_history=False,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-        },
-    )
-    strict_history = thread_history_result(
-        [make_visible_message(sender=_SENDER, body="child", event_id="$child:localhost")],
-        is_full_history=True,
-    )
-    cache.get_dispatch_thread_history = AsyncMock(return_value=degraded_history)
-    cache.get_strict_thread_history = AsyncMock(return_value=strict_history)
-    resolver = _resolver(config, conversation_cache=cache)
-
-    result = await resolver.extract_dispatch_context(_room(), _reply_event())
-
-    assert result.context.is_thread is True
-    assert result.context.thread_id == _PARENT
-    assert result.context.thread_history == strict_history
-    cache.get_dispatch_thread_history.assert_awaited_once_with(
-        _ROOM_ID,
-        _PARENT,
-        caller_label="dispatch_context",
-    )
-    cache.get_strict_thread_history.assert_awaited_once_with(
-        _ROOM_ID,
-        _PARENT,
-        caller_label="dispatch_context_strict_candidate_fallback",
-    )
 
 
 @pytest.mark.asyncio

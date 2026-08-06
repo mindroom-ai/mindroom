@@ -166,6 +166,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
 ]
 
@@ -174,9 +175,11 @@ path = "mindroom.matrix.conversation_reads"
 depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
+    "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_hydration",
+    "mindroom.matrix.thread_history_result",
 ]
-visibility = ["mindroom.bot"]
+visibility = ["mindroom.bot", "mindroom.conversation_resolver"]
 
 [[modules]]
 path = "mindroom.response_delivery"
@@ -2531,6 +2534,7 @@ visibility = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.client",
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_reads",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
@@ -2853,6 +2857,8 @@ depends_on = [
     "mindroom.matrix.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.conversation_hydration",
+    "mindroom.matrix.conversation_reads",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_diagnostics",
@@ -2898,6 +2904,8 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.conversation_hydration",
+    "mindroom.matrix.conversation_reads",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.event_info",
     "mindroom.matrix.joined_room_history",

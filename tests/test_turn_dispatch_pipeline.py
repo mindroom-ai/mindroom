@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -41,6 +41,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import ConversationPage
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
@@ -48,6 +49,8 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -98,6 +101,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -377,7 +381,7 @@ class TestAgentBot(AgentBotTestBase):
         """Dispatch startup should use the bounded full-history read."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = nio.RoomMessageText.from_dict(
@@ -394,8 +398,11 @@ class TestAgentBot(AgentBotTestBase):
                 "type": "m.room.message",
             },
         )
-        history = ThreadHistoryResult(
-            [
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root",
+            messages=[
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
                     body="Root",
@@ -404,15 +411,24 @@ class TestAgentBot(AgentBotTestBase):
                     content={"body": "Root"},
                 ),
             ],
-            is_full_history=True,
         )
 
-        mock_advisory_history = AsyncMock()
-        mock_dispatch_history = AsyncMock(return_value=history)
+        observed_limits: list[int] = []
+        real_read = ConversationReader.read
+
+        async def spy_read(reader: ConversationReader, **kwargs: object) -> ConversationPage:
+            observed_limits.append(kwargs["limit"])
+            return await real_read(reader, **kwargs)
 
         with (
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", new=mock_dispatch_history),
-            patch.object(bot._conversation_cache, "get_thread_history", new=mock_advisory_history),
+            patch.object(ConversationReader, "read", new=spy_read),
+            # Dispatch runs before the turn is accepted, so it must never block
+            # on the homeserver to build its planning context.
+            patch.object(
+                ConversationReader,
+                "read_strict",
+                new=AsyncMock(side_effect=AssertionError("dispatch blocked on a strict read")),
+            ),
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
             context = context_result.context
@@ -420,13 +436,12 @@ class TestAgentBot(AgentBotTestBase):
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert [message.event_id for message in context.thread_history] == ["$thread_root"]
+        # The conversation was hydrated, so a non-blocking read still proves
+        # the history whole and no post-lock refresh is owed.
         assert context.requires_model_history_refresh is False
-        mock_dispatch_history.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root",
-            caller_label="dispatch_context",
-        )
-        mock_advisory_history.assert_not_awaited()
+        # Every read the dispatch path takes is bounded by the hydration window.
+        assert observed_limits
+        assert set(observed_limits) == {HYDRATED_PROMPT_WINDOW_MESSAGES}
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_fetches_direct_thread_history_through_dispatch_fetcher(
@@ -434,11 +449,11 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Direct-thread dispatch context should read bounded full history through the dispatch fetcher."""
+        """Direct-thread dispatch context should read bounded full history from the projection."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_cache_support(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = nio.RoomMessageText.from_dict(
@@ -455,51 +470,39 @@ class TestAgentBot(AgentBotTestBase):
                 "type": "m.room.message",
             },
         )
-        dispatch_history = ThreadHistoryResult(
-            [
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="Root",
-                    event_id="$thread_root",
-                    timestamp=1234567889,
-                    content={"body": "Root"},
-                ),
-                ResolvedVisibleMessage.synthetic(
-                    sender="@mindroom_calculator:localhost",
-                    body="Reply",
-                    event_id="$reply",
-                    timestamp=1234567890,
-                    content={"body": "Reply"},
-                ),
-            ],
-            is_full_history=True,
+        seeded = [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="Root",
+                event_id="$thread_root",
+                timestamp=1234567889,
+                content={"body": "Root"},
+                thread_id="$thread_root",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@mindroom_calculator:localhost",
+                body="Reply",
+                event_id="$reply",
+                timestamp=1234567890,
+                content={"body": "Reply"},
+                thread_id="$thread_root",
+            ),
+        ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root",
+            messages=seeded,
         )
+        dispatch_history = thread_history_result(seeded, is_full_history=True)
 
-        with patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-            new=AsyncMock(return_value=dispatch_history),
-        ) as mock_history:
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert context.thread_history == dispatch_history
         assert context.requires_model_history_refresh is False
-        trusted_sender_ids = frozenset(
-            matrix_id.full_id for matrix_id in entity_ids(config, runtime_paths_for(config)).values()
-        )
-        mock_history.assert_awaited_once_with(
-            bot.client,
-            room.room_id,
-            "$thread_root",
-            event_cache=bot.event_cache,
-            trusted_sender_ids=trusted_sender_ids,
-            caller_label="dispatch_context",
-            coordinator_queue_wait_ms=ANY,
-            post_coordinator_read_started=ANY,
-            refill=ANY,
-        )
 
     @pytest.mark.asyncio
     async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(
@@ -857,7 +860,7 @@ class TestAgentBot(AgentBotTestBase):
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         }
-        snapshot_history = thread_history_result([], is_full_history=False)
+        empty_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
 
         with (
             patch.object(
@@ -865,15 +868,17 @@ class TestAgentBot(AgentBotTestBase):
                 "resolve_text_event",
                 new=AsyncMock(return_value=event),
             ),
+            # A command runs before the turn is accepted, so it must take the
+            # non-blocking snapshot read and never wait on the homeserver.
             patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                new=AsyncMock(side_effect=AssertionError("command used full dispatch history")),
+                ConversationReader,
+                "read_strict",
+                new=AsyncMock(side_effect=AssertionError("command blocked on a strict read")),
             ) as mock_full_history,
             patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_snapshot",
-                new=AsyncMock(return_value=snapshot_history),
+                ConversationReader,
+                "read",
+                new=AsyncMock(return_value=empty_page),
             ) as mock_snapshot,
             patch.object(
                 bot._command_turn_executor,
@@ -888,9 +893,9 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_full_history.assert_not_awaited()
         mock_snapshot.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root",
-            caller_label="dispatch_command_context",
+            room_id=room.room_id,
+            thread_id="$thread_root",
+            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
         mock_execute_command.assert_awaited_once()
         assert mock_execute_command.await_args.kwargs["target"].resolved_thread_id == "$thread_root"

@@ -2254,7 +2254,7 @@ class TestThreadHistoryCache:
         try:
             readers = [
                 asyncio.create_task(
-                    conversation_cache.get_dispatch_thread_history("!room:localhost", "$thread_root"),
+                    conversation_cache.get_strict_thread_history("!room:localhost", "$thread_root"),
                 )
                 for _ in range(20)
             ]
@@ -2672,7 +2672,7 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_dispatch_thread_history(
+            history = await conversation_cache.get_strict_thread_history(
                 "!room:localhost",
                 "$thread_root",
             )
@@ -2729,7 +2729,7 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_dispatch_thread_history(
+            history = await conversation_cache.get_strict_thread_history(
                 "!room:localhost",
                 "$thread_root",
             )
@@ -2786,7 +2786,7 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_dispatch_thread_history(
+            history = await conversation_cache.get_strict_thread_history(
                 "!room:localhost",
                 "$thread_root",
             )

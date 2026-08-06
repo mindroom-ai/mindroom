@@ -682,7 +682,6 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
-        history = _empty_full_thread_history()
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -707,7 +706,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot._response_runner, "generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
@@ -786,7 +784,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths,
         )
-        refreshed_history = ThreadHistoryResult(list(thread_history), is_full_history=True)
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -814,11 +811,6 @@ class TestAgentBot(AgentBotTestBase):
                 bot._response_runner,
                 "generate_team_response_helper",
                 new=AsyncMock(return_value="$response"),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                AsyncMock(return_value=refreshed_history),
             ),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
@@ -911,7 +903,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths,
         )
-        history = _empty_full_thread_history()
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[team_member],
@@ -939,7 +930,6 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(side_effect=fake_send_streaming_response),

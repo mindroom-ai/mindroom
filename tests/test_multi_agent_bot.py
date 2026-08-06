@@ -52,6 +52,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -574,7 +575,10 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        bot.client = AsyncMock()
+        # A threaded turn now reads through the projection, and a strict read
+        # hydrates first. A bare AsyncMock returns a mock from room_get_event,
+        # so hydration fails and the turn ends silently with no response.
+        bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
 
         # Mock presence check to return user online when streaming is enabled
@@ -622,11 +626,9 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         snapshot = ThreadHistoryResult([], is_full_history=False)
-        history = ThreadHistoryResult([], is_full_history=True)
 
         with (
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", AsyncMock(return_value=snapshot)),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
         ):
             await bot._on_message(mock_room, mock_event)
             await drain_coalescing(bot)
@@ -1104,14 +1106,12 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot")
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history")
     @patch("mindroom.response_runner.should_use_streaming")
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_get_latest_thread: AsyncMock,
         mock_should_use_streaming: AsyncMock,
-        mock_fetch_history: AsyncMock,
         mock_fetch_snapshot: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -1150,7 +1150,7 @@ class TestAgentBot(AgentBotTestBase):
             enable_streaming=enable_streaming,
         )
         _install_runtime_cache_support(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
@@ -1191,8 +1191,16 @@ class TestAgentBot(AgentBotTestBase):
                 event_id="prev2",
             ),
         ]
-        mock_fetch_history.return_value = thread_history_result(test1_history, is_full_history=True)
         mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=True)
+        # Thread participation is read from the projection, so the thread has
+        # to actually contain this agent's earlier reply for it to answer
+        # without a mention.
+        await seed_thread_history(
+            bot,
+            room_id=mock_room.room_id,
+            thread_id="thread_root",
+            messages=test1_history,
+        )
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
@@ -1268,7 +1276,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_ai_response.reset_mock()
         mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
-        mock_fetch_history.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
         test2_history = [
@@ -1283,8 +1290,15 @@ class TestAgentBot(AgentBotTestBase):
                 event_id="prev3",
             ),
         ]
-        mock_fetch_history.return_value = thread_history_result(test2_history, is_full_history=True)
         mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=True)
+        # A second agent joins the same thread; re-seeding is idempotent for
+        # the two messages already admitted.
+        await seed_thread_history(
+            bot,
+            room_id=mock_room.room_id,
+            thread_id="thread_root",
+            messages=test2_history,
+        )
 
         # Create a new event with a different ID for Test 2
         mock_event_2 = MagicMock()

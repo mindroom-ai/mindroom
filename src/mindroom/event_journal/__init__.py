@@ -27,6 +27,7 @@ from .projection import ProjectedEvent, replacement_target, thread_root, visible
 from .store import EventJournalStore, PrincipalStore
 from .views import (
     AdmissionView,
+    ConversationReadView,
     DispatchView,
     HydrationView,
     OutboxView,
@@ -40,6 +41,7 @@ __all__ = [
     "AdmissionView",
     "ConversationCursor",
     "ConversationPage",
+    "ConversationReadView",
     "DeliveryStage",
     "DispatchView",
     "EventClass",

@@ -114,6 +114,7 @@ async def seed_thread_history(
     room_id: str,
     thread_id: str | None,
     messages: Sequence[ResolvedVisibleMessage],
+    hydrated: bool = True,
 ) -> None:
     """Put messages into the conversation projection a read will serve from.
 
@@ -122,9 +123,21 @@ async def seed_thread_history(
     stops the same test keeps passing. Stubbing the reader instead would pin
     the projection's absence -- the test would pass whether or not anything
     ever reached it.
+
+    Pass ``hydrated=False`` to seed content the projection holds without
+    claiming it is all of it, which is what makes a dispatch read report
+    itself degraded.
     """
     store = bot._journal_store.principal(bot._journal_principal_id)
-    for message in messages:
+    for ordinal, message in enumerate(messages, start=1):
+        # `_message` builds expectations through `ResolvedVisibleMessage
+        # .synthetic`, which stamps every one with timestamp 0. Seeding them
+        # all at 0 makes the page order fall back to the event ID, which is
+        # alphabetical rather than the order the conversation happened in.
+        # Position in this list is that order, so it becomes the creation time
+        # -- on the expectation objects too, since callers pass the very list
+        # they then assert against.
+        message.timestamp = ordinal
         await store.admit(
             InboundEvent(
                 event_id=message.event_id,
@@ -133,7 +146,7 @@ async def seed_thread_history(
                 kind=EventKind.MESSAGE,
                 event_class=EventClass.ACTIONABLE,
                 sender=message.sender,
-                origin_server_ts=message.timestamp,
+                origin_server_ts=ordinal,
                 source={"event_id": message.event_id, "content": dict(message.content)},
             ),
             ProjectedEvent(
@@ -141,13 +154,51 @@ async def seed_thread_history(
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=message.sender,
-                origin_server_ts=message.timestamp,
+                origin_server_ts=ordinal,
                 content=dict(message.content),
                 replaces_event_id=None,
                 redacts_event_id=None,
             ),
         )
         await store.settle(message.event_id, SettlementOutcome.SUCCEEDED)
+    if not hydrated:
+        return
+    # A strict read hydrates before it answers, and hydration talks to Matrix.
+    # A bot under test has a mocked client, so without the marker every strict
+    # read would try to fetch history from a mock and the turn would produce
+    # nothing at all. Seeding a conversation means it is known, not merely
+    # present.
+    await store.install_hydrated_conversation(
+        room_id=room_id,
+        thread_id=thread_id,
+        events=(),
+        expected_membership_epoch=await store.membership_epoch(room_id),
+    )
+
+
+async def seed_unhydrated_room_event(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+) -> None:
+    """Admit one known room event without claiming its conversation is complete."""
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    await store.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender=sender,
+            origin_server_ts=1,
+            source={"event_id": event_id, "content": {"body": body, "msgtype": "m.text"}},
+        ),
+        None,
+    )
 
 
 def thread_history_result(

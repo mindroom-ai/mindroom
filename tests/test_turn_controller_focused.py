@@ -18,8 +18,9 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -46,7 +47,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import EventClass, EventJournalStore, EventKind
+from mindroom.event_journal import ConversationPage, EventClass, EventJournalStore, EventKind, VisibleMessage
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import (
@@ -57,6 +58,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -82,7 +84,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
-    from unittest.mock import AsyncMock
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.dispatch_handoff import PreparedTextEvent
@@ -290,6 +291,40 @@ class _Harness:
         await self.runner.settle_inbox_responses()
 
 
+def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> ConversationReader:
+    """Return a reader for a harness that has no journal store behind it.
+
+    Not the same thing as stubbing a reader that does: these harnesses build a
+    resolver directly, so there is no projection to reach and a fake page is
+    the honest analogue of the conversation-cache mock they already carry.
+    """
+    page = ConversationPage(
+        messages=tuple(
+            VisibleMessage(
+                logical_event_id=message.event_id,
+                room_id=_ROOM_ID,
+                thread_id=_THREAD_ROOT,
+                sender=message.sender,
+                created_ts=message.timestamp or 0,
+                revision_event_id=message.event_id,
+                revision_ts=message.timestamp or 0,
+                content=dict(message.content),
+            )
+            for message in (thread_history or ())
+        ),
+        refresh_pending=(),
+        next_cursor=None,
+    )
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            read=AsyncMock(return_value=page),
+            read_strict=AsyncMock(return_value=page),
+        ),
+    )
+
+
 def _build_harness(
     config: Config,
     storage_path: Path,
@@ -328,6 +363,7 @@ def _build_harness(
             agent_name=agent_name,
             matrix_id=matrix_id,
             conversation_cache=conversation_cache,
+            conversation_reader=_conversation_reader(thread_history),
         ),
     )
     normalizer = InboundTurnNormalizer(

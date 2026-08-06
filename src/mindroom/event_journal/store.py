@@ -87,6 +87,17 @@ class PrincipalStore:
             lambda transaction: journal.load(transaction, self._principal_id, event_id),
         )
 
+    async def has_other_admitted_room_event(self, *, room_id: str, event_id: str) -> bool:
+        """Return whether another event from this room has reached the journal."""
+        return await self._backend.read(
+            lambda transaction: journal.has_other_admitted_room_event(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
+        )
+
     async def is_pending(self, event_id: str) -> bool:
         """Return whether one event still owes semantic work."""
         return await self._backend.read(

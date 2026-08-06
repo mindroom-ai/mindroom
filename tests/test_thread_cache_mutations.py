@@ -1256,8 +1256,8 @@ class TestMatrixConversationCacheThreadReads:
             new=AsyncMock(side_effect=[first, second]),
         ) as mock_read_thread:
             async with access.turn_scope():
-                first_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
-                second_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
+                first_history = await access.get_strict_thread_history("!test:localhost", "$thread_root")
+                second_history = await access.get_strict_thread_history("!test:localhost", "$thread_root")
 
         # The second read sees the newer thread, which a memo would have hidden.
         assert [message.event_id for message in first_history] == ["$thread_root"]
@@ -1318,12 +1318,12 @@ class TestMatrixConversationCacheThreadReads:
         ):
             async with access.turn_scope():
                 assert await access.get_event(room_id, event_id) is visible_event
-                assert await access.get_dispatch_thread_history(room_id, thread_id)
+                assert await access.get_strict_thread_history(room_id, thread_id)
 
                 await access.purge_rooms((room_id,))
 
                 assert await access.get_event(room_id, event_id) is departed_event
-                assert not await access.get_dispatch_thread_history(room_id, thread_id)
+                assert not await access.get_strict_thread_history(room_id, thread_id)
 
         assert mock_get_event.await_count == 2
 
