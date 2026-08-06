@@ -62,6 +62,47 @@ def text_event(
     return event
 
 
+def image_event(
+    event_id: str,
+    body: str = "photo.png",
+    *,
+    ts: int = 1_000,
+    encrypted: bool = False,
+) -> nio.Event:
+    """Return a parsed image message, optionally with its decryption keys."""
+    content: dict[str, Any] = {
+        "msgtype": "m.image",
+        "body": body,
+        "info": {"mimetype": "image/png", "size": 4_096, "w": 64, "h": 64},
+    }
+    if encrypted:
+        content["file"] = {
+            "url": f"mxc://example.org/{event_id.lstrip('$')}",
+            "key": {
+                "k": "cipher-key-material",
+                "alg": "A256CTR",
+                "ext": True,
+                "key_ops": ["encrypt", "decrypt"],
+                "kty": "oct",
+            },
+            "iv": "initialization-vector",
+            "hashes": {"sha256": "content-hash"},
+            "v": "v2",
+        }
+    else:
+        content["url"] = f"mxc://example.org/{event_id.lstrip('$')}"
+    source = {
+        "event_id": event_id,
+        "sender": ALICE,
+        "origin_server_ts": ts,
+        "type": "m.room.message",
+        "content": content,
+    }
+    event = nio.RoomMessage.parse_decrypted_event(source) if encrypted else nio.Event.parse_event(source)
+    assert isinstance(event, nio.Event)
+    return event
+
+
 def redaction_event(event_id: str, redacts: str, *, ts: int = 2_000) -> nio.Event:
     """Return a parsed redaction event."""
     event = nio.Event.parse_event(
@@ -233,6 +274,84 @@ class TestReplayFidelity:
         assert replayed.verified
         assert replayed.sender_key == "key"
         assert replayed.session_id == "session"
+
+    async def test_an_image_replays_with_the_reference_the_model_needs(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A media turn is only replayable if its content reference survives.
+
+        The prompt for a media turn is not the event body; it is the file the
+        body points at. A replay that produced the caption without the MXC
+        reference would run the turn again against different input and call
+        that recovery.
+        """
+        original = image_event("$img", "diagram.png")
+        await alice.admit(
+            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
+            projected_event(ROOM, original, EventKind.MEDIA),
+        )
+
+        replayed = parse_journal_event((await alice.pending())[0])
+
+        assert isinstance(replayed, nio.RoomMessageImage)
+        assert replayed.url == "mxc://example.org/img"
+        assert replayed.body == "diagram.png"
+
+    async def test_an_encrypted_image_replays_with_its_decryption_keys(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Without the key material the reference is a file nobody can open."""
+        original = image_event("$sealed", "sealed.png", encrypted=True)
+        await alice.admit(
+            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
+            projected_event(ROOM, original, EventKind.MEDIA),
+        )
+
+        replayed = parse_journal_event((await alice.pending())[0])
+
+        assert isinstance(replayed, nio.RoomEncryptedImage)
+        assert replayed.url == "mxc://example.org/sealed"
+        assert replayed.key["k"] == "cipher-key-material"
+        assert replayed.iv == "initialization-vector"
+        assert replayed.hashes["sha256"] == "content-hash"
+
+    async def test_a_coalesced_batch_of_text_and_media_replays_whole_and_in_order(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The unit that replays is the batch, not the last event of it.
+
+        Three images and a caption are one turn to the model. Recovering the
+        caption alone, or recovering the images in the wrong order, both change
+        the input the turn runs on.
+        """
+        sources = (
+            image_event("$one", "first.png", ts=1_000),
+            image_event("$two", "second.png", ts=1_001),
+            image_event("$three", "third.png", ts=1_002),
+            text_event("$caption", "what do these three have in common?", ts=1_003),
+        )
+        for source in sources:
+            kind = EventKind.MESSAGE if isinstance(source, nio.RoomMessageText) else EventKind.MEDIA
+            await alice.admit(
+                inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
+                projected_event(ROOM, source, kind),
+            )
+
+        replayed = [parse_journal_event(stored) for stored in await alice.pending()]
+
+        assert [event.event_id for event in replayed] == ["$one", "$two", "$three", "$caption"]
+        assert [
+            event.url  # type: ignore[attr-defined]
+            for event in replayed
+            if isinstance(event, nio.RoomMessageImage)
+        ] == [
+            "mxc://example.org/one",
+            "mxc://example.org/two",
+            "mxc://example.org/three",
+        ]
 
     async def test_a_corrupt_payload_is_refused_not_guessed(self, alice: PrincipalStore) -> None:
         """A corrupt payload is refused not guessed."""
