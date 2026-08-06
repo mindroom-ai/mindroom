@@ -95,6 +95,7 @@ class JournalDispatcher:
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
+    cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] | None = None
     background_task_owner: object | None = None
     _worker: PendingEventWorker = field(init=False, repr=False)
     _ingress: JournalIngress = field(init=False, repr=False)
@@ -119,6 +120,11 @@ class JournalDispatcher:
             on_admitted=self._worker.wake,
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
+            **(
+                {"cache_historical_event": self.cache_historical_event}
+                if self.cache_historical_event is not None
+                else {}
+            ),
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:

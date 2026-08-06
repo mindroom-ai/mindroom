@@ -26,11 +26,15 @@ from .models import (
     SettlementOutcome,
 )
 from .projection import ProjectedEvent, project
+from mindroom.logging_config import get_logger
+
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
     from .models import InboundEvent
+
+logger = get_logger(__name__)
 
 _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, event_class, sender,
@@ -139,7 +143,23 @@ def pending(
         """,  # noqa: S608 - a fixed column list, not interpolated input
         (principal_id, limit),
     )
-    return tuple(_journal_event(row) for row in rows)
+    return _decode_rows(rows)
+
+
+def _decode_rows(rows: tuple[Row, ...]) -> tuple[JournalEvent, ...]:
+    """Decode pending rows, skipping any whose payload cannot be read.
+
+    One unreadable row must not hide every other pending event behind it.
+    A row that cannot be decoded stays in place rather than being settled,
+    because settling it would claim work was done that never ran.
+    """
+    events: list[JournalEvent] = []
+    for row in rows:
+        try:
+            events.append(_journal_event(row))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.exception("journal_event_row_unreadable", event_id=row["event_id"])
+    return tuple(events)
 
 
 def load(
@@ -223,7 +243,7 @@ def pending_of_kind(
         """,  # noqa: S608 - a fixed column list, not interpolated input
         (principal_id, kind.value, limit),
     )
-    return tuple(_journal_event(row) for row in rows)
+    return _decode_rows(rows)
 
 
 def claim_semantic_consumer(

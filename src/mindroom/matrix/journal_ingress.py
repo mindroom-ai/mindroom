@@ -9,6 +9,7 @@ inferences are what the recovery bugs were made of.
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
@@ -27,7 +28,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.event_journal import JournalEvent, PrincipalStore
 
@@ -40,6 +41,10 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
 type MatrixEvent = nio.Event | nio.InviteEvent
+
+
+async def _ignore_historical_event(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+    """Do nothing with a historical event."""
 
 
 class JournalCorruptionError(RuntimeError):
@@ -230,6 +235,10 @@ class JournalIngress:
     # ready for them, which the timeline callback cannot decide for itself.
     room_lifecycle_enabled: Callable[[], bool] = lambda: False
     on_event_admitted: Callable[[nio.MatrixRoom, nio.Event], None] = lambda _room, _event: None
+    # Conversation content that did not arrive live still has to reach the
+    # conversation store before admission returns, so a reader that follows
+    # this sync response sees the history it was given.
+    cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] = _ignore_historical_event
 
     def register(self, client: nio.AsyncClient) -> None:
         """Install durable admission ahead of every other callback."""
@@ -249,6 +258,13 @@ class JournalIngress:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         _DELIVERY_PROVENANCE.set((event.event_id, provenance))
+        if provenance is not nio.TimelineEventProvenance.LIVE:
+            try:
+                await self.cache_historical_event(room, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise nio.CallbackNotAcceptedError(str(error)) from error
         kind = self.admission_kind(event)
         if kind is None:
             return

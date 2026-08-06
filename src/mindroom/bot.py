@@ -569,6 +569,7 @@ class AgentBot:
                 source_has_live_owner=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_journal_event,
+            cache_historical_event=self._conversation_cache.cache_historical_event,
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
             background_task_owner=self._runtime_view,
