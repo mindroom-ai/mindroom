@@ -1304,7 +1304,11 @@ class AgentBot:
             decision,
             cache_result=cache_result,
             joined_room_ids=joined_room_ids,
-            publish_record=partial(self._publish_classic_sync_commit, client),
+            publish_record=partial(
+                self._publish_classic_sync_commit,
+                client,
+                acknowledge=not decision.reset_client_token,
+            ),
         )
         await self._apply_client_rewind_decision(applied)
         return applied
@@ -1313,10 +1317,23 @@ class AgentBot:
         self,
         client: nio.AsyncClient | None,
         record: SyncContinuityRecord,
+        *,
+        acknowledge: bool,
     ) -> None:
-        """Publish one durable continuity record and acknowledge its exact nio state."""
+        """Publish one durable continuity record and acknowledge its exact nio state.
+
+        A checkpoint that skips an unrecoverable gap is certified together with
+        a client reset, because nio may still hold recovery state for the room
+        the checkpoint moved past and would refuse to acknowledge it. The reset
+        discards that state, so acknowledgement is skipped rather than raised.
+        """
         self._room_lifecycle.apply_continuity_record(record)
-        if client is not None and record.checkpoint is not None and client.has_uncommitted_classic_sync_state:
+        if (
+            acknowledge
+            and client is not None
+            and record.checkpoint is not None
+            and client.has_uncommitted_classic_sync_state
+        ):
             client.acknowledge_classic_sync(record.checkpoint.token)
 
     async def _apply_client_rewind_decision(

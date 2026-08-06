@@ -69,6 +69,16 @@ class SyncCacheWriteResult:
         """Return whether local cache work and recovery state permit a checkpoint."""
         return self.complete and not self.errors and not self.unrecovered_room_ids
 
+    @property
+    def recovery_conclusive(self) -> bool:
+        """Return whether this response settles whether nio closed every gap.
+
+        A response whose durable cache write failed or was cancelled never
+        reached its recovery verdict, so it may neither prove nor disprove that
+        a room's rebuild has stopped converging.
+        """
+        return self.complete and not self.errors
+
 
 @dataclass(frozen=True)
 class SyncCertificationDecision:
@@ -101,6 +111,7 @@ def _uncertain_reason(
     cache_result: SyncCacheWriteResult,
     *,
     token: str | None,
+    skipped_recovery_room_ids: frozenset[str],
 ) -> str | None:
     """Return why one sync response cannot certify a checkpoint."""
     if token is None:
@@ -109,7 +120,7 @@ def _uncertain_reason(
         reason = "cache_write_failed"
     elif not cache_result.complete:
         reason = "cache_write_incomplete"
-    elif cache_result.unrecovered_room_ids:
+    elif cache_result.unrecovered_room_ids - skipped_recovery_room_ids:
         reason = "sync_recovery_incomplete"
     else:
         reason = None
@@ -120,12 +131,19 @@ def certify_sync_response(
     *,
     next_batch: str | None,
     cache_result: SyncCacheWriteResult,
+    skipped_recovery_room_ids: frozenset[str] = frozenset(),
 ) -> SyncCertificationDecision:
-    """Return the certifier decision for one sync response."""
+    """Return the certifier decision for one sync response.
+
+    ``skipped_recovery_room_ids`` names rooms whose unrecovered gap the caller
+    has decided to give up on, trading that room's missed history for the
+    forward progress a permanently rewinding cursor can never make.
+    """
     token = normalize_sync_token(next_batch)
     reason = _uncertain_reason(
         cache_result,
         token=token,
+        skipped_recovery_room_ids=skipped_recovery_room_ids,
     )
     if reason is not None:
         return _uncertain_decision(
@@ -137,6 +155,11 @@ def certify_sync_response(
     return SyncCertificationDecision(
         state=SyncTrustState.CERTIFIED,
         checkpoint_to_save=checkpoint,
+        # Skipping a gap leaves nio holding recovery state for a room this
+        # checkpoint has already moved past, and that state can block the
+        # response from ever being acknowledged. Restart the client from the
+        # newly certified position instead of acknowledging in place.
+        reset_client_token=bool(skipped_recovery_room_ids),
     )
 
 

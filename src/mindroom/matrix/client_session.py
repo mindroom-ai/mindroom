@@ -69,6 +69,16 @@ class MatrixSyncStorage:
 
 DEFAULT_MATRIX_SYNC_STORAGE = MatrixSyncStorage()
 
+# How many recovered history events nio may hold for one room while it closes a
+# limited-timeline gap; exceeding it abandons the gap and leaves the room
+# unrecovered. nio's 200 is far below what a MindRoom room produces: a
+# streaming turn emits an `m.replace` edit per progressive update, so a handful
+# of concurrent agent turns already overruns the 50-event sync window this
+# client requests, and a short stall accumulates hundreds of events. 2000 is
+# forty sync windows of catch-up, enough that only an outage rather than a busy
+# minute abandons history, while still bounding held parsed events per room.
+_BACKFILL_MAX_EVENTS = 2000
+
 
 @runtime_checkable
 class _AsyncRequestHeaders(Protocol):
@@ -234,6 +244,7 @@ def matrix_client_config(
     custom_headers = dict(http_headers) if isinstance(http_headers, dict) else http_headers
     return nio.AsyncClientConfig(
         backfill_limited_timelines=True,
+        backfill_max_events=_BACKFILL_MAX_EVENTS,
         backfill_persist_recovery=sync_storage.persist_recovery,
         store_sync_tokens=sync_storage.store_tokens,
         custom_headers=cast("dict[str, str] | None", custom_headers),
