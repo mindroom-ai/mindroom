@@ -352,12 +352,6 @@ def _threads_export_command(
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
     ),
-    prefer_cache: bool = typer.Option(
-        False,
-        "--prefer-cache",
-        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
-        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
-    ),
     invited_rooms: bool = typer.Option(
         True,
         "--invited-rooms/--no-invited-rooms",
@@ -374,7 +368,6 @@ def _threads_export_command(
             watch=watch,
             interval=interval,
             max_thread_roots=max_thread_roots,
-            prefer_cache=prefer_cache,
             include_invited_rooms=invited_rooms,
         ),
     )
@@ -421,7 +414,6 @@ async def _threads_export(
     watch: bool,
     interval: int,
     max_thread_roots: int,
-    prefer_cache: bool,
     include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
@@ -444,7 +436,6 @@ async def _threads_export(
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
-                prefer_cache=prefer_cache,
                 include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:

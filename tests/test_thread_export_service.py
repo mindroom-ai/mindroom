@@ -15,7 +15,6 @@ from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME
 from tests.conftest import runtime_paths_for
 from tests.thread_export_helpers import (
     mark_thread_export_root,
-    mock_runtime_support,
     successful_group_result,
     thread_export_config,
     write_invited_rooms,
@@ -35,8 +34,6 @@ async def test_export_threads_once_records_group_failure_and_closes_resources(tm
     with (
         patch("mindroom.thread_export.selection.select_export_account", return_value=Mock()),
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()) as close_support,
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=RuntimeError("export failed")),
@@ -45,7 +42,6 @@ async def test_export_threads_once_records_group_failure_and_closes_resources(tm
         stats = await export_threads_once(config=config, runtime_paths=runtime_paths)
 
     client.close.assert_awaited_once()
-    close_support.assert_awaited_once()
     assert stats.failures == 2
     assert all("Export group failed: export failed" in failure.error for failure in stats.failed_items)
 
@@ -62,8 +58,6 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)) as login,
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
@@ -93,8 +87,6 @@ async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(t
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
@@ -144,7 +136,6 @@ async def test_export_threads_once_retracts_discovered_invited_room_when_disable
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock()) as login,
-        patch("mindroom.thread_export.service.build_owned_runtime_support") as build_support,
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(),
@@ -158,7 +149,6 @@ async def test_export_threads_once_retracts_discovered_invited_room_when_disable
         )
 
     login.assert_not_awaited()
-    build_support.assert_not_called()
     export_group.assert_not_awaited()
     assert stats.failures == 0
     assert not invited_export_dir.exists()
@@ -177,8 +167,6 @@ async def test_export_threads_once_continues_after_one_account_login_failure(tmp
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=login),
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
@@ -210,8 +198,6 @@ async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Pa
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
@@ -230,25 +216,23 @@ async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_failed_export_groups_do_not_create_runtime_support(tmp_path: Path) -> None:
-    """An account-assignment failure should not create an unused cache."""
+async def test_an_unassignable_account_group_fails_only_the_targets_that_wanted_it(tmp_path: Path) -> None:
+    """A room no account can reach fails the targets that requested it and no others."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path, account_keys=(INTERNAL_USER_ACCOUNT_KEY,))
     write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
 
-    with patch("mindroom.thread_export.service.build_owned_runtime_support") as build_support:
-        stats = await export_threads_to_targets_once(
-            config=config,
-            runtime_paths=runtime_paths,
-            targets=(
-                ThreadExportTarget(output_dir=tmp_path / "invited", include_invited_rooms=True),
-                ThreadExportTarget(output_dir=tmp_path / "configured", include_invited_rooms=False),
-            ),
-            room_filter="!user-room:localhost",
-        )
+    stats = await export_threads_to_targets_once(
+        config=config,
+        runtime_paths=runtime_paths,
+        targets=(
+            ThreadExportTarget(output_dir=tmp_path / "invited", include_invited_rooms=True),
+            ThreadExportTarget(output_dir=tmp_path / "configured", include_invited_rooms=False),
+        ),
+        room_filter="!user-room:localhost",
+    )
 
-    build_support.assert_not_called()
     assert stats[0].failures == 1
     assert stats[0].failed_items[0].room_id == "!user-room:localhost"
     assert stats[1].failures == 0
@@ -491,8 +475,6 @@ async def test_aliased_targets_are_skipped_while_unique_target_completes(
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
-        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
             new=AsyncMock(side_effect=successful_group_result),
