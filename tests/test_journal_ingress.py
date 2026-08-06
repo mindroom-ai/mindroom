@@ -22,7 +22,7 @@ from mindroom.matrix.journal_ingress import (
 from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable, Sized
 
     from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
 
@@ -506,10 +506,10 @@ class TestPendingEventWorker:
 
         worker = PendingEventWorker(store=alice, handle=handle)
         worker.start()
-        await _eventually(lambda: len(handled) == count)
+        await _eventually_async(lambda: alice.pending())
         await worker.stop()
 
-        assert await alice.pending() == ()
+        assert len(handled) == count
 
     async def test_work_admitted_while_a_lane_runs_is_still_dispatched(
         self,
@@ -596,6 +596,17 @@ class TestPendingEventWorker:
         await worker.stop()
 
         assert attempts == ["$m", "$m"]
+
+
+async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:
+    """Wait until a durable query comes back empty."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if not len(await query()):
+            return
+        await asyncio.sleep(0.01)
+    msg = "The durable queue never drained"
+    raise AssertionError(msg)
 
 
 async def _eventually(predicate: Callable[[], bool], *, seconds: float = 5.0) -> None:

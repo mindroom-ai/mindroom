@@ -134,7 +134,7 @@ def test_terminal_turn_settlement_does_no_io_on_the_persisting_thread(
 
     assert callback == bot._settle_terminal_turn_sources
     bot._journal_dispatcher.release_terminal_turn_sources(("$done",))
-    assert "$done" not in bot._journal_dispatcher._handed_off
+    assert "$done" not in bot._journal_dispatcher._worker._deferred
 
 
 def _install_fast_response_drain(bot: AgentBot) -> None:
