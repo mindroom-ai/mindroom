@@ -91,6 +91,15 @@ def advance_membership_epoch(
     # this bot was in before it left. Sending it now would answer the previous
     # membership inside the new one. An acknowledged delivery is kept, because
     # its row is the record that the message is already visible.
+    #
+    # An attempted-but-unacknowledged delivery goes too, even though its
+    # network outcome is unknown. Keeping it would only preserve a row nothing
+    # reads, and what the room actually contains is re-observed anyway: the
+    # projection was just dropped, so the next read rehydrates from the server
+    # and sees whichever of these messages landed. What must not happen is the
+    # turn's next attempt colliding with a transaction the homeserver already
+    # accepted, and that is prevented at the source, by binding the transaction
+    # ID to the epoch rather than by keeping the row.
     transaction.execute(
         """
         DELETE FROM response_outbox

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 ROOM = "!room:example.org"
+OTHER_ROOM = "!other:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
 
@@ -659,6 +660,42 @@ class TestMembershipEpoch:
         assert await alice.unacknowledged_deliveries() == ()
         assert await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL) is None
 
+    async def test_an_answer_attempted_before_a_rejoin_can_still_be_sent_after_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A delivery in flight across a rejoin must not silence the retry.
+
+        The dangerous row is the one that was claimed and sent, whose outcome
+        is unknown. Dropping it is right — but the turn behind it is still
+        pending, so it runs again in the new membership. If that attempt were
+        derived to the same transaction ID, a homeserver that had accepted the
+        first send would recognise it, discard the new one, and the user would
+        wait forever for an answer that was generated twice and shown never.
+        """
+        before = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+
+        await alice.advance_membership_epoch(ROOM)
+        after = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        assert after != before
+        claimed = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        assert claimed.transaction_id == after
+
     async def test_rejoining_keeps_an_answer_matrix_already_accepted(
         self,
         alice: PrincipalStore,
@@ -767,12 +804,14 @@ class TestOutbox:
 
     async def test_the_transaction_id_is_derived_not_random(self) -> None:
         """The transaction id is derived not random."""
-        first = delivery_transaction_id("agent@alice", "turn-1", "final")
-        second = delivery_transaction_id("agent@alice", "turn-1", "final")
-        other_stage = delivery_transaction_id("agent@alice", "turn-1", "initial")
+        first = delivery_transaction_id("agent@alice", "turn-1", "final", 0)
+        second = delivery_transaction_id("agent@alice", "turn-1", "final", 0)
+        other_stage = delivery_transaction_id("agent@alice", "turn-1", "initial", 0)
+        other_epoch = delivery_transaction_id("agent@alice", "turn-1", "final", 1)
 
         assert first == second
         assert first != other_stage
+        assert first != other_epoch
 
     async def test_enqueue_returns_the_same_transaction_across_restarts(
         self,
@@ -843,6 +882,41 @@ class TestOutbox:
         stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "sent"
+
+    async def test_enqueue_reports_the_transaction_an_attempted_row_froze(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An attempted row refuses the update, so it also refuses the new ID.
+
+        Everything derived from where a delivery is going — the room, and
+        through it the membership epoch — changes the transaction ID. A refused
+        re-enqueue must therefore report the identity the row will actually
+        send under, not the one that was just computed and discarded.
+        """
+        frozen = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+        await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.advance_membership_epoch(OTHER_ROOM)
+
+        reported = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=OTHER_ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+
+        assert reported == frozen
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.transaction_id == frozen
+        assert stored.room_id == ROOM
 
     async def test_reclaiming_returns_the_identical_delivery(self, alice: PrincipalStore) -> None:
         """Reclaiming returns the identical delivery."""
