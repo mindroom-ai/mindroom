@@ -30,7 +30,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_e
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.event_journal import AdmissionView, JournalEvent
 
 logger = get_logger(__name__)
 
@@ -229,7 +229,7 @@ def event_is_live(event_id: str) -> bool:
 class JournalIngress:
     """Commit every inbound Matrix event before nio considers it delivered."""
 
-    store: PrincipalStore
+    store: AdmissionView
     on_admitted: Callable[[], None] = lambda: None
     # Room-membership events are only MindRoom's to act on once the router is
     # ready for them, which the timeline callback cannot decide for itself.

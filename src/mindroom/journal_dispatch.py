@@ -39,7 +39,7 @@ from mindroom.pending_event_worker import PendingEventWorker
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.event_journal import EventClass, PrincipalStore
+    from mindroom.event_journal import DispatchView, EventClass
 
 from mindroom.event_journal import JournalEvent
 
@@ -88,7 +88,7 @@ class JournalCallbacks:
 class JournalDispatcher:
     """Admit Matrix events durably, then run their callbacks from the journal."""
 
-    store: PrincipalStore
+    store: DispatchView
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]

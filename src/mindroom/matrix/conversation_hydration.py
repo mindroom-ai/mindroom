@@ -32,7 +32,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import HydrationView
 
 logger = get_logger(__name__)
 
@@ -155,7 +155,7 @@ def _reduce_current_revision(
 class ConversationHydrator:
     """One-time conversation hydration and point refetch against Matrix."""
 
-    store: PrincipalStore
+    store: HydrationView
     client: nio.AsyncClient
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     prompt_window_messages: int = _HYDRATED_PROMPT_WINDOW_MESSAGES

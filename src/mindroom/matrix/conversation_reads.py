@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import ConversationCursor, ConversationPage, PrincipalStore
+    from mindroom.event_journal import ConversationCursor, ConversationPage, ProjectionView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
@@ -28,7 +28,7 @@ class _StaleConversationError(RuntimeError):
 class _ConversationReader:
     """Bounded conversation reads, hydrated on first use."""
 
-    store: PrincipalStore
+    store: ProjectionView
     hydrator: ConversationHydrator
 
     async def read(

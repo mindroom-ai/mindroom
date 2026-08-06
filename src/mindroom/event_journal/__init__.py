@@ -25,21 +25,37 @@ from .models import (
 )
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
 from .store import EventJournalStore, PrincipalStore
+from .views import (
+    AdmissionView,
+    DispatchView,
+    HydrationView,
+    OutboxView,
+    ProjectionView,
+    ReplayView,
+    SeedingView,
+)
 
 __all__ = [
     "AdmissionResult",
+    "AdmissionView",
     "ConversationCursor",
     "ConversationPage",
     "DeliveryStage",
+    "DispatchView",
     "EventClass",
     "EventJournalStore",
     "EventKind",
+    "HydrationView",
     "InboundEvent",
     "JournalEvent",
     "OutboxDelivery",
+    "OutboxView",
     "PrincipalStore",
     "ProjectedEvent",
+    "ProjectionView",
     "RefreshRequest",
+    "ReplayView",
+    "SeedingView",
     "SemanticConsumer",
     "SettlementOutcome",
     "VisibleMessage",

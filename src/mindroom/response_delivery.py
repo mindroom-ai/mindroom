@@ -17,7 +17,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore
+    from mindroom.event_journal import OutboxDelivery, OutboxView
 
 logger = get_logger(__name__)
 
@@ -28,7 +28,7 @@ type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
 class ResponseDelivery:
     """Claim-before-send delivery against one principal's outbox."""
 
-    store: PrincipalStore
+    store: OutboxView
     send: SendDelivery
 
     async def deliver(

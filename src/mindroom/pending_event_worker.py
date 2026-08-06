@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
-    from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.event_journal import JournalEvent, ReplayView
 
 logger = get_logger(__name__)
 
@@ -50,7 +50,7 @@ class PendingEventWorker:
     a single slow turn stall every other conversation the bot is in.
     """
 
-    store: PrincipalStore
+    store: ReplayView
     handle: _EventHandler
     _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
