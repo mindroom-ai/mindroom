@@ -37,6 +37,7 @@ from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _matrix_room,
     _message,
+    seed_thread_history,
     thread_history_result,
 )
 
@@ -95,9 +96,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         expected_history = [
-            _message(event_id="$thread_root:localhost", body="Root"),
-            _message(event_id="$thread_msg:localhost", body="Original"),
+            _message(event_id="$thread_root:localhost", body="Root", thread_id="$thread_root:localhost"),
+            _message(event_id="$thread_msg:localhost", body="Original", thread_id="$thread_root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",

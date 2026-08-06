@@ -44,6 +44,7 @@ RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.post_response_effects",
     "mindroom.turn_policy",
 }

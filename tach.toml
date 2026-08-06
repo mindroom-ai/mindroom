@@ -160,6 +160,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.conversation_hydration"
 depends_on = [
+    "mindroom.runtime_protocols",
     "mindroom.event_journal",
     "mindroom.logging_config",
 ]
@@ -2199,6 +2200,7 @@ visibility = [
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.post_response_effects",
     "mindroom.turn_policy",
 ]

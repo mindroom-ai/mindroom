@@ -21,6 +21,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.event_journal import (
+    EventClass,
+    EventKind,
+    InboundEvent,
+    ProjectedEvent,
+    SettlementOutcome,
+)
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -78,13 +85,69 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
-def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> ResolvedVisibleMessage:
-    """Build one typed visible message for thread-history mocks."""
+def _message(
+    *,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+    thread_id: str | None = None,
+) -> ResolvedVisibleMessage:
+    """Build one typed visible message matching what a real read returns.
+
+    A message fetched as part of a thread carries that thread. The production
+    read path has always populated it (`EventInfo.from_event(...).thread_id`),
+    so a thread-history expectation that leaves it out asserts nothing about
+    it -- which is invisible while a mock returns the very objects the test
+    constructed.
+    """
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
         body=body,
         event_id=event_id,
+        thread_id=thread_id,
     )
+
+
+async def seed_thread_history(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    messages: Sequence[ResolvedVisibleMessage],
+) -> None:
+    """Put messages into the conversation projection a read will serve from.
+
+    Written so a test can seed *before* the read path moves onto the
+    projection: while the cache still answers, this is inert, and once it
+    stops the same test keeps passing. Stubbing the reader instead would pin
+    the projection's absence -- the test would pass whether or not anything
+    ever reached it.
+    """
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    for message in messages:
+        await store.admit(
+            InboundEvent(
+                event_id=message.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender=message.sender,
+                origin_server_ts=message.timestamp,
+                source={"event_id": message.event_id, "content": dict(message.content)},
+            ),
+            ProjectedEvent(
+                event_id=message.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=message.sender,
+                origin_server_ts=message.timestamp,
+                content=dict(message.content),
+                replaces_event_id=None,
+                redacts_event_id=None,
+            ),
+        )
+        await store.settle(message.event_id, SettlementOutcome.SUCCEEDED)
 
 
 def thread_history_result(

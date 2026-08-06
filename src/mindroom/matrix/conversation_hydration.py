@@ -28,6 +28,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -156,7 +157,10 @@ class ConversationHydrator:
     """One-time conversation hydration and point refetch against Matrix."""
 
     store: HydrationView
-    client: nio.AsyncClient
+    # The runtime view rather than a client, because a client does not exist
+    # when the bot assembles its collaborators: it arrives at login. This is
+    # the same indirection the delivery gateway uses for the same reason.
+    runtime: SupportsClientConfig
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     prompt_window_messages: int = _HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
@@ -165,6 +169,19 @@ class ConversationHydrator:
         init=False,
         repr=False,
     )
+
+    def _client(self) -> nio.AsyncClient:
+        """Return the Matrix client, which only exists once the bot has logged in.
+
+        Held as the runtime view rather than a client because the bot assembles
+        its collaborators before it logs in, the same indirection the delivery
+        gateway uses for the same reason.
+        """
+        client = self.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for conversation hydration"
+            raise RuntimeError(msg)
+        return client
 
     def _max_pages(self) -> int:
         """Bound the walk in requests as well as in events.
@@ -209,7 +226,7 @@ class ConversationHydrator:
             logger.info("conversation_hydration_superseded", room_id=room_id, thread_id=thread_id)
 
     async def _fetch_thread(self, room_id: str, thread_id: str) -> tuple[ProjectedEvent, ...]:
-        root = await self.client.room_get_event(room_id, thread_id)
+        root = await self._client().room_get_event(room_id, thread_id)
         if not isinstance(root, nio.RoomGetEventResponse):
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
@@ -228,7 +245,7 @@ class ConversationHydrator:
         """
         events: list[ProjectedEvent] = []
         try:
-            async for event in self.client.room_get_event_relations(
+            async for event in self._client().room_get_event_relations(
                 room_id=room_id,
                 event_id=event_id,
                 recurse=True,
@@ -269,7 +286,7 @@ class ConversationHydrator:
         pages = 0
         start: str | None = None
         while True:
-            response = await self.client.room_messages(
+            response = await self._client().room_messages(
                 room_id,
                 start=start,
                 direction=nio.MessageDirection.back,
@@ -318,7 +335,7 @@ class ConversationHydrator:
         the message hidden and its refresh token durable, so the next strict
         read tries again rather than serving anything stale.
         """
-        original = await self.client.room_get_event(request.room_id, request.logical_event_id)
+        original = await self._client().room_get_event(request.room_id, request.logical_event_id)
         if not isinstance(original, nio.RoomGetEventResponse):
             logger.info(
                 "conversation_refresh_unavailable",

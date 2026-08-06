@@ -32,6 +32,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -415,7 +416,7 @@ async def prove_history_exhaustion(
     room_id = room.room_id
     await _send(client, room_id, _text("only message"))
 
-    hydrator = ConversationHydrator(store=store, client=client)
+    hydrator = ConversationHydrator(store=store, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
     await hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
 
     findings.record(
@@ -472,7 +473,7 @@ async def run_proof(homeserver: str) -> Findings:
                 msg = f"room creation failed: {room}"
                 raise TypeError(msg)
             room_id = room.room_id
-            hydrator = ConversationHydrator(store=store, client=client)
+            hydrator = ConversationHydrator(store=store, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
 
             await prove_recursion_depth(client, room_id, findings)
             await prove_edit_redaction(client, store, hydrator, room_id, findings)

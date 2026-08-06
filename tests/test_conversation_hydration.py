@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -191,7 +192,11 @@ class FakeClient:
 
 def hydrator(store: PrincipalStore, client: FakeClient, **bounds: int) -> ConversationHydrator:
     """Return a hydrator wired to a fake homeserver."""
-    return ConversationHydrator(store=store, client=client, **bounds)  # type: ignore[arg-type]
+    return ConversationHydrator(
+        store=store,
+        runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
+        **bounds,
+    )
 
 
 async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) -> None:
