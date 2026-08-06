@@ -29,7 +29,6 @@ from mindroom.room_thread_modes import (
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -76,7 +75,6 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
         logger=MagicMock(),
         conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, None, "$event"),
         record_handled_turn=MagicMock(),
         record_command_result=AsyncMock(),

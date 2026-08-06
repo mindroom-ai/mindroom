@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
-from tests.conftest import make_conversation_reader_mock, make_event_cache_mock
+from tests.conftest import make_conversation_reader_mock
 from tests.identity_helpers import persist_entity_accounts
 
 WELCOME_QUICK_COMMAND_LINES = [
@@ -459,7 +459,6 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         logger=MagicMock(),
         conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!adhoc:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
         record_command_result=AsyncMock(),
@@ -515,7 +514,6 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         logger=MagicMock(),
         conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
         record_command_result=AsyncMock(),
@@ -585,7 +583,6 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         logger=MagicMock(),
         conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
         record_command_result=AsyncMock(),

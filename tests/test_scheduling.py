@@ -47,7 +47,6 @@ from tests.bot_helpers import _visible_message
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     serve_conversation_reader,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -68,10 +67,6 @@ def _test_runtime_paths(tmp_path: Path) -> object:
         storage_path=tmp_path / "storage",
         process_env={},
     )
-
-
-def _event_cache() -> AsyncMock:
-    return make_event_cache_mock()
 
 
 def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
@@ -102,7 +97,6 @@ def _scheduling_runtime(
     room: object | None = None,
     conversation_cache: AsyncMock | None = None,
     conversation_reader: ConversationReader | None = None,
-    event_cache: AsyncMock | None = None,
     matrix_admin: object | None = None,
 ) -> SchedulingRuntime:
     return SchedulingRuntime(
@@ -112,7 +106,6 @@ def _scheduling_runtime(
         room=room or MagicMock(),
         conversation_cache=conversation_cache or _conversation_cache(),
         conversation_reader=conversation_reader or make_conversation_reader_mock(),
-        event_cache=event_cache or _event_cache(),
         matrix_admin=matrix_admin,
     )
 
@@ -352,7 +345,6 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -419,7 +411,6 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -433,7 +424,6 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             client,
             config,
             _runtime_paths(),
-            _event_cache(),
             conversation_cache,
         )
 
@@ -501,7 +491,6 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -518,7 +507,6 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             client,
             config,
             _runtime_paths(),
-            _event_cache(),
             conversation_cache,
         )
 
@@ -565,7 +553,6 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -612,7 +599,6 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -678,7 +664,6 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
             conversation_cache=conversation_cache,
         )
 
@@ -1027,7 +1012,6 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
             _conversation_cache(),
         )
 
@@ -1072,7 +1056,6 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
             initial_workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
             _conversation_cache(),
         )
 
@@ -1132,7 +1115,6 @@ async def test_run_once_task_retries_transient_state_read_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
             _conversation_cache(),
         )
 
@@ -1174,7 +1156,6 @@ async def test_run_once_task_marks_completed_after_success() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
             _conversation_cache(),
         )
 
@@ -1221,7 +1202,6 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
             _conversation_cache(),
         )
 

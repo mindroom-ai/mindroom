@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
-    from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
@@ -58,7 +57,6 @@ class CommandTurnExecutorDeps:
     turn_policy: TurnPolicy
     turn_store: TurnStore
     visible_responses: VisibleResponseReconciler
-    event_cache: Callable[[], ConversationEventCache]
     recover_config_confirmation_setup: Callable[[str, str], Awaitable[bool]]
 
 
@@ -150,7 +148,6 @@ class CommandTurnExecutor:
             logger=self.deps.logger,
             conversation_cache=self.deps.conversation_cache,
             conversation_reader=self.deps.conversation_reader,
-            event_cache=self.deps.event_cache(),
             matrix_admin=self._matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,

@@ -109,7 +109,6 @@ class TestScheduledTaskRestoration:
                 "lobby",
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
                 router_bot._conversation_cache,
             )
 
@@ -210,7 +209,6 @@ class TestScheduledTaskRestoration:
             "lobby",
             config,
             runtime_paths_for(config),
-            router_bot.event_cache,
             router_bot._conversation_cache,
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
@@ -254,7 +252,6 @@ class TestScheduledTaskRestoration:
                 router_bot.client,
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
                 router_bot._conversation_cache,
             )
 

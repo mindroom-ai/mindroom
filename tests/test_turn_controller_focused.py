@@ -478,7 +478,6 @@ def _build_harness(
             turn_policy=cast("TurnPolicy", policy),
             turn_store=turn_store,
             visible_responses=visible_responses,
-            event_cache=lambda: runtime.event_cache,
             recover_config_confirmation_setup=_recover_config_confirmation_setup,
         ),
     )

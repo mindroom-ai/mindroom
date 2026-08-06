@@ -699,7 +699,6 @@ class AgentBot:
                 turn_store=self._turn_store,
                 visible_responses=self._visible_responses,
                 conversation_reader=self._conversation_reader,
-                event_cache=lambda: self.event_cache,
                 recover_config_confirmation_setup=self._recover_config_confirmation_setup,
             ),
         )
@@ -1173,7 +1172,6 @@ class AgentBot:
             room_id,
             self.config,
             self.runtime_paths,
-            self.event_cache,
             self._conversation_cache,
         )
         if restored_tasks > 0:
@@ -2125,7 +2123,6 @@ class AgentBot:
                 self.client,
                 self.config,
                 self.runtime_paths,
-                self.event_cache,
                 self._conversation_cache,
             )
             if drained_count > 0:

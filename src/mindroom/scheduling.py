@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
 
 logger = get_logger(__name__)
@@ -179,7 +179,6 @@ class SchedulingRuntime:
     room: nio.MatrixRoom
     conversation_cache: ConversationCacheProtocol
     conversation_reader: ConversationReader
-    event_cache: ConversationEventCache
     matrix_admin: HookMatrixAdmin | None = None
 
 
@@ -414,7 +413,6 @@ def _start_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> bool:
@@ -435,7 +433,6 @@ def _start_scheduled_task(
                 workflow,
                 config,
                 runtime_paths,
-                event_cache,
                 conversation_cache,
                 matrix_admin,
             ),
@@ -477,7 +474,6 @@ async def drain_deferred_overdue_tasks(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
 ) -> int:
     """Start queued overdue one-time tasks after Matrix sync is ready."""
@@ -495,7 +491,6 @@ async def drain_deferred_overdue_tasks(
                 queued_task.workflow,
                 config,
                 runtime_paths,
-                event_cache,
                 conversation_cache,
                 matrix_admin=matrix_admin,
             ):
@@ -798,7 +793,6 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
@@ -820,7 +814,6 @@ async def _save_pending_scheduled_task(
         workflow,
         config,
         runtime_paths,
-        event_cache,
         conversation_cache,
         matrix_admin,
     )
@@ -1102,7 +1095,6 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    _event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
@@ -1373,7 +1365,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     room = runtime.room
     conversation_cache = runtime.conversation_cache
     conversation_reader = runtime.conversation_reader
-    event_cache = runtime.event_cache
 
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
@@ -1503,7 +1494,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=event_cache,
                 conversation_cache=conversation_cache,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
@@ -1721,7 +1711,6 @@ async def restore_scheduled_tasks(  # noqa: C901
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
     conversation_cache: ConversationCacheProtocol,
 ) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
@@ -1786,7 +1775,6 @@ async def restore_scheduled_tasks(  # noqa: C901
             workflow,
             config,
             runtime_paths,
-            event_cache,
             conversation_cache,
             matrix_admin=matrix_admin,
         ):

@@ -71,7 +71,6 @@ def _scheduling_runtime(
         room=room,
         conversation_cache=_conversation_cache(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=_event_cache(),
     )
 
 
@@ -251,7 +250,6 @@ async def test_schedule_allows_agents_in_room() -> None:
                 room=room,
                 conversation_cache=conversation_cache,
                 conversation_reader=make_conversation_reader_mock(),
-                event_cache=_event_cache(),
             ),
             room_id="test_room",
             thread_id="$thread123",
@@ -387,7 +385,6 @@ async def test_schedule_with_no_agent_mentions() -> None:
                 room=room,
                 conversation_cache=conversation_cache,
                 conversation_reader=make_conversation_reader_mock(),
-                event_cache=_event_cache(),
             ),
             room_id="test_room",
             thread_id="$thread123",

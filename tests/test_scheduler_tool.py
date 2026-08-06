@@ -116,7 +116,6 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         room=context.room,
         conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
-        event_cache=context.event_cache,
         matrix_admin=matrix_admin,
     )
     assert first_call == {
@@ -200,7 +199,6 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         room=context.room,
         conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
-        event_cache=context.event_cache,
     )
     assert mock_edit.await_count == 2
     assert mock_edit.await_args_list[0].kwargs == {
