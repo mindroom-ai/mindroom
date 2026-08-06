@@ -172,6 +172,15 @@ class ResponseLifecycleCoordinator:
                     break
                 if candidate_lock.locked():
                     continue
+                # An unlocked entry is not necessarily an idle one. Queued human
+                # ingress, and a turn that has begun but not yet taken the lock,
+                # both live in the signal rather than the lock, so evicting on
+                # lock state alone silently drops user input.
+                candidate_signal = self._thread_queued_signals.get(candidate)
+                if candidate_signal is not None and (
+                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
+                ):
+                    continue
                 self._response_lifecycle_locks.pop(candidate, None)
                 self._thread_queued_signals.pop(candidate, None)
         lock = asyncio.Lock()
