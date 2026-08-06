@@ -629,6 +629,38 @@ class TestBoundedReads:
         assert seen == sorted(identifiers)
 
 
+class TestAdmittedThreadId:
+    """What the journal already knows about an event's place in a thread."""
+
+    async def test_an_unseen_event_is_reported_as_unseen(self, alice: PrincipalStore) -> None:
+        """An unseen event is reported as unseen, not as thread-less."""
+        assert await alice.admitted_thread_id(room_id=ROOM, event_id="$never") == (False, None)
+
+    async def test_a_room_event_is_admitted_and_in_no_thread(self, alice: PrincipalStore) -> None:
+        """These two answers are opposite situations and only one is worth a fetch."""
+        await admit(alice, "$room-message")
+
+        assert await alice.admitted_thread_id(room_id=ROOM, event_id="$room-message") == (True, None)
+
+    async def test_a_thread_reply_reports_its_root(self, alice: PrincipalStore) -> None:
+        """A thread reply reports its root."""
+        await admit(alice, "$reply", thread_id="$root")
+
+        assert await alice.admitted_thread_id(room_id=ROOM, event_id="$reply") == (True, "$root")
+
+    async def test_a_context_only_event_still_answers(self, alice: PrincipalStore) -> None:
+        """Settlement clears the replay payload, not the relation the row records."""
+        await admit(alice, "$context", thread_id="$root", event_class=EventClass.CONTEXT_ONLY)
+
+        assert await alice.admitted_thread_id(room_id=ROOM, event_id="$context") == (True, "$root")
+
+    async def test_another_room_does_not_answer(self, alice: PrincipalStore) -> None:
+        """Another room does not answer."""
+        await admit(alice, "$reply", thread_id="$root")
+
+        assert await alice.admitted_thread_id(room_id=OTHER_ROOM, event_id="$reply") == (False, None)
+
+
 class TestLatestVisibleEvent:
     """The reply target a thread-blind client is pointed at."""
 

@@ -99,6 +99,14 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         ...
 
 
+class RelationView(Protocol):
+    """Asking what the journal already knows about one event's place in a thread."""
+
+    async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+        """Return whether one event was admitted, and which thread it belongs to."""
+        ...
+
+
 class ProjectionView(Protocol):
     """Reading a conversation, without any way to change one."""
 
@@ -264,5 +272,6 @@ __all__ = [
     "HydrationView",
     "OutboxView",
     "ProjectionView",
+    "RelationView",
     "ReplayView",
 ]

@@ -148,6 +148,17 @@ class PrincipalStore:
             ),
         )
 
+    async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+        """Return whether one event was admitted, and which thread it belongs to."""
+        return await self._backend.read(
+            lambda transaction: journal.admitted_thread_id(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
+        )
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         return await self._backend.read(

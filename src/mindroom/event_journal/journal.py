@@ -187,6 +187,34 @@ def has_other_admitted_room_event(
     return row is not None
 
 
+def admitted_thread_id(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+) -> tuple[bool, str | None]:
+    """Return whether this event was admitted, and the thread it belongs to.
+
+    Two facts rather than one, because ``None`` is a real answer: an event in
+    no thread and an event nobody here has seen are opposite situations, and
+    only the second is worth a homeserver round trip.
+
+    The journal records the MSC3440 root from the event's own relation, which
+    is what a caller resolving thread membership is asking for.
+    """
+    row = transaction.fetchone(
+        """
+        SELECT thread_id FROM journal_events
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?
+        """,
+        (principal_id, room_id, event_id),
+    )
+    if row is None:
+        return False, None
+    return True, decode_thread_id(row["thread_id"])
+
+
 def pending(
     transaction: Transaction,
     principal_id: str,

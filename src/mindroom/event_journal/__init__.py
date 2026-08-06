@@ -35,6 +35,7 @@ from .views import (
     HydrationView,
     OutboxView,
     ProjectionView,
+    RelationView,
     ReplayView,
 )
 
@@ -61,6 +62,7 @@ __all__ = [
     "ProjectedEvent",
     "ProjectionView",
     "RefreshRequest",
+    "RelationView",
     "ReplayView",
     "SemanticConsumer",
     "SettlementOutcome",
