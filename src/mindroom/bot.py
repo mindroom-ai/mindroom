@@ -1914,6 +1914,7 @@ class AgentBot:
 
     async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
+        self._journal_dispatcher.release_turn_replay()
         await self._journal_dispatcher.drain_once()
         await asyncio.to_thread(
             self._turn_store.cleanup,
