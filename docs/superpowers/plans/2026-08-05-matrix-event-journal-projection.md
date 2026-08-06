@@ -1768,3 +1768,47 @@ durably owed to a room": settling at TurnStore adoption marks the source done
 while nothing durable yet says what to send, so recovery has no reason to send
 anything and the turn is lost silently. Settling at enqueue means the source
 stops being pending only once the delivery exists, and recovery finds it.
+
+## Outbound seeding is deleted (2026-08-06)
+
+Done. `seed_outbound`, its ordering key, `OutboundProjection`, `SeedingView`,
+and the `provisional` / `revision_provisional` columns are gone, along with the
+seed/echo race handling in the original and edit projection paths. Net −327
+production lines.
+
+The sync echo is now the only route into conversation content.
+
+### What closed with it
+
+**Task 11, "restore a revision discarded before a backwards canonicalization",
+needed no fix.** Canonicalization existed only to promote a seeded row to
+authoritative; with no seeded rows there is no canonicalization and no
+discarded revision.
+
+**The sidecar echo CASE went too.** An echo could replace an already-resolved
+sidecar body with its own preview only because the seeded row was still marked
+provisional and therefore yielded. That was a real bug and a real special case;
+both are gone rather than maintained.
+
+### What it costs, stated plainly
+
+A turn that reads a conversation immediately after speaking in it sees the room
+as it was before it spoke, until the echo lands. That is echo ordering, not
+read-your-writes. Code that needs the identity of what it just sent uses the
+send response, which is the only account of it that is certain at that moment.
+
+The affected callers are the ones the earlier audit named: `thread_summary`,
+and the Matrix conversation tools. Each reads to build context rather than to
+confirm its own last message, so an echo-ordered read is the correct input; the
+audit's original conclusion that this is what they should get stands.
+
+### Why the enumeration tests went
+
+`TestSeedOrderingMatrix` enumerated every arrival order of two seeds, two
+echoes, and an original, because six defects in that family had each been fixed
+against the single ordering that exposed them. The orderings it enumerated
+cannot occur any more -- there are no seeds to order against echoes -- so the
+matrix is deleted rather than kept green against a mechanism that does not
+exist. `TestEchoOrdering` in `tests/test_journal_ingress.py` is what now pins
+that a bot's own message reaches the conversation, and it does so through
+admission, which is the only route left.
