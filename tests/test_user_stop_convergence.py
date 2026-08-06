@@ -147,8 +147,14 @@ async def test_the_same_stop_delivered_twice_cancels_once(tmp_path: Path) -> Non
     assert gateway.finalized == [_RESPONSE_EVENT_ID]
 
 
-async def test_concurrent_stops_converge_on_one_visible_cancellation(tmp_path: Path) -> None:
-    """Two reactions racing for the same response are still one outcome."""
+async def test_one_stop_delivered_concurrently_cancels_once(tmp_path: Path) -> None:
+    """The same stop arriving twice at once is one intent, not two.
+
+    Same receipt order deliberately: that is what a redelivery of one
+    reaction looks like. Two *different* receipt orders are two distinct
+    stop intents and each is entitled to settle, so racing those would
+    assert nothing about convergence.
+    """
     store = _store(tmp_path)
     _record_answered_turn(store)
     runner, gateway = _SerializingRunner(), _CountingGateway()
@@ -156,14 +162,14 @@ async def test_concurrent_stops_converge_on_one_visible_cancellation(tmp_path: P
 
     results = await asyncio.gather(
         reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop),
-        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER + 1, _noop),
+        reconciler.finalize(_RESPONSE_EVENT_ID, _STOP_RECEIPT_ORDER, _noop),
     )
 
     assert all(results)
     assert gateway.finalized == [_RESPONSE_EVENT_ID]
     stopped = store.get_turn_record(_SOURCE_EVENT_ID)
     assert stopped is not None
-    assert stopped.user_stop_settled_receipt_order == max(_STOP_RECEIPT_ORDER, _STOP_RECEIPT_ORDER + 1)
+    assert stopped.user_stop_settled_receipt_order == _STOP_RECEIPT_ORDER
 
 
 async def _noop() -> None:
