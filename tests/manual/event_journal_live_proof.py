@@ -349,6 +349,74 @@ async def prove_edit_churn(
     )
 
 
+async def prove_sidecar_resolution(
+    client: nio.AsyncClient,
+    store: PrincipalStore,
+    hydrator: ConversationHydrator,
+    room_id: str,
+    findings: Findings,
+) -> None:
+    """A message too large for one event must still read back whole.
+
+    Most answers this runtime produces exceed the event size limit and are
+    sent as a short preview plus the real text in an uploaded file. Nothing in
+    CI uploads to a real media repository or downloads from one, so the round
+    trip -- upload, reference, admit, resolve -- is only observable here.
+    """
+    whole = "the whole answer " * 512
+    upload, _keys = await client.upload(
+        lambda *_args: json.dumps({"msgtype": "m.text", "body": whole}).encode(),
+        content_type="application/json",
+        filename="message.json",
+        filesize=len(json.dumps({"msgtype": "m.text", "body": whole}).encode()),
+    )
+    if not isinstance(upload, nio.UploadResponse):
+        findings.record("the sidecar payload uploads to the media repository", False, str(upload))
+        return
+    findings.record("the sidecar payload uploads to the media repository", True, upload.content_uri)
+
+    preview = "the whole answer [Message continues in attached file]"
+    event_id = await _send(
+        client,
+        room_id,
+        {
+            "msgtype": "m.file",
+            "body": preview,
+            "url": upload.content_uri,
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+                "is_complete_content": True,
+            },
+        },
+    )
+    await _admit_from_server(client, store, room_id, event_id)
+
+    page = await store.read_conversation(room_id=room_id, thread_id=None, limit=200)
+    served = [m for m in page.messages if m.logical_event_id == event_id]
+    owed = [r for r in page.refresh_pending if r.logical_event_id == event_id]
+    findings.record(
+        "an unresolved sidecar is never served as a message",
+        not served,
+        f"{len(served)} row(s) served before resolution",
+    )
+    findings.record("an unresolved sidecar is reported as owing a fetch", bool(owed))
+
+    await hydrator.resolve_refreshes(room_id=room_id, thread_id=None)
+
+    page = await store.read_conversation(room_id=room_id, thread_id=None, limit=200)
+    resolved = [m for m in page.messages if m.logical_event_id == event_id]
+    findings.record(
+        "resolving downloads the attachment and installs the whole body",
+        bool(resolved) and resolved[0].content.get("body") == whole,
+        f"{len(str(resolved[0].content.get('body'))) if resolved else 0} chars, expected {len(whole)}",
+    )
+    findings.record(
+        "the preview never reaches a reader",
+        bool(resolved) and resolved[0].content.get("body") != preview,
+    )
+
+
 async def prove_deterministic_retry(
     client: nio.AsyncClient,
     store: PrincipalStore,
@@ -478,6 +546,7 @@ async def run_proof(homeserver: str) -> Findings:
             await prove_recursion_depth(client, room_id, findings)
             await prove_edit_redaction(client, store, hydrator, room_id, findings)
             await prove_edit_churn(client, store, room_id, findings)
+            await prove_sidecar_resolution(client, store, hydrator, room_id, findings)
             await prove_deterministic_retry(client, store, room_id, findings)
             await prove_history_exhaustion(client, store, findings)
         finally:
