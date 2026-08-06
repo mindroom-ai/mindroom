@@ -25,7 +25,13 @@ from mindroom.event_journal import (
     SettlementOutcome,
     delivery_transaction_id,
 )
-from mindroom.event_journal.schema import SQLITE_DIALECT, added_columns, schema_statements
+from mindroom.event_journal.schema import (
+    POSTGRES_DIALECT,
+    SQLITE_DIALECT,
+    added_columns,
+    render,
+    schema_statements,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -711,6 +717,29 @@ class TestSeedOrderingMatrix:
                 await admit(alice, event_id, sender=BOB, ts=ts, content=content)
 
         assert await bodies(alice) == ["second"]
+
+
+class TestByteOrderPinning:
+    """Ordering that a cursor depends on must not vary with the server locale."""
+
+    def test_the_cursor_comparison_is_pinned_to_byte_order(self) -> None:
+        """turn_id and stage shipped unpinned and cannot be retyped in place.
+
+        A PostgreSQL locale whose collation is not byte order would sort them
+        differently from the cursor's own comparison, and recovery would skip
+        rows or revisit them. CI cannot catch that: its PostgreSQL image uses
+        musl locales, which all behave like C, so the two orderings agree there
+        and diverge in a glibc deployment.
+        """
+        ordering = "ORDER BY created_at_ns, turn_id/*bytes*/, stage/*bytes*/"
+
+        assert render(ordering, SQLITE_DIALECT) == "ORDER BY created_at_ns, turn_id, stage"
+        assert render(ordering, POSTGRES_DIALECT) == ('ORDER BY created_at_ns, turn_id COLLATE "C", stage COLLATE "C"')
+
+    def test_an_unsubstituted_marker_is_still_valid_sql(self) -> None:
+        """It is written as a comment so a missed substitution cannot corrupt a query."""
+        assert "/*bytes*/" == "/*" + "bytes" + "*/"
+        assert render("SELECT 1", SQLITE_DIALECT) == "SELECT 1"
 
 
 class TestOutboundSeeding:

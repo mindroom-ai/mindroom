@@ -136,13 +136,18 @@ def unacknowledged(
     cursor a page of failures is re-read forever and nothing behind it is ever
     attempted.
     """
-    cursor_clause = "" if after is None else " AND (created_at_ns, turn_id, stage) > (?, ?, ?)"
+    # turn_id and stage shipped as unpinned TEXT and cannot be retyped without
+    # rewriting the table, so the byte-order pin goes on the comparison itself.
+    # Without it a server whose collation is not byte order sorts these
+    # differently from the cursor's own comparison, and the scan skips rows or
+    # revisits them.
+    cursor_clause = "" if after is None else " AND (created_at_ns, turn_id/*bytes*/, stage/*bytes*/) > (?, ?, ?)"
     cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM response_outbox
         WHERE principal_id = ? AND acknowledged_event_id IS NULL{cursor_clause}
-        ORDER BY created_at_ns, turn_id, stage
+        ORDER BY created_at_ns, turn_id/*bytes*/, stage/*bytes*/
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
         (principal_id, *cursor_params, limit),
