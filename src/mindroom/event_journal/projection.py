@@ -337,8 +337,23 @@ def _project_original(
             created_ts = excluded.created_ts,
             revision_event_id = excluded.revision_event_id,
             revision_ts = excluded.revision_ts,
-            content_json = excluded.content_json,
-            refresh_token = excluded.refresh_token,
+            -- The echo of a seeded message carries the same wire content the
+            -- seed did, sidecar reference and all. If a read already resolved
+            -- that attachment, taking the echo's body would replace the real
+            -- text with the preview, hide the message again, and make the next
+            -- read download the identical file a second time. The echo is
+            -- authoritative about ordering, not about text this row already
+            -- has, so a resolved body survives and its debt is cleared.
+            content_json = CASE
+                WHEN excluded.refresh_token IS NULL THEN excluded.content_json
+                WHEN visible_messages.content_json IS NOT NULL THEN visible_messages.content_json
+                ELSE excluded.content_json
+            END,
+            refresh_token = CASE
+                WHEN excluded.refresh_token IS NULL THEN NULL
+                WHEN visible_messages.content_json IS NOT NULL THEN NULL
+                ELSE excluded.refresh_token
+            END,
             membership_epoch = excluded.membership_epoch,
             provisional = 0,
             revision_provisional = 0

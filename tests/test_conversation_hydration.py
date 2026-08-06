@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 import pytest
 
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, ProjectedEvent
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
@@ -526,6 +526,14 @@ class TestRoomHydration:
         assert await alice.pending() == ()
 
 
+def _projected(source: dict[str, Any]) -> ProjectedEvent:
+    """Return the projection view of one raw event source."""
+    event = parse(source)
+    projected = projected_event(ROOM, event, EventKind.MESSAGE)
+    assert projected is not None
+    return projected
+
+
 class TestSidecarResolution:
     """A message whose text lives in an attachment is served whole, or not at all."""
 
@@ -922,3 +930,34 @@ class TestWindowTruncation:
         assert len(history) == 3
         assert page.next_cursor is None
         assert history.is_full_history
+
+
+class TestSeededSidecarSurvivesItsEcho:
+    """Resolving a bot's own long answer must survive the echo of it."""
+
+    async def test_the_echo_does_not_undo_a_resolved_body(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The echo carries the same preview the seed did.
+
+        Taking its body would put the truncated text back over the real one,
+        hide the message a second time, and make the next read download the
+        identical attachment again. The echo settles ordering; it knows nothing
+        about the text that this row has already resolved.
+        """
+        whole = "the whole seeded answer, at length"
+        source = TestSidecarResolution._sidecar_source("$mine", "preview [continues]", "mxc://s/mine")
+        seed = _projected(source)
+        await alice.seed_outbound_message(seed)
+        client = FakeClient(
+            events={"$mine": source},
+            sidecars={"mxc://s/mine": TestSidecarResolution._payload(whole)},
+        )
+        await hydrator(alice, client).resolve_refreshes(room_id=ROOM, thread_id=None)
+        assert await bodies(alice) == [whole], "the seeded sidecar did not resolve"
+
+        await admit_all(alice, [source])
+
+        assert await bodies(alice) == [whole], "the echo replaced the resolved body with the preview"
+        assert client.downloads == ["mxc://s/mine"], "the echo forced a second download"
