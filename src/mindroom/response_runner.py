@@ -78,6 +78,7 @@ from mindroom.user_turn_time import prefix_user_turn_time
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
+    DeliveryStage,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -1310,6 +1311,11 @@ class ResponseRunner:
                     target=resolved_target,
                     response_text=placeholder_message,
                     extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                    # A streamed answer creates its visible message here and
+                    # only edits it afterwards, so this send is the one a crash
+                    # could duplicate into two answers in the room.
+                    delivery_turn_id=request.response_envelope.source_event_id,
+                    delivery_stage=DeliveryStage.INITIAL,
                 ),
             )
             if placeholder_event_id is not None:

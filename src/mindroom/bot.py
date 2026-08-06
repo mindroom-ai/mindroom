@@ -1874,6 +1874,14 @@ class AgentBot:
             await self._prepare_matrix_sync_continuity()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
+            # Answers this bot generated but could not confirm reaching Matrix
+            # are owed to their rooms. Resending is safe -- each carries the
+            # transaction ID its first attempt used -- and it happens before
+            # sync starts so a recovered answer precedes anything that arrives
+            # after it.
+            recovered = await self._delivery_gateway.recover_deliveries()
+            if recovered:
+                self.logger.info("Resent unacknowledged deliveries", deliveries=recovered)
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)

@@ -213,6 +213,11 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
+    # Which of a turn's two durable delivery points this is. A streamed answer
+    # creates its visible message once, as a placeholder, and reaches its final
+    # text by editing that message; the placeholder is therefore the delivery
+    # whose duplication a reader would see, and it is the initial stage.
+    delivery_stage: DeliveryStage = DeliveryStage.FINAL
 
 
 @dataclass(frozen=True)
@@ -486,6 +491,52 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    async def _send_claimed(
+        self,
+        claimed: OutboxDelivery,
+        *,
+        retry_sync_recovery: bool,
+    ) -> DeliveredMatrixEvent:
+        """Send one claimed delivery exactly as it was frozen.
+
+        The payload comes from the row, never from whatever the caller happens
+        to be holding. A turn that ran twice sends what its first attempt
+        froze: content regenerated after a claim would go out under a
+        transaction ID the homeserver has already seen, be dropped as a
+        duplicate, and leave the durable result and the room disagreeing
+        forever.
+        """
+        delivered = await send_message_result(
+            self._client(),
+            claimed.room_id,
+            dict(claimed.payload),
+            retry_sync_recovery=retry_sync_recovery,
+            transaction_id=claimed.transaction_id,
+        )
+        if delivered is None:
+            msg = f"Matrix refused delivery for turn {claimed.turn_id!r} stage {claimed.stage.value!r}"
+            raise _DeliveryRefusedError(msg)
+        return delivered
+
+    async def recover_deliveries(self) -> int:
+        """Resend every delivery whose Matrix outcome this process cannot know.
+
+        Run once at startup. A delivery the homeserver already accepted is
+        resent under the same transaction ID and collapses back onto the same
+        event, so recovery cannot duplicate a visible answer -- which is what
+        makes resending unconditionally the safe choice over trying to work out
+        what happened.
+
+        A send that fails again leaves its row unacknowledged and is logged by
+        the recovery pass, which moves on. Nothing escapes here.
+        """
+
+        async def send(claimed: OutboxDelivery) -> str:
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
+            return delivered.event_id
+
+        return await ResponseDelivery(store=self.deps.outbox, send=send).recover()
+
     async def _send_content(
         self,
         request: SendTextRequest,
@@ -510,28 +561,14 @@ class DeliveryGateway:
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
-            # The payload comes from the claimed row, not from the caller. A
-            # turn that ran twice sends what the first attempt froze: content
-            # regenerated after a claim would go out under a transaction ID the
-            # homeserver has already seen, be dropped as a duplicate, and leave
-            # the durable result and the room disagreeing forever.
             nonlocal delivered
-            delivered = await send_message_result(
-                client,
-                claimed.room_id,
-                dict(claimed.payload),
-                retry_sync_recovery=request.retry_sync_recovery,
-                transaction_id=claimed.transaction_id,
-            )
-            if delivered is None:
-                msg = f"Matrix refused delivery for turn {claimed.turn_id!r}"
-                raise _DeliveryRefusedError(msg)
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
             return delivered.event_id
 
         try:
             event_id = await ResponseDelivery(store=self.deps.outbox, send=send).deliver(
                 turn_id=request.delivery_turn_id,
-                stage=DeliveryStage.FINAL,
+                stage=request.delivery_stage,
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=content,

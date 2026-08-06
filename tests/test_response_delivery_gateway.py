@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
+    DeliveryStage,
     FinalDeliveryRequest,
     ResponseIdentity,
     SendTextRequest,
@@ -218,3 +219,62 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert event_id == "$sent"
         assert outbox.rows == {}
+
+    async def test_a_streaming_placeholder_is_durable_under_its_own_stage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A streamed answer creates its visible message once, as a placeholder.
+
+        Everything after that is an edit of the same event, so the placeholder
+        is the send a crash could turn into two answers in the room. It needs
+        the same durability the blocking path has, under its own stage, so it
+        does not collide with the final delivery of the same turn.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        delivered = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+            event_id = await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text="...",
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+
+        assert event_id == "$placeholder"
+        assert list(outbox.rows) == [("$cause", "initial")]
+
+    async def test_the_placeholder_and_the_final_answer_do_not_collide(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One turn has two durable delivery points and they are distinct.
+
+        Sharing a stage would make the final answer look like a resend of the
+        placeholder, so it would never be sent and the room would keep the
+        placeholder for good.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+        send = AsyncMock(return_value=placeholder)
+
+        with patch("mindroom.delivery_gateway.send_message_result", send):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text="...",
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+            gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+            await gateway.deliver_final(self._final_request("the answer"))
+
+        assert sorted(outbox.rows) == [("$cause", "final"), ("$cause", "initial")]
+        transaction_ids = {call.kwargs["transaction_id"] for call in send.await_args_list}
+        assert len(transaction_ids) == 2, "the two delivery points shared a transaction ID"
