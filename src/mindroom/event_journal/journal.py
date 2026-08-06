@@ -87,23 +87,23 @@ def advance_membership_epoch(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
             (principal_id, room_id),
         )
-    # A delivery that has not reached Matrix was written for the conversation
-    # this bot was in before it left. Sending it now would answer the previous
-    # membership inside the new one. An acknowledged delivery is kept, because
-    # its row is the record that the message is already visible.
+    # A delivery that was never attempted was written for the conversation this
+    # bot was in before it left, and nothing outside this process has seen it.
+    # Sending it now would answer the previous membership inside the new one.
     #
-    # An attempted-but-unacknowledged delivery goes too, even though its
-    # network outcome is unknown. Keeping it would only preserve a row nothing
-    # reads, and what the room actually contains is re-observed anyway: the
-    # projection was just dropped, so the next read rehydrates from the server
-    # and sees whichever of these messages landed. What must not happen is the
-    # turn's next attempt colliding with a transaction the homeserver already
-    # accepted, and that is prevented at the source, by binding the transaction
-    # ID to the epoch rather than by keeping the row.
+    # An attempted delivery is a different object entirely, and deleting it was
+    # the mistake worth naming. Its outcome is unknown: the homeserver may hold
+    # it already. Dropping the row frees the turn to run again and post a second
+    # answer, and re-deriving a fresh transaction for that answer guarantees the
+    # duplicate rather than preventing it. Keeping the row keeps the frozen
+    # payload and the transaction that goes with it, so the only thing a retry
+    # can do is present the same transaction again and collapse onto the same
+    # event. That converges on exactly one visible answer whether or not the
+    # first attempt landed, which is the property this table exists for.
     transaction.execute(
         """
         DELETE FROM response_outbox
-        WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL
+        WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL AND attempted = 0
         """,
         (principal_id, room_id),
     )

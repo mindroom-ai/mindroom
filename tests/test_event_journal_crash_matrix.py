@@ -412,6 +412,30 @@ class TestModelIsNotRerun:
         assert stored.payload["body"] == "first answer"
         assert runtime.homeserver.visible_messages == 1
 
+    async def test_a_rejoin_between_send_and_acknowledgement_leaves_one_answer(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The end the user sees: one question, one answer, across a rejoin.
+
+        Matrix accepted the answer and the acknowledgement was lost, so the
+        bot cannot know whether the message exists. It then leaves and rejoins
+        the room, which drops everything derived from the old membership. The
+        turn is still pending, so it runs again — and the room must still hold
+        exactly one answer at the end of it.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+        assert runtime.homeserver.visible_messages == 1
+
+        await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+        assert runtime.homeserver.visible_messages == 1
+        assert runtime.model_runs == 1
+
     async def test_recovery_after_acknowledgement_sends_nothing(
         self,
         runtime: TurnRuntime,

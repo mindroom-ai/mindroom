@@ -37,30 +37,21 @@ def decode_thread_id(stored_thread_id: str) -> str | None:
     return None if stored_thread_id == _UNTHREADED_STORAGE_VALUE else stored_thread_id
 
 
-def delivery_transaction_id(
-    principal_id: str,
-    turn_id: str,
-    stage: str,
-    membership_epoch: int,
-) -> str:
+def delivery_transaction_id(principal_id: str, turn_id: str, stage: str) -> str:
     """Return the deterministic Matrix transaction ID for one delivery stage.
 
     Derived rather than random so that a retry after a crash reuses the exact
     transaction the homeserver may already have accepted, which is what makes
     redelivery idempotent.
 
-    The membership epoch is part of the derivation because that idempotence is
-    a liability across a rejoin. A delivery attempted before the bot left has
-    an unknown outcome, and a homeserver that accepted it remembers the
-    transaction. Re-deriving the same ID for the turn's next attempt would have
-    the new answer silently collapse into the old one and never appear. A
-    rejoin is a new epoch, so it is a new transaction.
+    Deliberately not varied by membership epoch. A rejoin does not undo a send:
+    if the homeserver accepted the message it is still in the room, so the only
+    convergent thing a retry can do is present the same transaction again and
+    collapse back onto the same event. Deriving a fresh identity per epoch
+    would post the answer a second time instead.
     """
     if not principal_id or not turn_id or not stage:
         msg = "A delivery transaction requires a principal, turn, and stage"
         raise ValueError(msg)
-    if membership_epoch < 0:
-        msg = f"A delivery transaction requires a real membership epoch, not {membership_epoch}"
-        raise ValueError(msg)
-    name = f"{principal_id}:{turn_id}:{stage}:{membership_epoch}"
+    name = f"{principal_id}:{turn_id}:{stage}"
     return f"mindroom-{uuid.uuid5(_TRANSACTION_NAMESPACE, name)}"

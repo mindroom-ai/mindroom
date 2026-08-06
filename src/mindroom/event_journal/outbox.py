@@ -20,7 +20,6 @@ import time
 from typing import TYPE_CHECKING
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
-from .journal import current_membership_epoch
 from .models import DeliveryStage, OutboxDelivery
 
 if TYPE_CHECKING:
@@ -45,14 +44,8 @@ def enqueue(
     payload: Mapping[str, object],
     edits_event_id: str | None,
 ) -> str:
-    """Record delivery intent, refusing to change an already attempted row.
-
-    The transaction ID is bound to the room's current membership epoch, so a
-    turn that is enqueued again after a rejoin sends under an identity the
-    homeserver has never seen.
-    """
-    epoch = current_membership_epoch(transaction, principal_id, room_id)
-    transaction_id = delivery_transaction_id(principal_id, turn_id, stage.value, epoch)
+    """Record delivery intent, refusing to change an already attempted row."""
+    transaction_id = delivery_transaction_id(principal_id, turn_id, stage.value)
     transaction.execute(
         """
         INSERT INTO response_outbox (
@@ -62,7 +55,6 @@ def enqueue(
         ON CONFLICT (principal_id, turn_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             thread_id = excluded.thread_id,
-            transaction_id = excluded.transaction_id,
             payload_json = excluded.payload_json,
             edits_event_id = excluded.edits_event_id
         WHERE response_outbox.attempted = 0
@@ -79,14 +71,7 @@ def enqueue(
             time.time_ns(),
         ),
     )
-    # An attempted row refused the update, and what it will send is what it
-    # froze. Reporting the ID that was just derived instead of the one the row
-    # holds would describe a message that is never going to exist.
-    stored = transaction.fetchone(
-        "SELECT transaction_id FROM response_outbox WHERE principal_id = ? AND turn_id = ? AND stage = ?",
-        (principal_id, turn_id, stage.value),
-    )
-    return transaction_id if stored is None else str(stored["transaction_id"])
+    return transaction_id
 
 
 def claim(

@@ -65,6 +65,13 @@ _HYDRATED_PROMPT_WINDOW_MESSAGES = 2_000
 # hydration stop at a window that is mostly edits — a handful of messages in an
 # edit-heavy room. The window is counted in logical messages, and this ceiling
 # exists only so that one pathological room cannot walk its entire history.
+#
+# Reaching it means the window is short, and the conversation is still marked
+# hydrated. That is the deliberate trade and it is worth being explicit about:
+# the marker records that the one-time walk ran to completion, not that a
+# particular number of messages exists. Withholding it would re-run a
+# twenty-thousand-event walk on every single read of that room, which is a far
+# worse outcome than a prompt with less history than its maximum.
 _MAX_FETCHED_EVENTS = 20_000
 
 
@@ -243,6 +250,10 @@ class ConversationHydrator:
         history than that is hydrated once the window is full. The window is
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
+
+        There are three ways this returns, and only two of them mean the window
+        was filled. The third is the event ceiling, which is logged rather than
+        raised: the caller gets a shorter conversation, not a failed read.
         """
         events: list[ProjectedEvent] = []
         logical = 0
