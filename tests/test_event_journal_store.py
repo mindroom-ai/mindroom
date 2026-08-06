@@ -7,6 +7,7 @@ backend is a rule MindRoom does not actually have.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import sqlite3
 from typing import TYPE_CHECKING
 
@@ -653,6 +654,61 @@ class TestSchemaUpgrade:
         statements = " ".join(schema_statements(SQLITE_DIALECT))
         for _table, column, _definition in added_columns():
             assert column in statements
+
+
+def _seed_orderings() -> list[tuple[str, ...]]:
+    """Every arrival order our own two edits and the original can actually take."""
+    steps = ("seed1", "echo1", "seed2", "echo2", "orig")
+    return [
+        order
+        for order in itertools.permutations(steps)
+        # We send the first edit before the second, and each echo follows its
+        # own send. Orders violating that describe events this bot never emits.
+        if order.index("seed1") < order.index("seed2")
+        and order.index("seed1") < order.index("echo1")
+        and order.index("seed2") < order.index("echo2")
+    ]
+
+
+class TestSeedOrderingMatrix:
+    """The reduction has to survive every arrival order, not the reported one.
+
+    Six separate defects in this family were each fixed against the single
+    ordering that exposed them, and the next ordering broke again. Enumerating
+    is what finally held, so the enumeration is the test.
+    """
+
+    @pytest.mark.parametrize("order", _seed_orderings())
+    async def test_the_latest_edit_wins_whatever_order_it_arrives_in(
+        self,
+        alice: PrincipalStore,
+        order: tuple[str, ...],
+    ) -> None:
+        """The server's newest edit is what the conversation must end on."""
+        # The later send sorts *earlier* by event ID on purpose, so a rule that
+        # falls back to comparing IDs cannot pass by accident. Note that this
+        # matrix cannot catch a held-seed ordering fault on its own: both echoes
+        # arrive here, and the second one repairs the order however the held
+        # rows were ranked. The unrepaired case -- two seeds and no echo -- is
+        # what `test_two_seeds_of_an_absent_target_keep_their_send_order` is
+        # for, and the two together cover the space.
+        steps = {
+            "seed1": ("seed", "$zzz", 100, "first"),
+            "echo1": ("admit", "$zzz", 2_000, "first"),
+            "seed2": ("seed", "$aaa", 200, "second"),
+            "echo2": ("admit", "$aaa", 3_000, "second"),
+            "orig": ("orig", "$m", 1_000, "original"),
+        }
+        for name in order:
+            kind, event_id, ts, body = steps[name]
+            content = text(body) if kind == "orig" else edit("$m", body)
+            if kind == "seed":
+                _, projected = message(event_id, sender=BOB, ts=ts, content=content)
+                await alice.seed_outbound_message(projected)
+            else:
+                await admit(alice, event_id, sender=BOB, ts=ts, content=content)
+
+        assert await bodies(alice) == ["second"]
 
 
 class TestOutboundSeeding:
