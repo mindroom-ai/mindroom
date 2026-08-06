@@ -75,6 +75,7 @@ __all__ = [
     "StreamingDeliveryError",
     "StreamingResponse",
     "TerminalEdit",
+    "TerminalSend",
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
@@ -421,6 +422,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
 
 
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
+# The same contract for a stream whose answer is its first visible event: no
+# placeholder was sent, so the terminal update is a send rather than an edit.
+type TerminalSend = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 
 
 @dataclass
@@ -464,6 +468,7 @@ class StreamingResponse:
     # caller supplies a sender that records the edit before attempting it;
     # every earlier edit is transport and goes out directly.
     terminal_edit: TerminalEdit | None = None
+    terminal_send: TerminalSend | None = None
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
@@ -1113,15 +1118,32 @@ class StreamingResponse:
         client: nio.AsyncClient,
         *,
         content: dict[str, Any],
+        display_text: str,
         retry_sync_recovery: bool,
+        is_final: bool = False,
     ) -> bool:
-        """Send the initial streaming event."""
-        delivered = await send_message_result(
-            client,
-            self.room_id,
-            content,
-            retry_sync_recovery=retry_sync_recovery,
-        )
+        """Send the initial streaming event.
+
+        This is the terminal update too when no placeholder was ever sent --
+        a suppressed one, or one whose own send failed. The answer is then the
+        stream's first visible event, and it has to become durable here or it
+        never does.
+        """
+        if is_final and self.terminal_send is not None:
+            delivered = await self.terminal_send(
+                client,
+                self.room_id,
+                content,
+                display_text,
+                retry_sync_recovery=retry_sync_recovery,
+            )
+        else:
+            delivered = await send_message_result(
+                client,
+                self.room_id,
+                content,
+                retry_sync_recovery=retry_sync_recovery,
+            )
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -1183,7 +1205,9 @@ class StreamingResponse:
                     if await self._send_initial_content(
                         client,
                         content=content,
+                        display_text=display_text,
                         retry_sync_recovery=retry_sync_recovery,
+                        is_final=is_final,
                     ):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
@@ -1838,6 +1862,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     conversation_cache: ConversationCacheProtocol | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
+    terminal_send: TerminalSend | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -1857,6 +1882,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         visible_event_id_callback=visible_event_id_callback,
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
         terminal_edit=terminal_edit,
+        terminal_send=terminal_send,
     )
 
     # Ensure the first chunk triggers an initial send immediately

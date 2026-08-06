@@ -46,6 +46,7 @@ from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     StreamingResponse,
     TerminalEdit,
+    TerminalSend,
     build_cancelled_response_update,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -1242,7 +1243,54 @@ class DeliveryGateway:
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
             terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
+            terminal_send=self._durable_terminal_send(request.delivery_turn_id, request.target),
         )
+
+    def _durable_terminal_send(self, turn_id: str | None, target: MessageTarget) -> TerminalSend | None:
+        """Return a sender that records a stream's terminal *send* before making it.
+
+        A stream normally edits a placeholder, but there is not always one to
+        edit: a queued forced compaction suppresses it deliberately, and its
+        own send can simply fail. The answer is then the stream's first
+        visible event, and without this it would reach the room with no
+        durable row behind it -- the one thing the outbox exists to prevent.
+        """
+        if turn_id is None:
+            return None
+
+        async def terminal_send(
+            client: nio.AsyncClient,
+            room_id: str,
+            content: dict[str, Any],
+            display_text: str,
+            *,
+            retry_sync_recovery: bool = False,
+        ) -> DeliveredMatrixEvent | None:
+            del client, room_id
+            if display_text == PROGRESS_PLACEHOLDER:
+                # Same reasoning as the terminal edit: a stream that ends
+                # reading "Thinking..." has not answered, and recording that
+                # as the turn's final delivery would settle it with a
+                # placeholder and leave `deliver_final` nothing to do.
+                return await send_message_result(
+                    self._client(),
+                    target.room_id,
+                    content,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
+            return await self._send_content(
+                SendTextRequest(
+                    target=target,
+                    response_text="",
+                    retry_sync_recovery=retry_sync_recovery,
+                    delivery_turn_id=turn_id,
+                    delivery_stage=DeliveryStage.FINAL,
+                ),
+                target.room_id,
+                content,
+            )
+
+        return terminal_send
 
     def _durable_terminal_edit(self, turn_id: str | None, target: MessageTarget) -> TerminalEdit | None:
         """Return a sender that records a stream's terminal edit before making it.

@@ -23,6 +23,7 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     ResponseIdentity,
     SendTextRequest,
+    StreamingDeliveryRequest,
 )
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
@@ -37,9 +38,17 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, OutboxView, PrincipalStore
+
+
+async def _empty_stream() -> AsyncIterator[str]:
+    """Return a stream with nothing in it; these tests never run one."""
+    return
+    yield ""
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -401,6 +410,100 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
+
+    async def test_a_streamed_answer_with_no_placeholder_to_edit_is_still_durable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stream does not always have a placeholder to edit.
+
+        A queued forced compaction suppresses it on purpose, and its own send
+        can fail. The answer is then the stream's first visible event, and it
+        reaches the room through the send path rather than the edit path --
+        which is exactly where a durable row is easiest to forget.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        sent = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "streamed"})
+        terminal = gateway._durable_terminal_send(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)) as send:
+            await terminal(AsyncMock(), _ROOM_ID, {"body": "streamed"}, "streamed")
+
+        assert list(outbox.rows) == [("$cause", "final")]
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
+        assert outbox.rows["$cause", "final"].edits_event_id is None
+        assert send.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+
+    async def test_the_stream_is_given_both_terminal_paths(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming has to be handed the durable sender, not just the editor.
+
+        The two callbacks are what make a streamed answer recoverable, and a
+        stream reaches its answer through whichever one applies. Passing only
+        the editor leaves the no-placeholder shape silently direct.
+        """
+        gateway = _gateway(tmp_path, FakeOutbox())
+        request = StreamingDeliveryRequest(
+            target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            response_stream=_empty_stream(),
+            delivery_turn_id="$cause",
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+
+        assert stream.await_args.kwargs["terminal_edit"] is not None
+        assert stream.await_args.kwargs["terminal_send"] is not None
+
+    async def test_a_turnless_stream_is_given_neither_terminal_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stream with no turn behind it has nothing for recovery to key on."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        request = StreamingDeliveryRequest(
+            target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            response_stream=_empty_stream(),
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+
+        assert stream.await_args.kwargs["terminal_edit"] is None
+        assert stream.await_args.kwargs["terminal_send"] is None
+
+    async def test_a_stream_that_only_ever_said_thinking_does_not_settle_the_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A first visible event reading "Thinking..." is not an answer.
+
+        Recording it as the turn's FINAL would settle the delivery with a
+        placeholder, and `deliver_final` -- which delivers the real answer in
+        exactly this case -- would find its own row acknowledged and send
+        nothing at all.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        sent = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+        terminal = gateway._durable_terminal_send(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)) as send:
+            await terminal(AsyncMock(), _ROOM_ID, {"body": PROGRESS_PLACEHOLDER}, PROGRESS_PLACEHOLDER)
+
+        assert outbox.rows == {}
+        send.assert_awaited_once()
 
     async def test_recovery_replays_a_final_edit_as_an_edit(
         self,

@@ -203,6 +203,50 @@ async def test_completed_terminal_edit_opts_into_sync_recovery_retry(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_completed_first_event_answer_goes_through_the_durable_sender(tmp_path: Path) -> None:
+    """A stream with no placeholder still owes its answer a durable row.
+
+    When the placeholder was suppressed or its send failed, the answer is the
+    stream's first visible event and reaches the room through the send path.
+    Leaving that path on the plain sender makes exactly those answers
+    unrecoverable -- the ones whose turn already had a delivery problem.
+    """
+    streaming = _streaming_response(_config(tmp_path))
+    streaming.event_id = None
+    streaming.accumulated_text = "complete answer"
+    delivered = DeliveredMatrixEvent(event_id="$answer", content_sent={"body": "complete answer"})
+    terminal_send = AsyncMock(return_value=delivered)
+    streaming.terminal_send = terminal_send
+    plain_send = AsyncMock(return_value=delivered)
+
+    with patch("mindroom.streaming.send_message_result", new=plain_send):
+        outcome = await streaming.finalize(_client())
+
+    assert outcome.terminal_status == "completed"
+    terminal_send.assert_awaited_once()
+    plain_send.assert_not_awaited()
+    assert terminal_send.await_args.args[3] == "complete answer"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_first_event_note_stays_on_the_plain_sender(tmp_path: Path) -> None:
+    """A cancellation note is transport, not an answer, first event or not."""
+    streaming = _streaming_response(_config(tmp_path))
+    streaming.event_id = None
+    streaming.accumulated_text = "partial answer"
+    delivered = DeliveredMatrixEvent(event_id="$note", content_sent={"body": "partial answer"})
+    terminal_send = AsyncMock(return_value=delivered)
+    streaming.terminal_send = terminal_send
+    plain_send = AsyncMock(return_value=delivered)
+
+    with patch("mindroom.streaming.send_message_result", new=plain_send):
+        await streaming.finalize(_client(), cancelled=True, cancel_source="user_stop")
+
+    terminal_send.assert_not_awaited()
+    plain_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_terminal_sync_recovery_error_does_not_backoff(tmp_path: Path) -> None:
     """Cancellation notes retain their immediate terminal-delivery semantics."""
     streaming = _streaming_response(_config(tmp_path))
