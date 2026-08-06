@@ -169,6 +169,7 @@ def project(
         event,
         target_event_id=replaces,
         membership_epoch=membership_epoch,
+        provisional=False,
     )
 
 
@@ -204,6 +205,7 @@ def seed_outbound(
             event,
             target_event_id=replaces,
             membership_epoch=membership_epoch,
+            provisional=True,
         )
         return
     transaction.execute(
@@ -211,8 +213,8 @@ def seed_outbound(
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
-            refresh_token, membership_epoch, provisional
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1)
+            refresh_token, membership_epoch, provisional, revision_provisional
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, 1)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO NOTHING
         """,
         (
@@ -250,8 +252,8 @@ def _project_original(
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
-            refresh_token, membership_epoch, provisional
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0)
+            refresh_token, membership_epoch, provisional, revision_provisional
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, 0)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             sender = excluded.sender,
@@ -260,7 +262,8 @@ def _project_original(
             revision_ts = excluded.revision_ts,
             content_json = excluded.content_json,
             membership_epoch = excluded.membership_epoch,
-            provisional = 0
+            provisional = 0,
+            revision_provisional = 0
         WHERE visible_messages.provisional = 1
           AND visible_messages.revision_event_id = visible_messages.logical_event_id
         """,
@@ -337,11 +340,12 @@ def _project_edit(
     *,
     target_event_id: str,
     membership_epoch: int,
+    provisional: bool,
 ) -> None:
     """Replace the target's visible body, or hold the edit until it arrives."""
     current = transaction.fetchone(
         """
-        SELECT sender, revision_event_id, revision_ts FROM visible_messages
+        SELECT sender, revision_event_id, revision_ts, revision_provisional FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (principal_id, event.room_id, target_event_id),
@@ -359,14 +363,25 @@ def _project_edit(
         return
     if current["sender"] != event.sender:
         return
-    # An event that is already the installed revision is this bot's own seeded
-    # edit coming back from the server. It is not a competitor to compare
-    # against; it is the authoritative account of the revision already shown,
-    # and its timestamp replaces the local guess. Comparing would reject it
-    # whenever this machine's clock runs ahead, and every later edit would
-    # then lose to a revision stamped in the future.
-    is_own_echo = current["revision_event_id"] == event.event_id
-    if not is_own_echo and not _is_newer(
+    # The server's account of a revision this bot seeded replaces the local
+    # guess outright: comparing would reject it whenever this machine's clock
+    # runs ahead, and every later edit would then lose to a revision stamped in
+    # the future.
+    #
+    # The direction matters and identity alone cannot express it. A seed that
+    # arrives *after* its own echo -- ordinary, because the send awaits the
+    # network before it seeds -- has the same event ID as the installed
+    # revision while carrying strictly worse information. Letting that through
+    # puts the local clock back on an authoritative revision and freezes the
+    # answer there.
+    already_authoritative = current["revision_event_id"] == event.event_id and not current["revision_provisional"]
+    if provisional and already_authoritative:
+        # The echo won the race. This seed carries the same revision with a
+        # worse timestamp, and its clock may well be ahead, so it would win a
+        # comparison it has no business winning.
+        return
+    canonicalizes = not provisional and current["revision_event_id"] == event.event_id and not already_authoritative
+    if not canonicalizes and not _is_newer(
         (event.origin_server_ts, event.event_id),
         (int(current["revision_ts"]), current["revision_event_id"]),
     ):
@@ -379,6 +394,7 @@ def _project_edit(
         revision_event_id=event.event_id,
         revision_ts=event.origin_server_ts,
         content=visible_content(event.content),
+        provisional=provisional,
     )
 
 
@@ -438,17 +454,20 @@ def _install_revision(
     revision_event_id: str,
     revision_ts: int,
     content: Mapping[str, object],
+    provisional: bool = False,
 ) -> None:
     transaction.execute(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL,
+            revision_provisional = ?
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (
             revision_event_id,
             revision_ts,
             _dumps(content),
+            1 if provisional else 0,
             principal_id,
             room_id,
             logical_event_id,

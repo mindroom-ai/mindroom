@@ -83,6 +83,12 @@ _TABLES = (
         -- event ID, and `origin_server_ts` is the server's to assign. The
         -- self-authored sync echo replaces those values and clears this.
         provisional INTEGER NOT NULL DEFAULT 0,
+        -- Set when the *currently installed revision* was seeded locally, which
+        -- is a different fact from the row being provisional: an authoritative
+        -- original can carry a locally seeded edit on top of it. Only this
+        -- tells a canonicalizing echo apart from a stale late seed of the same
+        -- revision, which are otherwise identical by event ID.
+        revision_provisional INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, logical_event_id)
     )
     """,

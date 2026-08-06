@@ -684,6 +684,30 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    async def test_an_edit_echo_that_beats_its_own_seed_still_wins(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The send awaits the network before it seeds, so the echo can be first.
+
+        That inverse ordering is not exotic; it is what happens whenever sync
+        delivers the echo while the sending coroutine is still suspended. The
+        late seed carries the same revision with a locally generated timestamp,
+        so identity alone cannot tell it from a canonicalizing echo -- and if
+        it is allowed through on a clock that runs ahead, every genuine later
+        edit loses to it and the answer freezes.
+        """
+        _, original = message("$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await alice.seed_outbound_message(original)
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await admit(alice, "$edit1", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+
+        _, late_seed = message("$edit1", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(late_seed)
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,

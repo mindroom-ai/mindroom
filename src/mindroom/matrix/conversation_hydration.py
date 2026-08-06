@@ -166,6 +166,14 @@ class ConversationHydrator:
         repr=False,
     )
 
+    def _max_pages(self) -> int:
+        """Bound the walk in requests as well as in events.
+
+        The event ceiling cannot stop a run of empty pages, since those add
+        nothing to the count they are measured by.
+        """
+        return max(1, self.max_fetched_events // _MESSAGES_PAGE_LIMIT)
+
     async def ensure_hydrated(self, *, room_id: str, thread_id: str | None) -> None:
         """Hydrate a conversation once, sharing one task among concurrent readers."""
         if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
@@ -258,6 +266,7 @@ class ConversationHydrator:
         events: list[ProjectedEvent] = []
         logical = 0
         fetched = 0
+        pages = 0
         start: str | None = None
         while True:
             response = await self.client.room_messages(
@@ -270,6 +279,7 @@ class ConversationHydrator:
                 msg = f"Could not fetch history for {room_id!r}: {response}"
                 raise _HydrationError(msg)
             fetched += len(response.chunk)
+            pages += 1
             for event in response.chunk:
                 projected = _projected_from_event(room_id, event)
                 if projected is None:
@@ -277,9 +287,17 @@ class ConversationHydrator:
                 events.append(projected)
                 if projected.replaces_event_id is None:
                     logical += 1
-            if logical >= self.prompt_window_messages or not response.chunk or not response.end:
+            if logical >= self.prompt_window_messages:
                 return tuple(events)
-            if fetched >= self.max_fetched_events:
+            # An empty page is not exhaustion. The server may filter a page down
+            # to nothing and still hand back a continuation token, and the room
+            # can hold visible history behind it; only the absent token means
+            # there is no more. A token that does not move is refusing to make
+            # progress, which is the one shape that could spin forever, because
+            # an empty page does not advance the event count either.
+            if not response.end or response.end == start:
+                return tuple(events)
+            if fetched >= self.max_fetched_events or pages >= self._max_pages():
                 # Not the window being met, so it is said out loud. A room that
                 # reaches this is one where reading further costs more than the
                 # older messages are worth to a prompt.

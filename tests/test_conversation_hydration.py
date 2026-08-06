@@ -96,6 +96,10 @@ class FakeClient:
     # fewer logical messages than it carries events.
     endless_originals_per_page: int = 1
     endless_edits_per_page: int = 0
+    # Explicit (chunk, end) pages, for shapes a real server produces that the
+    # endless generator cannot express.
+    pages: list[tuple[list[dict[str, Any]], str | None]] | None = None
+    repeat_last: bool = False
 
     async def room_get_event(
         self,
@@ -145,6 +149,10 @@ class FakeClient:
         """Return one page of history, then successful exhaustion."""
         del room_id, start, direction, limit
         self.history_pages += 1
+        if self.pages is not None:
+            index = min(self.history_pages - 1, len(self.pages) - 1) if self.repeat_last else self.history_pages - 1
+            sources, end = self.pages[index]
+            return nio.RoomMessagesResponse(ROOM, [parse(source) for source in sources], "start", end)
         if self.endless_history:
             return nio.RoomMessagesResponse(
                 ROOM,
@@ -437,6 +445,31 @@ class TestRoomHydration:
 
         assert client.history_pages == 3
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_an_empty_page_with_a_continuation_is_not_exhaustion(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A filtered page can be empty and still have history behind it.
+
+        Only the missing continuation token means the server has run out.
+        Treating an empty chunk as exhaustion stops the walk one page early and
+        then records the short result as a hydrated conversation.
+        """
+        client = FakeClient(pages=[([], "more"), ([raw("$older", "older")], None)])
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == 2
+        assert await bodies(alice) == ["older"]
+
+    async def test_a_token_that_does_not_move_stops_the_walk(self, alice: PrincipalStore) -> None:
+        """An empty page adds nothing to the count the ceiling measures."""
+        client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == 2
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:
         """Hydration does not create pending work."""
