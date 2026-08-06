@@ -670,8 +670,7 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     """Threaded subagent sends should include the latest thread event for fallback replies."""
     send_mock = AsyncMock(side_effect=delivered_matrix_side_effect("$evt"))
     monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
-    event_cache = MagicMock()
-    ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
+    ctx = _make_context(tmp_path, requester_id="@user:localhost")
     ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
     await subagents_module._send_matrix_text(

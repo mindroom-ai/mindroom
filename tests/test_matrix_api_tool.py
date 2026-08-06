@@ -808,7 +808,7 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() -> None:
-    """Threaded redaction detection should prefer conversation_cache over direct event_cache access."""
+    """Threaded redaction detection should resolve the thread through the conversation facade."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
@@ -817,7 +817,6 @@ async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() 
         room_id=ctx.room_id,
         content={"body": "threaded message", "msgtype": "m.text"},
     )
-    ctx.event_cache.get_thread_id_for_event.side_effect = AssertionError("unexpected direct event_cache lookup")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
