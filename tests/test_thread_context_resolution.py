@@ -160,9 +160,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         expected_history = [
-            _message(event_id="$thread_root:localhost", body="Root"),
-            _message(event_id="$thread_msg:localhost", body="Thread message"),
+            _message(event_id="$thread_root:localhost", body="Root", thread_id="$thread_root:localhost"),
+            _message(event_id="$thread_msg:localhost", body="Thread message", thread_id="$thread_root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
@@ -327,9 +333,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
-            _message(event_id="$thread_root:localhost", body="Root message"),
-            _message(event_id="$thread_reply:localhost", body="Thread reply"),
+            _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
+            _message(event_id="$thread_reply:localhost", body="Thread reply", thread_id="$thread_root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
@@ -573,9 +585,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
 
             expected_history = [
-                _message(event_id="$thread_root:localhost", body="Root message"),
-                _message(event_id="$reply:localhost", body="Reply"),
+                _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
+                _message(event_id="$reply:localhost", body="Reply", thread_id="$thread_root:localhost"),
             ]
+            await seed_thread_history(
+                bot,
+                room_id=room.room_id,
+                thread_id="$thread_root:localhost",
+                messages=expected_history,
+            )
             with patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
@@ -637,9 +655,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
-            _message(event_id="$thread_root:localhost", body="Root message"),
-            _message(event_id="$reply:localhost", body="Reply"),
+            _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
+            _message(event_id="$reply:localhost", body="Reply", thread_id="$thread_root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
@@ -719,10 +743,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
-            _message(event_id="$thread-root:localhost", body="Root"),
-            _message(event_id="$thread-reply:localhost", body="Thread reply"),
-            _message(event_id="$plain-reply:localhost", body="Bridged plain reply"),
+            _message(event_id="$thread-root:localhost", body="Root", thread_id="$thread-root:localhost"),
+            _message(event_id="$thread-reply:localhost", body="Thread reply", thread_id="$thread-root:localhost"),
+            _message(event_id="$plain-reply:localhost", body="Bridged plain reply", thread_id="$thread-root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread-root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
@@ -942,11 +972,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         expected_history = [
-            _message(event_id="$thread_root:localhost", body="Thread root"),
-            _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-            _message(event_id="$plain1:localhost", body="First plain reply"),
-            _message(event_id="$plain2:localhost", body="Second plain reply"),
+            _message(event_id="$thread_root:localhost", body="Thread root", thread_id="$thread_root:localhost"),
+            _message(
+                event_id="$thread_msg:localhost",
+                body="Earlier threaded message",
+                thread_id="$thread_root:localhost",
+            ),
+            _message(event_id="$plain1:localhost", body="First plain reply", thread_id="$thread_root:localhost"),
+            _message(event_id="$plain2:localhost", body="Second plain reply", thread_id="$thread_root:localhost"),
         ]
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=expected_history,
+        )
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
