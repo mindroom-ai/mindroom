@@ -1815,7 +1815,7 @@ admission, which is the only route left.
 
 ## Delivery cutover status (2026-08-06)
 
-Three of the four delivery points a turn has are now durable, and startup
+Every delivery point that carries a turn's answer is now durable, and startup
 resends anything whose outcome this process cannot know.
 
 | Delivery point | Route | Stage |
@@ -1823,32 +1823,77 @@ resends anything whose outcome this process cannot know.
 | Placeholder that creates the visible message | outbox | `INITIAL` |
 | Final answer, sent (no placeholder) | outbox | `FINAL` |
 | Final answer, edited onto a placeholder | outbox | `FINAL`, with `edits_event_id` |
-| Streamed terminal text | **direct, still open** | — |
+| Streamed terminal text, edited onto a placeholder | outbox | `FINAL`, with `edits_event_id` |
+| Streamed terminal text, as the stream's first event | outbox | `FINAL` |
+
+The streamed cases go through callbacks the gateway hands to
+`StreamingResponse` (`terminal_edit` and `terminal_send`), so no extra Matrix
+round trip is added: the edit or send the stream was going to make anyway is
+enqueued first and acknowledged after. An unacknowledged row therefore means
+exactly "the terminal update never landed", which is the condition recovery
+acts on and the only one.
 
 Sends that are not turns stay direct, as decided above: voice echoes, command
 confirmations, reconciliation notices. So do intermediate streaming edits,
 cancellation notices, and failure updates, which are transport rather than a
-turn's answer.
+turn's answer. A terminal update that still reads `Thinking...` is also direct,
+because a stream that never answered must not settle the turn -- `deliver_final`
+delivers the answer in exactly that case, and would find its own row
+acknowledged and send nothing.
+
+### Recovery is a retry loop, not a startup step
+
+Recovery runs after a sync response rather than at startup, because nio refuses
+ordinary sends into an encrypted room until sync has rebuilt device state --
+so a startup pass would spend its retry budget failing in exactly the rooms
+this exists for.
+
+The first response is not always enough either. It can arrive while a room is
+still unrecovered. `recover()` therefore reports what it still owes, and the
+pass runs again on later sync responses until it owes nothing. Tying "recovery
+finished" to "first sync observed" stranded any row that failed the first pass
+until the process restarted.
+
+An unacknowledged `INITIAL` is skipped whenever a `FINAL` row exists at all,
+acknowledged or not. Both rows unacknowledged is the ordinary shape of a crash
+between claiming the answer and recording it, and recovery walks rows oldest
+first, so requiring acknowledgement put the placeholder into the room *before*
+the answer. An edit-shaped `FINAL` cannot be stranded by the skip: its target
+event ID only exists because the placeholder send returned one.
 
 ### What is still open, precisely
 
-A streamed answer reaches its final text through `StreamingResponse`'s own
-transport (`streaming.py`), which sends the first event and edits it directly.
-`finalize_streamed_response` then converts an already-visible stream result
-into an outcome without delivering anything, so the terminal text of a streamed
-turn never enters the outbox.
+**A final-response transform edits the answer outside the outbox.**
+`finalize_streamed_response` applies `_apply_final_response_transform` after the
+terminal edit has already been claimed and acknowledged. When the hook changes
+the text, `_finalize_visible_replacement_edit` issues a second, direct edit, so
+the room shows the transformed answer while the frozen `FINAL` row holds the
+untransformed one.
 
-The placeholder before it is durable, so a crash mid-stream recovers to the
-placeholder rather than to nothing. What is lost is the answer itself.
+Only one visible message exists either way -- the second edit revises the same
+event -- so the outbox's central invariant holds. What diverges is the durable
+record: a rerun turn reading the row back reports the untransformed body, and a
+crash between the acknowledgement and the transform edit recovers to the
+untransformed text.
 
-The fix is not another direct send. Adding one would issue a second Matrix edit
-per streamed turn, for text the last stream edit already made visible. The
-shape that costs nothing in the happy path is to enqueue the terminal content
-as `FINAL` *before* the last streaming edit, let that edit go out under the
-claimed transaction ID, and acknowledge it afterwards -- so an unacknowledged
-row means the terminal edit never landed, which is exactly the condition
-recovery should act on.
+The fix is not to update the frozen row, which is frozen for a reason: a retry
+must resend what may already have been accepted. The right shape is to apply
+the transform *inside* the terminal-edit callback, before the enqueue, so the
+transformed text is both what is frozen and what is sent, and
+`finalize_streamed_response` finds nothing left to change. That moves a hook
+with its own cancellation semantics onto the streaming terminal path, so it is
+its own change rather than a call-site edit.
 
-That requires `StreamingResponse` to know its turn and its outbox, which is a
-real change to the streaming state machine rather than a call-site edit, and it
-is the last piece of this phase.
+**An oversized terminal edit freezes different bytes than it sends.**
+`send_message_result` runs `prepare_large_message`, which for content above the
+event limit uploads a sidecar and rewrites the payload with a fresh MXC URI --
+and, in an encrypted room, fresh file keys. The row is frozen *before* that
+rewrite, so recovery re-runs the upload and sends different bytes than the
+first attempt did.
+
+The visible outcome still converges, because Matrix deduplicates on the
+transaction ID alone rather than on content. The costs are a redundant upload
+on every recovered oversized answer, and a stored payload that does not
+describe the event it produced. The fix is to prepare the wire payload before
+enqueueing and give both the live and recovery paths a send-already-prepared
+primitive, so nothing is rebuilt after the claim.
