@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_diagnostics import (
@@ -26,6 +27,12 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
+
+# A caller asking for one sender's newest visible message wants the current
+# one. Walking a whole conversation to find a sender who has said nothing for
+# a long time would turn a status probe into a history read, so the answer is
+# "nothing recent" rather than a page-by-page search.
+_LATEST_SENDER_MESSAGE_WINDOW_MESSAGES = 50
 
 
 def projected_thread_history(
@@ -194,6 +201,39 @@ class ConversationReader:
             )
             raise _StaleConversationError(msg)
         return page
+
+
+async def latest_agent_message_snapshot(
+    reader: ConversationReader,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+) -> AgentMessageSnapshot | None:
+    """Return the newest visible message ``sender`` has in one conversation scope.
+
+    The read never blocks, because the callers are hooks and status probes
+    rather than prompt assembly: an unhydrated conversation answers from what
+    the projection already holds instead of waiting on a homeserver. A message
+    whose visible revision was redacted is absent rather than stale, which is
+    the same rule every other read on this projection follows.
+
+    ``thread_id=None`` means the unthreaded room conversation, not the room as
+    a whole, so a threaded reply never answers a room-scope question.
+    """
+    page = await reader.read(
+        room_id=room_id,
+        thread_id=thread_id,
+        limit=_LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
+    )
+    for message in reversed(page.messages):
+        if message.sender != sender:
+            continue
+        return AgentMessageSnapshot(
+            content=dict(message.content),
+            origin_server_ts=message.revision_ts,
+        )
+    return None
 
 
 async def complete_thread_history(

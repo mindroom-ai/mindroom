@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
-from mindroom.matrix.sync_certification import SyncCheckpoint
-from mindroom.matrix.sync_token_values import normalize_sync_token
+from mindroom.matrix.sync_token_values import SyncCheckpoint, normalize_sync_token
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable

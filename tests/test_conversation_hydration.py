@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import EventClass, EventKind, ProjectedEvent
+from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
@@ -30,7 +31,13 @@ from mindroom.matrix.conversation_hydration import (
     _projected_from_event,
     _reduce_current_revision,
 )
-from mindroom.matrix.conversation_reads import ConversationReader, _StaleConversationError, projected_thread_history
+from mindroom.matrix.conversation_reads import (
+    _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
+    ConversationReader,
+    _StaleConversationError,
+    latest_agent_message_snapshot,
+    projected_thread_history,
+)
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
@@ -1363,3 +1370,149 @@ class TestRefreshStarvation:
         assert "mxc://s/wanted" in client.downloads, "the requested message was never attempted"
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
         assert [message.content["body"] for message in page.messages] == ["the older answer"]
+
+
+class TestLatestSenderMessage:
+    """What a hook is told one sender's newest visible message is."""
+
+    @staticmethod
+    def _reader(store: PrincipalStore, client: FakeClient | None = None) -> ConversationReader:
+        return ConversationReader(store=store, hydrator=hydrator(store, client or FakeClient()))
+
+    async def test_the_newest_message_from_that_sender_answers(self, alice: PrincipalStore) -> None:
+        """Someone else speaking last must not hide the sender that was asked about."""
+        await admit_all(
+            alice,
+            [
+                raw("$a1", "older", ts=1_000),
+                raw("$a2", "newer", ts=2_000),
+                raw("$b1", "not mine", sender=BOB, ts=3_000),
+            ],
+        )
+
+        snapshot = await latest_agent_message_snapshot(
+            self._reader(alice),
+            room_id=ROOM,
+            thread_id=None,
+            sender=ALICE,
+        )
+
+        assert snapshot == AgentMessageSnapshot(
+            content={"msgtype": "m.text", "body": "newer"},
+            origin_server_ts=2_000,
+        )
+
+    async def test_an_edited_message_answers_with_the_edit(self, alice: PrincipalStore) -> None:
+        """A streamed answer is read through its edits, so the revision is what counts."""
+        await admit_all(
+            alice,
+            [raw("$m", "half", ts=1_000), raw("$e", "complete", ts=5_000, replaces="$m")],
+        )
+
+        snapshot = await latest_agent_message_snapshot(
+            self._reader(alice),
+            room_id=ROOM,
+            thread_id=None,
+            sender=ALICE,
+        )
+
+        assert snapshot is not None
+        assert snapshot.content["body"] == "complete"
+        assert snapshot.origin_server_ts == 5_000
+
+    async def test_a_threaded_message_does_not_answer_a_room_scope_read(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Room scope is the unthreaded conversation, not everything in the room."""
+        await admit_all(alice, [raw("$root", "root"), raw("$reply", "in thread", ts=2_000, thread_id="$root")])
+        reader = self._reader(alice)
+
+        room_scope = await latest_agent_message_snapshot(
+            reader,
+            room_id=ROOM,
+            thread_id=None,
+            sender=ALICE,
+        )
+        thread_scope = await latest_agent_message_snapshot(
+            reader,
+            room_id=ROOM,
+            thread_id="$root",
+            sender=ALICE,
+        )
+
+        assert room_scope is not None
+        assert room_scope.content["body"] == "root"
+        assert thread_scope is not None
+        assert thread_scope.content["body"] == "in thread"
+
+    async def test_a_silent_sender_answers_with_nothing(self, alice: PrincipalStore) -> None:
+        """A sender with nothing visible has no snapshot rather than someone else's."""
+        await admit_all(alice, [raw("$b1", "theirs", sender=BOB)])
+
+        assert (
+            await latest_agent_message_snapshot(
+                self._reader(alice),
+                room_id=ROOM,
+                thread_id=None,
+                sender=ALICE,
+            )
+            is None
+        )
+
+    async def test_a_message_awaiting_refetch_is_never_served(self, alice: PrincipalStore) -> None:
+        """The redacted revision is content the sender deleted; absence is the honest answer."""
+        await TestReadModes._hidden_message(alice)
+
+        assert (
+            await latest_agent_message_snapshot(
+                self._reader(alice),
+                room_id=ROOM,
+                thread_id=None,
+                sender=ALICE,
+            )
+            is None
+        )
+
+    async def test_the_read_never_reaches_the_homeserver(self, alice: PrincipalStore) -> None:
+        """A hook must not block on Matrix, so an unhydrated conversation answers locally."""
+        await admit_all(alice, [raw("$m", "only local", ts=1_000)])
+        client = FakeClient(events={"$m": raw("$m", "only local")}, history=[raw("$old", "older", ts=500)])
+
+        snapshot = await latest_agent_message_snapshot(
+            self._reader(alice, client),
+            room_id=ROOM,
+            thread_id=None,
+            sender=ALICE,
+        )
+
+        assert snapshot is not None
+        assert snapshot.content["body"] == "only local"
+        assert client.history_pages == 0
+        assert client.relation_calls == 0
+
+    async def test_a_sender_older_than_the_window_is_not_searched_for(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The read is a bounded status probe, not a walk back through the conversation."""
+        await admit_all(
+            alice,
+            [
+                raw("$mine", "mine", ts=1_000),
+                *(
+                    raw(f"$b{index}", f"theirs {index}", sender=BOB, ts=2_000 + index)
+                    for index in range(_LATEST_SENDER_MESSAGE_WINDOW_MESSAGES)
+                ),
+            ],
+        )
+
+        assert (
+            await latest_agent_message_snapshot(
+                self._reader(alice),
+                room_id=ROOM,
+                thread_id=None,
+                sender=ALICE,
+            )
+            is None
+        )

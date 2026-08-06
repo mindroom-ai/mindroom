@@ -54,7 +54,6 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
-    make_event_cache_mock,
 )
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
@@ -322,7 +321,6 @@ def _hook_runtime_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         conversation_reader=make_conversation_reader_mock(),
         hook_registry=registry,

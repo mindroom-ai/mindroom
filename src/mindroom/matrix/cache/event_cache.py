@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from .agent_message_snapshot import AgentMessageSnapshot
     from .thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 
 
@@ -122,16 +121,6 @@ class ConversationEventCache(Protocol):
         sender: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
-
-    async def get_latest_agent_message_snapshot(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        sender: str,
-        *,
-        runtime_started_at: float | None,
-    ) -> AgentMessageSnapshot | None:
-        """Return the latest visible cached message from one sender in the given scope."""
 
     async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
         """Return MXC plaintext only while a visible owning event still references it."""

@@ -563,7 +563,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                         client=bot_client,
                         config=config,
                         runtime_paths=paths,
-                        event_cache=SimpleNamespace(),
                         conversation_cache=SimpleNamespace(),
                         conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,

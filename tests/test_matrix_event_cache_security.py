@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -1517,10 +1516,10 @@ async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
 
 
 @pytest.mark.asyncio
-async def test_cached_sidecar_hydration_after_restart_preserves_event_age(
+async def test_cached_sidecar_plaintext_survives_a_restart_without_a_download(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
-    """Hydrating persisted plaintext must not make an old room-level event look new."""
+    """Plaintext persisted before a restart is reused rather than fetched again."""
     principal_id = "@agent:localhost"
     room_id = "!room:localhost"
     event_id = "$sidecar"
@@ -1536,7 +1535,6 @@ async def test_cached_sidecar_hydration_after_restart_preserves_event_age(
     restarted_root = _shared_cache(event_cache_factory)
     await restarted_root.initialize()
     restarted_cache = restarted_root.for_principal(principal_id)
-    runtime_started_at = time.time()
     membership_epoch = await restarted_cache.room_membership_epoch(room_id)
     assert membership_epoch is not None
     client = MagicMock(spec=nio.AsyncClient)
@@ -1549,17 +1547,10 @@ async def test_cached_sidecar_hydration_after_restart_preserves_event_age(
             room_id=room_id,
             expected_membership_epoch=membership_epoch,
         )
-        snapshot = await restarted_cache.get_latest_agent_message_snapshot(
-            room_id,
-            thread_id=None,
-            sender=principal_id,
-            runtime_started_at=runtime_started_at,
-        )
     finally:
         await restarted_root.close()
 
     assert resolved_event["content"]["body"] == "persisted"
-    assert snapshot is None
     client.download.assert_not_awaited()
 
 

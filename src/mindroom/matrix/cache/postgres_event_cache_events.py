@@ -150,24 +150,6 @@ async def load_latest_edit(
     return None if row is None else row.event
 
 
-async def load_latest_edit_row(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str,
-) -> CachedEventRow | None:
-    """Return the latest cached edit event plus its lookup-row write time."""
-    return await _load_latest_edit_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-
-
 async def _load_latest_edit_row(
     db: AsyncConnection,
     *,

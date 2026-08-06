@@ -40,8 +40,9 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_session import MatrixSyncStorage
 from mindroom.matrix.decrypt_failure import e2ee_stats
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate

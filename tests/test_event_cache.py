@@ -3138,42 +3138,6 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_event_cache_skips_latest_agent_message_snapshot_reads(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Disabled caches should fail open for latest-agent-message snapshot reads."""
-    cache = event_cache
-    try:
-        await cache.store_events_batch(
-            [
-                (
-                    "$reply",
-                    "!room:localhost",
-                    {
-                        "event_id": "$reply",
-                        "sender": "@agent:localhost",
-                        "origin_server_ts": 2000,
-                        "type": "m.room.message",
-                        "content": {"body": "Working...", "msgtype": "m.text"},
-                    },
-                ),
-            ],
-        )
-        cache.disable("test_disabled")
-
-        snapshot = await cache.get_latest_agent_message_snapshot(
-            "!room:localhost",
-            None,
-            "@agent:localhost",
-            runtime_started_at=0.0,
-        )
-    finally:
-        await cache.close()
-
-    assert snapshot is None
-
-
-@pytest.mark.asyncio
 async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(event_cache: ConversationEventCache) -> None:
     """Cache hits should bypass the full root-plus-relations fetch path."""
     cache = event_cache

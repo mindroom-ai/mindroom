@@ -985,7 +985,6 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.has_thread_snapshot.side_effect = has_thread_snapshot
     event_cache.get_thread_cache_gap.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
-    event_cache.get_latest_agent_message_snapshot.return_value = None
     event_cache.pending_durable_write_room_ids.return_value = ()
     event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
     departure_epochs: dict[str, int] = {}

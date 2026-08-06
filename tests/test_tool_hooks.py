@@ -69,7 +69,6 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -240,7 +239,6 @@ def _tool_runtime_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
         conversation_reader=make_conversation_reader_mock(),
         correlation_id="corr-runtime",

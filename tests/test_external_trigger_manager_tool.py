@@ -90,7 +90,6 @@ def _context(
         client=cast("Any", _Client()),
         config=config or _config(),
         runtime_paths=_runtime_paths(tmp_path),
-        event_cache=cast("Any", object()),
         conversation_cache=cast("Any", object()),
         conversation_reader=make_conversation_reader_mock(),
     )

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.matrix.sync_token_values import normalize_sync_token
+from mindroom.matrix.sync_token_values import SyncCheckpoint, normalize_sync_token
 
 if TYPE_CHECKING:
     import nio
@@ -19,14 +19,6 @@ class SyncTrustState(Enum):
     PENDING = "pending"
     CERTIFIED = "certified"
     UNCERTAIN = "uncertain"
-
-
-@dataclass(frozen=True)
-class SyncCheckpoint:
-    """A sync token saved after its sync response was durably cached."""
-
-    token: str
-    cache_generation: str | None = None
 
 
 @dataclass(frozen=True)

@@ -31,7 +31,7 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_event_cache_mock
+from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -124,7 +124,6 @@ def _make_context(
         client=MagicMock(),
         config=effective_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,
         conversation_reader=make_conversation_reader_mock(),
         room=room,
@@ -669,8 +668,7 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     """Threaded subagent sends should include the latest thread event for fallback replies."""
     send_mock = AsyncMock(side_effect=delivered_matrix_side_effect("$evt"))
     monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
-    event_cache = MagicMock()
-    ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
+    ctx = _make_context(tmp_path, requester_id="@user:localhost")
     ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
     await subagents_module._send_matrix_text(

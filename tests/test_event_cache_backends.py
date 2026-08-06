@@ -392,7 +392,6 @@ async def _assert_edit_snapshot_and_mxc_behavior(
     cache: PostgresEventCache,
     *,
     room_id: str,
-    thread_id: str,
     sender: str,
     old_edit: dict[str, object],
     latest_edit: dict[str, object],
@@ -404,15 +403,6 @@ async def _assert_edit_snapshot_and_mxc_behavior(
         ],
     )
     assert await cache.get_latest_edit(room_id, "$reply") == latest_edit
-    snapshot = await cache.get_latest_agent_message_snapshot(
-        room_id,
-        thread_id,
-        sender,
-        runtime_started_at=None,
-    )
-    assert snapshot is not None
-    assert snapshot.content["body"] == "latest edit"
-    assert snapshot.origin_server_ts == 1030
 
     mxc_owner = _message_event(
         event_id="$mxc-owner",
@@ -1667,7 +1657,6 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
         await _assert_edit_snapshot_and_mxc_behavior(
             cache,
             room_id=room_id,
-            thread_id=thread_id,
             sender=sender,
             old_edit=old_edit,
             latest_edit=latest_edit,

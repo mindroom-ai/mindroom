@@ -8,13 +8,12 @@ import pytest
 
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
-    SyncCheckpoint,
     SyncTrustState,
     certify_sync_response,
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
-from mindroom.matrix.sync_token_values import normalize_sync_token
+from mindroom.matrix.sync_token_values import SyncCheckpoint, normalize_sync_token
 
 
 @pytest.mark.parametrize(

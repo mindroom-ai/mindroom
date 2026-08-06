@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_latest_thread_event_id_mock
+from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +70,6 @@ def _tool_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,
         conversation_reader=conversation_reader,
         storage_path=tmp_path,
@@ -736,9 +735,7 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     assert first_attachment is not None
     assert second_attachment is not None
 
-    event_cache = MagicMock()
     context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
-    context = dataclasses.replace(context, event_cache=event_cache)
     context.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
     with patch(
@@ -763,8 +760,6 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     second_call = mock_send.await_args_list[1]
     assert first_call.kwargs["latest_thread_event_id"] == "$latest:localhost"
     assert second_call.kwargs["latest_thread_event_id"] == "$file_evt_1"
-    assert "event_cache" not in first_call.kwargs
-    assert "event_cache" not in second_call.kwargs
 
 
 @pytest.mark.asyncio

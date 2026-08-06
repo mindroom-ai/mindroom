@@ -10,17 +10,55 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.durable_write import write_json_file_durable
-from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 _GENERATION = "cache-generation"
 
+# The exact bytes earlier versions wrote, captured before `SyncCheckpoint` moved
+# out of the certification module. Real deployments hold records in this shape,
+# so it is a durable format rather than an implementation detail of whichever
+# module currently declares the type.
+_PERSISTED_RECORD_BYTES = (
+    '{"checkpoint": {"cache_generation": "cache-generation", "token": "s_saved"}, '
+    '"pending_join_decrypt_fences": ["!pending:localhost"], '
+    '"revision": 2, "version": "mindroom-sync-continuity-v2"}\n'
+)
+
 
 def _checkpoint(token: str) -> SyncCheckpoint:
     return SyncCheckpoint(token=token, cache_generation=_GENERATION)
+
+
+_PERSISTED_RECORD = SyncContinuityRecord(
+    revision=2,
+    checkpoint=_checkpoint("s_saved"),
+    pending_join_decrypt_fences=frozenset({"!pending:localhost"}),
+)
+
+
+def test_a_record_written_by_an_earlier_version_still_loads(tmp_path: Path) -> None:
+    """Checkpoints already on disk must survive the type moving modules."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(_PERSISTED_RECORD_BYTES, encoding="utf-8")
+
+    assert SyncContinuityStore(tmp_path, "code").load() == _PERSISTED_RECORD
+
+
+def test_saving_a_checkpoint_writes_the_same_bytes_it_always_did(tmp_path: Path) -> None:
+    """A checkpoint saved now must be readable by any version that reads the old shape."""
+    store = SyncContinuityStore(tmp_path, "code")
+
+    store.update_join_fences(add={"!pending:localhost"})
+    store.replace_checkpoint(_checkpoint("s_saved"))
+
+    written = (tmp_path / "sync_continuity" / "code.json").read_text(encoding="utf-8")
+    assert written == _PERSISTED_RECORD_BYTES
+    assert store.load() == _PERSISTED_RECORD
 
 
 def test_classic_acceptance_atomically_advances_checkpoint_and_clears_join_fence(
