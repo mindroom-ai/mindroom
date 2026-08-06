@@ -7,6 +7,7 @@ backend is a rule MindRoom does not actually have.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,17 +17,20 @@ from mindroom.event_journal import (
     ConversationCursor,
     DeliveryStage,
     EventClass,
+    EventJournalStore,
     EventKind,
     InboundEvent,
     ProjectedEvent,
     SettlementOutcome,
     delivery_transaction_id,
 )
+from mindroom.event_journal.schema import SQLITE_DIALECT, added_columns, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.event_journal import PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -605,6 +609,50 @@ class TestBoundedReads:
             cursor = page.next_cursor
 
         assert seen == sorted(identifiers)
+
+
+class TestSchemaUpgrade:
+    """A database that predates a column has to gain it, not fail on it."""
+
+    async def test_a_database_without_a_later_column_is_upgraded(self, tmp_path: Path) -> None:
+        """`CREATE TABLE IF NOT EXISTS` leaves an existing table untouched.
+
+        Which means a column added later never appears, and the failure lands
+        at the first statement that names it rather than at startup. The
+        journal runs in production, so every upgrade meets this.
+        """
+        database_path = tmp_path / "old.db"
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            """
+            CREATE TABLE visible_messages (
+                principal_id TEXT NOT NULL, room_id TEXT NOT NULL, logical_event_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL, sender TEXT NOT NULL, created_ts BIGINT NOT NULL,
+                revision_event_id TEXT NOT NULL, revision_ts BIGINT NOT NULL, content_json TEXT,
+                refresh_token BIGINT, membership_epoch BIGINT NOT NULL,
+                PRIMARY KEY (principal_id, room_id, logical_event_id)
+            )
+            """,
+        )
+        connection.commit()
+        connection.close()
+
+        store = EventJournalStore.open_sqlite(database_path)
+        try:
+            principal = store.principal("agent@alice")
+            _, projected = message("$m", sender=BOB, content=text("hello"))
+            await principal.seed_outbound_message(projected)
+
+            page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=5)
+            assert [m.content["body"] for m in page.messages] == ["hello"]
+        finally:
+            await store.close()
+
+    async def test_every_added_column_is_declared_in_the_table_too(self) -> None:
+        """The two lists are edited by hand and drift silently otherwise."""
+        statements = " ".join(schema_statements(SQLITE_DIALECT))
+        for _table, column, _definition in added_columns():
+            assert column in statements
 
 
 class TestOutboundSeeding:

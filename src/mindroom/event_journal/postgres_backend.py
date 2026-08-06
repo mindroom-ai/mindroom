@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .schema import POSTGRES_DIALECT, Dialect, render, schema_statements
+from .schema import POSTGRES_DIALECT, Dialect, add_column_statement, added_columns, render, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -109,6 +109,13 @@ class PostgresBackend:
         with self._writer.cursor(row_factory=dict_row) as cursor:
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
+            for table, column, definition in added_columns():
+                cursor.execute(
+                    cast(
+                        "LiteralString",
+                        add_column_statement(table, f"IF NOT EXISTS {column}", definition),
+                    ),
+                )
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

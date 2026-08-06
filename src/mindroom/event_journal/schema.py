@@ -177,6 +177,27 @@ _INDEXES = (
 )
 
 
+# Columns added to a table after it first shipped. `CREATE TABLE IF NOT EXISTS`
+# leaves an existing table exactly as it is, so a database created before one of
+# these columns existed keeps working right up until the first statement that
+# names it, and then fails at runtime rather than at startup. Every column added
+# to an existing table has to be listed here as well as in the table above.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("visible_messages", "provisional", "INTEGER NOT NULL DEFAULT 0"),
+    ("visible_messages", "revision_provisional", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def added_columns() -> tuple[tuple[str, str, str], ...]:
+    """Return every (table, column, definition) that may predate a database."""
+    return _ADDED_COLUMNS
+
+
+def add_column_statement(table: str, column: str, definition: str) -> str:
+    """Return the DDL that adds one column to an existing table."""
+    return f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+
+
 def schema_statements(dialect: Dialect) -> tuple[str, ...]:
     """Return every DDL statement needed to create the schema."""
     return tuple(
