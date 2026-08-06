@@ -2146,8 +2146,14 @@ path = "mindroom.matrix.sync_cache_trust"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_recovery_escape",
 ]
 visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.matrix.sync_recovery_escape"
+depends_on = []
+visibility = ["mindroom.matrix.sync_cache_trust"]
 
 [[modules]]
 path = "mindroom.matrix.sync_certification"

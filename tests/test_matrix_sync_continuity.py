@@ -42,6 +42,7 @@ from mindroom.matrix.client_session import MatrixSyncStorage
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+from mindroom.matrix.sync_recovery_escape import _CLASSIC_SYNC_RECOVERY_STALL_LIMIT
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate
@@ -2275,10 +2276,41 @@ def test_classic_checkpoint_publication_skips_ack_for_clean_duplicate(tmp_path: 
         SyncCheckpoint("s_same", cache_generation=_CACHE_GENERATION),
     )
 
-    bot._publish_classic_sync_commit(bot.client, record)
+    bot._publish_classic_sync_commit(bot.client, record, acknowledge=True)
 
     bot.client.acknowledge_classic_sync.assert_not_called()
     assert bot._room_lifecycle._applied_continuity_revision == record.revision
+
+
+@pytest.mark.asyncio
+async def test_gap_skipping_checkpoint_rewinds_instead_of_acknowledging(tmp_path: Path) -> None:
+    """A checkpoint past an abandoned gap restarts nio rather than acknowledging it.
+
+    nio may still hold recovery state for the room the checkpoint moved past and
+    would refuse the acknowledgement, so the escape resets the client onto its
+    newly certified position instead.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.has_uncommitted_classic_sync_state = True
+    cache_result = SyncCacheWriteResult(
+        complete=True,
+        unrecovered_room_ids=frozenset({"!wedged:localhost"}),
+    )
+    for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT):
+        decision = bot._sync_cache_trust.plan_response(
+            next_batch="s_past_the_gap",
+            cache_result=cache_result,
+        )
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.reset_client_token is True
+
+    applied = await bot._apply_sync_response_decision(decision, cache_result=cache_result)
+
+    assert applied.state is SyncTrustState.CERTIFIED
+    bot.client.acknowledge_classic_sync.assert_not_called()
+    bot.client.reset_classic_sync_state.assert_awaited_once()
+    assert bot.client.next_batch == "s_past_the_gap"
 
 
 @pytest.mark.asyncio

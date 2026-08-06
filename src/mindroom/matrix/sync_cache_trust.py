@@ -17,6 +17,7 @@ from mindroom.matrix.sync_certification import (
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
+from mindroom.matrix.sync_recovery_escape import SkippedRecoveryGap, SyncRecoveryStallTracker
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -40,6 +41,11 @@ class SyncCacheTrust:
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _recovery_stalls: SyncRecoveryStallTracker = field(
+        default_factory=SyncRecoveryStallTracker,
+        init=False,
+        repr=False,
+    )
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
@@ -201,11 +207,40 @@ class SyncCacheTrust:
         cache_result: SyncCacheWriteResult,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
+        skipped = self._observe_recovery_stalls(cache_result)
         decision = certify_sync_response(
             next_batch=next_batch,
             cache_result=cache_result,
+            skipped_recovery_room_ids=frozenset(gap.room_id for gap in skipped),
         )
+        if skipped and decision.checkpoint_to_save is not None:
+            self._report_skipped_recovery_gaps(skipped, skipped_to_token=decision.checkpoint_to_save.token)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
+
+    def _observe_recovery_stalls(self, cache_result: SyncCacheWriteResult) -> tuple[SkippedRecoveryGap, ...]:
+        """Return rooms whose rebuild has stopped converging from this checkpoint."""
+        if not cache_result.recovery_conclusive:
+            return ()
+        return self._recovery_stalls.observe(
+            unrecovered_room_ids=cache_result.unrecovered_room_ids,
+            checkpoint_token=self.retry_token(),
+        )
+
+    def _report_skipped_recovery_gaps(
+        self,
+        skipped: tuple[SkippedRecoveryGap, ...],
+        *,
+        skipped_to_token: str,
+    ) -> None:
+        """Announce every gap this principal gave up on, loudly and by name."""
+        for gap in skipped:
+            self.logger.error(
+                "matrix_sync_recovery_gap_skipped_after_stalled_rebuild",
+                room_id=gap.room_id,
+                failed_attempts=gap.failed_attempts,
+                skipped_from_token=gap.skipped_from_token,
+                skipped_to_token=skipped_to_token,
+            )
 
     async def apply_response(
         self,
