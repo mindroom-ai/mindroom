@@ -31,6 +31,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.response_runner import ResponseRequest
 from mindroom.turn_policy import _DispatchPlan
 from tests.conftest import (
+    install_relation_lookup,
     request_envelope,
     unwrap_extracted_collaborator,
 )
@@ -67,6 +68,21 @@ def test_plain_reply_event_info_has_no_thread_routing_root() -> None:
     assert event_info.is_reply is True
     assert event_info.reply_to_event_id == "$target:localhost"
     assert event_info.relates_to_event_id is None
+
+
+def _room_get_event_by_id(*responses: nio.RoomGetEventResponse) -> AsyncMock:
+    """Return a point-lookup mock keyed by event ID rather than call order.
+
+    A positional `side_effect` list encodes how many times each hop is fetched,
+    which is an implementation detail of whoever is walking the chain. Keying by
+    ID lets the walk change shape without the mock handing back the wrong event.
+    """
+    by_id = {response.event.event_id: response for response in responses}
+
+    async def _lookup(_room_id: str, event_id: str) -> object:
+        return by_id.get(event_id, nio.RoomGetEventError("missing", status_code="M_NOT_FOUND"))
+
+    return AsyncMock(side_effect=_lookup)
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
@@ -315,7 +331,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 },
             ),
         )
-        bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
             _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
@@ -332,7 +347,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
@@ -358,40 +372,38 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        bot.client.room_get_event = AsyncMock(
-            side_effect=[
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "first bridge reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
-                        },
-                        "event_id": "$plain_reply_1:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567896,
-                        "room_id": room.room_id,
-                        "type": "m.room.message",
+        bot.client.room_get_event = _room_get_event_by_id(
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "first bridge reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
                     },
-                ),
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "thread reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {
-                                "rel_type": "m.thread",
-                                "event_id": "$thread_root:localhost",
-                            },
+                    "event_id": "$plain_reply_1:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567896,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_root:localhost",
                         },
-                        "event_id": "$thread_msg:localhost",
-                        "sender": "@mindroom_general:localhost",
-                        "origin_server_ts": 1234567895,
-                        "room_id": room.room_id,
-                        "type": "m.room.message",
                     },
-                ),
-            ],
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567895,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
         )
 
         expected_history = [
@@ -409,12 +421,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        with patch.object(
-            bot._conversation_cache,
-            "get_thread_id_for_event",
-            AsyncMock(return_value=None),
-        ) as mock_lookup:
-            context = await bot._conversation_resolver.extract_message_context(room, event)
+        relations = install_relation_lookup(bot)
+        context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -423,14 +431,19 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread_msg:localhost",
             "$plain_reply_1:localhost",
         ]
-        assert mock_lookup.await_args_list == [
-            call(room.room_id, "$plain_reply_1:localhost"),
-            call(room.room_id, "$thread_msg:localhost"),
+        assert relations.asked == [
+            (room.room_id, "$plain_reply_1:localhost"),
+            (room.room_id, "$thread_msg:localhost"),
         ]
-        assert bot.client.room_get_event.await_args_list == [
-            call(room.room_id, "$plain_reply_1:localhost"),
-            call(room.room_id, "$thread_msg:localhost"),
-        ]
+        # Which events were fetched, not how many times: the resolver used to
+        # ask a cached index and then the server, and now asks the journal and
+        # then the server, so a hop can cost a different number of point reads.
+        # The per-event cost is pinned against the real lookup in
+        # `tests/test_relation_lookup.py`.
+        assert {c.args[1] for c in bot.client.room_get_event.await_args_list} == {
+            "$plain_reply_1:localhost",
+            "$thread_msg:localhost",
+        }
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_promoted_plain_reply_stays_threaded(
@@ -481,19 +494,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            context = await bot._conversation_resolver.extract_message_context(room, event)
+        # The journal already admitted the promoted plain reply into the thread,
+        # which is what the cached index used to be told.
+        install_relation_lookup(bot, threads={"$plain_reply_1:localhost": "$thread_root:localhost"})
+        context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
+        assert {c.args[1] for c in bot.client.room_get_event.await_args_list} == {"$plain_reply_1:localhost"}
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
@@ -617,7 +626,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 },
             ),
         )
-        bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
             _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
@@ -635,7 +643,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_promoted_plain_reply_refetches_thread_when_lookup_cache_is_cold(
@@ -664,42 +671,39 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        bot.client.room_get_event = AsyncMock(
-            side_effect=[
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "Bridged plain reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                        },
-                        "event_id": "$plain-reply:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567895,
-                        "room_id": room.room_id,
-                        "type": "m.room.message",
+        bot.client.room_get_event = _room_get_event_by_id(
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Bridged plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
                     },
-                ),
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "Thread reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {
-                                "rel_type": "m.thread",
-                                "event_id": "$thread-root:localhost",
-                            },
+                    "event_id": "$plain-reply:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567895,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread-root:localhost",
                         },
-                        "event_id": "$thread-reply:localhost",
-                        "sender": "@mindroom_general:localhost",
-                        "origin_server_ts": 1234567894,
-                        "room_id": room.room_id,
-                        "type": "m.room.message",
                     },
-                ),
-            ],
+                    "event_id": "$thread-reply:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567894,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
         )
-        bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         expected_history = [
             _message(event_id="$thread-root:localhost", body="Root", thread_id="$thread-root:localhost"),
@@ -712,13 +716,24 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread-root:localhost",
             messages=expected_history,
         )
+        # A cold index is now an empty journal. Without this the journal would
+        # already know these events' thread from having admitted them, and the
+        # walk this test is about would never happen.
+        install_relation_lookup(bot)
         context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
         assert context.thread_history == expected_history
-        assert bot.client.room_get_event.await_args_list[0].args == (room.room_id, "$plain-reply:localhost")
-        assert bot.client.room_get_event.await_args_list[1].args == (room.room_id, "$thread-reply:localhost")
+        # Which events were fetched, not how many times: the resolver used to
+        # ask a cached index and then the server, and now asks the journal and
+        # then the server, so a hop can cost a different number of point reads.
+        # The per-event cost is pinned against the real lookup in
+        # `tests/test_relation_lookup.py`.
+        assert {c.args[1] for c in bot.client.room_get_event.await_args_list} == {
+            "$plain-reply:localhost",
+            "$thread-reply:localhost",
+        }
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
@@ -762,7 +777,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 },
             ),
         )
-        bot.event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
 
         root_only = [
             _message(event_id="$room_root:localhost", body="Room root", thread_id="$room_root:localhost"),
@@ -779,7 +793,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id is None
         assert context.thread_history == []
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
-        bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_degrades_when_thread_lookup_fails(
@@ -823,7 +836,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 },
             ),
         )
-        bot.event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("sqlite boom"))
+        install_relation_lookup(bot, failure=RuntimeError("sqlite boom"))
 
         root_only = [
             _message(
@@ -843,8 +856,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.is_thread is False
         assert context.thread_id is None
         assert context.thread_history == []
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
-        bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
+        # Twice: the edit's target, and then the thread lookup that the failed
+        # journal read degraded onto the homeserver rather than giving up.
+        assert bot.client.room_get_event.await_args_list == [
+            call(room.room_id, "$room_message:localhost"),
+            call(room.room_id, "$room_message:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_threaded_message_stays_threaded_transitively(
@@ -869,51 +886,49 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        bot.client.room_get_event = AsyncMock(
-            side_effect=[
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "Second plain reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
-                        },
-                        "event_id": "$plain2:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567894,
-                        "room_id": "!test:localhost",
-                        "type": "m.room.message",
+        bot.client.room_get_event = _room_get_event_by_id(
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Second plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
                     },
-                ),
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "First plain reply",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
-                        },
-                        "event_id": "$plain1:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567893,
-                        "room_id": "!test:localhost",
-                        "type": "m.room.message",
+                    "event_id": "$plain2:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567894,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "First plain reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
                     },
-                ),
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "Earlier threaded message",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
-                        },
-                        "event_id": "$thread_msg:localhost",
-                        "sender": "@mindroom_general:localhost",
-                        "origin_server_ts": 1234567892,
-                        "room_id": "!test:localhost",
-                        "type": "m.room.message",
+                    "event_id": "$plain1:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567893,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
+            nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "Earlier threaded message",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                     },
-                ),
-            ],
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567892,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            ),
         )
 
         expected_history = [
@@ -1184,15 +1199,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         empty_strict_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
 
+        relations = install_relation_lookup(bot)
         with (
             patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value=None),
-            ) as mock_lookup,
-            patch.object(
-                bot._conversation_cache,
-                "get_event",
+                bot.client,
+                "room_get_event",
                 AsyncMock(return_value=root_response),
             ) as mock_get_event,
             patch(
@@ -1219,12 +1230,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert mock_strict_read.await_count >= 1
         assert context.requires_model_history_refresh is False
         assert context.planning_thread_history == ()
-        mock_lookup.assert_has_awaits(
-            [
-                call(room.room_id, "$thread_root:localhost"),
-                call(room.room_id, "$thread_root:localhost"),
-            ],
-        )
+        assert relations.asked == [
+            (room.room_id, "$thread_root:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
         mock_get_event.assert_has_awaits(
             [
                 call(room.room_id, "$thread_root:localhost"),
@@ -1271,8 +1280,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.read_strict",
                 new=AsyncMock(side_effect=TimeoutError("dispatch read timed out")),
@@ -1317,8 +1325,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot.client, "room_get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
 
@@ -1353,10 +1360,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(
-                bot._conversation_cache,
-                "get_event",
+                bot.client,
+                "room_get_event",
                 AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
             ),
         ):
@@ -1393,10 +1399,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(
-                bot._conversation_cache,
-                "get_event",
+                bot.client,
+                "room_get_event",
                 AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
             ),
         ):
@@ -1535,8 +1540,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         bot.event_cache.get_recent_room_events = AsyncMock(return_value=[])
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),
         ):
             await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
@@ -1774,8 +1778,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
-            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot.client, "room_get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
             pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
             await resolver.coalescing_thread_id(room, event)

@@ -8,7 +8,6 @@ has a direct safety net.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -24,18 +23,22 @@ from mindroom.conversation_resolver import ConversationResolver, ConversationRes
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.logging_config import get_logger
-from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
+from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.relation_lookup import RelationLookup
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_matrix_client_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.matrix.relation_lookup import RelationLookup
 
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
@@ -112,10 +115,33 @@ def _empty_conversation_reader() -> ConversationReader:
     )
 
 
+@dataclass
+class _ClientWithoutEvents:
+    """A homeserver that has never heard of the event being asked about."""
+
+    async def room_get_event(self, room_id: str, event_id: str) -> nio.RoomGetEventError:
+        """Report the event as missing."""
+        del room_id, event_id
+        return nio.RoomGetEventError("not found", "M_NOT_FOUND")
+
+
+@dataclass
+class _ClientCountingLookups:
+    """A homeserver that records how many point lookups it was asked for."""
+
+    lookups: int = 0
+
+    async def room_get_event(self, room_id: str, event_id: str) -> nio.RoomGetEventError:
+        """Count one lookup and report the event as missing."""
+        del room_id, event_id
+        self.lookups += 1
+        return nio.RoomGetEventError("not found", "M_NOT_FOUND")
+
+
 def _resolver(
     config: Config,
     *,
-    conversation_cache: AsyncMock | None = None,
+    relations: RelationLookup | None = None,
     conversation_reader: ConversationReader | None = None,
 ) -> ConversationResolver:
     runtime_paths = runtime_paths_for(config)
@@ -127,7 +153,8 @@ def _resolver(
             runtime_paths=runtime_paths,
             agent_name="general",
             matrix_id=registry.current_id("general"),
-            conversation_cache=conversation_cache or make_conversation_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            relations=relations or make_relation_lookup(),
             conversation_reader=conversation_reader or _empty_conversation_reader(),
         ),
     )
@@ -170,8 +197,7 @@ def _room() -> nio.MatrixRoom:
 @pytest.mark.asyncio
 async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> None:
     """An m.thread relation is authoritative for thread identity and the delivery target."""
-    cache = make_conversation_cache_mock()
-    resolver = _resolver(config, conversation_cache=cache)
+    resolver = _resolver(config)
 
     result = await resolver.extract_dispatch_context(_room(), _threaded_event())
 
@@ -183,13 +209,9 @@ async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> N
 
 
 @pytest.mark.asyncio
-async def test_reply_chain_falls_back_to_cached_thread_membership(config: Config) -> None:
-    """A plain reply inherits the thread of its parent through the cached thread index."""
-    cache = make_conversation_cache_mock()
-    cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: _THREAD_ROOT if event_id == _PARENT else None,
-    )
-    resolver = _resolver(config, conversation_cache=cache)
+async def test_reply_chain_inherits_the_thread_the_journal_recorded(config: Config) -> None:
+    """A plain reply inherits the thread its parent was admitted into."""
+    resolver = _resolver(config, relations=make_relation_lookup(threads={_PARENT: _THREAD_ROOT}))
 
     result = await resolver.extract_dispatch_context(_room(), _reply_event())
 
@@ -234,9 +256,7 @@ async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> N
 @pytest.mark.asyncio
 async def test_reply_to_missing_parent_keeps_unproven_candidate(config: Config) -> None:
     """An unresolvable parent demotes to room level but keeps the candidate for replay safety."""
-    cache = make_conversation_cache_mock()
-    cache.get_event = AsyncMock(return_value=nio.RoomGetEventError("not found", "M_NOT_FOUND"))
-    resolver = _resolver(config, conversation_cache=cache)
+    resolver = _resolver(config, relations=make_relation_lookup(client=_ClientWithoutEvents()))
 
     result = await resolver.extract_dispatch_context(_room(), _reply_event())
 
@@ -256,15 +276,16 @@ async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
         Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
         test_runtime_paths(tmp_path),
     )
-    cache = make_conversation_cache_mock()
-    resolver = _resolver(config, conversation_cache=cache)
+    reader = _empty_conversation_reader()
+    resolver = _resolver(config, conversation_reader=reader)
 
     result = await resolver.extract_dispatch_context(_room(), _threaded_event())
 
     assert result.context.is_thread is False
     assert result.context.thread_id is None
     assert result.thread_context is None
-    cache.get_dispatch_thread_history.assert_not_awaited()
+    reader.read.assert_not_awaited()  # type: ignore[attr-defined]
+    reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -333,34 +354,27 @@ def test_build_message_target_room_mode_override_stays_room_level(config: Config
     assert target.session_id == _ROOM_ID
 
 
-@dataclass
-class _ScopeTracker:
-    entered: int = 0
-    exited: int = 0
-
-
 @pytest.mark.asyncio
-async def test_turn_thread_cache_scope_wraps_conversation_cache_scope(config: Config) -> None:
-    """The per-turn cache scope opens and closes the conversation cache turn scope."""
-    cache = make_conversation_cache_mock()
-    tracker = _ScopeTracker()
-
-    @asynccontextmanager
-    async def turn_scope() -> AsyncIterator[None]:
-        tracker.entered += 1
-        try:
-            yield
-        finally:
-            tracker.exited += 1
-
-    cache.turn_scope = turn_scope
-    resolver = _resolver(config, conversation_cache=cache)
+async def test_the_turn_scope_makes_one_turn_pay_for_one_lookup(config: Config) -> None:
+    """The per-turn scope is what stops one turn refetching the same event."""
+    client = _ClientCountingLookups()
+    resolver = _resolver(config, relations=make_relation_lookup(client=client))
 
     async with resolver.turn_thread_cache_scope():
-        assert tracker.entered == 1
-        assert tracker.exited == 0
+        await resolver.extract_dispatch_context(_room(), _reply_event())
+        await resolver.extract_dispatch_context(_room(), _reply_event())
+    scoped = client.lookups
 
-    assert tracker.exited == 1
+    client.lookups = 0
+    await resolver.extract_dispatch_context(_room(), _reply_event())
+    await resolver.extract_dispatch_context(_room(), _reply_event())
+    unscoped = client.lookups
+
+    # The exact counts are the resolver's business; that the scope reduces them
+    # is this seam's. What one turn costs per event is pinned against the real
+    # lookup in `tests/test_relation_lookup.py`.
+    assert scoped > 0
+    assert scoped < unscoped
 
 
 @pytest.mark.asyncio

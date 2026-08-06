@@ -6,9 +6,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import nio
-from nio.responses import RoomGetEventError
-
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
@@ -52,6 +49,7 @@ from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    import nio
     import structlog
 
     from mindroom.constants import RuntimePaths
@@ -59,6 +57,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
     from mindroom.matrix.identity import MatrixID
+    from mindroom.matrix.relation_lookup import RelationLookup
 
 
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
@@ -233,8 +232,12 @@ class ConversationResolverDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
+    # Not read here any more. It survives only because advisory outbound
+    # bookkeeping still reaches it through `resolver.deps`, and that goes with
+    # phase 8e.
     conversation_cache: MatrixConversationCache
     conversation_reader: ConversationReader
+    relations: RelationLookup
 
 
 @dataclass
@@ -610,7 +613,7 @@ class ConversationResolver:
         completeness, so it has to be written down at the call site.
         """
         return thread_messages_thread_membership_access(
-            lookup_thread_id=self.deps.conversation_cache.get_thread_id_for_event,
+            lookup_thread_id=self.deps.relations.thread_id,
             fetch_event_info=self._event_info_for_event_id,
             fetch_thread_messages=lambda room_id, thread_id: self._read_thread_messages(
                 room_id,
@@ -681,18 +684,7 @@ class ConversationResolver:
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
-        if not isinstance(target_event, nio.RoomGetEventResponse):
-            if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
-                return None
-            detail = (
-                target_event.message
-                if isinstance(target_event, RoomGetEventError) and isinstance(target_event.message, str)
-                else "unknown error"
-            )
-            msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
-            raise RuntimeError(msg)
-        return EventInfo.from_event(target_event.event.source)
+        return await self.deps.relations.event_info(room_id, event_id)
 
     async def _resolve_thread_context(
         self,
@@ -971,7 +963,7 @@ class ConversationResolver:
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
         """Initialize per-turn conversation lookup memoization."""
-        async with self.deps.conversation_cache.turn_scope():
+        async with self.deps.relations.turn_scope():
             yield
 
     async def dispatch_thread_snapshot(

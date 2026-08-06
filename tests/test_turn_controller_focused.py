@@ -77,6 +77,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_relation_lookup,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -378,6 +379,7 @@ def _build_harness(
             agent_name=agent_name,
             matrix_id=matrix_id,
             conversation_cache=conversation_cache,
+            relations=make_relation_lookup(),
             conversation_reader=_conversation_reader(thread_history),
         ),
     )

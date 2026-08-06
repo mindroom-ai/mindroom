@@ -53,6 +53,7 @@ from tests.conftest import (
     agent_response_should_respond,
     bind_runtime_paths,
     create_mock_room,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -601,6 +602,7 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
             agent_name="primary",
             matrix_id=route_ids["primary"],
             conversation_cache=MagicMock(),
+            relations=make_relation_lookup(),
             conversation_reader=_empty_conversation_reader(),
         ),
     )

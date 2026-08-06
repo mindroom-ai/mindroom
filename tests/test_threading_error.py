@@ -19,6 +19,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
     install_generate_response_mock,
+    install_relation_lookup,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -452,14 +453,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        install_relation_lookup(bot, threads={"$thread_msg:localhost": "$thread_root:localhost"})
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         bot.client.room_send.assert_called_once()
         content = bot.client.room_send.call_args.kwargs["content"]

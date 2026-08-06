@@ -44,6 +44,7 @@ from tests.bot_helpers import (
     dispatch_reaction_durably as _dispatch_reaction,
 )
 from tests.conftest import (
+    install_relation_lookup,
     make_matrix_client_mock,
     replace_reaction_dispatcher_deps,
     runtime_paths_for,
@@ -1866,11 +1867,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        get_thread_id_for_event = AsyncMock(
-            side_effect=lambda room_id, event_id: (
-                "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
-            ),
-        )
         bot.client.room_get_event = AsyncMock(
             return_value=nio.RoomGetEventResponse.from_dict(
                 {
@@ -1903,14 +1899,8 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with (
-            patch.object(
-                unwrap_extracted_collaborator(bot._conversation_cache),
-                "get_thread_id_for_event",
-                get_thread_id_for_event,
-            ),
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
-        ):
+        install_relation_lookup(bot, threads={"$thread-reply": "$thread-root"})
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == [("$plain-reply", "$thread-root")]

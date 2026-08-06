@@ -116,6 +116,7 @@ visibility = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix.relation_lookup",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
@@ -171,6 +172,18 @@ visibility = [
     "mindroom.bot",
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
+]
+
+[[modules]]
+path = "mindroom.matrix.relation_lookup"
+depends_on = [
+    "mindroom.event_journal",
+    "mindroom.logging_config",
+    "mindroom.matrix.event_info",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.conversation_resolver",
 ]
 
 [[modules]]
@@ -2898,6 +2911,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.matrix.relation_lookup",
     "mindroom.agents",
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",

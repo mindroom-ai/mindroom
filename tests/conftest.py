@@ -22,7 +22,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,7 +52,14 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
-from mindroom.event_journal import ConversationPage, DeliveryStage, OutboxDelivery, OutboxView, VisibleMessage
+from mindroom.event_journal import (
+    ConversationPage,
+    DeliveryStage,
+    OutboxDelivery,
+    OutboxView,
+    RelationView,
+    VisibleMessage,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -80,6 +87,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.media_fallback import reset_model_media_capability_cache
@@ -1107,6 +1115,80 @@ class FakeOutbox:
 def make_outbox_mock() -> OutboxView:
     """Return an outbox a delivery test can actually send through."""
     return cast("OutboxView", FakeOutbox())
+
+
+@dataclass
+class FakeRelationStore:
+    """The journal's answer about which events it admitted, and their threads."""
+
+    threads: dict[str, str | None] = field(default_factory=dict)
+    asked: list[tuple[str, str]] = field(default_factory=list)
+    failure: Exception | None = None
+
+    async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+        """Return whether one event was admitted, and the thread it belongs to."""
+        self.asked.append((room_id, event_id))
+        if self.failure is not None:
+            raise self.failure
+        if event_id not in self.threads:
+            return False, None
+        return True, self.threads[event_id]
+
+
+def install_relation_lookup(
+    bot: object,
+    *,
+    threads: dict[str, str | None] | None = None,
+    client: object | None = None,
+    failure: Exception | None = None,
+) -> FakeRelationStore:
+    """Point one bot's resolver at a relation lookup a test controls.
+
+    Returns the journal stand-in so a test can assert what was asked of it.
+    `RelationLookup` is frozen, so the whole collaborator is replaced rather
+    than patched.
+    """
+    store = FakeRelationStore(threads=dict(threads or {}), failure=failure)
+    # The bot's own client unless a test says otherwise, so mocks a test already
+    # placed on it keep answering and keep being observable.
+    resolved_client = SimpleNamespace(client=client if client is not None else bot.client)  # type: ignore[attr-defined]
+    lookup = RelationLookup(
+        store=cast("RelationView", store),
+        runtime=resolved_client,  # type: ignore[arg-type]
+    )
+    bot._relations = lookup  # type: ignore[attr-defined]
+    # Tests wrap collaborators in a proxy, and setting `deps` on the wrapper
+    # would leave the resolver that actually runs holding its old ones.
+    resolver = unwrap_extracted_collaborator(bot._conversation_resolver)  # type: ignore[attr-defined]
+    resolver.deps = replace(resolver.deps, relations=lookup)
+    return store
+
+
+def make_relation_lookup(
+    *,
+    threads: dict[str, str | None] | None = None,
+    client: object | None = None,
+) -> RelationLookup:
+    """Return a real relation lookup over an in-memory set of admitted events.
+
+    The real object rather than a mock, so a caller that starts relying on the
+    journal-before-homeserver order, or on the per-turn memo, is tested against
+    the behaviour it will actually get. Without an explicit ``client`` the
+    homeserver serves a plain text event for any ID, which is what the old
+    cache double did.
+    """
+    resolved_client = SimpleNamespace(client=client) if client is not None else _serving_client()
+    return RelationLookup(
+        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}))),
+        runtime=resolved_client,  # type: ignore[arg-type]
+    )
+
+
+def _serving_client() -> SimpleNamespace:
+    """Return a runtime whose homeserver answers any point lookup."""
+    client = MagicMock()
+    client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
+    return SimpleNamespace(client=client)
 
 
 def make_latest_thread_event_id_mock(projected: str | None = None) -> AsyncMock:

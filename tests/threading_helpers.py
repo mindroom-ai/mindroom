@@ -138,11 +138,20 @@ async def seed_thread_history(
         # -- on the expectation objects too, since callers pass the very list
         # they then assert against.
         message.timestamp = ordinal
+        # A thread root carries no `m.thread` relation of its own -- it becomes
+        # a root only when someone replies to it -- so the journal records it
+        # with no thread. Seeding it as a member of its own thread would make
+        # relation resolution promote a plain room message into a thread.
+        #
+        # Only the journal column. The projection's own root handling is a
+        # separate question, and page reads here still expect what they always
+        # got.
+        admitted_thread_id = None if message.event_id == thread_id else thread_id
         await store.admit(
             InboundEvent(
                 event_id=message.event_id,
                 room_id=room_id,
-                thread_id=thread_id,
+                thread_id=admitted_thread_id,
                 kind=EventKind.MESSAGE,
                 event_class=EventClass.ACTIONABLE,
                 sender=message.sender,

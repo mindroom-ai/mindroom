@@ -120,6 +120,7 @@ from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
+from .matrix.relation_lookup import RelationLookup
 from .matrix.room_member_joins import (
     RoomMemberJoin,
     emit_room_member_join_at_least_once,
@@ -516,6 +517,10 @@ class AgentBot:
         self._membership_fence = MembershipFence(
             store=self._journal_store.principal(self._journal_principal_id),
         )
+        self._relations = RelationLookup(
+            store=self._journal_store.principal(self._journal_principal_id),
+            runtime=self._runtime_view,
+        )
         self._conversation_reader = ConversationReader(
             store=self._journal_store.principal(self._journal_principal_id),
             hydrator=ConversationHydrator(
@@ -532,6 +537,7 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 conversation_cache=self._conversation_cache,
                 conversation_reader=self._conversation_reader,
+                relations=self._relations,
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(
