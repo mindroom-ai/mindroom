@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 _OUTBOX_COLUMNS = """
     turn_id, stage, room_id, thread_id, transaction_id,
-    payload_json, edits_event_id, acknowledged_event_id
+    payload_json, edits_event_id, acknowledged_event_id, created_at_ns
 """
 
 
@@ -127,16 +127,25 @@ def unacknowledged(
     principal_id: str,
     *,
     limit: int,
+    after: tuple[int, str, str] | None = None,
 ) -> tuple[OutboxDelivery, ...]:
-    """Return deliveries that may or may not have reached Matrix, oldest first."""
+    """Return deliveries that may or may not have reached Matrix, oldest first.
+
+    ``after`` resumes past a row already visited, in the same order the scan
+    uses. A failed delivery stays unacknowledged on purpose, so without a
+    cursor a page of failures is re-read forever and nothing behind it is ever
+    attempted.
+    """
+    cursor_clause = "" if after is None else " AND (created_at_ns, turn_id, stage) > (?, ?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM response_outbox
-        WHERE principal_id = ? AND acknowledged_event_id IS NULL
+        WHERE principal_id = ? AND acknowledged_event_id IS NULL{cursor_clause}
         ORDER BY created_at_ns, turn_id, stage
         LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, limit),
+        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+        (principal_id, *cursor_params, limit),
     )
     return tuple(_delivery(row) for row in rows)
 
@@ -173,4 +182,5 @@ def _delivery(row: Row) -> OutboxDelivery:
         payload=payload,
         edits_event_id=row["edits_event_id"],
         acknowledged_event_id=row["acknowledged_event_id"],
+        created_at_ns=int(row["created_at_ns"]),
     )

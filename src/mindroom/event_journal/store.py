@@ -343,10 +343,16 @@ class PrincipalStore:
         self,
         *,
         limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
+        after: tuple[int, str, str] | None = None,
     ) -> tuple[OutboxDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         return await self._backend.read(
-            lambda transaction: outbox.unacknowledged(transaction, self._principal_id, limit=limit),
+            lambda transaction: outbox.unacknowledged(
+                transaction,
+                self._principal_id,
+                limit=limit,
+                after=after,
+            ),
         )
 
 

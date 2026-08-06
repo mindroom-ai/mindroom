@@ -88,13 +88,17 @@ class ResponseDelivery:
         report success while leaving answers the user is waiting for unsent.
         """
         recovered = 0
-        failed: set[tuple[str, str]] = set()
+        # A failure leaves the row unacknowledged, so it stays in the query's
+        # window. Filtering it in memory is not enough: a whole page of
+        # failures would be re-read forever and everything behind it starved.
+        # The scan therefore advances past every row it has visited.
+        cursor: tuple[int, str, str] | None = None
         while True:
-            batch = await self.store.unacknowledged_deliveries()
-            remaining = [delivery for delivery in batch if (delivery.turn_id, delivery.stage.value) not in failed]
-            if not remaining:
+            batch = await self.store.unacknowledged_deliveries(after=cursor)
+            if not batch:
                 return recovered
-            for delivery in remaining:
+            cursor = (batch[-1].created_at_ns, batch[-1].turn_id, batch[-1].stage.value)
+            for delivery in batch:
                 try:
                     await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
                 except Exception:
@@ -104,10 +108,8 @@ class ResponseDelivery:
                         stage=delivery.stage.value,
                         room_id=delivery.room_id,
                     )
-                    # Acknowledgement is what removes a delivery from this
-                    # query, so a failure that is not remembered would be
-                    # retried forever instead of letting the rest through.
-                    failed.add((delivery.turn_id, delivery.stage.value))
+                    # Left unacknowledged deliberately: the next recovery pass
+                    # picks it up again, while this pass moves on to the rest.
                     continue
                 recovered += 1
 

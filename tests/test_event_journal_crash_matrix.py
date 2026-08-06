@@ -51,11 +51,17 @@ class FakeHomeserver:
     events: dict[str, str] = field(default_factory=dict)
     sends: int = 0
     fail_next_send: bool = False
+    # Fail every send until this many attempts have been made, so a test can
+    # exhaust a whole recovery page rather than one row.
+    fail_sends_until: int = 0
     lose_acknowledgement: bool = False
 
     async def send(self, delivery: OutboxDelivery) -> str:
         """Accept one delivery, collapsing a repeated transaction ID."""
         self.sends += 1
+        if self.sends <= self.fail_sends_until:
+            msg = "connection reset"
+            raise CrashError(msg)
         if self.fail_next_send:
             self.fail_next_send = False
             msg = "connection reset"
@@ -346,6 +352,32 @@ class TestRecoveryIsComplete:
         assert recovered == count
         assert runtime.homeserver.visible_messages == count
         assert await runtime.store.unacknowledged_deliveries() == ()
+
+    async def test_a_whole_failing_page_does_not_starve_what_is_behind_it(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A failure leaves its row in the very query recovery re-reads.
+
+        So filtering failures in memory is not enough: one full page of them
+        pins the window, and every delivery behind it is never attempted. The
+        page here fails entirely, and the row after it still has to be sent.
+        """
+        count = _UNACKNOWLEDGED_BATCH + 1
+        for index in range(count):
+            await runtime.store.enqueue_delivery(
+                turn_id=f"turn-{index:04d}",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": f"answer {index}"},
+            )
+        runtime.homeserver.fail_sends_until = _UNACKNOWLEDGED_BATCH
+
+        recovered = await runtime.delivery.recover()
+
+        assert recovered == 1
+        assert runtime.homeserver.visible_messages == 1
 
     async def test_one_failing_delivery_does_not_block_the_rest(
         self,

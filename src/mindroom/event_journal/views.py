@@ -185,7 +185,12 @@ class OutboxView(Protocol):
         """Record the Matrix event one claimed delivery produced."""
         ...
 
-    async def unacknowledged_deliveries(self, *, limit: int = ...) -> tuple[OutboxDelivery, ...]:
+    async def unacknowledged_deliveries(
+        self,
+        *,
+        limit: int = ...,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[OutboxDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         ...
 

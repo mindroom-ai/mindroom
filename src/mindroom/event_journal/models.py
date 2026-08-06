@@ -178,3 +178,6 @@ class OutboxDelivery:
     payload: Mapping[str, object]
     edits_event_id: str | None
     acknowledged_event_id: str | None
+    # The scan key recovery pages on. Without it a pass that fails a whole page
+    # re-reads the same page forever and never reaches what is behind it.
+    created_at_ns: int
