@@ -113,11 +113,16 @@ class FakeClient:
         """Yield stored relations, enforcing depth the way nio does."""
         del room_id, recurse
         self.relation_calls += 1
-        if minimum_recursion_depth is not None and (
-            self.reported_depth is None or self.reported_depth < minimum_recursion_depth
+        sources = self.relations.get(event_id, [])
+        # Mirrors nio: an empty page has no depth to report and nothing that
+        # could have been truncated, so it is never rejected.
+        if (
+            minimum_recursion_depth is not None
+            and sources
+            and (self.reported_depth is None or self.reported_depth < minimum_recursion_depth)
         ):
             raise nio.InsufficientRecursionDepthError(minimum_recursion_depth, self.reported_depth)
-        for source in self.relations.get(event_id, []):
+        for source in sources:
             yield parse(source)
 
     async def room_messages(
@@ -237,28 +242,58 @@ class TestThreadHydration:
 
         assert client.relation_calls == 1
 
-    async def test_an_insufficient_depth_fails_the_read(self, alice: PrincipalStore) -> None:
-        """No fallback: a shallow traversal silently loses part of the thread."""
+    async def test_a_server_that_ignores_recurse_fails_the_read(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """No fallback: such a server silently returns only direct children.
+
+        Omitting the depth is the only portable signal that ``recurse`` was not
+        honored, because the number itself means different things on different
+        servers.
+        """
         client = FakeClient(
             events={"$root": raw("$root", "root")},
-            relations={"$root": []},
-            reported_depth=1,
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            reported_depth=None,
         )
 
-        with pytest.raises(HydrationError, match="depth"):
+        with pytest.raises(HydrationError, match="recursion depth"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
-    async def test_an_unreported_depth_fails_the_read(self, alice: PrincipalStore) -> None:
+    async def test_a_shallow_reported_depth_is_accepted(self, alice: PrincipalStore) -> None:
+        """Verified against a live Tuwunel: a complete page can report 0.
+
+        Tuwunel reports the depth of the deepest event it returned, so a
+        relation tree that is genuinely one level deep reports one level. A
+        floor above zero would reject ordinary conversations.
+        """
+        client = FakeClient(
+            events={"$root": raw("$root", "root")},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            reported_depth=0,
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "reply"]
+
+    async def test_an_empty_relation_page_is_not_a_failure(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A message with no relations reports no depth, and that is fine."""
         client = FakeClient(
             events={"$root": raw("$root", "root")},
             relations={"$root": []},
             reported_depth=None,
         )
 
-        with pytest.raises(HydrationError, match="depth"):
-            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root"]
 
     async def test_a_failed_hydration_is_retried_not_cached(
         self,

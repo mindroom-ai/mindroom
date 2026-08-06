@@ -36,11 +36,20 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Both Tuwunel and the MindRoom Synapse fork cap recursive relation traversal
-# at three, and neither advertises the cap. A root, its reply, and that reply's
-# edit is three levels, so three is also the minimum a correct conversation
-# needs. The requirement is checked on every page rather than assumed.
-REQUIRED_RECURSION_DEPTH = 3
+# Requiring zero means "the server must tell us it recursed", and that is the
+# strongest portable requirement there is.
+#
+# The two servers MindRoom runs against report different things under the same
+# name. Synapse returns the constant 3 — the depth it is willing to traverse.
+# Tuwunel returns the depth of the deepest event it actually returned, so a
+# root with one reply and one edit of that reply reports 1, verified against a
+# live server. Any numeric floor above zero would therefore reject ordinary
+# complete pages on Tuwunel while proving nothing on Synapse.
+#
+# What is worth catching is a server that ignores `recurse` entirely and
+# silently returns only direct children: it omits the field, and a caller that
+# accepted that would quietly lose every edit hanging off a threaded reply.
+REQUIRED_RECURSION_DEPTH = 0
 
 _MESSAGES_PAGE_LIMIT = 100
 _MAX_MESSAGES_PAGES = 20
@@ -202,8 +211,9 @@ class ConversationHydrator:
                     events.append(projected)
         except nio.InsufficientRecursionDepthError as error:
             msg = (
-                f"Homeserver traverses relations to depth {error.reported!r}, "
-                f"but {error.required} is required to build a conversation"
+                f"Homeserver returned related events without reporting a recursion depth "
+                f"({error.reported!r}), so it did not honor the recursive request and the "
+                f"conversation would be missing indirectly related events"
             )
             raise HydrationError(msg) from error
         return tuple(events)

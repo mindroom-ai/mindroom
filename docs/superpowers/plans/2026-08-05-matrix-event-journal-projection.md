@@ -156,11 +156,9 @@ A thread is hydrated by fetching its root and traversing recursive event relatio
 
 Mindroom-nio must expose `recurse`, parse the returned `recursion_depth`, and support a required minimum depth.
 
-MindRoom requires a reported depth of at least three on every recursive page before installing any page's events.
+MindRoom requires only that a non-empty recursive page reports `recursion_depth` at all, because the number itself is not comparable between servers.
 
 The Matrix version advertised by `/versions` is not proof of recursion depth.
-
-Tuwunel and Synapse currently report depth three, but the real-server proof must verify behavior rather than trust that observation.
 
 A room-scoped conversation may perform one serialized initial `/messages` traversal.
 
@@ -208,7 +206,17 @@ That 24-hour floor means a current-edit refetch normally returns the true previo
 
 The purge exists to reclaim storage from MindRoom's own streaming edit churn, which this plan already treats as transient, so it is not a reason to retain edit history locally.
 
-Tuwunel and the MindRoom Synapse fork both cap recursive relation traversal at depth three in source, and neither advertises that cap, which is why the required depth must be read from `recursion_depth` on each page.
+Tuwunel and the MindRoom Synapse fork both cap recursive relation traversal at depth three in source, and neither advertises that cap.
+
+The two servers do not report `recursion_depth` with the same meaning, which a live run against Tuwunel established and which invalidates any numeric floor.
+
+Synapse returns the constant three, describing the depth it is willing to traverse, while Tuwunel returns the depth of the deepest event it actually returned, so a root with one threaded reply and one edit of that reply reports one.
+
+A required depth above zero would therefore reject ordinary complete pages on Tuwunel while proving nothing on Synapse, so the portable requirement is only that a non-empty page reports the field at all.
+
+That requirement still catches the failure worth catching, which is a server that ignores `recurse` and silently returns direct children only, because such a server omits the field.
+
+An empty relation page reports no depth on Tuwunel and must not be treated as a failure, since it has nothing that could have been truncated.
 
 Both homeservers deduplicate a repeated transaction ID per sending device rather than per access token, and MindRoom persists its device across restarts, so deterministic outbox retries survive a crash but would not survive re-login with a new device.
 
@@ -265,7 +273,7 @@ It must prove:
 
 - The realistic restart case where bounded `/messages` exhaustion returns an empty chunk and omits `end` still recovers and replies once.
 - Cold history populates context and never starts a turn.
-- A root, reply, edit, and redaction relation tree reports and supplies the required recursive depth.
+- A root, reply, edit, and redaction relation tree reports `recursion_depth` and supplies every indirectly related event.
 - Redacting the latest edit reveals the prior unredacted edit when the server still retains it and reveals the original body after superseded edits have been purged.
 - Edit-heavy streaming leaves one latest logical message without durable intermediate bodies.
 - Deterministic retry after server acceptance creates one Matrix event.
