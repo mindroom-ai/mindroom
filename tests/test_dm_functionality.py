@@ -11,10 +11,10 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (

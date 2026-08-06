@@ -20,7 +20,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision

@@ -1863,7 +1863,7 @@ depends_on = [
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_cache_state",
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
 ]
 
 [[modules]]
@@ -1964,7 +1964,7 @@ path = "mindroom.matrix.cache.thread_reads"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.thread_diagnostics",
 ]
 
@@ -1993,7 +1993,7 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.matrix.cache.thread_history_result"
+path = "mindroom.matrix.thread_history_result"
 depends_on = []
 
 [[modules]]
@@ -2106,7 +2106,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.entity_resolution",
     "mindroom.matrix.cache",
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
@@ -2584,7 +2584,7 @@ path = "mindroom.matrix.client_thread_history"
 depends_on = [
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_cache_gap",
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.membership_fence",
@@ -2848,7 +2848,7 @@ depends_on = [
     "mindroom.dispatch_thread_context",
     "mindroom.entity_resolution",
     "mindroom.hooks",
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
@@ -3531,6 +3531,7 @@ depends_on = [
     "mindroom.attachments",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
+    "mindroom.matrix.thread_history_result",
     "mindroom.timing",
 ]
 visibility = [
@@ -3650,6 +3651,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
@@ -3684,7 +3686,7 @@ visibility = [
 [[modules]]
 path = "mindroom.dispatch_thread_context"
 depends_on = [
-    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_history_result",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.message_target",
 ]

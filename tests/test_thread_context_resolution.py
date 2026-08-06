@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
@@ -22,6 +21,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadResolution,
     resolve_related_event_thread_id_best_effort,

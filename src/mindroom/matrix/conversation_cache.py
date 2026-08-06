@@ -28,7 +28,6 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    ThreadHistoryResult,
     normalize_nio_event_for_cache,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
@@ -53,6 +52,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
 from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,

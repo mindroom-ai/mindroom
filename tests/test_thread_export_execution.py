@@ -11,13 +11,13 @@ import nio
 import pytest
 import yaml
 
-from mindroom.matrix.cache import thread_history_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.thread_export import ThreadExportTarget
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (

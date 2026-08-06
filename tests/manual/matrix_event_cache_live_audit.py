@@ -37,9 +37,10 @@ import certifi
 import httpx
 import nio
 
-from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
+from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot
+from mindroom.matrix.thread_history_result import ThreadHistoryResult  # noqa: TC001
 
 _TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 _TINY_WEBM_BASE64 = (

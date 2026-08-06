@@ -20,10 +20,7 @@ import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache import (
-    ThreadHistoryResult,
-    thread_cache_rejection_reason,
-)
+from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -46,6 +43,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from mindroom.thread_utils import get_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_visible_message, test_runtime_paths

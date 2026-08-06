@@ -27,13 +27,13 @@ from mindroom.dispatch_thread_context import (
     planning_history_unavailable_for,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,

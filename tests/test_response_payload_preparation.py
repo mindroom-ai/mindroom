@@ -22,7 +22,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation

@@ -23,7 +23,6 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -34,6 +33,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
 )
+from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
@@ -58,8 +58,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
     from typing import Any
 
-    from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:

@@ -57,7 +57,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
@@ -87,8 +87,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.dispatch_handoff import PreparedTextEvent
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability

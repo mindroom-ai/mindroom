@@ -21,7 +21,7 @@ from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
 
 if TYPE_CHECKING:

@@ -30,12 +30,12 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id, parse_session_id

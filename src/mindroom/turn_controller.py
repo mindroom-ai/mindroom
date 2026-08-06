@@ -73,7 +73,6 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
@@ -87,6 +86,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_payload_preparation import (

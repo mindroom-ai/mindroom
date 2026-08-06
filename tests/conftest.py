@@ -72,13 +72,13 @@ from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher

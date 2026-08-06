@@ -20,7 +20,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps

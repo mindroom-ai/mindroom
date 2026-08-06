@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.cache import ThreadHistoryResult
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):

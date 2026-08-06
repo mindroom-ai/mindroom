@@ -32,8 +32,8 @@ from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 from mindroom.voice_handler import prepare_voice_message

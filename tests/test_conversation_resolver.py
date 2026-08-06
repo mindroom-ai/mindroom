@@ -22,12 +22,12 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
+from mindroom.matrix.thread_history_result import thread_history_result
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,

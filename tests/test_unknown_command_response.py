@@ -11,7 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,

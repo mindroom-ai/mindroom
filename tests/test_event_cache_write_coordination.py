@@ -19,13 +19,14 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
+from mindroom.matrix.cache import thread_writes
 from mindroom.matrix.cache.outbound_thread_reservations import OutboundThreadReservations
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.matrix.thread_history_result import ThreadHistoryResult  # noqa: TC001
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _conversation_runtime,

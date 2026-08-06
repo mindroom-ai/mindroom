@@ -50,8 +50,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.cache import ThreadHistoryResult
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import _response_outcome_label
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer

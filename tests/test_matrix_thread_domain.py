@@ -14,7 +14,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import resolve_canonical_tool_thread_target
 from mindroom.matrix import thread_bookkeeping
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpact,
@@ -28,6 +27,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadResolution,

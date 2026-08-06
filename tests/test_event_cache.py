@@ -31,7 +31,6 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import (
@@ -44,6 +43,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
 )
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     agent_response_should_respond,
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
-    from mindroom.matrix.cache import ThreadHistoryResult
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 def _conversation_cache_for_thread_reads(

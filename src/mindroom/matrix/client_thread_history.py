@@ -53,12 +53,10 @@ from nio.responses import RoomThreadsResponse
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadCacheGap,
-    ThreadHistoryResult,
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
     thread_cache_gap_reason,
     thread_cache_rejection_reason,
-    thread_history_result,
 )
 from mindroom.matrix.cache.thread_cache_gap import (
     mark_room_threads_gap_fail_closed,
@@ -90,6 +88,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,

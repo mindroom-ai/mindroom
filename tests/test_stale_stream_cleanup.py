@@ -24,7 +24,6 @@ from mindroom.constants import (
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
-from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.identity import managed_account_key
@@ -45,6 +44,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     _StaleStreamRecoveryResult as StaleStreamRecoveryResult,
 )
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY

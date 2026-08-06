@@ -43,9 +43,9 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome

@@ -16,8 +16,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import _MultiAgentOrchestrator
