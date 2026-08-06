@@ -23,7 +23,7 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventKind, SemanticConsumer
+from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, StoredApprovalCard
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
@@ -68,21 +68,33 @@ class _FakeApprovalCards:
 
     def __init__(self) -> None:
         self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.resolutions: dict[str, dict[str, Any]] = {}
         self.lookups: list[tuple[str, str]] = []
 
     async def remember_approval_card(self, *, room_id: str, card_event_id: str, card: Mapping[str, Any]) -> None:
         self.cards.setdefault(card_event_id, (room_id, dict(card)))
 
+    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
+        if card_event_id in self.cards:
+            self.resolutions.setdefault(card_event_id, dict(resolution))
+
     async def forget_approval_card(self, *, card_event_id: str) -> None:
         self.cards.pop(card_event_id, None)
+        self.resolutions.pop(card_event_id, None)
 
-    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None:
         self.lookups.append((room_id, card_event_id))
         entry = self.cards.get(card_event_id)
-        return None if entry is None or entry[0] != room_id else entry[1]
+        if entry is None or entry[0] != room_id:
+            return None
+        return StoredApprovalCard(card=entry[1], resolution=self.resolutions.get(card_event_id))
 
-    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[dict[str, Any], ...]:
-        return tuple(card for card_room, card in self.cards.values() if card_room == room_id)[:limit]
+    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[StoredApprovalCard, ...]:
+        return tuple(
+            StoredApprovalCard(card=card, resolution=self.resolutions.get(card["event_id"]))
+            for card_room, card in self.cards.values()
+            if card_room == room_id
+        )[:limit]
 
 
 def _detached_approval_card() -> dict[str, Any]:

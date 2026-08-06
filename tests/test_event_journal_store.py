@@ -1038,14 +1038,56 @@ class TestApprovalCards:
         }
 
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
-        """A remembered card reads back whole."""
+        """A remembered card reads back whole, and unanswered."""
         await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
 
-        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") == self.card("$card")
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.card == self.card("$card")
+        assert stored.resolution is None
+
+    async def test_a_recorded_decision_reads_back_with_the_card(self, alice: PrincipalStore) -> None:
+        """A card keeps its decision until the room is known to show it.
+
+        The decision is written before the Matrix edit is attempted, so this is
+        what a crash between the two leaves behind, and it is what tells the
+        next startup to redeliver rather than expire.
+        """
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.resolution == {"status": "approved"}
+        assert stored.card == self.card("$card")
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [entry.resolution for entry in scanned] == [{"status": "approved"}]
+
+    async def test_a_second_decision_does_not_replace_the_first(self, alice: PrincipalStore) -> None:
+        """The committed decision is the one that stands.
+
+        A retry after a failed edit resends what was decided; letting a later
+        write through would let a second click overwrite a decision whose tool
+        already ran.
+        """
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "denied"})
+
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.resolution == {"status": "approved"}
+
+    async def test_a_decision_on_an_unknown_card_records_nothing(self, alice: PrincipalStore) -> None:
+        """Resolving a card that was never stored must not create one."""
+        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
 
     async def test_a_forgotten_card_is_gone(self, alice: PrincipalStore) -> None:
         """Resolving a card is what removes it, so presence means pending."""
         await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
         await alice.forget_approval_card(card_event_id="$card")
 
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
@@ -1069,7 +1111,7 @@ class TestApprovalCards:
 
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
         assert stored is not None
-        assert stored["sender"] == ALICE
+        assert stored.card["sender"] == ALICE
 
     async def test_a_rooms_cards_come_back_oldest_first(self, alice: PrincipalStore) -> None:
         """Startup expiry walks the room's cards in the order they were sent."""
@@ -1081,7 +1123,7 @@ class TestApprovalCards:
             )
 
         stored = await alice.pending_approval_cards(room_id=ROOM)
-        assert [card["event_id"] for card in stored] == ["$card-0", "$card-1", "$card-2"]
+        assert [entry.card["event_id"] for entry in stored] == ["$card-0", "$card-1", "$card-2"]
 
     async def test_the_scan_honors_its_limit(self, alice: PrincipalStore) -> None:
         """A bounded scan is what tells the caller its own view was truncated."""

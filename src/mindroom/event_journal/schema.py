@@ -152,6 +152,10 @@ _TABLES = (
         room_id TEXT NOT NULL,
         card_event_id TEXT NOT NULL,
         card_json TEXT NOT NULL,
+        -- The decision this bot committed to before it tried to show it. A
+        -- card is answered the moment this is set, whether or not the edit
+        -- carrying it reached the room.
+        resolution_json TEXT,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
@@ -196,7 +200,7 @@ _INDEXES = (
 # these columns existed keeps working right up until the first statement that
 # names it, and then fails at runtime rather than at startup. Every column added
 # to an existing table has to be listed here as well as in the table above.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("approval_cards", "resolution_json", "TEXT"),)
 
 
 def added_columns() -> tuple[tuple[str, str, str], ...]:

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from . import approvals, journal, outbox, reads
+from .approvals import StoredApprovalCard  # noqa: TC001 - part of this module's runtime return types
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -377,6 +378,17 @@ class PrincipalStore:
             ),
         )
 
+    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
+        """Record the decision one card carries, before it is shown."""
+        await self._backend.write(
+            lambda transaction: approvals.resolve(
+                transaction,
+                self._principal_id,
+                card_event_id=card_event_id,
+                resolution=resolution,
+            ),
+        )
+
     async def forget_approval_card(self, *, card_event_id: str) -> None:
         """Drop one approval card that has reached a terminal state."""
         await self._backend.write(
@@ -392,8 +404,8 @@ class PrincipalStore:
         *,
         room_id: str,
         card_event_id: str,
-    ) -> dict[str, Any] | None:
-        """Return one card still awaiting a decision under this membership."""
+    ) -> StoredApprovalCard | None:
+        """Return one card this bot still owes work on under this membership."""
         return await self._backend.read(
             lambda transaction: approvals.pending_card(
                 transaction,
@@ -408,8 +420,8 @@ class PrincipalStore:
         *,
         room_id: str,
         limit: int = _DEFAULT_ROOM_CARD_LIMIT,
-    ) -> tuple[dict[str, Any], ...]:
-        """Return one room's cards still awaiting a decision, oldest first."""
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return one room's unfinished cards, oldest first."""
         return await self._backend.read(
             lambda transaction: approvals.pending_cards(
                 transaction,

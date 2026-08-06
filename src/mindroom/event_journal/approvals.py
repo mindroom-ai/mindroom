@@ -8,9 +8,14 @@ journal clears a settled event's payload on purpose, so by the time anyone
 asked the card would be gone.
 
 The table is deliberately narrow, and the narrowness is the point -- this is
-the alternative to keeping a general event cache alive for one consumer. A
-row's existence *is* the pending state: resolving a card deletes its row, so
-there is no status column that can disagree with what Matrix shows.
+the alternative to keeping a general event cache alive for one consumer.
+
+A card is answered the moment the bot commits to a decision, which is before
+it can know whether the edit carrying that decision reached the room. The
+decision is therefore written down first and the row is dropped only once the
+room shows it. A row that survives with a decision on it is not a card anyone
+still owes an answer to; it is an answer that may not have been delivered, and
+resending the identical edit is what settles it.
 
 Only cards this bot authored are ever stored, because only those are ever
 recovered; a card another sender wrote is not this bot's to resolve.
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -28,6 +34,42 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+
+
+@dataclass(frozen=True, slots=True)
+class StoredApprovalCard:
+    """One recorded card, and the decision it is already carrying if any."""
+
+    card: dict[str, Any]
+    # None while the card is genuinely unanswered. Once set, the decision was
+    # made and only its delivery is in doubt.
+    resolution: dict[str, Any] | None
+
+
+def resolve(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    card_event_id: str,
+    resolution: Mapping[str, Any],
+) -> None:
+    """Record the decision this bot is about to show, before it shows it.
+
+    Written before the Matrix edit, so a crash between the two leaves an
+    answered card rather than a pending one. Startup then redelivers this exact
+    decision instead of expiring a card the room may already show as approved.
+    """
+    transaction.execute(
+        """
+        UPDATE approval_cards SET resolution_json = ?
+        WHERE principal_id = ? AND card_event_id = ? AND resolution_json IS NULL
+        """,
+        (
+            json.dumps(dict(resolution), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            principal_id,
+            card_event_id,
+        ),
+    )
 
 
 def remember(
@@ -80,11 +122,11 @@ def pending_card(
     *,
     room_id: str,
     card_event_id: str,
-) -> dict[str, Any] | None:
-    """Return one still-pending card, or nothing if it is resolved or fenced."""
+) -> StoredApprovalCard | None:
+    """Return one card this bot still owes work on, or nothing if it is fenced."""
     row = transaction.fetchone(
         """
-        SELECT cards.card_json AS card_json
+        SELECT cards.card_json AS card_json, cards.resolution_json AS resolution_json
         FROM approval_cards AS cards
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = cards.principal_id
@@ -105,11 +147,11 @@ def pending_cards(
     *,
     room_id: str,
     limit: int = _DEFAULT_ROOM_CARD_LIMIT,
-) -> tuple[dict[str, Any], ...]:
-    """Return one room's still-pending cards, oldest first."""
+) -> tuple[StoredApprovalCard, ...]:
+    """Return one room's unfinished cards, oldest first."""
     rows = transaction.fetchall(
         """
-        SELECT cards.card_json AS card_json
+        SELECT cards.card_json AS card_json, cards.resolution_json AS resolution_json
         FROM approval_cards AS cards
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = cards.principal_id
@@ -128,9 +170,14 @@ def pending_cards(
     return tuple(_card(row) for row in rows)
 
 
-def _card(row: Row) -> dict[str, Any]:
+def _card(row: Row) -> StoredApprovalCard:
     card = json.loads(row["card_json"])
     if not isinstance(card, dict):
         msg = "Stored approval card is not an object"
         raise TypeError(msg)
-    return card
+    stored_resolution = row["resolution_json"]
+    resolution = None if stored_resolution is None else json.loads(stored_resolution)
+    if resolution is not None and not isinstance(resolution, dict):
+        msg = "Stored approval resolution is not an object"
+        raise TypeError(msg)
+    return StoredApprovalCard(card=card, resolution=resolution)

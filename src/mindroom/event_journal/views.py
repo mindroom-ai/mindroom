@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from .approvals import StoredApprovalCard
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -228,8 +229,12 @@ class ApprovalView(Protocol):
         """Record one sent approval card as awaiting a decision."""
         ...
 
+    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
+        """Record the decision one card carries, before it is shown."""
+        ...
+
     async def forget_approval_card(self, *, card_event_id: str) -> None:
-        """Drop one approval card that has reached a terminal state."""
+        """Drop one approval card whose decision the room now shows."""
         ...
 
     async def pending_approval_card(
@@ -237,8 +242,8 @@ class ApprovalView(Protocol):
         *,
         room_id: str,
         card_event_id: str,
-    ) -> dict[str, Any] | None:
-        """Return one card still awaiting a decision under this membership."""
+    ) -> StoredApprovalCard | None:
+        """Return one card this bot still owes work on under this membership."""
         ...
 
     async def pending_approval_cards(
@@ -246,8 +251,8 @@ class ApprovalView(Protocol):
         *,
         room_id: str,
         limit: int = ...,
-    ) -> tuple[dict[str, Any], ...]:
-        """Return one room's cards still awaiting a decision, oldest first."""
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return one room's unfinished cards, oldest first."""
         ...
 
 

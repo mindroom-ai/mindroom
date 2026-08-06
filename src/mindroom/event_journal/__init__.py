@@ -7,6 +7,7 @@ Three facts live here, each with exactly one owner:
 - what MindRoom intends to send and whether it landed (the outbox).
 """
 
+from .approvals import StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .models import (
     AdmissionResult,
@@ -60,6 +61,7 @@ __all__ = [
     "ReplayView",
     "SemanticConsumer",
     "SettlementOutcome",
+    "StoredApprovalCard",
     "VisibleMessage",
     "decode_thread_id",
     "delivery_transaction_id",

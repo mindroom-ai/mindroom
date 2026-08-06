@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.event_journal import StoredApprovalCard
 from mindroom.logging_config import get_logger
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -60,15 +61,17 @@ if TYPE_CHECKING:
 
 
 class FakeApprovalCards:
-    """The cards a bot still owes a decision on, as the durable store keeps them.
+    """The cards a bot still owes work on, as the durable store keeps them.
 
-    A row's presence is the pending state, so resolving a card removes it. The
-    store only ever holds cards this bot authored, which is why nothing here
-    can model a foreign edit: one cannot reach it.
+    A decision is written before it is shown and the row is dropped once the
+    room shows it, so a row carrying a resolution is an answer whose delivery
+    is in doubt. The store only ever holds cards this bot authored, which is
+    why nothing here can model a foreign edit: one cannot reach it.
     """
 
     def __init__(self) -> None:
         self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.resolutions: dict[str, dict[str, Any]] = {}
 
     async def remember_approval_card(
         self,
@@ -79,15 +82,26 @@ class FakeApprovalCards:
     ) -> None:
         self.cards.setdefault(card_event_id, (room_id, dict(card)))
 
+    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
+        if card_event_id in self.cards:
+            self.resolutions.setdefault(card_event_id, dict(resolution))
+
     async def forget_approval_card(self, *, card_event_id: str) -> None:
         self.cards.pop(card_event_id, None)
+        self.resolutions.pop(card_event_id, None)
 
-    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None:
         entry = self.cards.get(card_event_id)
-        return None if entry is None or entry[0] != room_id else entry[1]
+        if entry is None or entry[0] != room_id:
+            return None
+        return StoredApprovalCard(card=entry[1], resolution=self.resolutions.get(card_event_id))
 
-    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[dict[str, Any], ...]:
-        return tuple(card for card_room, card in self.cards.values() if card_room == room_id)[:limit]
+    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[StoredApprovalCard, ...]:
+        return tuple(
+            StoredApprovalCard(card=card, resolution=self.resolutions.get(card["event_id"]))
+            for card_room, card in self.cards.values()
+            if card_room == room_id
+        )[:limit]
 
     async def store_card(self, card_event_id: str, room_id: str, card: dict[str, Any]) -> None:
         """Seed one card as if a previous process had sent it."""
@@ -2113,8 +2127,9 @@ async def test_a_sent_card_survives_the_process_that_sent_it(tmp_path: Path) -> 
 
     stored = await cards.pending_approval_card(room_id="!room:localhost", card_event_id=pending.card_event_id)
     assert stored is not None
-    assert stored["content"]["approval_id"] == pending.approval_id
-    assert stored["sender"] == "@mindroom_router:localhost"
+    assert stored.resolution is None
+    assert stored.card["content"]["approval_id"] == pending.approval_id
+    assert stored.card["sender"] == "@mindroom_router:localhost"
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -2809,6 +2824,99 @@ async def test_discard_pending_on_startup_skips_cross_router_cached_cards(
 
     assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_redelivers_a_decision_instead_of_expiring_it(tmp_path: Path) -> None:
+    """A card whose decision was recorded is answered, even if the edit was lost.
+
+    The decision is written before the edit is attempted, so a crash between
+    the two leaves the row behind. Expiring it would overwrite an approval the
+    room may already show -- and whose tool may already have run -- with
+    "expired". The recorded decision is redelivered instead.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_card("$approval", "!room:localhost", _approval_card())
+    await cards.resolve_approval_card(
+        card_event_id="$approval",
+        resolution={"status": "approved", "resolution_reason": "Looks fine."},
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+    assert editor.await_args.args[2]["status"] == "approved"
+    assert editor.await_args.args[2]["resolution_reason"] == "Looks fine."
+    assert cards.cards == {}
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_an_already_decided_card_does_not_re_resolve_it(tmp_path: Path) -> None:
+    """A recorded decision closes the card to further answers.
+
+    Its live waiter is gone with the process that made the decision, so the
+    click arrives at the recovery path. Treating it as a fresh resolution would
+    replace a decision whose tool may already have run.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_card("$approval", "!room:localhost", _approval_card())
+    await cards.resolve_approval_card(card_event_id="$approval", resolution={"status": "approved"})
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="Changed my mind.",
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_decision_is_recorded_before_the_edit_is_attempted(tmp_path: Path) -> None:
+    """Ordering is the whole point: recorded first, shown second.
+
+    If the edit were attempted first, a crash in between would leave a card
+    that looks unanswered, and the next startup would expire a decision the
+    room already shows.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_card("$approval", "!room:localhost", _approval_card())
+    recorded_when_edited: list[dict[str, Any] | None] = []
+
+    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        recorded_when_edited.append(cards.resolutions.get("$approval"))
+        return True
+
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert len(recorded_when_edited) == 1
+    assert recorded_when_edited[0] is not None, "the edit went out before the decision was durable"
+    assert recorded_when_edited[0]["status"] == "expired"
 
 
 @pytest.mark.asyncio

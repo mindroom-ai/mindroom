@@ -1526,19 +1526,25 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_delivery_recovery_retries_after_a_later_sync_when_the_first_pass_failed(
+async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
     tmp_path: Path,
 ) -> None:
-    """Owed answers must not wait for a restart when the first pass could not send.
+    """Owed answers must not wait for a restart, whatever left them owed.
 
     The first sync response can arrive while a room is still unrecovered, and
-    nio refuses ordinary sends into one. Treating "first sync observed" as
-    "recovery finished" would leave that room's answer unsent for the life of
-    the process.
+    nio refuses ordinary sends into one. A pass can also raise before it
+    reports anything, and a live send can be refused long after the first
+    sync. Each of those leaves a row unacknowledged, and a flag armed by only
+    some of them loses the answers the others produced.
     """
     bot = _sliding_response_bot(tmp_path)
     bot._first_sync_done = False
-    outcomes = [RecoveryOutcome(recovered=0, failed=1), RecoveryOutcome(recovered=1, failed=0)]
+    outcomes = [
+        RuntimeError("the first pass never reported"),
+        RecoveryOutcome(recovered=0, failed=1),
+        RecoveryOutcome(recovered=1, failed=0),
+        RecoveryOutcome(recovered=0, failed=0),
+    ]
     recover = AsyncMock(side_effect=outcomes)
 
     with (
@@ -1548,16 +1554,16 @@ async def test_delivery_recovery_retries_after_a_later_sync_when_the_first_pass_
         patch.object(bot, "_maybe_start_startup_thread_prewarm"),
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
+        # A pass that raises must not be the last one.
         await bot._run_sync_response_side_effects(first_sync_response=True)
-        assert bot._delivery_recovery_owed is True
-
+        # A pass that reported a failure must not be the last one either.
         await bot._run_sync_response_side_effects(first_sync_response=False)
-        assert bot._delivery_recovery_owed is False
-
-        # Nothing is owed now, so an ordinary sync response costs no pass.
+        await bot._run_sync_response_side_effects(first_sync_response=False)
+        # And a delivery refused after every earlier pass completed is still
+        # found, because the outbox is asked rather than a flag.
         await bot._run_sync_response_side_effects(first_sync_response=False)
 
-    assert recover.await_count == 2
+    assert recover.await_count == len(outcomes)
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:

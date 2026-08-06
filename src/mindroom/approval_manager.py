@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalView, StoredApprovalCard
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -355,20 +355,31 @@ class _ApprovalManager:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
     async def discard_pending_on_startup(self) -> int:
-        """Expire cached, router-authored approval cards after startup."""
+        """Settle every router-authored card this bot restarted holding.
+
+        A card whose decision was already recorded is redelivered rather than
+        expired: the previous process committed to it, its tool may already
+        have run, and the room may already show it. Only a card nobody ever
+        answered is expired, because its requester is gone with the process
+        that asked.
+        """
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
 
         discarded = 0
         for room_id in self._configured_approval_room_ids():
-            for card_event in await self._recoverable_room_cards(room_id):
+            for stored in await self._recoverable_room_cards(room_id):
                 pending = self._trusted_pending_from_card_event(
-                    card_event,
+                    stored.card,
                     room_id=room_id,
                     transport_sender=transport_sender,
                 )
                 if pending is None:
+                    continue
+                if stored.resolution is not None:
+                    if await self._redeliver_recorded_resolution(pending, stored.resolution):
+                        discarded += 1
                     continue
                 result = await self._discard_matrix_only_card(
                     pending=pending,
@@ -378,6 +389,26 @@ class _ApprovalManager:
                 if result.resolved:
                     discarded += 1
         return discarded
+
+    async def _redeliver_recorded_resolution(
+        self,
+        pending: PendingApproval,
+        resolution: dict[str, Any],
+    ) -> bool:
+        """Show a decision a previous process committed to but may not have shown.
+
+        Editing the card to the same terminal content it may already carry is
+        a no-op in the room, so this converges whether or not the first attempt
+        landed.
+        """
+        if not self._claim_matrix_cleanup(pending.card_event_id):
+            return False
+        with self._claimed_resolution(pending.card_event_id):
+            delivered = await self._deliver_resolution(pending, resolution)
+            if delivered:
+                with self._live_lock:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
+            return delivered
 
     async def handle_card_response(
         self,
@@ -816,18 +847,27 @@ class _ApprovalManager:
     ) -> bool:
         if self._edit_event is None:
             return False
+        resolution = self._resolved_event_content(
+            pending,
+            status=status,
+            reason=reason,
+            resolved_by=resolved_by,
+            resolved_at=_utcnow(),
+        )
+        # Written before the edit is attempted. A crash in between then leaves
+        # a card that is answered but perhaps not shown, which startup can
+        # redeliver; recording it afterwards would leave one that looks
+        # unanswered, and startup would expire a decision the room already
+        # shows -- possibly an approval whose tool has already run.
+        await self._record_resolution(pending.card_event_id, resolution)
+        return await self._deliver_resolution(pending, resolution)
+
+    async def _deliver_resolution(self, pending: PendingApproval, resolution: dict[str, Any]) -> bool:
+        """Show one already-recorded decision, dropping the card once it lands."""
+        if self._edit_event is None:
+            return False
         try:
-            delivered = await self._edit_event(
-                pending.room_id,
-                pending.card_event_id,
-                self._resolved_event_content(
-                    pending,
-                    status=status,
-                    reason=reason,
-                    resolved_by=resolved_by,
-                    resolved_at=_utcnow(),
-                ),
-            )
+            delivered = await self._edit_event(pending.room_id, pending.card_event_id, resolution)
         except Exception:
             logger.warning(
                 "Failed to edit approval Matrix event",
@@ -839,10 +879,22 @@ class _ApprovalManager:
             return False
         # Dropped only once the room shows the decision. An edit that never
         # landed leaves a card the user can still click, and the row is the
-        # only thing that lets the next startup expire it.
+        # only thing that brings the next startup back to it.
         if delivered:
             await self._forget_card(pending.card_event_id)
         return delivered
+
+    async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> None:
+        if self._cards is None:
+            return
+        try:
+            await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
+        except Exception:
+            logger.warning(
+                "Failed to record an approval decision before showing it",
+                event_id=card_event_id,
+                exc_info=True,
+            )
 
     def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
         """Return the live waiter's own view of one card.
@@ -868,14 +920,17 @@ class _ApprovalManager:
     ) -> PendingApproval | None:
         if self._cards is None:
             return None
-        card_event = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
-        if card_event is None:
+        stored = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        # A recorded decision means this card is answered; only its delivery is
+        # in doubt. Treating a click on it as a fresh resolution would overwrite
+        # a decision whose tool may already have run.
+        if stored is None or stored.resolution is not None:
             return None
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return None
         return self._trusted_pending_from_card_event(
-            card_event,
+            stored.card,
             room_id=room_id,
             transport_sender=transport_sender,
             expected_card_event_id=card_event_id,
@@ -940,7 +995,7 @@ class _ApprovalManager:
                 exc_info=True,
             )
 
-    async def _recoverable_room_cards(self, room_id: str) -> tuple[dict[str, Any], ...]:
+    async def _recoverable_room_cards(self, room_id: str) -> tuple[StoredApprovalCard, ...]:
         if self._cards is None:
             return ()
         cards = await self._cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_DISCARD_SCAN_LIMIT)
