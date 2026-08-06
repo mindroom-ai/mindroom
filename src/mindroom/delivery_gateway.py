@@ -38,7 +38,9 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.response_delivery import DeliveryStage, ResponseDelivery
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
     StreamingResponse,
+    TerminalEdit,
     build_cancelled_response_update,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -321,6 +323,10 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
+    # The turn this stream answers, when it has one. Its terminal edit is the
+    # delivery that makes the answer visible, so it becomes durable; every
+    # earlier edit stays transport.
+    delivery_turn_id: str | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
 
@@ -1197,7 +1203,57 @@ class DeliveryGateway:
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
+            terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
         )
+
+    def _durable_terminal_edit(self, turn_id: str | None, target: MessageTarget) -> TerminalEdit | None:
+        """Return a sender that records a stream's terminal edit before making it.
+
+        Nothing extra is sent. The edit the stream was going to make anyway is
+        enqueued first and acknowledged after, so an unacknowledged row means
+        exactly "the terminal edit never landed" -- which is the condition
+        startup recovery should act on, and the only one.
+        """
+        if turn_id is None:
+            return None
+
+        async def terminal_edit(
+            client: nio.AsyncClient,
+            room_id: str,
+            event_id: str,
+            content: dict[str, Any],
+            display_text: str,
+            *,
+            retry_sync_recovery: bool = False,
+        ) -> DeliveredMatrixEvent | None:
+            del client, room_id
+            if display_text == PROGRESS_PLACEHOLDER:
+                # A stream that ends still reading "Thinking..." has not
+                # answered. Recording that as the turn's final delivery would
+                # settle it with a placeholder, and `deliver_final` -- which
+                # delivers the answer in exactly this case -- would then find
+                # its own delivery already acknowledged and send nothing.
+                return await edit_message_result(
+                    self._client(),
+                    target.room_id,
+                    event_id,
+                    content,
+                    display_text,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
+            return await self._edit_content(
+                EditTextRequest(
+                    target=target,
+                    event_id=event_id,
+                    new_text=display_text,
+                    retry_sync_recovery=retry_sync_recovery,
+                    delivery_turn_id=turn_id,
+                ),
+                target.room_id,
+                content,
+            )
+
+        return terminal_edit
 
     async def _finalize_visible_replacement_edit(
         self,

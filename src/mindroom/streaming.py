@@ -48,12 +48,13 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
@@ -73,6 +74,7 @@ __all__ = [
     "StreamInputChunk",
     "StreamingDeliveryError",
     "StreamingResponse",
+    "TerminalEdit",
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
@@ -418,6 +420,9 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     )
 
 
+type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
+
+
 @dataclass
 class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
@@ -453,6 +458,12 @@ class StreamingResponse:
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    # How the terminal edit reaches Matrix, when the caller wants it durable.
+    # A streamed answer becomes visible through edits, so the last one is the
+    # delivery whose loss leaves a user reading a half-finished reply. The
+    # caller supplies a sender that records the edit before attempting it;
+    # every earlier edit is transport and goes out directly.
+    terminal_edit: TerminalEdit | None = None
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
@@ -881,10 +892,12 @@ class StreamingResponse:
         if prepared_delivery is None:
             return True
 
+        durable_terminal = is_final and stream_status == STREAM_STATUS_COMPLETED
         return await self._send_prepared_delivery(
             client,
             prepared_delivery=prepared_delivery,
             is_final=is_final,
+            durable_terminal=durable_terminal,
             boundary_refresh=boundary_refresh,
             capture_completions=capture_completions,
             retry_on_failure=retry_on_failure and is_final,
@@ -897,6 +910,7 @@ class StreamingResponse:
         *,
         prepared_delivery: _PreparedStreamingDelivery,
         is_final: bool,
+        durable_terminal: bool = False,
         boundary_refresh: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
@@ -922,6 +936,7 @@ class StreamingResponse:
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
                 retry_sync_recovery=not is_final or retry_on_failure,
+                is_final=durable_terminal,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -1124,10 +1139,12 @@ class StreamingResponse:
         content: dict[str, Any],
         display_text: str,
         retry_sync_recovery: bool,
+        is_final: bool = False,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        delivered = await edit_message_result(
+        edit = self.terminal_edit if is_final and self.terminal_edit is not None else edit_message_result
+        delivered = await edit(
             client,
             self.room_id,
             self.event_id,
@@ -1149,8 +1166,15 @@ class StreamingResponse:
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
         retry_sync_recovery: bool = False,
+        is_final: bool = False,
     ) -> bool:
-        """Send a new event or edit the existing one."""
+        """Send a new event or edit the existing one.
+
+        ``is_final`` here means "this edit carries the turn's answer", which is
+        narrower than "this is the last edit". A cancelled or failed stream
+        also ends with a terminal edit, and that edit is a notice rather than
+        an answer, so it must not claim the turn's durable delivery.
+        """
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         for attempt in range(1, total_attempts + 1):
             try:
@@ -1170,6 +1194,7 @@ class StreamingResponse:
                         content=content,
                         display_text=display_text,
                         retry_sync_recovery=retry_sync_recovery,
+                        is_final=is_final,
                     ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
@@ -1812,6 +1837,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
+    terminal_edit: TerminalEdit | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -1830,6 +1856,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         conversation_cache=conversation_cache,
         visible_event_id_callback=visible_event_id_callback,
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
+        terminal_edit=terminal_edit,
     )
 
     # Ensure the first chunk triggers an initial send immediately

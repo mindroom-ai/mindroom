@@ -4553,3 +4553,64 @@ class TestStreamingConfig:
         # interval_ramp_seconds=0 should be valid (disables ramp)
         sc = StreamingConfig(interval_ramp_seconds=0)
         assert sc.interval_ramp_seconds == 0
+
+
+class TestTerminalEditDurability:
+    """Only the edit that carries a streamed answer claims the turn's delivery."""
+
+    @staticmethod
+    def _streaming(tmp_path: Path, terminal_edit: object) -> StreamingResponse:
+        """Return one stream already showing a message, with a durable sender."""
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$root"),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            terminal_edit=terminal_edit,  # type: ignore[arg-type]
+        )
+        streaming.event_id = "$visible"
+        streaming.accumulated_text = "the answer"
+        return streaming
+
+    @pytest.mark.asyncio
+    async def test_a_completed_stream_edits_through_the_durable_sender(self, tmp_path: Path) -> None:
+        """The last edit of a finished stream is what made the answer visible.
+
+        Nothing else delivers it, so if this edit is not recorded the answer
+        has no durable existence and a crash loses it silently.
+        """
+        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "the answer"})
+        terminal = AsyncMock(return_value=delivered)
+        streaming = self._streaming(tmp_path, terminal)
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
+            await streaming._send_or_edit_message(
+                AsyncMock(),
+                is_final=True,
+                stream_status=STREAM_STATUS_COMPLETED,
+            )
+
+        terminal.assert_awaited(), "a completed stream's terminal edit bypassed the durable sender"
+        direct.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_stream_edits_directly(self, tmp_path: Path) -> None:
+        """A cancelled stream ends with a notice, not an answer.
+
+        Recording it as the turn's final delivery would settle the turn with
+        "stopped", and the caller that delivers the real terminal state would
+        find its own delivery already acknowledged.
+        """
+        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "stopped"})
+        terminal = AsyncMock(return_value=delivered)
+        streaming = self._streaming(tmp_path, terminal)
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
+            await streaming._send_or_edit_message(
+                AsyncMock(),
+                is_final=True,
+                stream_status=STREAM_STATUS_CANCELLED,
+            )
+
+        terminal.assert_not_awaited()
+        direct.assert_awaited()

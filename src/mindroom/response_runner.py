@@ -2013,6 +2013,7 @@ class ResponseRunner:
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
+                                delivery_turn_id=request.response_envelope.source_event_id,
                             ),
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
@@ -2532,6 +2533,7 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        delivery_turn_id=request.response_envelope.source_event_id,
                     ),
                 )
                 if request.pipeline_timing is not None:

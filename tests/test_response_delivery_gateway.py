@@ -26,6 +26,7 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
+from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
     bind_runtime_paths,
@@ -332,3 +333,64 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert edit.await_count == 1, "a rerun turn edited the answer in a second time"
         assert first.event_id == second.event_id == "$placeholder"
+
+    async def test_a_placeholder_terminal_edit_does_not_settle_the_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stream that ends still showing "Thinking..." has not answered.
+
+        Its terminal edit carries the placeholder, and `deliver_final` is what
+        delivers the real answer afterwards -- against the same turn. If the
+        placeholder edit claimed that turn's final delivery, `deliver_final`
+        would find its own delivery already acknowledged, send nothing, and
+        leave the placeholder in the room for good.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "x"})
+        edit = AsyncMock(return_value=edited)
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.edit_message_result", edit):
+            # The stream ends on the placeholder, so its terminal edit is not
+            # this turn's answer and must not claim the turn's final delivery.
+            await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"body": PROGRESS_PLACEHOLDER}, PROGRESS_PLACEHOLDER)
+            assert outbox.rows == {}, "a placeholder edit claimed the turn's final delivery"
+
+            outcome = await gateway.deliver_final(
+                replace(self._final_request("the answer"), existing_event_id="$placeholder"),
+            )
+
+        assert outcome.event_id == "$placeholder"
+        assert edit.await_count == 2, "the answer was not delivered after a placeholder-only stream"
+        assert list(outbox.rows) == [("$cause", "final")]
+
+    async def test_a_real_terminal_edit_does_settle_the_turn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The mirror: a stream that produced an answer records it.
+
+        Without this, gating everything out would pass the test above while
+        leaving streamed answers exactly as undurable as before.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        edited = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "streamed"})
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)):
+            await terminal(AsyncMock(), _ROOM_ID, "$streamed", {"body": "streamed"}, "streamed")
+
+        assert list(outbox.rows) == [("$cause", "final")]
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
