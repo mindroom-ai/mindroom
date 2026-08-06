@@ -179,7 +179,11 @@ def seed_outbound(
     *,
     membership_epoch: int,
 ) -> None:
-    """Record a message this bot just sent, before its echo comes back.
+    """Record what this bot just sent, before its echo comes back.
+
+    An edit takes the ordinary edit path, because there is nothing provisional
+    about which logical message it revises — only about when. The echo of that
+    same revision reinstalls it with the server's timestamp.
 
     Waiting for the echo is free for a turn a room event triggered, because
     the timeline orders this message before the user's next one. It is not
@@ -192,6 +196,16 @@ def seed_outbound(
     event ID and nothing else; the timestamp here is this machine's clock, and
     ordering is the server's to decide. The echo replaces it.
     """
+    replaces = replacement_target(event.content)
+    if replaces is not None:
+        _project_edit(
+            transaction,
+            principal_id,
+            event,
+            target_event_id=replaces,
+            membership_epoch=membership_epoch,
+        )
+        return
     transaction.execute(
         """
         INSERT INTO visible_messages (
@@ -345,7 +359,14 @@ def _project_edit(
         return
     if current["sender"] != event.sender:
         return
-    if not _is_newer(
+    # An event that is already the installed revision is this bot's own seeded
+    # edit coming back from the server. It is not a competitor to compare
+    # against; it is the authoritative account of the revision already shown,
+    # and its timestamp replaces the local guess. Comparing would reject it
+    # whenever this machine's clock runs ahead, and every later edit would
+    # then lose to a revision stamped in the future.
+    is_own_echo = current["revision_event_id"] == event.event_id
+    if not is_own_echo and not _is_newer(
         (event.origin_server_ts, event.event_id),
         (int(current["revision_ts"]), current["revision_event_id"]),
     ):

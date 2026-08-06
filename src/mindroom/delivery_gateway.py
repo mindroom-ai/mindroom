@@ -577,6 +577,11 @@ class DeliveryGateway:
                 delivered.event_id,
                 delivered.content_sent,
             )
+            await self.deps.outbound_projection.record_sent(
+                room_id=target.room_id,
+                event_id=delivered.event_id,
+                content=delivered.content_sent,
+            )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(

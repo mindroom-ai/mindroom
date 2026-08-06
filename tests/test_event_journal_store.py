@@ -653,6 +653,37 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    async def test_a_streamed_edit_is_visible_before_its_echo(self, alice: PrincipalStore) -> None:
+        """A streamed answer reaches its final text by editing, not by sending."""
+        _, original = message("$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await alice.seed_outbound_message(original)
+        _, revision = message("$edit", sender=BOB, ts=2_000, content=edit("$mine", "complete"))
+
+        await alice.seed_outbound_message(revision)
+
+        assert await bodies(alice) == ["complete"]
+
+    async def test_the_echo_of_a_seeded_edit_replaces_its_guessed_time(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Otherwise a fast clock freezes the answer at whatever it said first.
+
+        The seeded revision carries a local timestamp. If the echo of that same
+        revision were compared against it rather than trusted, the comparison
+        would reject the authoritative time, leave a future one installed, and
+        every genuine later edit would lose to it.
+        """
+        _, original = message("$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await alice.seed_outbound_message(original)
+        _, revision = message("$edit", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(revision)
+
+        await admit(alice, "$edit", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,

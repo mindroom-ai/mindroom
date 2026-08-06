@@ -17,7 +17,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, SendTextRequest
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, EditTextRequest, SendTextRequest
 from mindroom.matrix.outbound_projection import OutboundProjection
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -151,3 +151,35 @@ async def test_a_threaded_answer_lands_in_its_own_thread(
     unthreaded = await alice.read_conversation(room_id=_ROOM_ID, thread_id=None, limit=10)
     assert [m.logical_event_id for m in threaded.messages] == ["$sent"]
     assert unthreaded.messages == ()
+
+
+async def test_a_streamed_answer_reads_as_its_final_text(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """Streaming reaches the final answer by editing, so the edit must seed too.
+
+    Without this a turn that reads straight after a streamed answer sees the
+    answer's first delivery -- often a placeholder -- rather than what the
+    room actually shows.
+    """
+    gateway = _gateway(tmp_path, OutboundProjection(store=alice, sender=_AGENT_USER_ID))
+    sent = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "partial"})
+    edited = SimpleNamespace(
+        event_id="$edit",
+        content_sent={
+            "msgtype": "m.text",
+            "body": "* complete",
+            "m.new_content": {"msgtype": "m.text", "body": "complete"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$sent"},
+        },
+    )
+    target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
+
+    with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)):
+        await gateway.send_text(SendTextRequest(target=target, response_text="partial"))
+    with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)):
+        await gateway.edit_text(EditTextRequest(target=target, event_id="$sent", new_text="complete"))
+
+    page = await alice.read_conversation(room_id=_ROOM_ID, thread_id=None, limit=10)
+    assert [(m.logical_event_id, m.content["body"]) for m in page.messages] == [("$sent", "complete")]
