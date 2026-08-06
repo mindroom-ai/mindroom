@@ -82,7 +82,7 @@ class ExternalTriggerRuntime:
     """Runtime objects needed to deliver accepted external triggers."""
 
     client: object
-    conversation_cache: object
+    conversation_reader: object
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
 

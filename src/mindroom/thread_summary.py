@@ -712,6 +712,7 @@ async def _deliver_generated_summary(
     message_count: int,
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     *,
     trusted_sender_ids: Collection[str],
 ) -> None:
@@ -754,7 +755,7 @@ async def _deliver_generated_summary(
             normalized_summary,
             message_count,
             model_name,
-            conversation_cache,
+            conversation_reader,
             initial_enrichment_complete=initial_enrichment_complete,
         )
     except Exception:
@@ -768,7 +769,7 @@ async def send_thread_summary_event(
     summary: str,
     message_count: int,
     model_name: str,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     *,
     initial_enrichment_complete: bool | None = None,
     pinned: bool | None = None,
@@ -806,10 +807,9 @@ async def send_thread_summary_event(
     latest_thread_event_id = known_latest_thread_event_id
     if latest_thread_event_id is None:
         try:
-            latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-                room_id,
-                thread_id,
-                caller_label="thread_summary_send",
+            latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+                room_id=room_id,
+                thread_id=thread_id,
             )
         except Exception as exc:
             logger.warning(
@@ -842,11 +842,6 @@ async def send_thread_summary_event(
     )
     delivered = await send_message_result(client, room_id, content)
     if delivered is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
         logger.info(
             "Sent thread summary",
             room_id=room_id,
@@ -866,7 +861,6 @@ async def set_manual_thread_summary(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
     conversation_reader: ConversationReader,
     pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
@@ -914,7 +908,7 @@ async def set_manual_thread_summary(
                 normalized_summary,
                 message_count,
                 "manual",
-                conversation_cache,
+                conversation_reader,
                 pinned=pin,
             )
         except Exception as exc:
@@ -1074,6 +1068,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             message_count,
             model_name,
             conversation_cache,
+            conversation_reader,
             trusted_sender_ids=trusted_sender_ids,
         )
         # Record after the delivery attempt so cancellation cannot leave a

@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -69,11 +69,10 @@ def _test_runtime_paths(tmp_path: Path) -> object:
     )
 
 
-def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
-    access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-    access.notify_outbound_message = Mock()
-    return access
+def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncMock:
+    reader = AsyncMock()
+    reader.latest_thread_event_id = AsyncMock(return_value=latest_thread_event_id)
+    return reader
 
 
 def _matrix_room(
@@ -95,7 +94,6 @@ def _scheduling_runtime(
     config: object | None = None,
     runtime_paths: object | None = None,
     room: object | None = None,
-    conversation_cache: AsyncMock | None = None,
     conversation_reader: ConversationReader | None = None,
     matrix_admin: object | None = None,
 ) -> SchedulingRuntime:
@@ -104,7 +102,6 @@ def _scheduling_runtime(
         config=config or MagicMock(),
         runtime_paths=runtime_paths or _runtime_paths(),
         room=room or MagicMock(),
-        conversation_cache=conversation_cache or _conversation_cache(),
         conversation_reader=conversation_reader or make_conversation_reader_mock(),
         matrix_admin=matrix_admin,
     )
@@ -337,7 +334,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start:
         restored = await restore_scheduled_tasks(
@@ -345,7 +342,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -403,7 +400,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -411,7 +408,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -424,7 +421,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             client,
             config,
             _runtime_paths(),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert drained == 2
@@ -483,7 +480,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -491,7 +488,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -507,7 +504,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             client,
             config,
             _runtime_paths(),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert drained == 1
@@ -545,7 +542,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -553,7 +550,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -591,7 +588,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -599,7 +596,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -656,7 +653,7 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -664,7 +661,7 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -1012,7 +1009,7 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_not_awaited()
@@ -1056,7 +1053,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
             initial_workflow,
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1115,7 +1112,7 @@ async def test_run_once_task_retries_transient_state_read_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     sleep.assert_awaited_once()
@@ -1156,7 +1153,7 @@ async def test_run_once_task_marks_completed_after_success() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1202,7 +1199,7 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1257,7 +1254,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1304,7 +1301,7 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1342,7 +1339,7 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_not_awaited()
@@ -2669,7 +2666,6 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
         config=config,
         runtime_paths=runtime_paths,
         room=room,
-        conversation_cache=_conversation_cache(),
         conversation_reader=conversation_reader,
     )
     parse_result = ScheduledWorkflow(

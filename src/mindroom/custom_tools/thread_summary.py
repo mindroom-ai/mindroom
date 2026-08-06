@@ -53,8 +53,6 @@ class ThreadSummaryTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
-        conversation_cache = context.conversation_cache
-
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:
             return self._payload(
@@ -111,7 +109,6 @@ class ThreadSummaryTools(Toolkit):
                 summary,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
-                conversation_cache=conversation_cache,
                 conversation_reader=context.conversation_reader,
                 pin=pin,
             )

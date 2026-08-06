@@ -114,7 +114,6 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
         matrix_admin=matrix_admin,
     )
@@ -197,7 +196,6 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
     )
     assert mock_edit.await_count == 2

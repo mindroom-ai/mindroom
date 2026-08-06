@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
 
 logger = get_logger(__name__)
@@ -177,7 +176,6 @@ class SchedulingRuntime:
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
-    conversation_cache: ConversationCacheProtocol
     conversation_reader: ConversationReader
     matrix_admin: HookMatrixAdmin | None = None
 
@@ -413,7 +411,7 @@ def _start_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
@@ -433,7 +431,7 @@ def _start_scheduled_task(
                 workflow,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin,
             ),
         )
@@ -446,7 +444,7 @@ def _start_scheduled_task(
                 _running_tasks,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin,
             ),
         )
@@ -474,7 +472,7 @@ async def drain_deferred_overdue_tasks(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> int:
     """Start queued overdue one-time tasks after Matrix sync is ready."""
     drained_count = 0
@@ -491,7 +489,7 @@ async def drain_deferred_overdue_tasks(
                 queued_task.workflow,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 matrix_admin=matrix_admin,
             ):
                 drained_count += 1
@@ -793,7 +791,7 @@ async def _save_pending_scheduled_task(
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
@@ -814,7 +812,7 @@ async def _save_pending_scheduled_task(
         workflow,
         config,
         runtime_paths,
-        conversation_cache,
+        conversation_reader,
         matrix_admin,
     )
 
@@ -975,7 +973,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     running_tasks: dict[str, asyncio.Task],
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Run a recurring task based on cron schedule."""
@@ -1062,7 +1060,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     workflow,
                     config,
                     runtime_paths,
-                    conversation_cache,
+                    conversation_reader,
                     task_id,
                     matrix_admin,
                 )
@@ -1083,7 +1081,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    conversation_cache,
+                    conversation_reader,
                 )
     finally:
         _cleanup_task_if_current(task_id, running_tasks)
@@ -1095,7 +1093,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     workflow: ScheduledWorkflow,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Run a one-time scheduled task."""
@@ -1156,7 +1154,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 latest_workflow,
                 config,
                 runtime_paths,
-                conversation_cache,
+                conversation_reader,
                 task_id,
                 matrix_admin,
             )
@@ -1195,7 +1193,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     workflow,
                     current_target,
                     error_message,
-                    conversation_cache,
+                    conversation_reader,
                 )
             if latest_pending_task is not None:
                 try:
@@ -1363,7 +1361,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     config = runtime.config
     runtime_paths = runtime.runtime_paths
     room = runtime.room
-    conversation_cache = runtime.conversation_cache
     conversation_reader = runtime.conversation_reader
 
     if mentioned_agents is None:
@@ -1494,7 +1491,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 workflow=workflow_result,
                 config=config,
                 runtime_paths=runtime_paths,
-                conversation_cache=conversation_cache,
+                conversation_reader=conversation_reader,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
             )
@@ -1711,7 +1708,7 @@ async def restore_scheduled_tasks(  # noqa: C901
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
@@ -1775,7 +1772,7 @@ async def restore_scheduled_tasks(  # noqa: C901
             workflow,
             config,
             runtime_paths,
-            conversation_cache,
+            conversation_reader,
             matrix_admin=matrix_admin,
         ):
             restored_count += 1

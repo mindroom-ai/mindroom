@@ -54,11 +54,10 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     return bound_config
 
 
-def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
-    access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-    access.notify_outbound_message = Mock()
-    return access
+def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncMock:
+    reader = AsyncMock()
+    reader.latest_thread_event_id = AsyncMock(return_value=latest_thread_event_id)
+    return reader
 
 
 def _event_cache() -> AsyncMock:
@@ -619,9 +618,9 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
+        conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
         with patch(
-            "mindroom.hooks.sender._send_message_result",
+            "mindroom.scheduling_executor.send_matrix_message",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event123",
@@ -634,13 +633,12 @@ class TestExecuteScheduledWorkflow:
                 workflow,
                 config,
                 runtime_paths_for(config),
-                conversation_cache,
+                conversation_reader,
             )
 
-        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-            "!room:server",
-            "$thread123",
-            caller_label="scheduled_workflow_message",
+        conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+            room_id="!room:server",
+            thread_id="$thread123",
         )
         mock_send.assert_awaited_once()
         call_args = mock_send.await_args
@@ -683,7 +681,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.hooks.sender._send_message_result",
+            "mindroom.scheduling_executor.send_matrix_message",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event456",
@@ -691,16 +689,16 @@ class TestExecuteScheduledWorkflow:
                 ),
             ),
         ) as mock_send:
-            conversation_cache = _conversation_cache()
+            conversation_reader = _conversation_reader()
             await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
                 runtime_paths_for(config),
-                conversation_cache,
+                conversation_reader,
             )
 
-        conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+        conversation_reader.latest_thread_event_id.assert_not_awaited()
         mock_send.assert_awaited_once()
         content = mock_send.await_args.args[2]
         assert "⏰ [Automated Task]" not in content["body"]
@@ -722,10 +720,10 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
         target = MessageTarget.resolve("!room:server", "$thread123", None)
-        conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
+        conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
 
         with patch(
-            "mindroom.hooks.sender._send_message_result",
+            "mindroom.scheduling_executor.send_matrix_message",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$notice123",
@@ -738,7 +736,7 @@ class TestExecuteScheduledWorkflow:
                 workflow,
                 target,
                 "Workflow failed",
-                conversation_cache,
+                conversation_reader,
             )
 
         mock_send.assert_awaited_once()
@@ -746,10 +744,9 @@ class TestExecuteScheduledWorkflow:
         content = mock_send.await_args.args[2]
         assert content["body"] == "Workflow failed"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest456"
-        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-            "!room:server",
-            "$thread123",
-            caller_label="scheduled_workflow_failure",
+        conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+            room_id="!room:server",
+            thread_id="$thread123",
         )
 
     async def test_execute_workflow_simple_reminder(self) -> None:
@@ -765,7 +762,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.hooks.sender._send_message_result",
+            "mindroom.scheduling_executor.send_matrix_message",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event789",
@@ -778,7 +775,7 @@ class TestExecuteScheduledWorkflow:
                 workflow,
                 config,
                 runtime_paths_for(config),
-                _conversation_cache(latest_thread_event_id="$thread123"),
+                _conversation_reader(latest_thread_event_id="$thread123"),
             )
             mock_send.assert_awaited_once()
 
@@ -810,14 +807,14 @@ class TestExecuteScheduledWorkflow:
             ],
         )
 
-        with patch("mindroom.hooks.sender._send_message_result", new=mock_send):
+        with patch("mindroom.scheduling_executor.send_matrix_message", new=mock_send):
             # Should not raise, but log error
             await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
                 runtime_paths_for(config),
-                _conversation_cache(latest_thread_event_id="$thread123"),
+                _conversation_reader(latest_thread_event_id="$thread123"),
             )
 
             # Should have tried to send original and error message
@@ -843,7 +840,7 @@ class TestExecuteScheduledWorkflow:
 
         with (
             patch(
-                "mindroom.hooks.sender._send_message_result",
+                "mindroom.scheduling_executor.send_matrix_message",
                 new=AsyncMock(
                     side_effect=[
                         None,
@@ -856,13 +853,13 @@ class TestExecuteScheduledWorkflow:
             ) as mock_send,
             patch("mindroom.scheduling_executor.logger.info") as mock_info,
         ):
-            conversation_cache = _conversation_cache(latest_thread_event_id="$latest123")
+            conversation_reader = _conversation_reader(latest_thread_event_id="$latest123")
             await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
                 runtime_paths_for(config),
-                conversation_cache,
+                conversation_reader,
             )
 
         assert mock_send.await_count == 2
@@ -882,13 +879,13 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.hooks.sender._send_message_result", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(
                 client,
                 workflow,
                 config,
                 runtime_paths_for(config),
-                _conversation_cache(),
+                _conversation_reader(),
             )
             mock_send.assert_not_called()
 
@@ -992,7 +989,6 @@ class TestIntegrationWithScheduling:
                     config=config,
                     runtime_paths=runtime_paths_for(config),
                     room=room,
-                    conversation_cache=_conversation_cache(),
                     conversation_reader=make_conversation_reader_mock(),
                 ),
                 room_id="!room:server",
@@ -1077,7 +1073,6 @@ class TestIntegrationWithScheduling:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 room=room,
-                conversation_cache=_conversation_cache(),
                 conversation_reader=make_conversation_reader_mock(),
             ),
             room_id="!room:server",
@@ -1173,7 +1168,6 @@ class TestIntegrationWithScheduling:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 room=room,
-                conversation_cache=_conversation_cache(),
                 conversation_reader=make_conversation_reader_mock(),
             ),
             room_id="!room:server",

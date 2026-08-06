@@ -102,9 +102,8 @@ def _make_context(
     room_agent_names: list[str] | None = None,
 ) -> ToolRuntimeContext:
     async def _latest_thread_event_id(
-        _room_id: str,
-        thread_id: str | None,
         *_args: object,
+        thread_id: str | None = None,
         **_kwargs: object,
     ) -> str | None:
         return thread_id
@@ -675,7 +674,7 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
     event_cache = MagicMock()
     ctx = replace(_make_context(tmp_path, requester_id="@user:localhost"), event_cache=event_cache)
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
     await subagents_module._send_matrix_text(
         ctx,
@@ -685,10 +684,9 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
         original_sender=ctx.requester_id,
     )
 
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        ctx.thread_id,
-        caller_label="subagent_tool_send",
+    ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
     )
     content = send_mock.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == ctx.thread_id
@@ -1157,7 +1155,7 @@ async def test_sessions_spawn_sets_summary_after_spawn(
         TEST_SUMMARY,
         1,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id="$event",
     )
     update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
@@ -1180,7 +1178,7 @@ async def test_sessions_spawn_summary_does_not_read_the_new_thread(
     ctx.client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$summary:localhost", room_id=ctx.room_id),
     )
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$never-read:localhost")
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$never-read:localhost")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1188,7 +1186,7 @@ async def test_sessions_spawn_summary_does_not_read_the_new_thread(
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    ctx.conversation_reader.latest_thread_event_id.assert_not_awaited()
     relates_to = ctx.client.room_send.call_args.kwargs["content"]["m.relates_to"]
     assert relates_to["rel_type"] == "m.thread"
     assert relates_to["event_id"] == "$spawn-root:localhost"
@@ -1482,7 +1480,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         TEST_SUMMARY,
         1,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id="$event",
     )
     tag_mock.assert_awaited_once_with(
@@ -1524,7 +1522,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         TEST_SUMMARY,
         0,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id=None,
     )
     tag_mock.assert_awaited_once_with(
@@ -1576,7 +1574,7 @@ async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
         TEST_SUMMARY,
         1,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id="$new-event",
     )
     tag_mock.assert_awaited_once_with(
@@ -1628,7 +1626,7 @@ async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
         TEST_SUMMARY,
         0,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id=None,
     )
     tag_mock.assert_awaited_once_with(
@@ -1674,7 +1672,7 @@ async def test_sessions_spawn_skips_room_level_reuse_candidates(
         TEST_SUMMARY,
         1,
         "manual",
-        ctx.conversation_cache,
+        ctx.conversation_reader,
         known_latest_thread_event_id="$event",
     )
     tag_mock.assert_awaited_once_with(

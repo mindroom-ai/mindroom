@@ -82,10 +82,9 @@ class MatrixMessageOperations:
         message_extras: list[MessageExtraSection] | None,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
-        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label="matrix_message_tool_send",
+        latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_id,
         )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:

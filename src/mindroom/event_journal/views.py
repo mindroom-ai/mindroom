@@ -116,6 +116,10 @@ class ProjectionView(Protocol):
 class ConversationReadView(ProjectionView, Protocol):
     """Reading a conversation plus the evidence needed to judge completeness."""
 
+    async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
+        """Return the newest visible event in one thread, or nothing."""
+        ...
+
     async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether this conversation was hydrated under current membership."""
         ...

@@ -103,6 +103,31 @@ class ConversationReader:
             event_id=source_event_id,
         )
 
+    async def latest_thread_event_id(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str | None = None,
+        existing_event_id: str | None = None,
+    ) -> str | None:
+        """Return the event an MSC3440 reply fallback should point at.
+
+        Only when nothing else already answers the question: a caller editing
+        an existing event, or one that already knows what it is replying to,
+        needs no fallback and gets ``None`` so it keeps what it has.
+
+        The thread root is the answer when the projection has nothing newer.
+        That is right for an empty thread and it is also the safe reading of a
+        thread whose newest message is this bot's own, still waiting for its
+        echo -- a reply anchored one message back still renders in the thread,
+        because the ``m.thread`` relation is what places it. This fallback only
+        decides what a client that ignores threads shows it under.
+        """
+        if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
+            return None
+        return await self.store.latest_visible_event_id(room_id=room_id, thread_id=thread_id) or thread_id
+
     async def read(
         self,
         *,

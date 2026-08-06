@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,7 +50,6 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import emit
 from mindroom.hooks.sender import HookMessageSender as SenderAlias
-from mindroom.hooks.sender import send_and_track_message
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
@@ -95,39 +95,6 @@ def _config(tmp_path: Path) -> Config:
 def test_hooks_package_reexports_hook_message_sender() -> None:
     """The public hooks package should keep exporting HookMessageSender."""
     assert HookMessageSender is SenderAlias
-
-
-@pytest.mark.asyncio
-async def test_send_and_track_message_records_delivered_content() -> None:
-    """Shared send tracking should cache the exact content returned by delivery."""
-    content = {"msgtype": "m.text", "body": "already built"}
-    delivered_content = {"msgtype": "m.text", "body": "already built", "server": "normalized"}
-    conversation_cache = MagicMock()
-
-    async def mock_send(
-        _client: object,
-        _room_id: str,
-        _content: dict[str, object],
-    ) -> object:
-        return delivered_matrix_event("$tracked", delivered_content)
-
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send) as mock_send_result:
-        delivered = await send_and_track_message(
-            AsyncMock(),
-            "!room:localhost",
-            content,
-            conversation_cache,
-        )
-
-    assert delivered is not None
-    assert delivered.event_id == "$tracked"
-    mock_send_result.assert_awaited_once()
-    assert mock_send_result.await_args.args[2] is content
-    conversation_cache.notify_outbound_message.assert_called_once_with(
-        "!room:localhost",
-        "$tracked",
-        delivered_content,
-    )
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:
@@ -559,7 +526,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     """Hook sends should include hook metadata and thread relations."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
+    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value="$latest"))
 
     captured_content: dict[str, object] = {}
 
@@ -571,7 +538,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         event_id = await bot._hook_send_message(
             "!room:localhost",
             "hello",
@@ -587,10 +554,9 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     assert isinstance(captured_content["m.relates_to"], dict)
     assert captured_content["m.relates_to"]["rel_type"] == "m.thread"
     assert captured_content["m.relates_to"]["event_id"] == "$thread"
-    bot._conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!room:localhost",
-        "$thread",
-        caller_label="hook_sender",
+    bot._conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread",
     )
 
 
@@ -610,8 +576,8 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
+    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
+    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         event_id = await bot._hook_send_message(
             "!room:localhost",
             "hello",
@@ -1323,9 +1289,9 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
         await ctx.send_message("!room:localhost", "router started")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content[SOURCE_KIND_KEY] == "hook"
@@ -1356,9 +1322,9 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content[SOURCE_KIND_KEY] == "hook_dispatch"

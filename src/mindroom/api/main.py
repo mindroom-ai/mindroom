@@ -537,7 +537,7 @@ def bind_orchestrator_knowledge_refresh_scheduler(
 def bind_external_trigger_runtime(
     api_app: FastAPI,
     client: object,
-    conversation_cache: object,
+    conversation_reader: object,
     *,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
 ) -> None:
@@ -545,7 +545,7 @@ def bind_external_trigger_runtime(
     api_state = config_lifecycle.require_api_state(api_app)
     config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
         client=client,
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
         config_generation=api_state.snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
     )

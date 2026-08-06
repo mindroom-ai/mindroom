@@ -907,11 +907,8 @@ class AgentBot:
         caller_label: str = "agent_bot_latest_thread_event_lookup",
     ) -> str | None:
         """Return the latest event id for one Matrix thread when the cache knows it."""
-        return await self._conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-        )
+        del caller_label
+        return await self._conversation_reader.latest_thread_event_id(room_id=room_id, thread_id=thread_id)
 
     @property
     def hook_registry(self) -> HookRegistry:
@@ -1172,7 +1169,7 @@ class AgentBot:
             room_id,
             self.config,
             self.runtime_paths,
-            self._conversation_cache,
+            self._conversation_reader,
         )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
@@ -2123,7 +2120,7 @@ class AgentBot:
                 self.client,
                 self.config,
                 self.runtime_paths,
-                self._conversation_cache,
+                self._conversation_reader,
             )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
@@ -2596,7 +2593,7 @@ class AgentBot:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
-            conversation_cache=self._conversation_cache,
+            conversation_reader=self._conversation_reader,
         )
         if event_id:
             self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)

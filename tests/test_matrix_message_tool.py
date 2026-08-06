@@ -87,9 +87,8 @@ def _make_context(
     event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
     async def _latest_thread_event_id(
-        _room_id: str,
-        thread_id: str | None,
         *_args: object,
+        thread_id: str | None = None,
         **_kwargs: object,
     ) -> str | None:
         return thread_id
@@ -115,8 +114,9 @@ def _make_context(
         side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
     )
     conversation_cache = make_conversation_cache_mock()
-    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     conversation_cache.notify_outbound_message = Mock()
+    conversation_reader = make_conversation_reader_mock()
+    conversation_reader.latest_thread_event_id = AsyncMock(side_effect=_latest_thread_event_id)
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
@@ -135,7 +135,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=conversation_cache,
-        conversation_reader=make_conversation_reader_mock(),
+        conversation_reader=conversation_reader,
         event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         storage_path=storage_path,
@@ -537,7 +537,7 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     tool = MatrixMessageTools()
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value=None)
 
     with (
         patch(
@@ -555,10 +555,9 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     assert payload["room_id"] == ctx.room_id
     assert payload["thread_id"] is None
     assert payload["event_id"] == "$evt"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        None,
-        caller_label="matrix_message_tool_send",
+    ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id=None,
     )
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
@@ -680,7 +679,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     )
     assert attachment is not None
     ctx = _make_context(storage_path=tmp_path, attachment_ids=("att_upload",))
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$evt"
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$evt")
 
     with (
         patch(
@@ -707,10 +706,10 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     assert payload["attachment_thread_id"] == "$evt"
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"] == ["att_upload"]
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_has_awaits(
+    ctx.conversation_reader.latest_thread_event_id.assert_has_awaits(
         [
-            call(ctx.room_id, None, caller_label="matrix_message_tool_send"),
-            call(ctx.room_id, "$evt", caller_label="attachment_tool_send"),
+            call(room_id=ctx.room_id, thread_id=None),
+            call(room_id=ctx.room_id, thread_id="$evt"),
         ],
     )
     mock_send.assert_awaited_once()
@@ -1263,7 +1262,7 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
     generated_file = tmp_path / "generated.txt"
     generated_file.write_text("artifact", encoding="utf-8")
     ctx = _make_context(storage_path=tmp_path)
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=ctx.thread_id)
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value=ctx.thread_id)
 
     with (
         patch(
@@ -2750,7 +2749,7 @@ async def test_matrix_message_edit_happy_path() -> None:
     tool = MatrixMessageTools()
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
+    ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest")
     sent_content: dict[str, object] = {}
 
     async def _deliver_edit(
@@ -2781,7 +2780,7 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert isinstance(replacement, dict)
     assert replacement["body"] == "updated text"
     assert "m.relates_to" not in replacement
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    ctx.conversation_reader.latest_thread_event_id.assert_not_awaited()
     ctx.conversation_reader.read_strict.assert_not_awaited()
 
 

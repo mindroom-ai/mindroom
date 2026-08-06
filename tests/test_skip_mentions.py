@@ -288,10 +288,8 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks = MagicMock()
     response_hooks._apply_before_response = before_hooks
     response_hooks.emit_after_response = after_hooks
-    conversation_cache = SimpleNamespace(
-        get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
-        notify_outbound_message=Mock(),
-    )
+    conversation_cache = SimpleNamespace(notify_outbound_message=Mock())
+    conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=SimpleNamespace(
@@ -307,7 +305,10 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             redact_message_event=AsyncMock(return_value=True),
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
-                deps=SimpleNamespace(conversation_cache=conversation_cache),
+                deps=SimpleNamespace(
+                    conversation_cache=conversation_cache,
+                    conversation_reader=conversation_reader,
+                ),
             ),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
@@ -344,7 +345,7 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     capsys.readouterr()
     gateway = DeliveryGateway(replace(gateway.deps, logger=get_logger("tests.delivery")))
 
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
         return_value="$latest",
     )
     with patch(
@@ -363,11 +364,10 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     assert payload["event"] == "Sent response"
     assert payload["room_id"] == "!test:server"
     assert payload["thread_id"] == "$thread"
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!test:server",
-        "$thread",
-        "$event123",
-        caller_label="delivery_send_text",
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!test:server",
+        thread_id="$thread",
+        reply_to_event_id="$event123",
     )
 
 
@@ -376,7 +376,7 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
     """Threaded sends should write through to the conversation cache immediately."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", None)
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
         return_value="$latest",
     )
 
@@ -400,11 +400,10 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
     assert record_args[1] == "$response"
     assert record_args[2]["m.relates_to"]["event_id"] == "$thread"
     assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!test:server",
-        "$thread",
-        None,
-        caller_label="delivery_send_text",
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!test:server",
+        thread_id="$thread",
+        reply_to_event_id=None,
     )
 
 
@@ -413,7 +412,7 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     """Threaded edits should treat edit_message success as an event ID and write through immediately."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
         return_value="$latest",
     )
 
@@ -441,7 +440,7 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     assert "m.relates_to" not in record_args[2]["m.new_content"]
     # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
     # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -449,7 +448,7 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
     """Streaming delivery should attribute its latest-thread lookup."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
         return_value="$latest",
     )
 
@@ -468,12 +467,11 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
             ),
         )
 
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!test:server",
-        "$thread",
-        "$root",
-        "$existing",
-        caller_label="delivery_stream",
+    gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!test:server",
+        thread_id="$thread",
+        reply_to_event_id="$root",
+        existing_event_id="$existing",
     )
 
 

@@ -635,13 +635,10 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = (
-                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-                    resolved_target.room_id,
-                    effective_thread_id,
-                    resolved_target.reply_to_event_id,
-                    caller_label="delivery_send_text",
-                )
+            latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
+                room_id=resolved_target.room_id,
+                thread_id=effective_thread_id,
+                reply_to_event_id=resolved_target.reply_to_event_id,
             )
             content = format_message_with_mentions(
                 config,
@@ -1214,12 +1211,11 @@ class DeliveryGateway:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
-        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-            request.target.room_id,
-            request.target.resolved_thread_id,
-            request.target.reply_to_event_id,
-            request.existing_event_id,
-            caller_label="delivery_stream",
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
+            room_id=request.target.room_id,
+            thread_id=request.target.resolved_thread_id,
+            reply_to_event_id=request.target.reply_to_event_id,
+            existing_event_id=request.existing_event_id,
         )
         return await send_streaming_response(
             client,

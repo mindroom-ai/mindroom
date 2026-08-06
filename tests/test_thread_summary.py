@@ -988,7 +988,7 @@ class TestMaybeGenerateThreadSummary:
             "🧵 Login failure investigation",
             2,
             "default",
-            self.conversation_cache,
+            self.conversation_reader,
             initial_enrichment_complete=None,
         )
         set_tags.assert_not_awaited()
@@ -1042,7 +1042,7 @@ class TestMaybeGenerateThreadSummary:
             "🧵 Login failure investigation",
             12,
             "default",
-            self.conversation_cache,
+            self.conversation_reader,
             initial_enrichment_complete=True,
         )
         set_tags.assert_awaited_once_with(
@@ -1549,7 +1549,7 @@ class TestMaybeGenerateThreadSummary:
             "Users discussed testing strategies",
             5,
             "default",
-            self.conversation_cache,
+            self.conversation_reader,
             initial_enrichment_complete=None,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
@@ -1583,7 +1583,7 @@ class TestMaybeGenerateThreadSummary:
             "Fix ISSUE-116",
             5,
             "default",
-            self.conversation_cache,
+            self.conversation_reader,
             initial_enrichment_complete=None,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
@@ -2092,9 +2092,8 @@ class TestSendSummaryEvent:
         """Verify the public summary-send API writes the expected event payload."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
-        conversation_cache = AsyncMock()
-        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
-        conversation_cache.notify_outbound_message = Mock()
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
 
         result = await send_thread_summary_event(
             client,
@@ -2103,7 +2102,7 @@ class TestSendSummaryEvent:
             summary="Discussed deployment plan",
             message_count=15,
             model_name="haiku",
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
             initial_enrichment_complete=True,
         )
 
@@ -2128,20 +2127,17 @@ class TestSendSummaryEvent:
         assert meta["model"] == "haiku"
         assert meta["initial_enrichment_complete"] is True
         assert "generated_at" in meta
-        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-            "!room:x",
-            "$root1",
-            caller_label="thread_summary_send",
+        conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+            room_id="!room:x",
+            thread_id="$root1",
         )
-        conversation_cache.notify_outbound_message.assert_called_once_with("!room:x", "$s1", content)
 
     async def test_known_latest_thread_event_id_skips_the_history_read(self) -> None:
         """A caller that already knows the newest thread event should not trigger a history read."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
-        conversation_cache = AsyncMock()
-        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$never-read")
-        conversation_cache.notify_outbound_message = Mock()
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$never-read")
 
         result = await send_thread_summary_event(
             client,
@@ -2150,12 +2146,12 @@ class TestSendSummaryEvent:
             summary="Spawned an isolated session",
             message_count=1,
             model_name="manual",
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
             known_latest_thread_event_id="$root1",
         )
 
         assert result == "$s1"
-        conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+        conversation_reader.latest_thread_event_id.assert_not_awaited()
         relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
         assert relates_to["rel_type"] == "m.thread"
         assert relates_to["event_id"] == "$root1"
@@ -2165,9 +2161,8 @@ class TestSendSummaryEvent:
         """Overlong summaries should be truncated before sending to Matrix."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
-        conversation_cache = AsyncMock()
-        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
-        conversation_cache.notify_outbound_message = Mock()
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
         summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
 
         result = await send_thread_summary_event(
@@ -2177,7 +2172,7 @@ class TestSendSummaryEvent:
             summary=summary,
             message_count=15,
             model_name="haiku",
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
         assert result == "$s1"
@@ -2192,9 +2187,8 @@ class TestSendSummaryEvent:
         """Return None when room_send fails."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
-        conversation_cache = AsyncMock()
-        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$reply1")
-        conversation_cache.notify_outbound_message = Mock()
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
 
         result = await send_thread_summary_event(
             client,
@@ -2203,19 +2197,17 @@ class TestSendSummaryEvent:
             summary="test",
             message_count=5,
             model_name="default",
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
         assert result is None
-        conversation_cache.notify_outbound_message.assert_not_called()
 
     async def test_latest_thread_lookup_failure_falls_back_to_thread_root(self) -> None:
         """Summary sending should remain threaded when latest-event lookup fails."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
-        conversation_cache = AsyncMock()
-        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(side_effect=RuntimeError("lookup boom"))
-        conversation_cache.notify_outbound_message = Mock()
+        conversation_reader = AsyncMock()
+        conversation_reader.latest_thread_event_id = AsyncMock(side_effect=RuntimeError("lookup boom"))
 
         result = await send_thread_summary_event(
             client,
@@ -2224,14 +2216,13 @@ class TestSendSummaryEvent:
             summary="test",
             message_count=5,
             model_name="default",
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
         assert result == "$s1"
         relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
         assert relates_to["event_id"] == "$root1"
         assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
-        conversation_cache.notify_outbound_message.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2241,7 +2232,6 @@ class TestSetManualThreadSummary:
     async def test_sets_summary_and_updates_cache(self) -> None:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
         client = _mock_client()
-        conversation_cache = AsyncMock()
         conversation_reader = make_conversation_reader_mock()
         seeded_history = [
             *_make_thread_history(3),
@@ -2265,7 +2255,6 @@ class TestSetManualThreadSummary:
                 "  # **Fix** [ISSUE-116](http://example.com)  ",
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
-                conversation_cache=conversation_cache,
                 conversation_reader=conversation_reader,
             )
 
@@ -2282,7 +2271,7 @@ class TestSetManualThreadSummary:
             "Fix ISSUE-116",
             4,
             "manual",
-            conversation_cache,
+            conversation_reader,
             pinned=True,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 4
@@ -2290,7 +2279,6 @@ class TestSetManualThreadSummary:
     async def test_send_failure_raises_and_leaves_cache_unchanged(self) -> None:
         """A failed manual summary send should not advance the cached threshold baseline."""
         client = _mock_client()
-        conversation_cache = AsyncMock()
         conversation_reader = make_conversation_reader_mock()
         serve_conversation_reader(conversation_reader, _make_thread_history(5))
         update_last_summary_count("!room:x", "$root1", 2)
@@ -2309,7 +2297,6 @@ class TestSetManualThreadSummary:
                 "failed write",
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
-                conversation_cache=conversation_cache,
                 conversation_reader=conversation_reader,
             )
 
@@ -2318,7 +2305,6 @@ class TestSetManualThreadSummary:
     async def test_fetch_failure_raises_before_send(self) -> None:
         """A failed history fetch should raise the shared manual-summary fetch error."""
         client = _mock_client()
-        conversation_cache = AsyncMock()
         conversation_reader = make_conversation_reader_mock()
         conversation_reader.read_strict.side_effect = TimeoutError("timed out")
 
@@ -2330,7 +2316,6 @@ class TestSetManualThreadSummary:
                 "done",
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
-                conversation_cache=conversation_cache,
                 conversation_reader=conversation_reader,
             )
 

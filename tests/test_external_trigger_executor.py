@@ -127,10 +127,10 @@ def _payload_with_payload_controlled_mentions() -> ExternalTriggerPayload:
     )
 
 
-def _conversation_cache(*, latest_thread_event_id: str | None = "$latest") -> AsyncMock:
-    access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed.return_value = latest_thread_event_id
-    return access
+def _conversation_reader(*, latest_thread_event_id: str | None = "$latest") -> AsyncMock:
+    reader = AsyncMock()
+    reader.latest_thread_event_id.return_value = latest_thread_event_id
+    return reader
 
 
 def test_build_external_trigger_message_text_mentions_agent_and_includes_payload_details() -> None:
@@ -180,11 +180,11 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
 ) -> None:
     """Executor uses configured room/thread target and returns the Matrix delivery event ID."""
     config = _config(tmp_path)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
@@ -192,19 +192,17 @@ async def test_execute_external_trigger_sends_to_fixed_thread_target_with_source
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
 
     assert event_id == "$matrix-event"
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!fixed:localhost",
-        "$thread-root",
-        caller_label="external_trigger",
+    conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!fixed:localhost",
+        thread_id="$thread-root",
     )
     send_and_track_message.assert_awaited_once()
-    _client, room_id, content, sent_cache = send_and_track_message.await_args.args
+    _client, room_id, content = send_and_track_message.await_args.args
     assert room_id == "!fixed:localhost"
-    assert sent_cache is conversation_cache
     assert content["m.relates_to"]["event_id"] == "$thread-root"
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
@@ -226,11 +224,11 @@ async def test_execute_external_trigger_resolves_configured_room_alias(
     state = MatrixState.load(runtime_paths)
     state.add_room("lobby", "!resolved:localhost", "#lobby:localhost", "Lobby")
     state.save(runtime_paths)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     await execute_external_trigger(
         client=AsyncMock(),
@@ -238,13 +236,12 @@ async def test_execute_external_trigger_resolves_configured_room_alias(
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
 
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!resolved:localhost",
-        "$thread-root",
-        caller_label="external_trigger",
+    conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!resolved:localhost",
+        thread_id="$thread-root",
     )
     assert send_and_track_message.await_args.args[1] == "!resolved:localhost"
 
@@ -261,7 +258,7 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     await execute_external_trigger(
         client=AsyncMock(),
@@ -269,7 +266,7 @@ async def test_execute_external_trigger_only_parses_configured_target_mention(
         payload=_payload_with_payload_controlled_mentions(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=_conversation_cache(),
+        conversation_reader=_conversation_reader(),
     )
 
     content: dict[str, Any] = send_and_track_message.await_args.args[2]
@@ -293,7 +290,7 @@ async def test_execute_external_trigger_private_target_preserves_owner_metadata(
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
@@ -301,7 +298,7 @@ async def test_execute_external_trigger_private_target_preserves_owner_metadata(
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=_conversation_cache(),
+        conversation_reader=_conversation_reader(),
     )
 
     assert event_id == "$matrix-event"
@@ -324,7 +321,7 @@ async def test_execute_external_trigger_target_mention_ignores_unprepared_unrela
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
@@ -332,7 +329,7 @@ async def test_execute_external_trigger_target_mention_ignores_unprepared_unrela
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=_conversation_cache(),
+        conversation_reader=_conversation_reader(),
     )
 
     assert event_id == "$matrix-event"
@@ -349,11 +346,11 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
 ) -> None:
     """new_thread external triggers avoid thread lookup."""
     config = _config(tmp_path)
-    conversation_cache = _conversation_cache()
+    conversation_reader = _conversation_reader()
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$new-thread-event", content_sent={}),
     )
-    monkeypatch.setattr("mindroom.external_triggers.executor.send_and_track_message", send_and_track_message)
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
 
     event_id = await execute_external_trigger(
         client=AsyncMock(),
@@ -361,11 +358,11 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
         payload=_payload(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
 
     assert event_id == "$new-thread-event"
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    conversation_reader.latest_thread_event_id.assert_not_awaited()
     send_and_track_message.assert_awaited_once()
     content: dict[str, Any] = send_and_track_message.await_args.args[2]
     assert "m.relates_to" not in content

@@ -474,7 +474,7 @@ class TestRouterHandoffThreadMode:
             patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="assistant")),
             patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
@@ -511,7 +511,7 @@ class TestRouterHandoffThreadMode:
             patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="coder")),
             patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
+                "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
                 new_callable=AsyncMock,
                 return_value="$latest",
             ) as mock_get_latest,

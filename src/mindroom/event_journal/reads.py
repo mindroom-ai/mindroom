@@ -123,6 +123,35 @@ def _page_rows(
     return tuple(rows)
 
 
+def latest_visible_event_id(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> str | None:
+    """Return the newest visible event in one thread, or nothing if it is empty.
+
+    The revision, not the logical message: the caller is building an
+    ``m.in_reply_to`` fallback for clients that do not understand threads, and
+    what those render is the event that is actually in the room.
+
+    A message awaiting a refetch still answers. Its body is withheld from every
+    read, but its identity is not in doubt, and pointing a reply at it is
+    correct whether or not its text is currently servable.
+    """
+    row = transaction.fetchone(
+        """
+        SELECT revision_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        ORDER BY created_ts DESC, logical_event_id DESC
+        LIMIT 1
+        """,
+        (principal_id, room_id, encode_thread_id(thread_id)),
+    )
+    return None if row is None else str(row["revision_event_id"])
+
+
 def pending_refreshes(
     transaction: Transaction,
     principal_id: str,

@@ -77,8 +77,9 @@ def _context(
 ) -> ToolRuntimeContext:
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     conversation_cache = make_conversation_cache_mock()
-    conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
     conversation_cache.notify_outbound_message = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
+    conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest")
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -91,7 +92,7 @@ def _context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=conversation_cache,
-        conversation_reader=make_conversation_reader_mock(),
+        conversation_reader=conversation_reader,
         event_cache=make_event_cache_mock(),
     )
 
@@ -180,10 +181,9 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         response_format="opus",
     )
     mock_voice_payload.assert_awaited_once()
-    context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!room:localhost",
-        "$thread-root",
-        caller_label="matrix_voice_message_tool",
+    context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread-root",
     )
     mock_send.assert_awaited_once_with(
         context.client,
@@ -266,7 +266,7 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
             thread_id="room",
         )
 
-    context.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    context.conversation_reader.latest_thread_event_id.assert_not_awaited()
     assert mock_send.await_args.kwargs["thread_id"] is None
     assert mock_send.await_args.kwargs["latest_thread_event_id"] is None
 
@@ -396,7 +396,7 @@ async def test_matrix_voice_message_generation_error_is_sanitized(tmp_path: Path
 async def test_matrix_voice_message_missing_thread_fallback_is_structured_error(tmp_path: Path) -> None:
     """Missing thread fallback should not escape as a delivery ValueError."""
     context = _context(tmp_path, thread_id="$thread-root")
-    context.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    context.conversation_reader.latest_thread_event_id = AsyncMock(return_value=None)
 
     with (
         tool_runtime_context(context),

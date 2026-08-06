@@ -143,7 +143,6 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "  🧵 Ready\nfor\t review  ",
         config=context.config,
         runtime_paths=context.runtime_paths,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
         pin=True,
     )
@@ -177,7 +176,6 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         "# **Fix** [ISSUE-116](http://example.com)",
         config=context.config,
         runtime_paths=context.runtime_paths,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
         pin=True,
     )
@@ -231,7 +229,6 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         "done",
         config=context.config,
         runtime_paths=context.runtime_paths,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
         pin=True,
     )

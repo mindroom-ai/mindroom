@@ -328,10 +328,9 @@ async def send_resolved_attachments(
     """Send local files or already-encrypted Matrix media while preserving order."""
     attachment_event_ids: list[str] = []
     assert context.conversation_cache is not None
-    latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-        room_id,
-        thread_id,
-        caller_label="attachment_tool_send",
+    latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+        room_id=room_id,
+        thread_id=thread_id,
     )
     for attachment in attachments:
         if isinstance(attachment, Path):

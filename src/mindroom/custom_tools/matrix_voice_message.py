@@ -305,10 +305,9 @@ class MatrixVoiceMessageTools(Toolkit):
     ) -> tuple[str | None, str | None]:
         if thread_id is None:
             return None, None
-        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label="matrix_voice_message_tool",
+        latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_id,
         )
         if latest_thread_event_id is not None:
             return latest_thread_event_id, None

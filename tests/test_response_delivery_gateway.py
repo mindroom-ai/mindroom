@@ -84,8 +84,10 @@ def _gateway(tmp_path: Path, outbox: OutboxView | None = None) -> DeliveryGatewa
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(
+                    conversation_reader=SimpleNamespace(
+                        latest_thread_event_id=AsyncMock(return_value="$root"),
+                    ),
                     conversation_cache=SimpleNamespace(
-                        get_latest_thread_event_id_if_needed=AsyncMock(return_value="$root"),
                         notify_outbound_message=Mock(),
                     ),
                 ),

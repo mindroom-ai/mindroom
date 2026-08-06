@@ -179,6 +179,17 @@ class PrincipalStore:
             ),
         )
 
+    async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
+        """Return the newest visible event in one thread, or nothing."""
+        return await self._backend.read(
+            lambda transaction: reads.latest_visible_event_id(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
     async def pending_refreshes(
         self,
         *,

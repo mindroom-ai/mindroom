@@ -1069,6 +1069,7 @@ def make_conversation_reader_mock() -> ConversationReader:
             may_have_unread_history=AsyncMock(return_value=False),
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
+            latest_thread_event_id=AsyncMock(return_value=None),
         ),
     )
 

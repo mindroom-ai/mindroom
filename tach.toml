@@ -4768,8 +4768,8 @@ expose = [
     "render_enrichment_block",
     "render_system_enrichment_block",
     "render_transient_context",
-    "send_and_track_message",
     "send_hook_message",
+    "send_matrix_message",
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]

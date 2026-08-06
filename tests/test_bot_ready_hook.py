@@ -766,7 +766,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send),
+        patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send),
     ):
         await bot._on_sync_response(MagicMock())
 
@@ -1900,7 +1900,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
     assert sender is not None
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
-    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         event_id = await sender("!room:localhost", "hello", None, "test-plugin:bot:ready", None)
 
     assert event_id == "$hook-event"

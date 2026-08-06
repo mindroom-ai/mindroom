@@ -434,7 +434,6 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_cache=context.conversation_cache,
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
     )
