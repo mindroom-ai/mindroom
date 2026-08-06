@@ -1118,11 +1118,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         dispatch_history = ThreadHistoryResult(
             [
-                _message(event_id="$thread_root:localhost", body="Root"),
-                _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-                _message(event_id="$plain1:localhost", body="Plain reply"),
+                _message(event_id="$thread_root:localhost", body="Root", thread_id="$thread_root:localhost"),
+                _message(
+                    event_id="$thread_msg:localhost",
+                    body="Earlier threaded message",
+                    thread_id="$thread_root:localhost",
+                ),
+                _message(event_id="$plain1:localhost", body="Plain reply", thread_id="$thread_root:localhost"),
             ],
             is_full_history=True,
+        )
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=list(dispatch_history),
         )
         with (
             patch.object(
@@ -1182,10 +1192,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         dispatch_history = ThreadHistoryResult(
             [
-                _message(event_id="$thread_root:localhost", body="Root"),
-                _message(event_id="$plain1:localhost", body="Plain reply"),
+                _message(event_id="$thread_root:localhost", body="Root", thread_id="$thread_root:localhost"),
+                _message(event_id="$plain1:localhost", body="Plain reply", thread_id="$thread_root:localhost"),
             ],
             is_full_history=True,
+        )
+        await seed_thread_history(
+            bot,
+            room_id=room.room_id,
+            thread_id="$thread_root:localhost",
+            messages=list(dispatch_history),
         )
 
         with (
