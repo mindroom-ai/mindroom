@@ -9,7 +9,17 @@ from typing import TYPE_CHECKING, Any
 import nio
 import pytest
 
-from mindroom.event_journal import EventClass, EventKind, SettlementOutcome
+from mindroom.constants import (
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
+from mindroom.event_journal import EventClass, EventKind, SettlementOutcome, VisibleMessage
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
     JournalIngress,
@@ -140,6 +150,68 @@ def room() -> nio.MatrixRoom:
     return nio.MatrixRoom(ROOM, ALICE)
 
 
+PLACEHOLDER_ID = "$placeholder"
+PLACEHOLDER_BODY = "Thinking..."
+
+
+def placeholder_event(*, ts: int = 1_000) -> nio.Event:
+    """Return the visible message a streamed answer starts life as.
+
+    Built the way the runtime builds it: an ordinary ``m.text`` send carrying
+    the pending stream status as extra content.
+    """
+    event = nio.Event.parse_event(
+        {
+            "event_id": PLACEHOLDER_ID,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": PLACEHOLDER_BODY,
+                STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+            },
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def stream_event(
+    event_id: str,
+    body: str,
+    status: str,
+    *,
+    replaces: str,
+    sender: str = BOT,
+    msgtype: str = "m.text",
+    ts: int = 1_100,
+) -> nio.Event:
+    """Return one revision of a streamed answer, in the real edit envelope.
+
+    Uses the production builder rather than a hand-written shape, so a change
+    to where the stream status lands inside an edit breaks these tests instead
+    of quietly making them test nothing.
+    """
+    content = build_edit_event_content(
+        event_id=replaces,
+        new_content={"msgtype": msgtype, "body": body},
+        new_text=body,
+        extra_content={STREAM_STATUS_KEY: status},
+    )
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
 class TestProvenanceMapping:
     """nio owns provenance; MindRoom owns only what it means."""
 
@@ -222,11 +294,11 @@ class TestAdmissionAdapter:
             },
         )
         assert isinstance(event, nio.Event)
-        assert projected_event(ROOM, event, EventKind.REACTION) is None
+        assert projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
 
     async def test_a_redaction_projects_onto_its_target(self) -> None:
         """A redaction projects onto its target."""
-        projected = projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION)
+        projected = projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
@@ -293,7 +365,7 @@ class TestSidecarContent:
         event = sidecar_event("$long", preview, "mxc://server/long-answer")
         await alice.admit(
             inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE),
+            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -316,7 +388,7 @@ class TestSidecarContent:
         for event in (plain, sidecar):
             await alice.admit(
                 inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE),
+                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -338,7 +410,7 @@ class TestSidecarContent:
         event = text_event("$long", whole, ts=5_000)
         await alice.admit(
             inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE),
+            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -364,7 +436,7 @@ class TestEchoOrdering:
         echo = bot_event("$answer", "the answer")
         await alice.admit(
             inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, echo, EventKind.MESSAGE),
+            projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -384,7 +456,7 @@ class TestEchoOrdering:
         ):
             await alice.admit(
                 inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE),
+                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -412,7 +484,7 @@ class TestEchoOrdering:
             *(
                 alice.admit(
                     inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                    projected_event(ROOM, event, EventKind.MESSAGE),
+                    projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
                 )
                 for event in batch
             ),
@@ -438,7 +510,7 @@ class TestEchoOrdering:
         one goes through `_admit` so that a sender filter added there fails
         here, because the echo route depends on there not being one.
         """
-        ingress = JournalIngress(store=alice)
+        ingress = JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
 
@@ -457,17 +529,238 @@ class TestEchoOrdering:
         recovered = bot_event("$answer", "the answer", ts=3_100)
         await alice.admit(
             inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, recovered, EventKind.MESSAGE),
+            projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
         )
         live = text_event("$follow_up", "and then?", ts=3_200)
         await alice.admit(
             inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, live, EventKind.MESSAGE),
+            projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
 
         assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
+
+
+class TestStreamingProgressIsTransport:
+    """A streamed answer is one message, however many edits it took to write.
+
+    A progress edit is how the answer travels, not something the conversation
+    gained: the room still holds one reply, whose body is whatever the stream
+    settled on. Reducing every progress echo would rewrite that row once per
+    edit and arrive where it was going anyway.
+
+    The frames here carry ``m.text`` deliberately. MindRoom currently sends
+    in-progress updates as ``m.notice``, which journal admission does not own
+    at all, so today's progress echo is dropped by a filter that has nothing to
+    do with conversation content. The rule under test must hold on its own —
+    see the last test in this class, which pins both filters and which is
+    which.
+    """
+
+    @staticmethod
+    async def _admit_live(ingress: JournalIngress, *events: nio.Event) -> None:
+        for event in events:
+            await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+
+    @staticmethod
+    async def _one_visible(store: PrincipalStore) -> VisibleMessage:
+        page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert len(page.messages) == 1, f"expected one logical message, got {len(page.messages)}"
+        return page.messages[0]
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_this_bots_progress_edit_leaves_the_placeholder_on_screen(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """A self-authored in-flight revision must not move the visible row."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            placeholder_event(),
+            stream_event("$progress", "half an ans", status, replaces=PLACEHOLDER_ID, ts=1_100),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == PLACEHOLDER_BODY
+        assert visible.revision_event_id == PLACEHOLDER_ID
+
+    async def test_a_skipped_progress_edit_is_still_an_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Skipping is a projection policy, not a refusal to accept the event.
+
+        Admission is what deduplicates a redelivered echo and what a restart
+        replays from. Dropping the event instead of only its projection would
+        make nio's redelivery of it look like something new.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            placeholder_event(),
+            stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
+        )
+
+        assert [event.event_id for event in await alice.pending()] == [PLACEHOLDER_ID, "$progress"]
+
+    async def test_the_placeholder_is_the_message_the_answer_lands_on(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The placeholder advertises ``pending`` too, and must still project.
+
+        It is an original, not a replacement. Skipping it would leave the
+        terminal edit with no logical message to revise, and the answer would
+        never become visible at all.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(ingress, placeholder_event())
+
+        visible = await self._one_visible(alice)
+        assert visible.logical_event_id == PLACEHOLDER_ID
+        assert visible.content["body"] == PLACEHOLDER_BODY
+        assert visible.content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            STREAM_STATUS_COMPLETED,
+            STREAM_STATUS_CANCELLED,
+            STREAM_STATUS_ERROR,
+            STREAM_STATUS_INTERRUPTED,
+        ],
+    )
+    async def test_a_terminal_edit_installs_its_body_and_its_status(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """Every way a stream ends is content, and the four are not the same.
+
+        ``completed`` is the answer; the other three are the answer being cut
+        short. Prompt preparation tells all four apart when it decides whether
+        to resume a partial reply, so a rule that kept only ``completed`` would
+        strand an interrupted answer on its placeholder.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            placeholder_event(),
+            stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
+            stream_event("$terminal", "the whole answer", status, replaces=PLACEHOLDER_ID, ts=1_200),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == "the whole answer"
+        assert visible.content[STREAM_STATUS_KEY] == status
+        assert visible.revision_event_id == "$terminal"
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_an_edit_claiming_a_transport_status_from_someone_else_reduces(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """A stream status is a claim, not a permission.
+
+        Anyone can put this key in their own edit. Only this bot's own
+        revisions are transport, so a user's edit reduces whatever it says —
+        otherwise a correction could be suppressed by spelling it right.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            text_event("$ask", "frist question", ts=1_000),
+            stream_event("$fix", "first question", status, sender=ALICE, replaces="$ask", ts=1_100),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.content["body"] == "first question"
+        assert visible.revision_event_id == "$fix"
+
+    async def test_a_crash_mid_stream_leaves_the_placeholder_until_cleanup_speaks(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The row a crash leaves behind is the placeholder, and that is correct.
+
+        No intermediate body was durable, so there is nothing to half-restore.
+        Startup stale-stream cleanup rewrites the visible message with a
+        terminal status, and that echo reduces like any other terminal edit —
+        which is what makes skipping progress safe rather than lossy.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        progress = [
+            stream_event(
+                f"$progress{index}",
+                f"partial {index}",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                ts=1_100 + index,
+            )
+            for index in range(1, 6)
+        ]
+
+        await self._admit_live(ingress, placeholder_event(), *progress)
+
+        crashed = await self._one_visible(alice)
+        assert crashed.content["body"] == PLACEHOLDER_BODY
+        assert crashed.revision_event_id == PLACEHOLDER_ID
+
+        await self._admit_live(
+            ingress,
+            stream_event(
+                "$cleanup",
+                "partial 5 [interrupted]",
+                STREAM_STATUS_ERROR,
+                replaces=PLACEHOLDER_ID,
+                ts=1_200,
+            ),
+        )
+
+        repaired = await self._one_visible(alice)
+        assert repaired.content["body"] == "partial 5 [interrupted]"
+        assert repaired.content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        assert repaired.revision_event_id == "$cleanup"
+
+    async def test_a_notice_typed_progress_edit_never_reaches_the_projection_policy(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Two filters can drop a progress echo, and only one of them is this rule.
+
+        MindRoom sends in-progress updates as ``m.notice`` so they raise no
+        push notification, and journal admission owns ``m.text`` messages only.
+        Today's progress echo is therefore refused a kind before the projection
+        policy is consulted. That is a notification-semantics choice on the
+        delivery side rather than a statement about conversation content, so
+        the rule above is deliberately not allowed to lean on it.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            placeholder_event(),
+            stream_event(
+                "$notice",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
+        )
+
+        assert [event.event_id for event in await alice.pending()] == [PLACEHOLDER_ID]
+        assert (await self._one_visible(alice)).revision_event_id == PLACEHOLDER_ID
 
 
 class TestReplayFidelity:
@@ -478,7 +771,7 @@ class TestReplayFidelity:
         original = text_event("$m", "hello")
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE),
+            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
 
         stored = (await alice.pending())[0]
@@ -502,7 +795,7 @@ class TestReplayFidelity:
 
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE),
+            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
         replayed = parse_journal_event((await alice.pending())[0])
 
@@ -525,7 +818,7 @@ class TestReplayFidelity:
         original = image_event("$img", "diagram.png")
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA),
+            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
         )
 
         replayed = parse_journal_event((await alice.pending())[0])
@@ -542,7 +835,7 @@ class TestReplayFidelity:
         original = image_event("$sealed", "sealed.png", encrypted=True)
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA),
+            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
         )
 
         replayed = parse_journal_event((await alice.pending())[0])
@@ -573,7 +866,7 @@ class TestReplayFidelity:
             kind = EventKind.MESSAGE if isinstance(source, nio.RoomMessageText) else EventKind.MEDIA
             await alice.admit(
                 inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
-                projected_event(ROOM, source, kind),
+                projected_event(ROOM, source, kind, self_sender=BOT),
             )
 
         replayed = [parse_journal_event(stored) for stored in await alice.pending()]
@@ -608,7 +901,7 @@ class TestDurableAdmission:
 
     async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
         """An admitted event becomes pending work."""
-        ingress = JournalIngress(store=alice)
+        ingress = JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
 
@@ -619,7 +912,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """Cold history populates context without work."""
-        ingress = JournalIngress(store=alice)
+        ingress = JournalIngress(store=alice, self_sender=BOT)
 
         await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
 
@@ -637,7 +930,7 @@ class TestDurableAdmission:
                 msg = "disk is full"
                 raise RuntimeError(msg)
 
-        ingress = JournalIngress(store=Failing())  # type: ignore[arg-type]
+        ingress = JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
 
         with pytest.raises(nio.CallbackNotAcceptedError):
             await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
@@ -647,7 +940,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """Nio redelivers what it was never told was accepted."""
-        ingress = JournalIngress(store=alice)
+        ingress = JournalIngress(store=alice, self_sender=BOT)
         event = text_event("$m")
 
         await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
@@ -660,7 +953,7 @@ class TestDurableAdmission:
         alice: PrincipalStore,
     ) -> None:
         """An unowned event is neither admitted nor rejected."""
-        ingress = JournalIngress(store=alice)
+        ingress = JournalIngress(store=alice, self_sender=BOT)
         topic = nio.Event.parse_event(
             {
                 "event_id": "$topic",
@@ -685,7 +978,7 @@ class TestPendingEventWorker:
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
         await store.admit(
             inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE),
+            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:

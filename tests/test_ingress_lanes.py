@@ -595,6 +595,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),
+        self_sender="@lane:example.org",
         callbacks=callbacks,
         room_for_id=lambda _room_id: _room(),
         turn_is_terminal=lambda _event_id: False,

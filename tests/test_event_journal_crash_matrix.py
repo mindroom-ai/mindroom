@@ -37,6 +37,7 @@ pytestmark = pytest.mark.asyncio
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
+BOT = "@mindroom_general:example.org"
 SOURCE = "$inbound"
 
 
@@ -158,7 +159,7 @@ async def admit(store: PrincipalStore, event: nio.Event | None = None) -> None:
     event = event or inbound()
     await store.admit(
         inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-        projected_event(ROOM, event, EventKind.MESSAGE),
+        projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
     )
 
 

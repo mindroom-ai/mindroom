@@ -526,6 +526,7 @@ class AgentBot:
             hydrator=ConversationHydrator(
                 store=self._journal_store.principal(self._journal_principal_id),
                 runtime=self._runtime_view,
+                self_sender=runtime_matrix_id.full_id,
             ),
         )
         self._conversation_resolver = ConversationResolver(
@@ -584,6 +585,7 @@ class AgentBot:
         )
         self._journal_dispatcher = JournalDispatcher(
             store=self._journal_store.principal(self._journal_principal_id),
+            self_sender=runtime_matrix_id.full_id,
             callbacks=JournalCallbacks(
                 on_message=self._on_message,
                 on_media=self._on_media_message,

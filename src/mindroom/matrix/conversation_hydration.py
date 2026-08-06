@@ -30,6 +30,7 @@ from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from mindroom.matrix.transport_progress import is_transport_progress_revision
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -91,12 +92,17 @@ def _is_redacted(source: Mapping[str, object]) -> bool:
     return isinstance(unsigned, dict) and "redacted_because" in unsigned
 
 
-def _projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | None:
+def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
     """Return the projection view of one fetched event, or nothing.
 
     A redacted event comes back from the server with its content stripped.
     Storing that would put an empty message in the conversation, so it is
     dropped instead: the server has already told us there is nothing to show.
+
+    This bot's own in-flight streaming edits are dropped for the other reason
+    the projection exists: they are transport. The same rule runs here and at
+    live admission, because a cold read fetches the whole relation tree and
+    would otherwise reinstall every progress edit the live path just declined.
     """
     if _is_redacted(event.source):
         return None
@@ -105,7 +111,7 @@ def _projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | No
         return None
     if event.source.get("type") != "m.room.message":
         return None
-    return ProjectedEvent(
+    projected = ProjectedEvent(
         event_id=event.event_id,
         room_id=room_id,
         thread_id=thread_root(content),
@@ -115,6 +121,9 @@ def _projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | No
         replaces_event_id=replacement_target(content),
         redacts_event_id=None,
     )
+    if is_transport_progress_revision(projected, self_sender=self_sender):
+        return None
+    return projected
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +176,10 @@ class ConversationHydrator:
     # when the bot assembles its collaborators: it arrives at login. This is
     # the same indirection the delivery gateway uses for the same reason.
     runtime: SupportsClientConfig
+    # This bot's raw Matrix user ID, the same value live admission compares
+    # senders against, so a refetched conversation reduces to what the live
+    # projection would have held.
+    self_sender: str
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     prompt_window_messages: int = HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
@@ -230,7 +243,7 @@ class ConversationHydrator:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        root_projected = _projected_from_event(room_id, root.event)
+        root_projected = _projected_from_event(room_id, root.event, self_sender=self.self_sender)
         if root_projected is not None:
             events.append(root_projected)
         events.extend(await self._fetch_relations(room_id, thread_id))
@@ -250,7 +263,7 @@ class ConversationHydrator:
                 recurse=True,
                 minimum_recursion_depth=self.required_recursion_depth,
             ):
-                projected = _projected_from_event(room_id, event)
+                projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
                 if projected is not None:
                     events.append(projected)
         except nio.InsufficientRecursionDepthError as error:
@@ -297,7 +310,7 @@ class ConversationHydrator:
             fetched += len(response.chunk)
             pages += 1
             for event in response.chunk:
-                projected = _projected_from_event(room_id, event)
+                projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
                 if projected is None:
                     continue
                 events.append(projected)
@@ -358,7 +371,7 @@ class ConversationHydrator:
                 logical_event_id=request.logical_event_id,
             )
             return False
-        projected = _projected_from_event(request.room_id, original.event)
+        projected = _projected_from_event(request.room_id, original.event, self_sender=self.self_sender)
         if projected is None:
             return await self.store.drop_refetched_message(request)
         relations = await self._fetch_relations(request.room_id, request.logical_event_id)

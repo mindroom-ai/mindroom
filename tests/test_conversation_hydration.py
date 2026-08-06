@@ -11,7 +11,17 @@ from typing import TYPE_CHECKING, Any
 import nio
 import pytest
 
+from mindroom.constants import (
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
 from mindroom.event_journal import EventClass, EventKind, ProjectedEvent
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
@@ -33,6 +43,7 @@ pytestmark = pytest.mark.asyncio
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
+BOT = "@mindroom_general:example.org"
 
 
 @pytest.fixture
@@ -203,11 +214,18 @@ class FakeClient:
         return events
 
 
-def hydrator(store: PrincipalStore, client: FakeClient, **bounds: int) -> ConversationHydrator:
+def hydrator(
+    store: PrincipalStore,
+    client: FakeClient,
+    *,
+    self_sender: str = BOT,
+    **bounds: int,
+) -> ConversationHydrator:
     """Return a hydrator wired to a fake homeserver."""
     return ConversationHydrator(
         store=store,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
+        self_sender=self_sender,
         **bounds,
     )
 
@@ -218,7 +236,7 @@ async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) ->
         event = parse(source)
         await store.admit(
             inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE),
+            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
 
@@ -228,12 +246,54 @@ async def bodies(store: PrincipalStore, thread_id: str | None = None) -> list[st
     return [str(m.content["body"]) for m in page.messages]
 
 
+async def revisions(store: PrincipalStore, thread_id: str | None = None) -> list[str]:
+    """Return which revision each logical message is currently showing."""
+    page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=50)
+    return [m.revision_event_id for m in page.messages]
+
+
+def stream_raw(
+    event_id: str,
+    body: str,
+    status: str,
+    *,
+    sender: str = BOT,
+    ts: int = 1_000,
+    thread_id: str | None = None,
+    replaces: str | None = None,
+) -> dict[str, Any]:
+    """Return one frame of a streamed answer, as the server would serve it.
+
+    Edits go through the production envelope builder rather than a
+    hand-written shape, so a change to where the stream status lives inside an
+    edit breaks these tests instead of quietly making them test nothing.
+    """
+    if replaces is not None:
+        content = build_edit_event_content(
+            event_id=replaces,
+            new_content={"msgtype": "m.text", "body": body},
+            new_text=body,
+            extra_content={STREAM_STATUS_KEY: status},
+        )
+    else:
+        content = {"msgtype": "m.text", "body": body, STREAM_STATUS_KEY: status}
+        if thread_id is not None:
+            content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": ts,
+        "type": "m.room.message",
+        "content": content,
+    }
+
+
 class TestRevisionReduction:
     """Hydration must reach the same answer the live projection would."""
 
     async def test_the_original_wins_when_there_are_no_edits(self) -> None:
         """The original wins when there are no edits."""
-        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")), self_sender=BOT)
         assert original is not None
 
         revision = _reduce_current_revision(original, ())
@@ -243,11 +303,11 @@ class TestRevisionReduction:
 
     async def test_the_newest_edit_wins(self) -> None:
         """The newest edit wins."""
-        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")), self_sender=BOT)
         assert original is not None
         relations = [
-            _projected_from_event(ROOM, parse(raw("$e1", "second", ts=2_000, replaces="$m"))),
-            _projected_from_event(ROOM, parse(raw("$e2", "third", ts=3_000, replaces="$m"))),
+            _projected_from_event(ROOM, parse(raw("$e1", "second", ts=2_000, replaces="$m")), self_sender=BOT),
+            _projected_from_event(ROOM, parse(raw("$e2", "third", ts=3_000, replaces="$m")), self_sender=BOT),
         ]
 
         revision = _reduce_current_revision(original, [r for r in relations if r is not None])
@@ -256,11 +316,12 @@ class TestRevisionReduction:
 
     async def test_an_edit_from_another_sender_is_ignored(self) -> None:
         """An edit from another sender is ignored."""
-        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")), self_sender=BOT)
         assert original is not None
         forged = _projected_from_event(
             ROOM,
             parse(raw("$e", "forged", sender=BOB, ts=9_000, replaces="$m")),
+            self_sender=BOT,
         )
         assert forged is not None
 
@@ -268,9 +329,78 @@ class TestRevisionReduction:
 
         assert revision.content["body"] == "first"
 
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_this_bots_progress_edit_converts_to_nothing(self, status: str) -> None:
+        """The converter is where the two paths are made to agree."""
+        source = parse(stream_raw("$p", "half an ans", status, ts=2_000, replaces="$answer"))
+
+        assert _projected_from_event(ROOM, source, self_sender=BOT) is None
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            STREAM_STATUS_COMPLETED,
+            STREAM_STATUS_CANCELLED,
+            STREAM_STATUS_ERROR,
+            STREAM_STATUS_INTERRUPTED,
+        ],
+    )
+    async def test_this_bots_terminal_edit_still_converts(self, status: str) -> None:
+        """Only an unfinished revision is transport; every ending is content."""
+        source = parse(stream_raw("$t", "the whole answer", status, ts=2_000, replaces="$answer"))
+
+        projected = _projected_from_event(ROOM, source, self_sender=BOT)
+
+        assert projected is not None
+        assert projected.replaces_event_id == "$answer"
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_someone_elses_progress_edit_still_converts(self, status: str) -> None:
+        """Only this bot's own revisions are transport."""
+        source = parse(stream_raw("$p", "half an ans", status, sender=ALICE, ts=2_000, replaces="$answer"))
+
+        assert _projected_from_event(ROOM, source, self_sender=BOT) is not None
+
+    @pytest.mark.parametrize(
+        ("replacement_status", "fallback_status", "is_transport"),
+        [
+            (STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED, True),
+            (STREAM_STATUS_COMPLETED, STREAM_STATUS_STREAMING, False),
+        ],
+    )
+    async def test_the_replacement_body_decides_not_the_fallback(
+        self,
+        replacement_status: str,
+        fallback_status: str,
+        is_transport: bool,
+    ) -> None:
+        """An edit says two things, and only one of them is the message.
+
+        A Matrix edit carries its real content under ``m.new_content`` and a
+        fallback copy at the top level for clients that do not resolve edits.
+        The projection installs the replacement, so the replacement is what has
+        to be classified; reading the fallback would let the two disagree and
+        pick the wrong one.
+        """
+        source = stream_raw("$e", "half an ans", replacement_status, ts=2_000, replaces="$answer")
+        source["content"][STREAM_STATUS_KEY] = fallback_status
+
+        projected = _projected_from_event(ROOM, parse(source), self_sender=BOT)
+
+        assert (projected is None) is is_transport
+
+    async def test_this_bots_placeholder_still_converts(self) -> None:
+        """A pending original is the message the answer will land on."""
+        source = parse(stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000))
+
+        projected = _projected_from_event(ROOM, source, self_sender=BOT)
+
+        assert projected is not None
+        assert projected.replaces_event_id is None
+
     async def test_a_redacted_event_projects_to_nothing(self) -> None:
         """The server already stripped it; storing an empty body would show one."""
-        assert _projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True))) is None
+        assert _projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True)), self_sender=BOT) is None
 
 
 class TestThreadHydration:
@@ -526,10 +656,191 @@ class TestRoomHydration:
         assert await alice.pending() == ()
 
 
+class TestStreamingProgressIsTransport:
+    """A cold read must reach the conversation the live path would have kept.
+
+    Hydration fetches the whole relation tree, so a rule applied only to live
+    admission would be undone by the first cold read of the room: every
+    progress edit the live path declined would come back from the server and
+    reduce. The two paths therefore share one predicate, and these pin the
+    hydration half of it.
+
+    Unlike live admission, hydration does not filter by ``msgtype`` anywhere,
+    so a progress edit really does arrive here whether it was sent as
+    ``m.text`` or ``m.notice``. This is the path where the rule pays for
+    itself.
+    """
+
+    @staticmethod
+    def _streamed_answer(status: str | None, *, thread_id: str | None = "$root") -> list[dict[str, Any]]:
+        """Return a placeholder, five progress edits, and an optional ending."""
+        frames = [stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id=thread_id)]
+        frames.extend(
+            stream_raw(
+                f"$progress{index}",
+                f"partial {index}",
+                STREAM_STATUS_STREAMING,
+                ts=2_000 + index,
+                replaces="$answer",
+            )
+            for index in range(1, 6)
+        )
+        if status is not None:
+            frames.append(
+                stream_raw("$terminal", "the whole answer", status, ts=2_100, replaces="$answer"),
+            )
+        return frames
+
+    def _thread_client(self, status: str | None) -> FakeClient:
+        return FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": self._streamed_answer(status)},
+        )
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_a_refetched_progress_edit_is_not_reinstalled(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """The one revision this bot never wrote down must not come back."""
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": [
+                    stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root"),
+                    stream_raw("$progress", "half an ans", status, ts=2_001, replaces="$answer"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking..."]
+        assert await revisions(alice, "$root") == ["$root", "$answer"]
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            STREAM_STATUS_COMPLETED,
+            STREAM_STATUS_CANCELLED,
+            STREAM_STATUS_ERROR,
+            STREAM_STATUS_INTERRUPTED,
+        ],
+    )
+    async def test_a_refetched_terminal_revision_is_installed(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """Every terminal ending is content, and a cold read must show it."""
+        await hydrator(alice, self._thread_client(status)).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert await revisions(alice, "$root") == ["$root", "$terminal"]
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+        assert page.messages[1].content[STREAM_STATUS_KEY] == status
+
+    async def test_a_cold_read_after_a_crash_mid_stream_shows_the_placeholder(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing intermediate was durable, so nothing intermediate comes back.
+
+        This is the ordering the whole rule has to survive: the process died
+        between the last progress edit and the terminal one, so the server
+        holds five progress edits and no ending. Reducing them would show the
+        user a half-written answer as if it were finished.
+        """
+        await hydrator(alice, self._thread_client(None)).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking..."]
+        assert await revisions(alice, "$root") == ["$root", "$answer"]
+
+    async def test_a_room_walk_skips_progress_edits_too(self, alice: PrincipalStore) -> None:
+        """The room walk and the thread walk must agree.
+
+        They are different fetches — ``/messages`` against a room, relations
+        against a root — and only the shared converter makes them reach the
+        same conversation.
+        """
+        client = FakeClient(history=list(reversed(self._streamed_answer(None, thread_id=None))))
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert await bodies(alice) == ["Thinking..."]
+        assert await revisions(alice) == ["$answer"]
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_a_refetched_user_edit_claiming_a_transport_status_reduces(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """A stream status in someone else's edit is a claim, not a permission."""
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": [
+                    raw("$ask", "frist follow-up", ts=2_000, thread_id="$root"),
+                    stream_raw("$fix", "first follow-up", status, sender=ALICE, ts=2_001, replaces="$ask"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "first follow-up"]
+        assert await revisions(alice, "$root") == ["$root", "$fix"]
+
+    @pytest.mark.parametrize("status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+    async def test_a_point_refetch_ignores_this_bots_progress_edits(
+        self,
+        alice: PrincipalStore,
+        status: str,
+    ) -> None:
+        """The one exceptional repair reduces by the same rule as everything else.
+
+        Redacting the visible revision sends the hydrator back to the server
+        for whatever is left. If progress edits counted there, the repair would
+        install a body the projection had spent the whole stream refusing.
+        """
+        answer = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000)
+        terminal = stream_raw("$terminal", "the whole answer", STREAM_STATUS_COMPLETED, ts=2_100, replaces="$answer")
+        progress = stream_raw("$late", "half an ans", status, ts=2_200, replaces="$answer")
+        for source in (answer, terminal):
+            event = parse(source)
+            await alice.admit(
+                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            )
+        redaction = parse(
+            {
+                "event_id": "$redact",
+                "sender": BOT,
+                "origin_server_ts": 2_300,
+                "type": "m.room.redaction",
+                "redacts": "$terminal",
+                "content": {},
+            },
+        )
+        await alice.admit(
+            inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+        )
+        client = FakeClient(events={"$answer": answer}, relations={"$answer": [progress]})
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        await hydrator(alice, client).resolve_refreshes(page.refresh_pending)
+
+        assert await bodies(alice) == ["Thinking..."]
+        assert await revisions(alice) == ["$answer"]
+
+
 def _projected(source: dict[str, Any]) -> ProjectedEvent:
     """Return the projection view of one raw event source."""
     event = parse(source)
-    projected = projected_event(ROOM, event, EventKind.MESSAGE)
+    projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
     assert projected is not None
     return projected
 
@@ -712,7 +1023,7 @@ class TestPointRefetch:
         assert isinstance(redaction, nio.Event)
         await store.admit(
             inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION),
+            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
 
     async def test_the_prior_edit_is_restored_when_the_server_still_has_it(
@@ -740,7 +1051,7 @@ class TestPointRefetch:
         )
         await alice.admit(
             inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION),
+            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(
             events={"$m": raw("$m", "first")},
@@ -894,7 +1205,7 @@ class TestReadModes:
         )
         await store.admit(
             inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION),
+            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
 
     async def test_a_non_strict_read_omits_rather_than_waits(

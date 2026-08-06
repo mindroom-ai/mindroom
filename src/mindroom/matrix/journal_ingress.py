@@ -26,6 +26,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
+from mindroom.matrix.transport_progress import is_transport_progress_revision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -143,8 +144,23 @@ def inbound_event(
     )
 
 
-def projected_event(room_id: str, event: nio.Event, kind: EventKind) -> ProjectedEvent | None:
-    """Return the projection view of one event, when it carries content."""
+def projected_event(
+    room_id: str,
+    event: nio.Event,
+    kind: EventKind,
+    *,
+    self_sender: str,
+) -> ProjectedEvent | None:
+    """Return the projection view of one event, when it carries content.
+
+    ``self_sender`` is this bot's raw Matrix user ID, which is what a timeline
+    event's sender is compared against. It is not the journal principal, whose
+    identity also carries the agent name.
+
+    Returning nothing for this bot's own in-flight streaming edit is what keeps
+    a streamed answer to one projection write rather than one per progress
+    edit. It happens here so that nothing which admits an event can forget to.
+    """
     if kind not in _PROJECTED_KINDS:
         return None
     content = event.source.get("content")
@@ -154,7 +170,7 @@ def projected_event(room_id: str, event: nio.Event, kind: EventKind) -> Projecte
     # content, but servers still serve the top-level key over the
     # client-server API, which is what nio parses.
     redacts = event.redacts if isinstance(event, nio.RedactionEvent) else None
-    return ProjectedEvent(
+    projected = ProjectedEvent(
         event_id=event.event_id,
         room_id=room_id,
         thread_id=thread_root(content),
@@ -164,6 +180,9 @@ def projected_event(room_id: str, event: nio.Event, kind: EventKind) -> Projecte
         replaces_event_id=None,
         redacts_event_id=redacts,
     )
+    if is_transport_progress_revision(projected, self_sender=self_sender):
+        return None
+    return projected
 
 
 def parse_journal_event(stored: JournalEvent) -> nio.Event:
@@ -230,6 +249,10 @@ class JournalIngress:
     """Commit every inbound Matrix event before nio considers it delivered."""
 
     store: AdmissionView
+    # This bot's raw Matrix user ID, so a self-authored streaming edit can be
+    # recognized as transport. Deliberately not the journal principal, which
+    # prefixes the agent name and would therefore never match a sender.
+    self_sender: str
     on_admitted: Callable[[], None] = lambda: None
     # Room-membership events are only MindRoom's to act on once the router is
     # ready for them, which the timeline callback cannot decide for itself.
@@ -276,7 +299,7 @@ class JournalIngress:
         try:
             await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),
-                projected_event(room.room_id, event, kind),
+                projected_event(room.room_id, event, kind, self_sender=self.self_sender),
             )
         except Exception as error:
             # Refusing acceptance is the whole point: nio keeps the event for
