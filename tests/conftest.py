@@ -108,6 +108,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
+    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -117,6 +118,15 @@ _STRUCTLOG_CONFIGURE = structlog.configure
 _POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
 _POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
 _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
+
+# The event journal orders text in SQL, in SQLite, and in Python, and those
+# three must agree. An Alpine image cannot show a disagreement: every musl
+# locale sorts like C, so a missing `COLLATE "C"` looks correct there and
+# breaks against a glibc server. The journal's server is therefore glibc.
+_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
+_POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
+_POSTGRES_JOURNAL_IMAGE = "postgres:16"
+_POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
 
 
 def _configure_quiet_structlog() -> None:
@@ -486,9 +496,9 @@ def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
     raise RuntimeError(msg)
 
 
-def _postgres_container_name(run_id: str) -> str:
+def _postgres_container_name(run_id: str, prefix: str = _POSTGRES_CONTAINER_PREFIX) -> str:
     """Return the deterministic disposable Postgres container name for one test run."""
-    return f"{_POSTGRES_CONTAINER_PREFIX}{run_id}"
+    return f"{prefix}{run_id}"
 
 
 def _remove_postgres_container(docker: str, container_name: str) -> None:
@@ -506,19 +516,29 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
 
 
 def pytest_configure_node(node: "WorkerController") -> None:
-    """Remember the shared Postgres container name in the xdist controller."""
-    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
-        node.workerinput["testrunuid"],
+    """Remember the shared Postgres container names in the xdist controller."""
+    run_id = node.workerinput["testrunuid"]
+    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(run_id)
+    node.config.stash[_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
+        run_id,
+        _POSTGRES_JOURNAL_CONTAINER_PREFIX,
     )
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Remove the shared Postgres container after every xdist worker has finished."""
+    """Remove the shared Postgres containers after every xdist worker has finished."""
     if hasattr(session.config, "workerinput"):
         return
-    container_name = session.config.stash.get(_POSTGRES_CONTAINER_NAME_STASH_KEY, None)
     docker = shutil.which("docker")
-    if container_name is not None and docker is not None:
+    if docker is None:
+        return
+    for stash_key in (
+        _POSTGRES_CONTAINER_NAME_STASH_KEY,
+        _POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY,
+    ):
+        container_name = session.config.stash.get(stash_key, None)
+        if container_name is None:
+            continue
         try:
             _remove_postgres_container(docker, container_name)
         except RuntimeError as exc:
@@ -594,6 +614,92 @@ def postgres_event_cache_url(
     finally:
         if not shared_across_workers:
             _remove_postgres_container(docker, container_name)
+
+
+@pytest.fixture(scope="session")
+def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
+    """Start or reuse one glibc Postgres server for event-journal parity tests."""
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker is required for Postgres event-journal parity tests")
+    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
+        pytest.skip("Docker daemon is unavailable for Postgres event-journal parity tests")
+
+    shared_across_workers = worker_id != "master"
+    run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
+    container_name = _postgres_container_name(run_id, _POSTGRES_JOURNAL_CONTAINER_PREFIX)
+    run_result = subprocess.run(
+        [
+            docker, "run", "--rm", "-d",
+            "--name", container_name,
+            "--label", f"mindroom.pytest.run={run_id}",
+            "-e", "POSTGRES_USER=cache",
+            "-e", "POSTGRES_PASSWORD=test",
+            "-e", "POSTGRES_DB=mindroom",
+            "-e", f"LANG={_POSTGRES_JOURNAL_LOCALE}",
+            "-e", f"POSTGRES_INITDB_ARGS=--locale={_POSTGRES_JOURNAL_LOCALE}",
+            "-p", "127.0.0.1::5432",
+            _POSTGRES_JOURNAL_IMAGE,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )  # fmt: skip
+    if run_result.returncode != 0:
+        inspect_result = subprocess.run(
+            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if not shared_across_workers or inspect_result.returncode != 0:
+            pytest.skip(f"Could not start Postgres journal container: {run_result.stderr.strip()}")
+        if inspect_result.stdout.strip() in {"dead", "exited"}:
+            msg = f"Shared Postgres journal container is {inspect_result.stdout.strip()}"
+            raise RuntimeError(msg)
+
+    try:
+        database_url = _wait_for_postgres_container_port(docker, container_name)
+        _wait_for_postgres_container(database_url)
+        if shared_across_workers:
+            database_url = _create_postgres_worker_database(database_url, worker_id)
+        yield database_url
+    finally:
+        if not shared_across_workers:
+            _remove_postgres_container(docker, container_name)
+
+
+@pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
+async def journal_store(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> AsyncGenerator["EventJournalStore", None]:
+    """Return one open event-journal store per supported backend.
+
+    Parametrized rather than duplicated so a rule can only be proven for one
+    backend by also proving it for the other.
+    """
+    from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
+
+    backend = str(request.param)
+    if backend == "sqlite":
+        store = await EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
+    else:
+        import psycopg  # noqa: PLC0415
+        from psycopg import sql  # noqa: PLC0415
+
+        database_url = request.getfixturevalue("postgres_journal_url")
+        schema = f"journal_{uuid.uuid4().hex}"
+        with psycopg.connect(database_url, autocommit=True) as db:
+            db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        separator = "&" if "?" in database_url else "?"
+        store = await EventJournalStore.open_postgres(
+            f"{database_url}{separator}options=-csearch_path%3D{schema}",
+        )
+    try:
+        yield store
+    finally:
+        await store.close()
 
 
 @pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
