@@ -11,7 +11,7 @@ from nio import crypto
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
-from mindroom.matrix.sidecar_content import sidecar_mxc_url
+from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
@@ -60,23 +60,11 @@ def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
     return sidecar_mxc_url(content) is not None
 
 
-def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the content dict that owns the long-text sidecar metadata."""
-    if "io.mindroom.long_text" in content:
-        return content
-
-    new_content = content.get("m.new_content")
-    if isinstance(new_content, dict) and "io.mindroom.long_text" in new_content:
-        return new_content
-
-    return None
-
-
 def _sidecar_reference(event_source: Mapping[str, Any]) -> tuple[str, str] | None:
     """Return one visible event's exact durable sidecar reference."""
     event_id = event_source.get("event_id")
     content = _normalized_content_dict(event_source.get("content"))
-    sidecar_content = _sidecar_content_for_resolution(content)
+    sidecar_content = sidecar_content_to_resolve(content)
     mxc_url = sidecar_mxc_url(sidecar_content) if sidecar_content is not None else None
     if not isinstance(event_id, str) or not event_id or mxc_url is None:
         return None
@@ -150,7 +138,7 @@ async def _register_sidecar_owner(
 ) -> str | None:
     """Persist the visible event/reference before plaintext hydration begins."""
     content = _normalized_content_dict(event_source.get("content"))
-    sidecar_content = _sidecar_content_for_resolution(content)
+    sidecar_content = sidecar_content_to_resolve(content)
     if sidecar_content is None or sidecar_mxc_url(sidecar_content) is None:
         event_id = event_source.get("event_id")
         return event_id if isinstance(event_id, str) else fallback_event_id
@@ -505,7 +493,7 @@ async def _resolve_canonical_content(
     hydration_batch: SidecarHydrationBatch | None,
 ) -> dict[str, Any]:
     """Hydrate canonical event content from a v2 JSON sidecar when available."""
-    sidecar_content = _sidecar_content_for_resolution(content)
+    sidecar_content = sidecar_content_to_resolve(content)
     if client is None or sidecar_content is None:
         return content
 

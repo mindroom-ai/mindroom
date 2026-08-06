@@ -15,6 +15,8 @@ import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+
 from .identity import encode_thread_id
 
 if TYPE_CHECKING:
@@ -27,6 +29,10 @@ _REL_TYPE = "rel_type"
 _REPLACE_REL_TYPE = "m.replace"
 _THREAD_REL_TYPE = "m.thread"
 _NEW_CONTENT = "m.new_content"
+# A seeded row is this bot's own account of what it just sent, so it has no
+# journal receipt to name. It only ever has to be a token that exists; the
+# echo of the same message overwrites the row with a real one.
+_SEED_REFRESH_TOKEN = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,25 @@ _is_newer = is_newer_revision
 
 def _dumps(content: Mapping[str, object]) -> str:
     return json.dumps(content, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def _stored_body(content: Mapping[str, object], receipt_order: int) -> tuple[str | None, int | None]:
+    """Return how one revision's body is stored, and what it still owes.
+
+    A message too large for a single Matrix event carries a truncated preview
+    in its content and its real text in an attached file. Storing that preview
+    would hand every reader a body that looks complete and is not, and no
+    reader can tell the difference by inspecting it.
+
+    So the row records the same shape a redaction leaves behind: no body, and a
+    refresh token. Reads omit it and report it as owed rather than serving it,
+    and the existing resolver repairs it. Resolved content carries no sidecar
+    metadata of its own, so storing the resolution is what clears the debt --
+    nothing has to remember to.
+    """
+    if holds_unresolved_sidecar(content):
+        return None, receipt_order
+    return _dumps(content), None
 
 
 def _loads(content_json: str) -> Mapping[str, object]:
@@ -161,13 +186,20 @@ def project(
         return
     replaces = replacement_target(event.content)
     if replaces is None:
-        _project_original(transaction, principal_id, event, membership_epoch=membership_epoch)
+        _project_original(
+            transaction,
+            principal_id,
+            event,
+            receipt_order=receipt_order,
+            membership_epoch=membership_epoch,
+        )
         return
     _project_edit(
         transaction,
         principal_id,
         event,
         target_event_id=replaces,
+        receipt_order=receipt_order,
         membership_epoch=membership_epoch,
         provisional=False,
     )
@@ -209,17 +241,19 @@ def seed_outbound(
             principal_id,
             replace(event, origin_server_ts=_seed_ordering_key(transaction, principal_id, event, replaces)),
             target_event_id=replaces,
+            receipt_order=_SEED_REFRESH_TOKEN,
             membership_epoch=membership_epoch,
             provisional=True,
         )
         return
+    content_json, refresh_token = _stored_body(event.content, _SEED_REFRESH_TOKEN)
     transaction.execute(
         """
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
             refresh_token, membership_epoch, provisional, revision_provisional
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO NOTHING
         """,
         (
@@ -231,7 +265,8 @@ def seed_outbound(
             event.origin_server_ts,
             event.event_id,
             event.origin_server_ts,
-            _dumps(event.content),
+            content_json,
+            refresh_token,
             membership_epoch,
         ),
     )
@@ -277,6 +312,7 @@ def _project_original(
     principal_id: str,
     event: ProjectedEvent,
     *,
+    receipt_order: int,
     membership_epoch: int,
 ) -> None:
     """Install a new logical message and apply an edit that beat it here.
@@ -287,13 +323,14 @@ def _project_original(
     authoritative. Every other repeat is a genuine duplicate and changes
     nothing, which is why the update is guarded rather than unconditional.
     """
+    content_json, refresh_token = _stored_body(event.content, receipt_order)
     transaction.execute(
         """
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
             refresh_token, membership_epoch, provisional, revision_provisional
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             sender = excluded.sender,
@@ -301,6 +338,7 @@ def _project_original(
             revision_event_id = excluded.revision_event_id,
             revision_ts = excluded.revision_ts,
             content_json = excluded.content_json,
+            refresh_token = excluded.refresh_token,
             membership_epoch = excluded.membership_epoch,
             provisional = 0,
             revision_provisional = 0
@@ -316,7 +354,8 @@ def _project_original(
             event.origin_server_ts,
             event.event_id,
             event.origin_server_ts,
-            _dumps(event.content),
+            content_json,
+            refresh_token,
             membership_epoch,
         ),
     )
@@ -330,13 +369,15 @@ def _project_original(
         """,
         (event.origin_server_ts, principal_id, event.room_id, event.event_id),
     )
-    _apply_unresolved_edit(transaction, principal_id, event)
+    _apply_unresolved_edit(transaction, principal_id, event, receipt_order=receipt_order)
 
 
 def _apply_unresolved_edit(
     transaction: Transaction,
     principal_id: str,
     event: ProjectedEvent,
+    *,
+    receipt_order: int,
 ) -> None:
     """Apply the original sender's held edit, then drop every held edit.
 
@@ -370,6 +411,7 @@ def _apply_unresolved_edit(
         revision_event_id=held["edit_event_id"],
         revision_ts=int(held["edit_ts"]),
         content=visible_content(_loads(held["content_json"])),
+        receipt_order=receipt_order,
         # A held edit this bot seeded is still a guess about ordering. Losing
         # that here would install a locally timed revision as authoritative,
         # and its own echo would then look like a stale duplicate.
@@ -383,6 +425,7 @@ def _project_edit(
     event: ProjectedEvent,
     *,
     target_event_id: str,
+    receipt_order: int,
     membership_epoch: int,
     provisional: bool,
 ) -> None:
@@ -439,6 +482,7 @@ def _project_edit(
         revision_event_id=event.event_id,
         revision_ts=event.origin_server_ts,
         content=visible_content(event.content),
+        receipt_order=receipt_order,
         provisional=provisional,
     )
 
@@ -518,19 +562,22 @@ def _install_revision(
     revision_event_id: str,
     revision_ts: int,
     content: Mapping[str, object],
+    receipt_order: int,
     provisional: bool = False,
 ) -> None:
+    content_json, refresh_token = _stored_body(content, receipt_order)
     transaction.execute(
         """
         UPDATE visible_messages
-        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = NULL,
+        SET revision_event_id = ?, revision_ts = ?, content_json = ?, refresh_token = ?,
             revision_provisional = ?
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
         (
             revision_event_id,
             revision_ts,
-            _dumps(content),
+            content_json,
+            refresh_token,
             1 if provisional else 0,
             principal_id,
             room_id,
@@ -613,7 +660,14 @@ def install_refetched_revision(
     refresh token, so this conditional update is what stops a slow refetch from
     overwriting fresher truth. Returning ``False`` leaves the token durable and
     the message unreadable, which is the safe direction.
+
+    Content that still holds a sidecar reference is refused for the same
+    reason. A refetch returns the event as the server stored it, preview and
+    all, so installing it unread would resolve the debt by satisfying it with
+    the very text it was raised about.
     """
+    if holds_unresolved_sidecar(content):
+        return False
     row = transaction.fetchone(
         """
         UPDATE visible_messages

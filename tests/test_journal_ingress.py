@@ -272,22 +272,22 @@ def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> 
 
 
 class TestSidecarContent:
-    """A message too large for one Matrix event still reaches a prompt whole."""
+    """A message too large for one Matrix event never reaches a prompt truncated."""
 
-    @pytest.mark.xfail(
-        reason="the projection stores the sidecar preview; resolution moves to the pending-event worker",
-        strict=True,
-    )
-    async def test_a_strict_read_returns_the_sidecar_body_not_the_preview(
+    async def test_an_unresolved_sidecar_is_owed_rather_than_served(
         self,
         alice: PrincipalStore,
     ) -> None:
         """Most agent answers exceed the event size limit and live in a sidecar.
 
-        The projection stores what the event said, and a sidecar event says only
-        "[Message continues in attached file]". Serving that to a prompt would
-        feed the model a placeholder in place of its own previous answer, for
-        the majority of its own history.
+        The event itself says only "[Message continues in attached file]".
+        Storing that would feed a model a placeholder in place of its own
+        previous answer, for the majority of its own history, and no reader
+        could tell by looking that the body it got was a stub.
+
+        So the message is reported as owing a resolution instead, which is the
+        same shape a redaction leaves behind, and the readers that already know
+        how to wait for one repair it.
         """
         preview = "The answer beg [Message continues in attached file]"
         event = sidecar_event("$long", preview, "mxc://server/long-answer")
@@ -298,9 +298,53 @@ class TestSidecarContent:
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
 
-        assert [message.logical_event_id for message in page.messages] == ["$long"]
-        body = page.messages[0].content.get("body")
-        assert body != preview, "the projection served the sidecar preview as the message body"
+        assert page.messages == (), "the projection served an unresolved sidecar as a message"
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+
+    async def test_an_ordinary_message_alongside_it_is_still_served(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Owing one resolution must not hide the rest of the conversation.
+
+        Pins that the sidecar rule is about the one message whose text is
+        missing. A rule that withheld the whole page would be indistinguishable
+        from the correct one in a test that only ever admits a sidecar.
+        """
+        plain = text_event("$plain", "a short answer", ts=4_000)
+        sidecar = sidecar_event("$long", "truncated [Message continues in attached file]", "mxc://server/long")
+        for event in (plain, sidecar):
+            await alice.admit(
+                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                projected_event(ROOM, event, EventKind.MESSAGE),
+            )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["a short answer"]
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+
+    async def test_resolved_content_is_stored_whole(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Content carrying no sidecar reference is the resolved form.
+
+        This is what makes the rule self-clearing: the payload inside the
+        attachment has no sidecar metadata of its own, so storing it settles
+        the debt without anything having to remember to clear a flag.
+        """
+        whole = "The answer begins here and runs on for many thousands of characters."
+        event = text_event("$long", whole, ts=5_000)
+        await alice.admit(
+            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, EventKind.MESSAGE),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == [whole]
+        assert page.refresh_pending == ()
 
 
 class TestEchoOrdering:

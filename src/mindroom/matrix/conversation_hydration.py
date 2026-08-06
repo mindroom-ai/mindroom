@@ -28,6 +28,8 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
+from mindroom.matrix.message_content import resolve_event_source_content
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -361,12 +363,53 @@ class ConversationHydrator:
             return await self.store.drop_refetched_message(request)
         relations = await self._fetch_relations(request.room_id, request.logical_event_id)
         revision = _reduce_current_revision(projected, relations)
+        content = await self._resolved_content(revision.event_id, revision.content)
+        if content is None:
+            return False
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
             revision_ts=revision.origin_server_ts,
-            content=revision.content,
+            content=content,
         )
+
+    async def _resolved_content(
+        self,
+        event_id: str,
+        content: Mapping[str, object],
+    ) -> Mapping[str, object] | None:
+        """Return one revision's whole text, fetching its sidecar when it has one.
+
+        A message too large for a single Matrix event carries a preview in its
+        content and its real text in an attached file, and the projection
+        refuses to store the preview. This is where that file is read.
+
+        It happens here, and not at admission, because admission commits before
+        nio accepts the sync response: making acceptance wait on a media
+        download would let a slow or missing attachment decide whether an event
+        counts as received. It happens per refetched message, and not per
+        hydrated room, because the caller asking for the text is the one whose
+        page size bounds how much of it is worth fetching.
+
+        Returning nothing means the attachment could not be read. The message
+        then stays unreadable and keeps its refresh token, so the next strict
+        read tries again rather than installing the preview and calling the
+        debt settled.
+        """
+        if not holds_unresolved_sidecar(content):
+            return content
+        resolved = await resolve_event_source_content(
+            {"event_id": event_id, "content": dict(content)},
+            self._client(),
+        )
+        resolved_content = resolved.get("content")
+        if not isinstance(resolved_content, dict) or holds_unresolved_sidecar(resolved_content):
+            logger.info(
+                "conversation_refresh_sidecar_unresolved",
+                event_id=event_id,
+            )
+            return None
+        return resolved_content
 
     async def resolve_refreshes(self, *, room_id: str, thread_id: str | None) -> None:
         """Drive every owed refetch for one conversation.

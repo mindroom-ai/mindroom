@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -101,6 +102,18 @@ class FakeClient:
     # endless generator cannot express.
     pages: list[tuple[list[dict[str, Any]], str | None]] | None = None
     repeat_last: bool = False
+    # The bodies this server serves for long-text sidecars, by MXC URL, and a
+    # count of how many times each was actually fetched.
+    sidecars: dict[str, str] = field(default_factory=dict)
+    downloads: list[str] = field(default_factory=list)
+
+    async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
+        """Return one stored attachment."""
+        self.downloads.append(mxc)
+        payload = self.sidecars.get(mxc)
+        if payload is None:
+            return nio.DownloadError("M_NOT_FOUND")
+        return nio.DownloadResponse(payload.encode(), "application/json", None)
 
     async def room_get_event(
         self,
@@ -511,6 +524,162 @@ class TestRoomHydration:
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert await alice.pending() == ()
+
+
+class TestSidecarResolution:
+    """A message whose text lives in an attachment is served whole, or not at all."""
+
+    @staticmethod
+    def _sidecar_source(event_id: str, preview: str, mxc: str, *, ts: int = 1_000) -> dict[str, Any]:
+        """Return one event whose body is a preview of an attached payload."""
+        return {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.file",
+                "body": preview,
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                "url": mxc,
+            },
+        }
+
+    @staticmethod
+    def _payload(body: str) -> str:
+        """Return what the attachment holds: the whole original content."""
+        return json.dumps({"msgtype": "m.text", "body": body})
+
+    @staticmethod
+    async def _reader(store: PrincipalStore, client: FakeClient) -> ConversationReader:
+        """Return a reader over an already-hydrated conversation.
+
+        Hydration is not what these tests are about, and leaving it to run
+        would let an empty history walk decide the outcome instead of the
+        attachment fetch.
+        """
+        await store.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            expected_membership_epoch=await store.membership_epoch(ROOM),
+        )
+        return ConversationReader(store=store, hydrator=hydrator(store, client))
+
+    async def test_a_strict_read_returns_the_attached_body_not_the_preview(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The exact text the sender wrote reaches the reader.
+
+        Asserting the whole body, and not merely that it differs from the
+        preview, is the point: an implementation that resolved to an empty
+        string, or to the attachment's JSON envelope rather than its body,
+        would satisfy "not the preview" while still handing a model something
+        its author never wrote.
+        """
+        whole = "The answer begins here, and then continues for a very long time indeed."
+        source = self._sidecar_source("$long", "The answer beg [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source}, sidecars={"mxc://s/long": self._payload(whole)})
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == [whole]
+        assert page.refresh_pending == ()
+
+    async def test_a_non_strict_read_reports_the_message_as_missing_rather_than_truncated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A caller unwilling to wait is told the page is short, not given a stub.
+
+        The preview is a plausible-looking body, so a reader handed it has no
+        way to know it is incomplete. Absence is the only honest answer that
+        costs nothing.
+        """
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source}, sidecars={"mxc://s/long": self._payload("whole")})
+        reader = await self._reader(alice, client)
+
+        page = await reader.read(room_id=ROOM, thread_id=None, limit=10)
+
+        assert page.messages == ()
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+        assert client.downloads == []
+
+    async def test_one_attachment_is_fetched_once_however_often_it_is_read(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Resolving is durable, so a second read costs no download.
+
+        Most answers in this product are attachments, so a resolution that
+        repeated per read would put a media fetch behind every prompt.
+        """
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source}, sidecars={"mxc://s/long": self._payload("whole")})
+        reader = await self._reader(alice, client)
+
+        await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/long"]
+
+    async def test_a_streamed_answer_downloads_only_the_revision_that_won(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Streaming rewrites one message many times before it settles.
+
+        Each intermediate edit replaces the visible revision, so only the last
+        one is ever owed a resolution. Downloading per admitted revision would
+        fetch an attachment for every edit of every answer.
+        """
+        original = self._sidecar_source("$m", "p0 [Message continues in attached file]", "mxc://s/v0")
+        edits = []
+        for index, mxc in enumerate(("mxc://s/v1", "mxc://s/v2", "mxc://s/v3"), start=1):
+            edit = self._sidecar_source(f"$e{index}", f"p{index} [continues]", mxc, ts=2_000 + index)
+            edit["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+            edits.append(edit)
+        await admit_all(alice, [original, *edits])
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": edits},
+            sidecars={f"mxc://s/v{index}": self._payload(f"answer v{index}") for index in range(4)},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["answer v3"]
+        assert client.downloads == ["mxc://s/v3"]
+
+    async def test_an_unreachable_attachment_keeps_the_read_incomplete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A failed fetch must not settle the debt with the preview.
+
+        This is the direction that matters. Installing the preview here would
+        clear the refresh token, and the truncated body would then look exactly
+        like content that had been resolved -- permanently, because nothing
+        would ever ask again. Failing loudly leaves it repairable.
+        """
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source})
+        reader = await self._reader(alice, client)
+
+        with pytest.raises(_StaleConversationError):
+            await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert page.messages == ()
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
 
 
 class TestPointRefetch:

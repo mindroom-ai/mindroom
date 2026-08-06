@@ -1335,7 +1335,14 @@ The accompanying rules:
 - Recovered events use the same ingestion path as live ones.
 - An outbound redaction takes effect immediately on acknowledgement, because MindRoom must stop serving deleted content without waiting for a round trip.
 
-**Landed.** `send_text` and `edit_text` both seed on acceptance, which covers blocking answers and streamed ones — a streamed answer reaches its final text by editing, so seeding only the original would have a turn that reads immediately afterwards see the placeholder.
+**Landed, and now superseded.** `send_text` and `edit_text` both seed on acceptance, which covers blocking answers and streamed ones — a streamed answer reaches its final text by editing, so seeding only the original would have a turn that reads immediately afterwards see the placeholder.
+
+> **Superseded by the audit below (2026-08-06).** Provisional seeding is to be
+> deleted: the sync echo is the only route into conversation content. The rest
+> of this section describes machinery that is being removed, and is kept
+> because the ordering hazards it documents are what the echo-ordering tests
+> now pin. Read it as a record of why the mechanism was hard, not as a
+> specification to build against.
 
 The two halves need different mechanisms, and the reason is worth stating.
 For an original the whole row is provisional, so the echo replaces it, guarded by a `provisional` column.
@@ -1497,12 +1504,31 @@ across `src/mindroom`, 32 of them in `event_journal/projection.py` and 7 in
 `test_event_journal_store.py`, `test_turn_policy.py`, `test_team_mode_decision.py`,
 `test_response_runner_agent.py`.
 
-### Conclusion
+### Conclusion (authoritative)
 
 Removal is justified, and the ordering guarantee -- not the absence of
 read-after-send callers -- is the reason. Prove it first with the echo-ordering
 tests before deleting anything, and decide explicitly what `thread_summary` is
 allowed to miss rather than letting seeding hide the question.
+
+**This decision overrides the "Landed" note earlier in this document**, which
+described seeding as the mechanism for making a bot's own answer readable. Where
+the two disagree, this section wins. Concretely:
+
+- The sync echo is the only route into conversation content.
+- Provisional seeding and its ordering machinery are deleted: `seed_outbound`,
+  `OutboundProjection`, `SeedingView`, and the `provisional` /
+  `revision_provisional` columns.
+- The open "a rejected revision is never reconsidered" defect (task 11) is
+  caused by provisional seeding and disappears with it, rather than needing its
+  own fix.
+- Reads issued in the same execution that sent a message are documented as
+  echo-ordered, not read-your-writes. A turn that must know its own last message
+  uses the event ID from the send response.
+
+The echo-ordering tests landed first, as required: `TestEchoOrdering` in
+`tests/test_journal_ingress.py` pins that a bot's own message is admitted and
+ordered against the traffic around it, so deletion is now unblocked.
 
 ## Blocking: the projection serves truncated bodies for sidecar'd messages (2026-08-06)
 
@@ -1541,53 +1567,67 @@ pending refresh already models: a non-blocking read may serve the preview, a
 strict read must resolve it before answering, and the resolved text is written
 back so the fetch happens once.
 
-### Before fixing
+### Implemented (2026-08-06)
 
-Write the failing test first: admit a message whose content is a v2 sidecar
-reference, then assert a strict projected read returns the full body rather than
-the preview. That test should fail against the current projection.
-
-### Agreed design (supersedes the "lazy resolution on read" sketch above)
-
-Settled with the operator on 2026-08-06. Ownership: **Matrix owns the sidecar;
-the projected row owns the resolved visible content.** No separate plaintext
-table -- the old `mxc_text` cache in the event cache is not to be recreated,
-because a second owner needs its own invalidation and, critically, its own
-redaction cleanup. Plaintext living in the projected row means redaction removes
-it as a consequence of the projection already working.
+Ownership: **Matrix owns the sidecar; the projected row owns the resolved
+visible content.** No separate plaintext table -- the old `mxc_text` cache in
+the event cache is not to be recreated, because a second owner needs its own
+invalidation and, critically, its own redaction cleanup. Plaintext living in the
+projected row means redaction removes it as a consequence of the projection
+already working.
 
 Storing resolved content in the projected row does not hurt replay: replay reads
 `journal_events`, which keeps the exact admitted source. `visible_messages` is a
 reduction and is allowed to hold canonical content.
 
-Shape:
+Projection stays inside the admission transaction. An earlier sketch here
+proposed splitting it out so a worker could resolve the sidecar before
+projecting; that is rejected. It would break the crash invariant this document
+states at the top, and it would strand context-only history, which is admitted
+already settled with its source payload cleared and so never reaches a worker.
+Recovering it would need a second obligation kind and a second fence -- a
+recovery state machine bought to avoid one media fetch.
 
-1. Split projection out of admission. `_admit` stays network-free -- it commits
-   before nio accepts, so an MXC download there would make sync acceptance
-   depend on a media fetch.
-2. The pending-event worker resolves the sidecar and then projects.
-3. The worker skips revisions already superseded by a later edit, so a streaming
-   turn resolves only the winning revision instead of every intermediate one.
-   This is the collapse-before-download property; without it a long streamed
-   answer downloads each growing intermediate edit.
-4. Redaction of the currently visible revision is the exceptional path: mark the
-   logical message for refresh and refetch the server-visible state, then
-   replace the projection under the existing membership-epoch fence plus a
-   refresh generation, so a slow refetch cannot overwrite newer state. The
-   refetch must reconstruct from the original plus surviving relations -- fetching
-   the redacted edit returns stripped content.
+What is implemented instead reuses the mechanism redaction already established:
 
-Contract during the admission-to-projection window: the message is *absent*, not
-truncated. Absent-and-incomplete is what hydration already models; a preview
-masquerading as content is not. No reader may treat presence as completeness
-without checking.
+1. The projection refuses to store content whose text is a preview.
+   `_stored_body` (`event_journal/projection.py`) writes a null body and a
+   refresh token for any content still carrying sidecar metadata. This is a
+   pure content inspection, so admission stays network-free.
+2. That is the same row shape a redacted revision leaves behind, so the readers
+   that already handle it need no change: `read_conversation` omits the message
+   and reports it in `refresh_pending`, a non-strict read reports the page
+   incomplete (`conversation_reads.py:71`), and a strict read resolves and
+   re-reads before answering, raising `_StaleConversationError` if it still
+   cannot (`conversation_reads.py:144`).
+3. `ConversationHydrator._resolved_content` performs the fetch, from the point
+   refetch path that redaction already used. Failure returns nothing, so the
+   message keeps its token and stays repairable rather than settling the debt
+   with the preview. `install_refetched_revision` refuses unresolved content as
+   a backstop; a mutation test confirms that backstop alone keeps behaviour
+   correct when the resolver is broken.
+4. Redaction is unchanged. It already refetches the original plus surviving
+   relations under the membership-epoch fence and the refresh token, and
+   resolution now happens on that same path.
 
-Performance note that decides whether this is viable: `HYDRATED_PROMPT_WINDOW_MESSAGES`
-is 2_000 (`matrix/conversation_hydration.py:61`) and is what `_read_thread_messages`
-passes as the read limit, while the real prompt trim happens much later and much
-smaller at `execution_preparation.py:599`. Resolution must follow the consumer's
-budget, never the read window; the sidecar's `original_event_size` gives a
-conservative byte budget without downloading anything.
+Collapse-before-download falls out of laziness rather than worker timing. An
+earlier sketch proposed the worker "skip revisions already superseded by a later
+edit"; that is rejected because a worker processing an edit cannot know a later
+one is coming. Because each edit overwrites the visible row and nothing
+downloads until a read asks, a streamed answer resolves only the revision that
+won, whatever order the edits arrived in. `TestSidecarResolution::
+test_a_streamed_answer_downloads_only_the_revision_that_won` pins one download
+across three intermediate edits.
+
+Resolution is bounded by the reader, not by hydration. Hydration installs rows
+without fetching attachments, and the fetch happens per refetched message on the
+strict read that wants it, so the bound is that read's page limit.
+`HYDRATED_PROMPT_WINDOW_MESSAGES` (2_000, `matrix/conversation_hydration.py:61`)
+is the hydration walk's ceiling and never a resolution budget. An earlier note
+here claimed `execution_preparation.py:599` is "the real prompt trim"; that is
+wrong -- it is the explicit `history_limit` selection used by scheduled and
+tool-driven turns, and general prompt trimming happens through token-budget
+selection elsewhere.
 
 Steady state: one download per newly prompt-relevant visible revision, then
 local reads until that revision is edited or redacted.

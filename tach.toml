@@ -108,7 +108,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.event_journal"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.bot",
     "mindroom.journal_dispatch",
@@ -163,6 +163,8 @@ depends_on = [
     "mindroom.runtime_protocols",
     "mindroom.event_journal",
     "mindroom.logging_config",
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.sidecar_content",
 ]
 visibility = [
     "mindroom.bot",
@@ -4231,10 +4233,12 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["sidecar_mxc_url"]
+expose = ["holds_unresolved_sidecar", "sidecar_content_to_resolve", "sidecar_mxc_url"]
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
+    "mindroom.event_journal",
     "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.message_content",
 ]
 exclusive = true
