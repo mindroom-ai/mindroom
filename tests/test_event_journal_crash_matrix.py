@@ -1,0 +1,423 @@
+"""Crash the turn pipeline at each of its nine boundaries.
+
+A durable design is only as good as its worst interruption point. Each test
+below stops the process at one specific moment, restarts everything that is
+not durable, and then checks the two properties that matter: exactly one
+terminal turn, and at most one visible response.
+
+The model is counted as well. Re-running a completed model call is not a
+correctness bug in the Matrix sense, but it is a real cost and a real source
+of divergence between the durable result and what the room shows, so the
+boundaries after the result is durable must not re-run it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+import nio
+import pytest
+
+from mindroom.event_journal import (
+    DeliveryStage,
+    EventClass,
+    EventKind,
+    SettlementOutcome,
+)
+from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.pending_event_worker import PendingEventWorker
+from mindroom.response_delivery import ResponseDelivery
+
+if TYPE_CHECKING:
+    from mindroom.event_journal import EventJournalStore, JournalEvent, OutboxDelivery, PrincipalStore
+
+pytestmark = pytest.mark.asyncio
+
+ROOM = "!room:example.org"
+ALICE = "@alice:example.org"
+SOURCE = "$inbound"
+
+
+class Crash(RuntimeError):
+    """The process died here."""
+
+
+@dataclass
+class FakeHomeserver:
+    """A Matrix server that deduplicates by transaction ID, like a real one."""
+
+    events: dict[str, str] = field(default_factory=dict)
+    sends: int = 0
+    fail_next_send: bool = False
+    lose_acknowledgement: bool = False
+
+    async def send(self, delivery: OutboxDelivery) -> str:
+        """Accept one delivery, collapsing a repeated transaction ID."""
+        self.sends += 1
+        if self.fail_next_send:
+            self.fail_next_send = False
+            msg = "connection reset"
+            raise Crash(msg)
+        event_id = self.events.setdefault(delivery.transaction_id, f"$sent{len(self.events)}")
+        if self.lose_acknowledgement:
+            self.lose_acknowledgement = False
+            msg = "crashed after Matrix accepted the message"
+            raise Crash(msg)
+        return event_id
+
+    @property
+    def visible_messages(self) -> int:
+        """Return how many distinct events this server actually holds."""
+        return len(self.events)
+
+
+@dataclass
+class TurnRuntime:
+    """Everything that would be rebuilt by a restart."""
+
+    store: PrincipalStore
+    homeserver: FakeHomeserver
+    model_runs: int = 0
+    crash_after_model: bool = False
+    crash_after_enqueue: bool = False
+    crash_before_settle: bool = False
+
+    @property
+    def delivery(self) -> ResponseDelivery:
+        """Return a fresh delivery view, as a restart would."""
+        return ResponseDelivery(store=self.store, send=self.homeserver.send)
+
+    async def handle(self, event: JournalEvent) -> SettlementOutcome:
+        """Run one turn: model, durable result, enqueue, claim, send, settle."""
+        self.model_runs += 1
+        answer = f"answer to {event.event_id}"
+        if self.crash_after_model:
+            msg = "crashed after the model finished"
+            raise Crash(msg)
+
+        await self.store.enqueue_delivery(
+            turn_id=event.event_id,
+            stage=DeliveryStage.FINAL,
+            room_id=event.room_id,
+            thread_id=event.thread_id,
+            payload={"msgtype": "m.text", "body": answer},
+        )
+        if self.crash_after_enqueue:
+            msg = "crashed after enqueue, before claim"
+            raise Crash(msg)
+
+        await self.delivery.flush(turn_id=event.event_id, stage=DeliveryStage.FINAL)
+        if self.crash_before_settle:
+            msg = "crashed after acknowledgement, before settlement"
+            raise Crash(msg)
+        return SettlementOutcome.SUCCEEDED
+
+    def worker(self) -> PendingEventWorker:
+        """Return a fresh worker, as a restart would."""
+        return PendingEventWorker(store=self.store, handle=self.handle)
+
+
+@pytest.fixture
+def runtime(journal_store: EventJournalStore) -> TurnRuntime:
+    """Return one turn runtime over a real store."""
+    return TurnRuntime(store=journal_store.principal("agent@alice"), homeserver=FakeHomeserver())
+
+
+def inbound(event_id: str = SOURCE) -> nio.Event:
+    """Return one parsed inbound message."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": 1_000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "question"},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+async def admit(store: PrincipalStore, event: nio.Event | None = None) -> None:
+    """Admit one inbound message durably."""
+    event = event or inbound()
+    await store.admit(
+        inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+        projected_event(ROOM, event, EventKind.MESSAGE),
+    )
+
+
+async def assert_settled_once(runtime: TurnRuntime) -> None:
+    """Assert the outcome every boundary must reach."""
+    assert await runtime.store.pending() == (), "the event still owes work"
+    settled = await runtime.store.load_event(SOURCE)
+    assert settled is not None, "the event vanished from the journal"
+    assert runtime.homeserver.visible_messages == 1, (
+        f"{runtime.homeserver.visible_messages} visible responses"
+    )
+
+
+class TestCrashMatrix:
+    """One terminal turn and at most one visible response, at every boundary."""
+
+    async def test_one_before_journal_commit(self, runtime: TurnRuntime) -> None:
+        """nio was never told the event was accepted, so it redelivers it."""
+        # Nothing was admitted: the transaction did not commit.
+        assert await runtime.store.pending() == ()
+        assert runtime.homeserver.visible_messages == 0
+
+        await admit(runtime.store)
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+    async def test_two_after_journal_commit_before_nio_accepts(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """nio redelivers what it was not told about; the journal deduplicates."""
+        await admit(runtime.store)
+        await admit(runtime.store)
+
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+    async def test_three_after_acceptance_before_the_worker_starts(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The pending row is the entire handoff, so a restart just resumes."""
+        await admit(runtime.store)
+
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+    async def test_four_after_turn_creation_before_the_model_runs(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """No durable result yet, so the model has to run — exactly once."""
+        await admit(runtime.store)
+        runtime.crash_after_model = True
+        runtime.model_runs = -1  # The crashed attempt does not count as a real run.
+
+        await runtime.worker().drain_once()
+        assert await runtime.store.pending() != ()
+
+        runtime.crash_after_model = False
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+    async def test_five_after_the_result_is_durable_before_enqueue(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        await admit(runtime.store)
+        runtime.crash_after_model = True
+        await runtime.worker().drain_once()
+
+        runtime.crash_after_model = False
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+
+    async def test_six_after_enqueue_before_the_claim_commits(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        await admit(runtime.store)
+        runtime.crash_after_enqueue = True
+        await runtime.worker().drain_once()
+
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id is None
+        assert runtime.homeserver.sends == 0
+
+        runtime.crash_after_enqueue = False
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+
+    async def test_seven_after_the_claim_before_network_io(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The claim is committed, so recovery resends the identical payload."""
+        await admit(runtime.store)
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "claimed"},
+        )
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert claimed is not None
+
+        recovered = await runtime.delivery.recover()
+
+        assert recovered == 1
+        assert runtime.homeserver.visible_messages == 1
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.payload["body"] == "claimed"
+
+    async def test_eight_after_matrix_accepts_before_acknowledgement(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The dangerous one: the message exists but MindRoom does not know.
+
+        Recovery resends under the same deterministic transaction ID, which
+        the homeserver collapses back into the event it already created.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+
+        await runtime.worker().drain_once()
+        assert runtime.homeserver.visible_messages == 1
+
+        await runtime.delivery.recover()
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+
+    async def test_nine_after_acknowledgement_before_settlement(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The retry must not produce a second message."""
+        await admit(runtime.store)
+        runtime.crash_before_settle = True
+        await runtime.worker().drain_once()
+
+        assert await runtime.store.pending() != ()
+        assert runtime.homeserver.visible_messages == 1
+
+        runtime.crash_before_settle = False
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+
+
+class TestModelIsNotRerun:
+    """Boundaries five through nine must not spend the model again."""
+
+    async def test_a_regenerated_answer_cannot_replace_an_accepted_one(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The exact case claiming exists to prevent.
+
+        Matrix accepted the first answer. A restart produced a different one.
+        Sending it under the same transaction ID would be silently discarded,
+        leaving the durable result and the room disagreeing forever — so the
+        claimed payload wins and stays visible.
+        """
+        await admit(runtime.store)
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "first answer"},
+        )
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        await runtime.homeserver.send(claimed)
+
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "regenerated answer"},
+        )
+        await runtime.delivery.recover()
+
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.payload["body"] == "first answer"
+        assert runtime.homeserver.visible_messages == 1
+
+    async def test_recovery_after_acknowledgement_sends_nothing(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        await admit(runtime.store)
+        await runtime.worker().drain_once()
+        sends_before = runtime.homeserver.sends
+
+        await runtime.delivery.recover()
+
+        assert runtime.homeserver.sends == sends_before
+
+    async def test_a_send_failure_leaves_the_turn_retryable(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        await admit(runtime.store)
+        runtime.homeserver.fail_next_send = True
+
+        await runtime.worker().drain_once()
+        assert await runtime.store.pending() != ()
+        assert runtime.homeserver.visible_messages == 0
+
+        await runtime.worker().drain_once()
+
+        await assert_settled_once(runtime)
+
+
+class TestInitialAndFinalStages:
+    """A turn's two visible deliveries are independently idempotent."""
+
+    async def test_the_stages_do_not_share_a_transaction(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        initial = await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "thinking"},
+        )
+        final = await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+
+        assert initial != final
+
+    async def test_recovery_resends_both_stages_once(self, runtime: TurnRuntime) -> None:
+        for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "answer")):
+            await runtime.store.enqueue_delivery(
+                turn_id=SOURCE,
+                stage=stage,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": body},
+            )
+
+        assert await runtime.delivery.recover() == 2
+        assert runtime.homeserver.visible_messages == 2
+        sends_after_recovery = runtime.homeserver.sends
+
+        # Acknowledged deliveries leave the recovery set, so a second restart
+        # is not a second send.
+        assert await runtime.delivery.recover() == 0
+        assert runtime.homeserver.sends == sends_after_recovery
+        assert runtime.homeserver.visible_messages == 2
+
