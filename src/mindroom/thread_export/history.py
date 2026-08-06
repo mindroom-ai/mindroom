@@ -208,7 +208,7 @@ async def _scan_room_history_for_thread(
         )
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"thread export room scan failed for {room_id}: {response}"
-            raise ThreadExportHistoryError(msg)  # noqa: TRY004
+            raise ThreadExportHistoryError(msg)
         if not response.chunk:
             break
         page_count += 1
@@ -322,8 +322,7 @@ async def _thread_event_sources(
     """Select and order the scanned sources that belong to one thread."""
     scanned_event_sources = scan.event_sources_by_event_id
     event_infos = {
-        event_id: EventInfo.from_event(event_source)
-        for event_id, event_source in scanned_event_sources.items()
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_event_sources.items()
     }
     ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_event_sources.values())
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
