@@ -30,6 +30,7 @@ pytestmark = pytest.mark.asyncio
 
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
+BOT = "@mindroom_general:example.org"
 
 
 @pytest.fixture
@@ -56,6 +57,21 @@ def text_event(
             "origin_server_ts": ts,
             "type": "m.room.message",
             "content": content,
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def bot_event(event_id: str, body: str = "the answer", *, ts: int = 1_100) -> nio.Event:
+    """Return this bot's own message as it comes back on the sync timeline."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": body},
         },
     )
     assert isinstance(event, nio.Event)
@@ -232,6 +248,102 @@ class TestAdmissionAdapter:
         )
         assert not isinstance(event, nio.RedactionEvent)
         assert _event_kind(event) is not EventKind.REDACTION
+
+
+class TestEchoOrdering:
+    """The sync echo is the route this bot's own answers take into a conversation.
+
+    These pin the guarantee the outbound path relies on instead of writing its
+    own answers into the projection: an answer and any later user message reach
+    this bot on one server-ordered timeline, so a turn resolved after the user's
+    message already sees the answer that preceded it.
+    """
+
+    async def test_an_answer_reaches_the_conversation_through_its_echo(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A self-authored echo is projected like any other timeline event."""
+        echo = bot_event("$answer", "the answer")
+        await alice.admit(
+            inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, echo, EventKind.MESSAGE),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer"]
+        assert page.messages[0].sender == BOT
+
+    async def test_a_later_user_turn_sees_the_answer_that_preceded_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Timeline order puts the echo before the message that follows it."""
+        for event in (
+            text_event("$ask", "question", ts=1_000),
+            bot_event("$answer", "the answer", ts=1_100),
+            text_event("$follow_up", "and then?", ts=1_200),
+        ):
+            await alice.admit(
+                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                projected_event(ROOM, event, EventKind.MESSAGE),
+            )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == [
+            "$ask",
+            "$answer",
+            "$follow_up",
+        ]
+
+    async def test_one_sync_carrying_both_still_orders_the_answer_first(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Batching an echo and the next message together changes nothing.
+
+        The ordering comes from the server timestamps the server assigned, not
+        from how many sync responses the events were split across.
+        """
+        batch = (
+            bot_event("$answer", "the answer", ts=2_100),
+            text_event("$follow_up", "and then?", ts=2_200),
+        )
+        await asyncio.gather(
+            *(
+                alice.admit(
+                    inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                    projected_event(ROOM, event, EventKind.MESSAGE),
+                )
+                for event in batch
+            ),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
+
+    async def test_a_recovered_answer_orders_with_the_live_message_after_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A gap-recovered echo still lands before the live message that follows."""
+        recovered = bot_event("$answer", "the answer", ts=3_100)
+        await alice.admit(
+            inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, recovered, EventKind.MESSAGE),
+        )
+        live = text_event("$follow_up", "and then?", ts=3_200)
+        await alice.admit(
+            inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, live, EventKind.MESSAGE),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
 
 
 class TestReplayFidelity:
