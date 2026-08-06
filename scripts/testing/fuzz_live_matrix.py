@@ -452,7 +452,7 @@ def _restart_invariant_checks(
             wait_until_passes=True,
         ),
         _RestartInvariantCheck(
-            invariant="fresh_dispatch_obligation_recovered",
+            invariant="fresh_journal_event_recovered",
             observed=observation.fresh_obligation_recovered,
             expected=True,
             event_category="fresh_user",
@@ -1148,27 +1148,33 @@ class ManagedTuwunelStack:
             timeout=max(deadline - time.monotonic(), 0),
         )
 
-    def restart_dispatch_obligation_state(self, event_id: str) -> str | None:
-        """Return the exact agent message obligation state without creating storage."""
-        tracking_path = self.storage_path / "tracking"
-        for database_path in sorted(tracking_path.glob("dispatch_obligations-*.sqlite3")):
-            with closing(sqlite3.connect(database_path)) as database:
-                row = database.execute(
-                    """
-                    SELECT state
-                    FROM dispatch_obligations
-                    WHERE principal_id = ?
-                      AND entity_name = ?
-                      AND source_event_id = ?
-                      AND callback_kind = 'message'
-                    """,
-                    (self.agent_id, AGENT_NAME, event_id),
-                ).fetchone()
-            if row is not None:
-                return str(row[0])
-        return None
+    def restart_journal_event_state(self, event_id: str) -> str | None:
+        """Return the durable state of one agent message without creating storage.
 
-    def wait_for_restart_dispatch_obligation_state(
+        A settled event reports its outcome rather than the literal `settled`,
+        because the outcome is the fact a caller cares about. An event whose
+        turn is still running is simply pending: the journal has no separate
+        `deferred` state, since a process that dies mid-turn must leave the
+        event eligible for retry either way.
+        """
+        database_path = self.storage_path / "tracking" / "event_journal.db"
+        if not database_path.exists():
+            return None
+        with closing(sqlite3.connect(database_path)) as database:
+            row = database.execute(
+                """
+                SELECT state, outcome
+                FROM journal_events
+                WHERE principal_id = ? AND event_id = ? AND kind = 'message'
+                """,
+                (f"{AGENT_NAME}@{self.agent_id}", event_id),
+            ).fetchone()
+        if row is None:
+            return None
+        state, outcome = row
+        return str(outcome) if state == "settled" and outcome else str(state)
+
+    def wait_for_restart_journal_event_state(
         self,
         event_id: str,
         *,
@@ -1178,7 +1184,7 @@ class ManagedTuwunelStack:
         """Wait until the exact fresh callback reaches one accepted durable state."""
         expected_states = frozenset({expected}) if isinstance(expected, str) else expected
         return _wait_until(
-            lambda: self.restart_dispatch_obligation_state(event_id) in expected_states,
+            lambda: self.restart_journal_event_state(event_id) in expected_states,
             timeout=timeout,
         )
 
@@ -1791,9 +1797,9 @@ class LiveFuzzRunner:
             step=4,
         )
         obligation_unsettled = await asyncio.to_thread(
-            self.stack.wait_for_restart_dispatch_obligation_state,
+            self.stack.wait_for_restart_journal_event_state,
             fresh,
-            expected=frozenset({"pending", "deferred"}),
+            expected=frozenset({"pending"}),
             timeout=self.reply_timeout,
         )
         _require_restart_invariant(
@@ -1955,7 +1961,7 @@ class LiveFuzzRunner:
                 bool(fresh_response_bodies)
                 and all(RECOVERED_RUNTIME_GENERATION_MARKER in body for body in fresh_response_bodies)
             ),
-            fresh_obligation_recovered=(self.stack.restart_dispatch_obligation_state(fresh_event_id) == "succeeded"),
+            fresh_obligation_recovered=(self.stack.restart_journal_event_state(fresh_event_id) == "succeeded"),
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,

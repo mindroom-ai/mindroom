@@ -235,6 +235,13 @@ class JournalIngress:
         """Install durable admission ahead of every other callback."""
         client.add_event_admission_callback(self._admit)
 
+    def admission_kind(self, event: nio.Event) -> EventKind | None:
+        """Return the kind this event is admitted as, or nothing."""
+        kind = event_kind(event)
+        if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
+            return EventKind.ROOM_LIFECYCLE
+        return kind
+
     async def _admit(
         self,
         room: nio.MatrixRoom,
@@ -242,9 +249,7 @@ class JournalIngress:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         _DELIVERY_PROVENANCE.set((event.event_id, provenance))
-        kind = event_kind(event)
-        if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
-            kind = EventKind.ROOM_LIFECYCLE
+        kind = self.admission_kind(event)
         if kind is None:
             return
         event_class = event_class_for(provenance)

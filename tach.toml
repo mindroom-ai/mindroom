@@ -101,6 +101,7 @@ path = "mindroom.dispatch_recovery_context"
 depends_on = []
 visibility = [
     "mindroom.coalescing",
+    "mindroom.journal_dispatch",
     "mindroom.turn_controller",
     "mindroom.visible_voice_echo",
 ]
@@ -143,6 +144,7 @@ visibility = ["mindroom.journal_dispatch"]
 path = "mindroom.journal_dispatch"
 depends_on = [
     "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_recovery_context",
     "mindroom.dispatch_source",
     "mindroom.event_journal",
     "mindroom.logging_config",

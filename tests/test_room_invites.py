@@ -21,7 +21,6 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
@@ -437,7 +436,7 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
-    assert bot._dispatch_obligation_store.pending() == ()
+    assert await bot._journal_dispatcher.store.pending() == ()
     assert not bot._room_lifecycle.decrypt_notice_is_fenced("!invalid-state:localhost")
 
 
@@ -482,7 +481,7 @@ async def test_initial_sync_invite_is_current_membership_work(
     join_room.assert_awaited_once_with(bot.client, room.room_id)
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)
     assert bot._room_lifecycle.invited_rooms == {room.room_id}
-    assert bot._dispatch_obligation_store.pending() == ()
+    assert await bot._journal_dispatcher.store.pending() == ()
 
 
 @pytest.mark.asyncio
@@ -526,15 +525,16 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
         await asyncio.wait_for(join_started.wait(), timeout=1)
         await asyncio.sleep(0)
         assert callback_task.done()
-        pending = bot._dispatch_obligation_store.pending()
-        assert len(pending) == 1
-        assert pending[0].callback_kind is DispatchCallbackKind.INVITE
+        # Invites are not journalled: an invite the bot has not acted on
+        # reappears in every sync response, so the homeserver already provides
+        # the redelivery a journal row would have.
+        assert await bot._journal_dispatcher.store.pending() == ()
     finally:
         release_join.set()
         await callback_task
 
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-    assert bot._dispatch_obligation_store.pending() == ()
+    assert await bot._journal_dispatcher.store.pending() == ()
 
 
 @pytest.mark.asyncio
@@ -953,11 +953,11 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
 
 
 @pytest.mark.asyncio
-async def test_pending_invite_retries_failed_welcome_autonomously(
+async def test_redelivered_invite_retries_a_failed_welcome(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Recovery must retain and retry an invite whose welcome delivery fails."""
+    """A redelivered invite must retry a welcome whose delivery failed."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -984,8 +984,6 @@ async def test_pending_invite_retries_failed_welcome_autonomously(
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
-    bot._dispatch_obligation_runner._retry_initial_delay_seconds = 0
-    bot._dispatch_obligation_runner._retry_max_delay_seconds = 0
     event = nio.InviteEvent.parse_event(
         {
             "type": "m.room.member",
@@ -996,19 +994,18 @@ async def test_pending_invite_retries_failed_welcome_autonomously(
     )
     assert isinstance(event, nio.InviteEvent)
     room = nio.MatrixRoom("!router-invited:localhost", bot.matrix_id.full_id)
-    obligation = await bot._dispatch_obligation_runner.persist(
-        room,
-        event,
-        DispatchCallbackKind.INVITE,
-    )
-    assert obligation is not None
-
-    await bot._dispatch_obligation_runner.recover_pending(turn_backed=False)
+    await bot._on_invite_before_sync_certification(room, event)
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    join_room.assert_awaited_once_with(bot.client, room.room_id)
+    # The welcome failed. An invite the bot has not finished acting on is
+    # still in the next sync response, so the retry arrives as a redelivery
+    # rather than from an in-process retry loop.
+    await bot._on_invite_before_sync_certification(room, event)
+    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    join_room.assert_awaited_with(bot.client, room.room_id)
     assert send_response.await_count == 2
-    assert not bot._dispatch_obligation_store.pending()
+    assert not await bot._journal_dispatcher.store.pending()
 
 
 @pytest.mark.asyncio

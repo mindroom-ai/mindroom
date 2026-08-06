@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import EventKind, SemanticConsumer, SettlementOutcome
 from mindroom.logging_config import get_logger
@@ -136,12 +137,24 @@ class JournalDispatcher:
         """Signal that newly admitted work is waiting."""
         self._worker.wake()
 
+    def ingress_admission_kind(self, event: nio.Event) -> EventKind | None:
+        """Return the kind timeline admission would give one event, if any."""
+        return self._ingress.admission_kind(event)
+
     async def stop(self) -> None:
         """Stop draining, leaving unfinished work pending for the next start."""
         await self._worker.stop()
 
     async def drain_once(self) -> int:
-        """Run everything currently pending to completion."""
+        """Run everything currently pending to completion.
+
+        This is the explicit recovery entry point, so it also forgets which
+        events it had handed to a turn. A turn that deferred without taking
+        ownership — the router declining an unready candidate, say — would
+        otherwise never be reconsidered. Duplicate turns are prevented by
+        `TurnStore` claiming its sources, not by this bookkeeping.
+        """
+        self._handed_off.clear()
         return await self._worker.drain_once()
 
     async def admit_out_of_band(
@@ -150,11 +163,18 @@ class JournalDispatcher:
         event: nio.Event,
         kind: EventKind,
         event_class: EventClass,
+        *,
+        live: bool = True,
     ) -> None:
         """Admit an event that does not arrive through timeline admission.
 
         Room-membership events are only owned once the router is ready for
         them, which is a decision the timeline callback cannot make.
+
+        ``live=False`` admits the event without handing its parsed object to
+        the callback, so the worker treats it as a replay. That is what a
+        caller wants when it is recording work for a later process to run
+        rather than delivering something that just happened.
         """
         try:
             await self.store.admit(
@@ -165,8 +185,30 @@ class JournalDispatcher:
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
-        self._remember_live_event(room, event)
+        if live:
+            self._remember_live_event(room, event)
         self._worker.wake()
+
+    async def admit_and_run(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        kind: EventKind,
+        event_class: EventClass,
+    ) -> None:
+        """Admit one out-of-band event and run its callback before returning.
+
+        Membership hooks are ordered against the sync response that produced
+        them, so their callback has to finish inside that response rather than
+        whenever the worker next looks.
+        """
+        await self.admit_out_of_band(room, event, kind, event_class)
+        stored = await self.store.load_event(event.event_id)
+        if stored is None or not await self.store.is_pending(event.event_id):
+            return
+        outcome = await self._run_event(stored)
+        if outcome is not None:
+            await self.store.settle(event.event_id, outcome)
 
     async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
         """Run one journal event's callback and report how it settled."""
@@ -183,6 +225,12 @@ class JournalDispatcher:
         if event.event_id in self._handed_off:
             return None
         live = self._live_events.pop(event.event_id, None)
+        # An event the journal loaded rather than nio just delivered is a
+        # replay. Turn work behaves differently there: it defers silently
+        # instead of telling the user an agent is still starting, because that
+        # notice was already sent — or the conversation has moved on — by the
+        # time a replay runs.
+        replaying = live is None
         room, matrix_event = live if live is not None else (None, None)
         if matrix_event is None:
             try:
@@ -197,7 +245,8 @@ class JournalDispatcher:
                 return SettlementOutcome.INTENTIONALLY_IGNORED
         if room is None:
             room = self.room_for_id(event.room_id)
-        outcome = await self._invoke(event, room, matrix_event)
+        with turn_dispatch_recovery_scope(active=replaying and event.kind in TURN_BACKED_KINDS):
+            outcome = await self._invoke(event, room, matrix_event)
         if outcome is None:
             self._handed_off.add(event.event_id)
         return outcome

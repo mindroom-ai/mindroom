@@ -487,6 +487,7 @@ class TestRoutingRegression:
             event,
             EventKind.MESSAGE,
             EventClass.ACTIONABLE,
+            live=False,
         )
 
         await router_bot.recover_pending_turn_journal_events()
@@ -508,6 +509,7 @@ class TestRoutingRegression:
             blocked_event,
             EventKind.MESSAGE,
             EventClass.ACTIONABLE,
+            live=False,
         )
 
         await router_bot.recover_pending_turn_journal_events()

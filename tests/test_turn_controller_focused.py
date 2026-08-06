@@ -38,7 +38,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
+from mindroom.event_journal import EventClass, EventJournalStore, EventKind
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -66,7 +67,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
-from mindroom.turn_settlement_retry import TurnSettlementRetry
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
@@ -573,23 +573,18 @@ def _obligation_runner(
     principal_id: str,
     entity_name: str,
     room: nio.MatrixRoom,
-) -> tuple[DispatchObligationRunner, DispatchObligationStore]:
+) -> JournalDispatcher:
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
 
-    store = DispatchObligationStore(
-        tracking_path=tracking_path,
-        principal_id=principal_id,
-        entity_name=entity_name,
-    )
-    runner = DispatchObligationRunner(
-        store=store,
-        callbacks=DispatchObligationRunner.callbacks_for(
+    store = EventJournalStore.open_sqlite(tracking_path / "event_journal.db")
+    return JournalDispatcher(
+        store=store.principal(f"{entity_name}@{principal_id}"),
+        callbacks=JournalCallbacks(
             on_message=harness.controller.handle_text_event,
             on_media=harness.controller.handle_media_event,
             on_reaction=cast("Any", noop),
             on_approval=cast("Any", noop),
-            on_invite=cast("Any", noop),
             on_room_lifecycle=cast("Any", noop),
             on_redaction=cast("Any", noop),
             on_decryption_failure=cast("Any", noop),
@@ -598,7 +593,6 @@ def _obligation_runner(
         room_for_id=lambda _room_id: room,
         turn_is_terminal=harness.turn_store.is_durably_handled,
     )
-    return runner, store
 
 
 def _router_relay_event(
@@ -1105,17 +1099,16 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
         body=f"{mention} duplicate",
         origin_server_ts=1_000_001,
     )
-    obligation_runner, obligation_store = _obligation_runner(
+    obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
         principal_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
-    turn_settlement_retry = TurnSettlementRetry(store=obligation_store)
     harness.turn_store.deps = replace(
         harness.turn_store.deps,
-        on_terminal_turn_persisted=turn_settlement_retry.retry,
+        on_terminal_turn_persisted=obligation_runner.release_terminal_turn_sources,
     )
     normalization_started = asyncio.Event()
     release_normalization = asyncio.Event()
@@ -1132,11 +1125,11 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
 
     with patch.object(InboundTurnNormalizer, "resolve_text_event", new=resolve_with_barrier):
         first_dispatch = asyncio.create_task(
-            obligation_runner.dispatch(room, first, DispatchCallbackKind.MESSAGE),
+            obligation_runner.admit_and_run(room, first, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
         await normalization_started.wait()
         second_dispatch = asyncio.create_task(
-            obligation_runner.dispatch(room, second, DispatchCallbackKind.MESSAGE),
+            obligation_runner.admit_and_run(room, second, EventKind.MESSAGE, EventClass.ACTIONABLE),
         )
         await asyncio.sleep(0)
         assert not second_dispatch.done()
@@ -1145,11 +1138,10 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
 
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
-    if turn_settlement_retry._task is not None:
-        await turn_settlement_retry._task
+    await obligation_runner.drain_once()
 
-    assert not obligation_store.has_pending(first.event_id, DispatchCallbackKind.MESSAGE)
-    assert not obligation_store.has_pending(second.event_id, DispatchCallbackKind.MESSAGE)
+    assert not await obligation_runner.store.is_pending(first.event_id)
+    assert not await obligation_runner.store.is_pending(second.event_id)
 
 
 @pytest.mark.asyncio
@@ -1225,21 +1217,20 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
         MagicMock(side_effect=IngressAdmissionClosedError),
     )
 
-    obligation_runner, obligation_store = _obligation_runner(
+    obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
         principal_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
-    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MESSAGE)
-    assert obligation is not None
+    await obligation_runner.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
     with pytest.raises(IngressAdmissionClosedError):
-        await obligation_runner._run_persisted(obligation, room=room, event=event)
+        await obligation_runner.callbacks.on_message(room, event)
 
     release_claim.assert_called_once()
-    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert await obligation_runner.store.is_pending(event.event_id)
     competing_claim = TurnRecord.create([event.event_id], completed=False)
     assert harness.turn_store.try_claim_turn(competing_claim) is True
     harness.turn_store.release_pending_turn_claim(competing_claim)
@@ -1260,20 +1251,19 @@ async def test_failed_media_admission_remains_a_pending_exact_callback(
         "submit_lane_slot",
         MagicMock(side_effect=IngressAdmissionClosedError),
     )
-    obligation_runner, obligation_store = _obligation_runner(
+    obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
         principal_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
-    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MEDIA)
-    assert obligation is not None
+    await obligation_runner.admit_out_of_band(room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
 
     with pytest.raises(IngressAdmissionClosedError):
-        await obligation_runner._run_persisted(obligation, room=room, event=event)
+        await obligation_runner.callbacks.on_message(room, event)
 
-    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MEDIA)
+    assert await obligation_runner.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio
@@ -1283,7 +1273,7 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
     event = _text_event("hello there", event_id="$router-ignore:localhost")
 
-    obligation_runner, obligation_store = _obligation_runner(
+    obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
         principal_id=_entity_user_id(config, ROUTER_AGENT_NAME),
@@ -1300,13 +1290,13 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
         ),
     )
 
-    await obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+    await obligation_runner.admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     await harness.gate.drain_all()
 
     assert harness.policy.plan_turn_calls == 1
     assert harness.runner.requests == []
     assert harness.turn_store.get_turn_record(event.event_id) is None
-    assert not obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not await obligation_runner.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio

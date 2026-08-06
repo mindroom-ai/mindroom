@@ -6,6 +6,7 @@ import asyncio
 import os
 import stat
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -18,7 +19,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
@@ -37,7 +38,6 @@ from tests.sync_continuity_helpers import load_sync_checkpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.dispatch_obligations.storage import DispatchObligation, DispatchObligationKey
 
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -396,19 +396,13 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
     sync_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await sync_task
-    assert bot._dispatch_obligation_store.has_pending(
-        "$state-retry",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert await bot._journal_dispatcher.store.is_pending("$state-retry")
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
-    await bot._dispatch_obligation_runner.recover_pending()
+    await bot._journal_dispatcher.drain_once()
 
     assert attempts == 2
-    assert not bot._dispatch_obligation_store.has_pending(
-        "$state-retry",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending("$state-retry")
 
 
 @pytest.mark.asyncio
@@ -487,13 +481,13 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
 
-    def fail_create(_obligation: object) -> object:
+    async def fail_create(*_args: object, **_kwargs: object) -> object:
         message = "dispatch database unavailable"
         raise OSError(message)
 
     reset = AsyncMock(wraps=bot._reset_classic_sync_state)
     monkeypatch.setattr(bot, "_reset_classic_sync_state", reset)
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
+    monkeypatch.setattr(type(bot._journal_dispatcher.store), "admit", fail_create)
 
     with pytest.raises(OSError, match="dispatch database unavailable"):
         await bot._on_sync_response(
@@ -608,13 +602,14 @@ async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
     async def dispatch(
         _room: nio.MatrixRoom,
         event: nio.Event,
-        callback_kind: DispatchCallbackKind,
+        kind: EventKind,
+        _event_class: EventClass,
     ) -> None:
         assert not bot._room_member_join_lock.locked()
-        assert callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+        assert kind is EventKind.ROOM_LIFECYCLE
         dispatched.append(event.event_id)
 
-    monkeypatch.setattr(bot._dispatch_obligation_runner, "dispatch", dispatch)
+    monkeypatch.setattr(bot._journal_dispatcher, "admit_and_run", dispatch)
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(room.room_id, [_room_member_event(event_id="$dispatch")]),
@@ -961,29 +956,31 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
     bot.client.rooms = {room.room_id: room}
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     event = _room_member_event(event_id="$delayed-lifecycle")
-    obligation = await bot._dispatch_obligation_runner.persist(
+    await bot._journal_dispatcher.admit_out_of_band(
         room,
         event,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
     )
-    assert obligation is not None
+    # Hold the lifecycle callback open so the snapshot marker arrives while
+    # the exact pending work is still running.
+    lifecycle_started = asyncio.Event()
+    release_lifecycle = asyncio.Event()
+    original_on_room_member = bot._on_room_member
 
-    lookup_started = threading.Event()
-    release_lookup = threading.Event()
-    pending_for = bot._dispatch_obligation_store.pending_for
+    async def blocked_on_room_member(*args: object, **kwargs: object) -> None:
+        lifecycle_started.set()
+        await release_lifecycle.wait()
+        await original_on_room_member(*args, **kwargs)
 
-    def delayed_pending_for(key: DispatchObligationKey) -> DispatchObligation | None:
-        lookup_started.set()
-        assert release_lookup.wait(timeout=1.0)
-        return pending_for(key)
-
-    monkeypatch.setattr(bot._dispatch_obligation_store, "pending_for", delayed_pending_for)
-    callback = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-        owner=bot._runtime_view,
+    monkeypatch.setattr(bot, "_on_room_member", blocked_on_room_member)
+    monkeypatch.setattr(
+        bot._journal_dispatcher,
+        "callbacks",
+        replace(bot._journal_dispatcher.callbacks, on_room_lifecycle=blocked_on_room_member),
     )
-    await callback(room, event)
-    assert await asyncio.to_thread(lookup_started.wait, 1.0)
+    draining = asyncio.create_task(bot._journal_dispatcher.drain_once())
+    await asyncio.wait_for(lifecycle_started.wait(), timeout=1.0)
 
     await bot._emit_room_member_joined_sync_state_hooks(
         _sync_response_with_state(
@@ -992,14 +989,12 @@ async def test_limited_state_snapshot_does_not_settle_delayed_lifecycle_replay(
             timeline_limited=True,
         ),
     )
-    release_lookup.set()
+    release_lifecycle.set()
+    await draining
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$delayed-lifecycle"]
-    assert not bot._dispatch_obligation_store.has_pending(
-        event.event_id,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1025,7 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     await bot._on_sync_error(sync_error)
     bot.client.rooms = {room.room_id: room}
     assert (
-        bot._dispatch_obligation_runner._admission_kind(
+        bot._journal_dispatcher.ingress_admission_kind(
             _room_member_event(event_id="$timeline-snapshot"),
         )
         is None
@@ -1086,7 +1081,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._register_room_member_callback_after_initial_sync()
-    room_member_admission = bot._dispatch_obligation_runner._admit_source_event
+    room_member_admission = bot._journal_dispatcher._ingress._admit
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -1104,6 +1099,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         nio.TimelineEventProvenance.HISTORY,
     )
     await room_member_callback(room, timeline_event)
+    await bot._journal_dispatcher.drain_once()
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -1116,6 +1112,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
         nio.TimelineEventProvenance.LIVE,
     )
     await room_member_callback(room, live_event)
+    await bot._journal_dispatcher.drain_once()
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$live"]
@@ -1141,21 +1138,19 @@ async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     bot._register_room_member_callback_after_initial_sync()
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     event = _room_member_event(event_id="$pending-member")
-    obligation = await bot._dispatch_obligation_runner.persist(
+    await bot._journal_dispatcher.admit_out_of_band(
         room,
         event,
-        DispatchCallbackKind.ROOM_LIFECYCLE,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
     )
-    assert obligation is not None
 
     await room_member_callback(room, event)
+    await bot._journal_dispatcher.drain_once()
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$pending-member"]
-    assert not bot._dispatch_obligation_store.has_pending(
-        "$pending-member",
-        DispatchCallbackKind.ROOM_LIFECYCLE,
-    )
+    assert not await bot._journal_dispatcher.store.is_pending("$pending-member")
 
 
 @pytest.mark.asyncio
@@ -1194,7 +1189,7 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     bot.client.rooms = {room.room_id: room}
 
     assert (
-        bot._dispatch_obligation_runner._admission_kind(
+        bot._journal_dispatcher.ingress_admission_kind(
             _room_member_event(event_id="$timeline-snapshot"),
         )
         is None
@@ -1327,7 +1322,7 @@ def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path)
     bot = _router_bot(tmp_path)
     bot._first_sync_done = False
 
-    assert bot._dispatch_obligation_runner._admission_kind(_room_member_event()) is None
+    assert bot._journal_dispatcher.ingress_admission_kind(_room_member_event()) is None
 
 
 @pytest.mark.asyncio

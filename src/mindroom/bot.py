@@ -2355,7 +2355,7 @@ class AgentBot:
             dispatch_snapshot_joins=dispatch_snapshot_joins,
         )
         for room, event in plan.dispatch_events:
-            await self._journal_dispatcher.admit_out_of_band(
+            await self._journal_dispatcher.admit_and_run(
                 room,
                 event,
                 EventKind.ROOM_LIFECYCLE,
@@ -2396,7 +2396,7 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
         ):
-            await self._journal_dispatcher.admit_out_of_band(
+            await self._journal_dispatcher.admit_and_run(
                 room,
                 event,
                 EventKind.ROOM_LIFECYCLE,

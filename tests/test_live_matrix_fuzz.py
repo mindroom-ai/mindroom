@@ -19,7 +19,8 @@ import httpx
 import pytest
 import yaml
 
-from mindroom.dispatch_obligations import DispatchObligationStore
+from mindroom.event_journal import EventClass, EventJournalStore, EventKind, InboundEvent
+
 from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityStore
@@ -121,7 +122,7 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         assert event_ids == ("$restart-old-text", "$restart-old-media")
         return 4
 
-    def wait_for_restart_dispatch_obligation_state(
+    def wait_for_restart_journal_event_state(
         self,
         event_id: str,
         *,
@@ -129,7 +130,7 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         timeout: float,
     ) -> bool:
         assert event_id == "$restart-fresh"
-        assert expected == frozenset({"pending", "deferred"})
+        assert expected == frozenset({"pending"})
         assert timeout == 1
         self.order.append("obligation-pending")
         return True
@@ -262,7 +263,7 @@ def seeded_restart_observation_stack(
     stop_calls: list[float] = []
     stack.agent_id, stack.router_id = "@agent:example", "@router:example"
     monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-    monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+    monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
 
     def record_stop(*, timeout: float = 20) -> bool:
         stop_calls.append(timeout)
@@ -481,7 +482,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
     assert any("invariant=fresh_semantic_ingress_replayed_after_restart" in failure for failure in failures)
     assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
-    assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
+    assert any("invariant=fresh_journal_event_recovered" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=orderly_drain_completed" in failure for failure in failures)
 
@@ -811,63 +812,47 @@ def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> Non
         stack.close()
 
 
-def test_restart_regression_reads_exact_durable_obligation_state() -> None:
-    """The recovery oracle must follow the exact agent message obligation."""
+def test_restart_regression_reads_exact_durable_journal_state() -> None:
+    """The recovery oracle must follow the exact agent message journal row."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id = "@agent:example"
-        store = DispatchObligationStore(
-            tracking_path=stack.storage_path / "tracking",
-            principal_id=stack.agent_id,
-            entity_name="general",
-        )
-        database_path = store._database_path
-        with closing(sqlite3.connect(database_path)) as database:
-            database.execute(
-                """
-                INSERT INTO dispatch_obligations(
-                    principal_id,
-                    entity_name,
-                    source_event_id,
-                    callback_kind,
-                    room_id,
-                    event_source_json,
-                    state,
-                    created_at_ns,
-                    settled_at_ns
-                ) VALUES (?, 'general', '$fresh', 'message', '!room:example', '{}', 'pending', 1, NULL)
-                """,
-                (stack.agent_id,),
-            )
-            database.commit()
+        store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
+        principal_id = f"general@{stack.agent_id}"
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
 
-        assert stack.restart_dispatch_obligation_state("$fresh") == "pending"
-        assert stack.restart_dispatch_obligation_state("$other") is None
-        assert stack.wait_for_restart_dispatch_obligation_state(
+        async def admit() -> None:
+            await store.principal(principal_id).admit(
+                InboundEvent(
+                    event_id="$fresh",
+                    room_id="!room:example",
+                    thread_id=None,
+                    kind=EventKind.MESSAGE,
+                    event_class=EventClass.ACTIONABLE,
+                    sender="@user:example",
+                    origin_server_ts=1,
+                    source={"event_id": "$fresh"},
+                ),
+            )
+
+        asyncio.run(admit())
+
+        assert stack.restart_journal_event_state("$fresh") == "pending"
+        assert stack.restart_journal_event_state("$other") is None
+        assert stack.wait_for_restart_journal_event_state(
             "$fresh",
-            expected=frozenset({"pending", "deferred"}),
+            expected="pending",
             timeout=0.01,
         )
 
+        # A settled row reports its outcome, which is the fact the oracle needs.
         with closing(sqlite3.connect(database_path)) as database:
             database.execute(
-                "UPDATE dispatch_obligations SET state = 'deferred'",
+                "UPDATE journal_events SET state = 'settled', outcome = 'succeeded', settled_at_ns = 2",
             )
             database.commit()
 
-        assert stack.wait_for_restart_dispatch_obligation_state(
-            "$fresh",
-            expected=frozenset({"pending", "deferred"}),
-            timeout=0.01,
-        )
-
-        with closing(sqlite3.connect(database_path)) as database:
-            database.execute(
-                "UPDATE dispatch_obligations SET state = 'succeeded', settled_at_ns = 2",
-            )
-            database.commit()
-
-        assert stack.restart_dispatch_obligation_state("$fresh") == "succeeded"
+        assert stack.restart_journal_event_state("$fresh") == "succeeded"
     finally:
         stack.close()
 
@@ -1523,7 +1508,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+        monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
         dormant = DormantClient()
 
         def drain_callbacks(*, timeout: float = 20) -> bool:
