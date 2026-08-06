@@ -98,22 +98,15 @@ class ThreadMutationCacheOps:
         *,
         name: str,
         emit_timing: bool = False,
-        coalesce_key: tuple[str, str] | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one cache mutation under the room-ordered write barrier."""
         event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
-        scoped_coalesce_key = (
-            None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
-        )
         return coordinator.queue_room_update(
             room_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=scoped_coalesce_key,
-            coalesce_log_context=coalesce_log_context,
             coordination_scope=event_cache.principal_id,
         )
 
@@ -125,23 +118,16 @@ class ThreadMutationCacheOps:
         *,
         name: str,
         emit_timing: bool = False,
-        coalesce_key: tuple[str, str] | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one thread-specific cache mutation under the same-thread write barrier."""
         event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
-        scoped_coalesce_key = (
-            None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
-        )
         return coordinator.queue_thread_update(
             room_id,
             thread_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=scoped_coalesce_key,
-            coalesce_log_context=coalesce_log_context,
             coordination_scope=event_cache.principal_id,
         )
 

@@ -139,11 +139,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 *,
                 name: str,
                 emit_timing: bool = True,
-                coalesce_key: tuple[str, str] | None = None,
-                coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, coordination_scope
                 observed_emit_timing.append(emit_timing)
                 return asyncio.create_task(update_coro_factory())
 
@@ -160,7 +158,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     async def test_queue_thread_cache_update_forwards_default_coordinator_options(self) -> None:
         """Thread cache facade should always forward the expanded coordinator options."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
-        observed_options: list[tuple[object, object, object, object]] = []
+        observed_options: list[tuple[object, object]] = []
 
         class _RecordingCoordinator:
             def queue_thread_update(
@@ -171,12 +169,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 *,
                 name: str,
                 emit_timing: object = "missing",
-                coalesce_key: object = "missing",
-                coalesce_log_context: object = "missing",
                 coordination_scope: object = "missing",
             ) -> asyncio.Task[object]:
                 del room_id, thread_id, name
-                observed_options.append((emit_timing, coalesce_key, coalesce_log_context, coordination_scope))
+                observed_options.append((emit_timing, coordination_scope))
                 return asyncio.create_task(update_coro_factory())
 
         async def update() -> None:
@@ -191,7 +187,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         await task
 
-        assert observed_options == [(False, None, None, event_cache.principal_id)]
+        assert observed_options == [(False, event_cache.principal_id)]
 
     @pytest.mark.asyncio
     async def test_queue_room_update_logs_timing_breakdown_when_enabled(
@@ -513,11 +509,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 *,
                 name: str,
                 emit_timing: bool = False,
-                coalesce_key: tuple[str, str] | None = None,
-                coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, emit_timing, coordination_scope
                 return asyncio.create_task(update_coro_factory())
 
             def queue_thread_update(
@@ -528,8 +522,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 *,
                 name: str,
                 emit_timing: bool = False,
-                coalesce_key: tuple[str, str] | None = None,
-                coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
                 del thread_id
@@ -538,8 +530,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     update_coro_factory,
                     name=name,
                     emit_timing=emit_timing,
-                    coalesce_key=coalesce_key,
-                    coalesce_log_context=coalesce_log_context,
                     coordination_scope=coordination_scope,
                 )
 
