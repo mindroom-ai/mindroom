@@ -255,11 +255,21 @@ def _seed_ordering_key(
         """,
         (principal_id, event.room_id, target_event_id),
     )
-    if current is None:
-        # The original has not arrived, so there is nothing to outrank yet; the
-        # held row competes only with other held edits from the same sender.
-        return 0
-    return int(current["revision_ts"]) + 1
+    if current is not None:
+        return int(current["revision_ts"]) + 1
+    # The original has not arrived, so this seed is held. It still has to
+    # outrank the seed before it: collapsing every held seed onto zero would
+    # order them by event ID, and the bot's own send order -- the one thing
+    # seeding exists to preserve -- would be decided by a string comparison.
+    # These keys stay near zero and so cannot reach a real server timestamp.
+    held = transaction.fetchone(
+        """
+        SELECT edit_ts FROM unresolved_edits
+        WHERE principal_id = ? AND room_id = ? AND target_event_id = ? AND sender = ?
+        """,
+        (principal_id, event.room_id, target_event_id, event.sender),
+    )
+    return 0 if held is None else int(held["edit_ts"]) + 1
 
 
 def _project_original(

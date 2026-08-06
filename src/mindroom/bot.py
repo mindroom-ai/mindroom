@@ -2022,19 +2022,28 @@ class AgentBot:
         # the client and then aborted the config reload's removal of this
         # generation -- leaving it registered, half-stopped, while its
         # replacement opened the same database under the same principal.
-        await self._release("journal dispatcher", self._journal_dispatcher.stop())
-        await self._release("journal store", self._journal_store.close())
+        failures: list[Exception] = []
+        await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+        await self._release("journal store", self._journal_store.close(), failures)
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
-            await self._release("matrix client", self.client.close())
+            await self._release("matrix client", self.client.close(), failures)
+        if failures:
+            # Every step ran, and the caller still has to hear about it. A
+            # config reload removes this bot from the runtime map only if stop
+            # returns, and then starts a replacement that opens the same
+            # database under the same principal -- so certifying a partial stop
+            # as a clean one is how two generations end up sharing a store.
+            raise failures[0]
         self.logger.info("Stopped agent bot")
 
-    async def _release(self, what: str, closing: Awaitable[None]) -> None:
-        """Await one shutdown step, reporting failure rather than propagating it."""
+    async def _release(self, what: str, closing: Awaitable[None], failures: list[Exception]) -> None:
+        """Await one shutdown step, recording failure so the later steps still run."""
         try:
             await closing
-        except Exception:
+        except Exception as error:
             self.logger.exception("Failed to release resource during stop", resource=what)
+            failures.append(error)
 
     async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
         """Send a welcome message if the room has no messages yet.

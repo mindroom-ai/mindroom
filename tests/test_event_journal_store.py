@@ -832,6 +832,33 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [("$zzz", "$aaa"), ("$aaa", "$zzz")],
+    )
+    async def test_two_seeds_of_an_absent_target_keep_their_send_order(
+        self,
+        alice: PrincipalStore,
+        first: str,
+        second: str,
+    ) -> None:
+        """Send order is the one thing seeding exists to preserve.
+
+        Both parked edits are waiting for an original that has not arrived, so
+        neither has a revision to be ranked against. Giving them all the same
+        key ordered them by event ID, which decided the bot's own send order by
+        string comparison -- run in both directions so that cannot pass by
+        accident.
+        """
+        _, older = message(first, sender=BOB, ts=1_000, content=edit("$mine", "older"))
+        _, newer = message(second, sender=BOB, ts=2_000, content=edit("$mine", "newer"))
+        await alice.seed_outbound_message(older)
+        await alice.seed_outbound_message(newer)
+
+        await admit(alice, "$mine", sender=BOB, ts=500, content=text("original"))
+
+        assert await bodies(alice) == ["newer"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,
