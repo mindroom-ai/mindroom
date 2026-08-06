@@ -2540,6 +2540,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.thread_export.history",
     "mindroom.thread_export.selection",
 ]
 
@@ -2562,6 +2563,7 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.message_content",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.thread_export.history",
 ]
 
 [[modules]]
@@ -2668,10 +2670,24 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.thread_export.history"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.media",
+    "mindroom.matrix.message_content",
+    "mindroom.matrix.thread_membership",
+    "mindroom.matrix.thread_projection",
+    "mindroom.matrix.visible_body",
+]
+visibility = ["mindroom.thread_export.execution"]
+
+[[modules]]
 path = "mindroom.thread_export.execution"
 depends_on = [
     "mindroom.matrix.client_thread_history",
-    "mindroom.matrix.thread_diagnostics",
+    "mindroom.thread_export.history",
     "mindroom.thread_export.models",
     "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
@@ -2685,7 +2701,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.users",
-    "mindroom.runtime_support",
     "mindroom.thread_export.execution",
     "mindroom.thread_export.models",
     "mindroom.thread_export.policy",

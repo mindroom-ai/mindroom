@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
-from mindroom.runtime_support import build_owned_runtime_support, close_owned_runtime_support
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
@@ -39,7 +38,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import SharedConversationEventCache
 
 
 logger = get_logger(__name__)
@@ -190,10 +188,8 @@ async def _run_export_group(
     homeserver: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: SharedConversationEventCache,
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
-    prefer_cache: bool,
 ) -> None:
     """Run one account group without preventing later groups after a failure."""
     try:
@@ -206,11 +202,9 @@ async def _run_export_group(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=event_cache.for_principal(group.user.user_id),
             rooms=group.rooms,
             targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,
-            prefer_cache=prefer_cache,
         )
     except Exception as exc:
         _record_group_failure(accumulators, group.rooms, f"Export group failed: {exc}")
@@ -228,7 +222,6 @@ async def export_threads_to_targets_once(
     targets: Sequence[ThreadExportTarget],
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    prefer_cache: bool = False,
 ) -> tuple[ThreadExportStats, ...]:
     """Login with persisted Matrix accounts and export once to every target.
 
@@ -236,10 +229,8 @@ async def export_threads_to_targets_once(
     Invited rooms are exported with the invited entity's own account, because the primary export
     account is not necessarily a member of user-created rooms.
 
-    With ``prefer_cache`` thread bodies are served from the validated durable event cache and only
-    fetched from the homeserver on miss or invalidation; a failing miss-refetch may then fall back to
-    stale cached rows instead of failing the thread.
-    Only use it while the runtime keeps the cache fresh (in-process or alongside a live ``mindroom run``).
+    Thread bodies always come from a direct Matrix pagination walk, so an export never depends on
+    another process having kept a cache warm and never writes out rows the homeserver has moved past.
 
     Each source thread is fetched once per room and fanned out to every authorized target.
     Scoped targets export only rooms where their required member is currently joined.
@@ -282,28 +273,15 @@ async def export_threads_to_targets_once(
         else:
             ready_groups.append(group)
 
-    if ready_groups:
-        support = build_owned_runtime_support(
-            cache_config=config.cache,
+    for group in ready_groups:
+        await _run_export_group(
+            group,
+            homeserver=homeserver,
+            config=config,
             runtime_paths=runtime_paths,
-            logger=logger,
-            background_task_owner=object(),
+            accumulators=validated_targets,
+            max_thread_roots=max_thread_roots,
         )
-        try:
-            await support.event_cache.initialize()
-            for group in ready_groups:
-                await _run_export_group(
-                    group,
-                    homeserver=homeserver,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    event_cache=support.event_cache,
-                    accumulators=validated_targets,
-                    max_thread_roots=max_thread_roots,
-                    prefer_cache=prefer_cache,
-                )
-        finally:
-            await close_owned_runtime_support(support, logger=logger)
 
     if room_filter is None:
         _reconcile_full_pass(validated_targets)
@@ -317,7 +295,6 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    prefer_cache: bool = False,
     required_member_user_id: str | None = None,
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
@@ -334,6 +311,5 @@ async def export_threads_once(
         ),
         room_filter=room_filter,
         max_thread_roots=max_thread_roots,
-        prefer_cache=prefer_cache,
     )
     return stats[0]

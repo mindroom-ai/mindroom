@@ -573,7 +573,7 @@ Adopt such a root by creating `.mindroom-thread-exports` inside it containing ex
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
-With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
+Thread bodies always come from a direct Matrix pagination walk, so an export never depends on another process having kept a cache warm and never writes out rows the homeserver has already moved past.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -608,12 +608,6 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 │ --max-thread-roots                            INTEGER  Maximum thread roots to         │
 │                                                        enumerate per room.             │
 │                                                        [default: 2000]                 │
-│ --prefer-cache                                         Serve thread bodies from the    │
-│                                                        durable event cache and only    │
-│                                                        fetch from the homeserver on    │
-│                                                        miss or invalidation. Use       │
-│                                                        alongside a running MindRoom    │
-│                                                        that keeps the cache fresh.     │
 │ --invited-rooms         --no-invited-rooms             Include rooms joined through    │
 │                                                        authorized invites              │
 │                                                        (user-created rooms).           │
@@ -630,7 +624,6 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
-mindroom threads export --storage-path mindroom_data --prefer-cache
 ```
 
 ## service
