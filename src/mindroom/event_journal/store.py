@@ -15,6 +15,7 @@ from . import journal, outbox, reads
 from .projection import (
     drop_refetched_message,
     install_refetched_revision,
+    seed_outbound,
 )
 
 if TYPE_CHECKING:
@@ -220,6 +221,21 @@ class PrincipalStore:
                 thread_id=thread_id,
                 events=events,
                 expected_membership_epoch=expected_membership_epoch,
+            ),
+        )
+
+    async def seed_outbound_message(self, event: ProjectedEvent) -> None:
+        """Make a message this bot just sent readable before its echo arrives."""
+        await self._backend.write(
+            lambda transaction: seed_outbound(
+                transaction,
+                self._principal_id,
+                event,
+                membership_epoch=journal.current_membership_epoch(
+                    transaction,
+                    self._principal_id,
+                    event.room_id,
+                ),
             ),
         )
 

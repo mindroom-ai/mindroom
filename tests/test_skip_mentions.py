@@ -309,6 +309,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 deps=SimpleNamespace(conversation_cache=conversation_cache),
             ),
             response_hooks=response_hooks,
+            outbound_projection=MagicMock(record_sent=AsyncMock()),
         ),
     )
     return gateway, before_hooks, after_hooks

@@ -607,6 +607,97 @@ class TestBoundedReads:
         assert seen == sorted(identifiers)
 
 
+class TestOutboundSeeding:
+    """A bot must be able to read the room it has just spoken in."""
+
+    async def test_a_sent_message_is_readable_before_its_echo(self, alice: PrincipalStore) -> None:
+        """Otherwise a turn that speaks and then reads sees a room it never spoke in."""
+        _, projected = message("$mine", sender=BOB, content=text("my answer"))
+
+        await alice.seed_outbound_message(projected)
+
+        assert await bodies(alice) == ["my answer"]
+
+    async def test_the_echo_replaces_the_guess_it_was_seeded_with(self, alice: PrincipalStore) -> None:
+        """A send response carries no timestamp, so the seeded order is a guess.
+
+        The echo is the server's own account of the same message, and ordering
+        against everything else in the room depends on believing it rather than
+        this machine's clock.
+        """
+        _, seeded = message("$mine", sender=BOB, ts=1_000, content=text("my answer"))
+        await alice.seed_outbound_message(seeded)
+
+        await admit(alice, "$mine", sender=BOB, ts=5_000, content=text("my answer"))
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [m.created_ts for m in page.messages] == [5_000]
+
+    async def test_a_seed_from_a_fast_clock_does_not_outrank_later_edits(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Correcting the creation time is not enough; the revision moves too.
+
+        Edits are ordered against the revision currently installed. A bot whose
+        clock runs ahead of the homeserver seeds a revision timestamp from the
+        future, and every genuine edit that follows looks older than it and
+        loses. The answer would then be frozen at its first token for as long
+        as the clocks disagree.
+        """
+        _, seeded = message("$mine", sender=BOB, ts=9_000, content=text("partial"))
+        await alice.seed_outbound_message(seeded)
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+
+        await admit(alice, "$edit", sender=BOB, ts=2_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
+    async def test_a_seed_never_overwrites_what_the_server_already_said(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A late seed is stale by definition and must not undo the echo."""
+        await admit(alice, "$mine", sender=BOB, ts=5_000, content=text("my answer"))
+        _, seeded = message("$mine", sender=BOB, ts=1_000, content=text("stale guess"))
+
+        await alice.seed_outbound_message(seeded)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [(m.created_ts, m.content["body"]) for m in page.messages] == [(5_000, "my answer")]
+
+    async def test_an_echo_does_not_revert_an_edit_that_arrived_first(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Streaming edits its own message, so this ordering is the common one.
+
+        The echo is authoritative about when the message was created and
+        nothing else. Letting it also restore the original revision would make
+        a finished answer flicker back to its first token.
+        """
+        _, seeded = message("$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await alice.seed_outbound_message(seeded)
+        await admit(alice, "$edit", sender=BOB, ts=2_000, content=edit("$mine", "complete"))
+
+        await admit(alice, "$mine", sender=BOB, ts=900, content=text("partial"))
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [(m.created_ts, m.content["body"]) for m in page.messages] == [(900, "complete")]
+
+    async def test_a_duplicate_echo_of_an_authoritative_row_changes_nothing(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only a provisional row yields; a real duplicate stays a no-op."""
+        await admit(alice, "$m", ts=5_000, content=text("original"))
+        await admit(alice, "$edit", ts=6_000, content=edit("$m", "edited"))
+
+        await admit(alice, "$m", ts=7_000, content=text("original"))
+
+        assert await bodies(alice) == ["edited"]
+
+
 class TestMembershipEpoch:
     """Leaving and rejoining invalidates what the previous membership saw."""
 

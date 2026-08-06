@@ -3040,8 +3040,18 @@ async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_path: Path) -> None:
-    """A walk that never proves continuity stays cold history: cached, never answered."""
+async def test_nio_bounded_exhaustion_answers_the_events_it_recovered(tmp_path: Path) -> None:
+    """A backfill that runs dry inside a bounded gap has seen all of it.
+
+    The gap is bounded at both ends -- the sync `prev_batch` above and the
+    `since` below -- so a page with no end token means no further event is
+    obtainable, not that the walk gave up. These are messages that arrived
+    while this bot was a member and has not answered, and treating them as
+    cold history is how a burst of user messages used to be silently ignored.
+
+    The cold fence itself is pinned where it belongs, on provenance, by
+    `test_cold_history_populates_context_without_work`.
+    """
     bot = _agent_bot(tmp_path)
     cache_root = SqliteEventCache(tmp_path / "history-event-cache.db")
     await cache_root.initialize()
@@ -3060,8 +3070,7 @@ async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_pa
     await bot._conversation_cache.mark_room_joined(room_id)
     history_text = _text_event("$unproven-text", "old text", 1)
     history_image = _image_event("$unproven-image", "old image", 2)
-    # An unbound walk that runs out of events without reaching the window's
-    # own token never proves the recovered events follow the held baseline.
+    # No end token: the server has no more history to give inside this gap.
     client._recovery_room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id=room_id,
@@ -3087,7 +3096,7 @@ async def test_nio_unproven_recovery_caches_history_behind_the_cold_fence(tmp_pa
         assert await bot.event_cache.get_event(room_id, history_image.event_id) is not None
         await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
-        turn_callback.assert_not_awaited()
+        assert turn_callback.await_count == 2
     finally:
         await client.close()
         await cache_root.close()

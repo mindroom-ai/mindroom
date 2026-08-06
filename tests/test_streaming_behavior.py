@@ -4051,6 +4051,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                outbound_projection=MagicMock(record_sent=AsyncMock()),
             ),
         )
         object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -4153,6 +4154,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                outbound_projection=MagicMock(record_sent=AsyncMock()),
             ),
         )
         outcome = await gateway.finalize_streamed_response(
@@ -4257,6 +4259,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                outbound_projection=MagicMock(record_sent=AsyncMock()),
             ),
         )
 

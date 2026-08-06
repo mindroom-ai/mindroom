@@ -172,21 +172,33 @@ def project(
     )
 
 
-def _project_original(
+def seed_outbound(
     transaction: Transaction,
     principal_id: str,
     event: ProjectedEvent,
     *,
     membership_epoch: int,
 ) -> None:
-    """Install a new logical message and apply an edit that beat it here."""
+    """Record a message this bot just sent, before its echo comes back.
+
+    Waiting for the echo is free for a turn a room event triggered, because
+    the timeline orders this message before the user's next one. It is not
+    free for a turn that reads the conversation after speaking in it, or for
+    one no room event triggered at all — a scheduled task, a todo poke. Those
+    would read a room they have already spoken in as one they have not, and
+    a strict read cannot express "wait for my own echo".
+
+    What is written is deliberately provisional. The send response carries an
+    event ID and nothing else; the timestamp here is this machine's clock, and
+    ordering is the server's to decide. The echo replaces it.
+    """
     transaction.execute(
         """
         INSERT INTO visible_messages (
             principal_id, room_id, logical_event_id, thread_id, sender,
             created_ts, revision_event_id, revision_ts, content_json,
-            refresh_token, membership_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            refresh_token, membership_epoch, provisional
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1)
         ON CONFLICT (principal_id, room_id, logical_event_id) DO NOTHING
         """,
         (
@@ -201,6 +213,65 @@ def _project_original(
             _dumps(event.content),
             membership_epoch,
         ),
+    )
+
+
+def _project_original(
+    transaction: Transaction,
+    principal_id: str,
+    event: ProjectedEvent,
+    *,
+    membership_epoch: int,
+) -> None:
+    """Install a new logical message and apply an edit that beat it here.
+
+    A row this bot seeded from its own send is the one case where an existing
+    row must yield. Its ordering metadata was a local guess, and this event is
+    the server's own account of the same message, so the echo is what makes it
+    authoritative. Every other repeat is a genuine duplicate and changes
+    nothing, which is why the update is guarded rather than unconditional.
+    """
+    transaction.execute(
+        """
+        INSERT INTO visible_messages (
+            principal_id, room_id, logical_event_id, thread_id, sender,
+            created_ts, revision_event_id, revision_ts, content_json,
+            refresh_token, membership_epoch, provisional
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0)
+        ON CONFLICT (principal_id, room_id, logical_event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            sender = excluded.sender,
+            created_ts = excluded.created_ts,
+            revision_event_id = excluded.revision_event_id,
+            revision_ts = excluded.revision_ts,
+            content_json = excluded.content_json,
+            membership_epoch = excluded.membership_epoch,
+            provisional = 0
+        WHERE visible_messages.provisional = 1
+          AND visible_messages.revision_event_id = visible_messages.logical_event_id
+        """,
+        (
+            principal_id,
+            event.room_id,
+            event.event_id,
+            encode_thread_id(event.thread_id),
+            event.sender,
+            event.origin_server_ts,
+            event.event_id,
+            event.origin_server_ts,
+            _dumps(event.content),
+            membership_epoch,
+        ),
+    )
+    # An edit can arrive before the echo of the message it edits. The revision
+    # then belongs to the edit and must survive, but the creation time is still
+    # a guess and the row is still provisional, so both are corrected here.
+    transaction.execute(
+        """
+        UPDATE visible_messages SET created_ts = ?, provisional = 0
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ? AND provisional = 1
+        """,
+        (event.origin_server_ts, principal_id, event.room_id, event.event_id),
     )
     _apply_unresolved_edit(transaction, principal_id, event)
 

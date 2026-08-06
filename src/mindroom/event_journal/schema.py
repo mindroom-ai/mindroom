@@ -78,6 +78,11 @@ _TABLES = (
         content_json TEXT,
         refresh_token BIGINT,
         membership_epoch BIGINT NOT NULL,
+        -- Set on a row this bot seeded from its own send, whose ordering
+        -- metadata is a local guess: a Matrix send response carries only the
+        -- event ID, and `origin_server_ts` is the server's to assign. The
+        -- self-authored sync echo replaces those values and clears this.
+        provisional INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, logical_event_id)
     )
     """,
