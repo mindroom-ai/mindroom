@@ -63,6 +63,7 @@ Sliding Sync exposed recovery gaps, but most current complexity comes from MindR
 - Conversation reads are bounded and indexed after at most one successful hydration per conversation and membership epoch.
 - Intermediate edit bodies and edit chains are not retained.
 - Redacting a current edit restores the server-authoritative previous visible revision without retaining a local edit chain.
+- No read path may serve a revision after that revision's redaction has been durably admitted, so a pending refetch omits the message rather than returning deleted content.
 - Initial and terminal response deliveries are idempotent across crashes.
 - The final implementation PR head must not leave both the old and replacement production paths active.
 - The single implementation PR must be green and must remove every active owner it replaces before merge.
@@ -119,15 +120,21 @@ Admission records every redaction target as a compact durable tombstone before p
 
 Redacting the logical original tombstones the logical message.
 
-Redacting the currently visible replacement marks the logical row with a durable refresh token derived from the redaction's journal receipt order.
+Redacting the currently visible replacement clears the row's visible body and marks the logical row with a durable refresh token derived from the redaction's journal receipt order.
+
+Clearing the body in the same admission transaction is required because a redacted revision must never be readable, and a stale-but-visible row would otherwise let any non-strict caller serve content the sender deleted.
 
 A strict conversation read waits for one shared point refetch of the logical original and its current relations instead of serving content known to be stale.
+
+A non-strict read never waits and never serves a body-cleared row, so it omits that logical message until a refetch installs the server-authoritative revision.
 
 The point refetch uses the same relation traversal and reducer as initial hydration, retains no edit chain, and installs the reconstructed visible row only when both the membership epoch and exact refresh token still match.
 
 A newer edit or redaction changes the projection revision and prevents an older in-flight refetch from overwriting it.
 
 Successful conditional installation clears the refresh token, while failure or cancellation leaves it durable and makes strict reads fail closed until retry succeeds.
+
+The next strict read of that conversation drives the retry, so no background refresh worker exists and a permanently unreachable homeserver degrades reads rather than accumulating retry state.
 
 Redacting an already superseded replacement does not change visible content.
 
@@ -189,6 +196,24 @@ PostgreSQL implements the same behavioral contract without a second application 
 
 The two backends run the same admission, projection, membership, pagination, and outbox contract tests.
 
+### Homeserver behavior that is not observable from this repository
+
+These facts come from the fork repositories and the deployment configuration rather than from MindRoom source, so implementation must not rediscover them by debugging.
+
+Tuwunel purges superseded `m.replace` events on a background job, which is why edit-redaction recovery must ask the server instead of trusting any local history.
+
+The purge is disabled by default in the fork but enabled in the MindRoom production deployment, with a 24-hour minimum age, an hourly interval, and a 10,000-event batch size.
+
+That 24-hour floor means a current-edit refetch normally returns the true previous edit and returns the original body only once superseded edits have aged out, and both outcomes are correct because every Matrix client sees the same server state.
+
+The purge exists to reclaim storage from MindRoom's own streaming edit churn, which this plan already treats as transient, so it is not a reason to retain edit history locally.
+
+Tuwunel and the MindRoom Synapse fork both cap recursive relation traversal at depth three in source, and neither advertises that cap, which is why the required depth must be read from `recursion_depth` on each page.
+
+Both homeservers deduplicate a repeated transaction ID per sending device rather than per access token, and MindRoom persists its device across restarts, so deterministic outbox retries survive a crash but would not survive re-login with a new device.
+
+Synapse expires stored transaction mappings on a periodic cleanup, so the real-server proof must record how long a deterministic retry stays idempotent rather than assuming it is unbounded.
+
 ## Feasibility Proof Before Production Cutover
 
 The first implementation work occurs on an isolated prototype branch that is not separately merged into `main`.
@@ -209,6 +234,7 @@ The prototype must demonstrate:
 - Current-edit redaction restoring the latest remaining server revision without retaining previous bodies.
 - A durable refresh token surviving restart, strict reads waiting for it, and refetch failure serving no stale content.
 - A newer edit racing point refetch and winning through conditional installation.
+- Non-strict reads omitting a body-cleared message instead of returning the redacted revision, on every read path, including across a restart with the refetch still pending.
 - Bounded cursor reads over a 100,000-message room conversation.
 - One indexed projection update per edit and no retained intermediate edit chain.
 - Zero SQLite lock failures under 50 concurrent Matrix conversations with an explicit `busy_timeout`.
@@ -327,6 +353,7 @@ The single implementation PR tracks these results as its internal checkpoints co
 | Model reruns after durable completion | Zero. |
 | Edit storage | One visible row per logical message and at most one unresolved row per target and sender. |
 | Current-edit redaction | Strict reads return the server-authoritative prior revision after point refetch and never stale content. |
+| Redacted revision exposure | Zero reads of any kind return a revision whose redaction was durably admitted. |
 | Conversation reads | Bounded cursor pages using the conversation index. |
 | Post-hydration room scans | Zero. |
 | SQLite lock failures | Zero in the 50-conversation stress run. |
