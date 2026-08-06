@@ -6,6 +6,10 @@ This is a feasibility-first architecture and cutover plan, not a prediction of e
 
 The implementation proceeds only if a focused prototype proves that the replacement is correct, fast enough, and materially smaller than the current system.
 
+All MindRoom production changes then land in one implementation PR.
+
+The required mindroom-nio change necessarily remains a separate prerequisite PR because it is a different repository.
+
 ## Goal
 
 Replace the overlapping Matrix callback-obligation, history-repair, conversation-cache, handled-source, and visible-delivery state machines with explicit non-overlapping owners.
@@ -58,9 +62,11 @@ Sliding Sync exposed recovery gaps, but most current complexity comes from MindR
 - An unrecovered room keeps the bot unready instead of silently becoming history.
 - Conversation reads are bounded and indexed after at most one successful hydration per conversation and membership epoch.
 - Intermediate edit bodies and edit chains are not retained.
+- MindRoom intentionally tombstones a logical message when its currently visible edit is redacted, even though a Matrix client may reveal the original body after that redaction.
+- This visible divergence is the accepted cost of not retaining edit history that the homeserver may also have purged.
 - Initial and terminal response deliveries are idempotent across crashes.
-- No merged cutover may leave both the old and replacement production paths active.
-- Every implementation PR must be green and must remove the active owner it replaces.
+- The final implementation PR head must not leave both the old and replacement production paths active.
+- The single implementation PR must be green and must remove every active owner it replaces before merge.
 - Existing authorization, E2EE metadata, media transcript, large-message sidecar, reaction, command, source-redaction, and room-membership behavior remains in scope.
 - The existing continuity-checkpoint format remains readable during cutover so downtime events can still be recovered.
 - `bot.py` remains lifecycle and dependency wiring rather than becoming an implementation owner.
@@ -77,6 +83,14 @@ Operational methods such as `admit`, `pending`, `settle`, `load_conversation`, m
 Inbound envelopes and conversation keys also omit `principal_id` because the bound store supplies it.
 
 This prevents callers from accidentally reading or settling another bot's rows.
+
+### Conversation identity storage
+
+Typed APIs represent an unthreaded conversation as `thread_id=None`.
+
+Durable SQLite and PostgreSQL tables represent it with `thread_id TEXT NOT NULL` and the empty string as the single canonical storage value.
+
+One shared boundary helper encodes `None` to the empty string and decodes it back, so primary keys and uniqueness constraints never depend on nullable equality.
 
 ### Durable admission
 
@@ -166,9 +180,13 @@ The two backends run the same admission, projection, membership, pagination, and
 
 ## Feasibility Proof Before Production Cutover
 
-The first implementation work is a disposable prototype branch that is not merged into `main`.
+The first implementation work occurs on an isolated prototype branch that is not separately merged into `main`.
 
 It proves the risky primitives without wiring a second production path into MindRoom.
+
+If it passes, its implementation and proof harness become the starting point of the single MindRoom implementation PR rather than being rebuilt.
+
+If it fails, the branch is discarded without adding unused architecture to `main`.
 
 ### Store and projection proof
 
@@ -219,11 +237,11 @@ Before any production cutover, record the prototype's source size, database size
 
 Proceed only if all correctness tests pass, no room scan is required after hydration, and the replacement has a credible path to removing substantially more production code than it adds.
 
-Use the measured prototype size to set a written source-growth budget before the first cutover PR.
+Use the measured prototype size to set a written source-growth budget before opening the MindRoom implementation PR.
 
 If the prototype needs compatibility facades, multiple writers, retained edit chains, or a second recovery classifier, stop and reject this design.
 
-## Cutover Sequence
+## One-PR Implementation Sequence
 
 ### 0. mindroom-nio prerequisite
 
@@ -231,17 +249,23 @@ Land a focused mindroom-nio PR that adds recursive relation query support, parse
 
 The current MindRoom baseline already pins mindroom-nio 0.36.0, so MindRoom must bump to the first release containing this additional contract.
 
+That release is a hard prerequisite for every downstream hydration change, and MindRoom must not add a fallback when depth is absent or too shallow.
+
 Do not add batch admission or MindRoom storage policy to nio during this work.
+
+All remaining phases occur on one MindRoom branch and in one implementation PR.
+
+They are internal cutover checkpoints, not separately mergeable PRs, and only the final state may be merged.
 
 ### 1. Ingress ownership cutover
 
 Introduce only the journal, membership epoch, principal-bound store, admission adapter, and pending worker needed to replace inbound callback durability.
 
-In the same PR, remove dispatch obligations, dispatch admission, the cold-history fence, and settlement retry ownership.
+Before the implementation PR can merge, remove dispatch obligations, dispatch admission, the cold-history fence, and settlement retry ownership.
 
-The PR must pass realistic nio restart recovery, provenance mapping, crash replay, authorization, command, media, reaction, redaction, and decryption-failure behavior.
+This checkpoint must pass realistic nio restart recovery, provenance mapping, crash replay, authorization, command, media, reaction, redaction, and decryption-failure behavior.
 
-It must be net simpler than the owners it deletes and must not include dormant projection or outbox frameworks.
+The journal replacement must be net simpler than the ingress owners it deletes.
 
 ### 2. Conversation projection cutover
 
@@ -249,7 +273,7 @@ Add latest-visible projection storage, bounded reads, and one-time thread and ro
 
 Change conversation resolution, reply lookup, reaction lookup, stale-stream cleanup, hooks, and streaming thread targeting to use the bounded projection API.
 
-In the same PR, remove the Matrix cache package, conversation-cache read variants, room-scan thread history and repair, cache trust, cache certification, advisory outbound cache writes, and cache write coordination.
+Before the implementation PR can merge, remove the Matrix cache package, conversation-cache read variants, room-scan thread history and repair, cache trust, cache certification, advisory outbound cache writes, and cache write coordination.
 
 Reduce checkpoint publication to successful durable admission plus nio's exact unrecovered-room result.
 
@@ -261,7 +285,7 @@ Add the claimed deterministic outbox and durable model-result handoff.
 
 Keep only the latest unsent streaming content in memory.
 
-In the same PR, remove duplicate pending-visible, delivery-retry, handled-source, and response-reconciliation state when the journal, `TurnStore`, or outbox owns the same fact.
+Before the implementation PR can merge, remove duplicate pending-visible, delivery-retry, handled-source, and response-reconciliation state when the journal, `TurnStore`, or outbox owns the same fact.
 
 Preserve only unique model-execution, cancellation, redaction, and business-outcome data in `TurnStore`.
 
@@ -273,11 +297,11 @@ Update the architecture documentation to name one owner for each durable fact.
 
 Run the complete backend, crash, performance, full repository, and real-server suites from the final state.
 
-No cleanup PR may add a compatibility path merely to avoid deleting an old implementation-specific test.
+The implementation PR may not add a compatibility path merely to avoid deleting an old implementation-specific test.
 
 ## Merge Gates
 
-Each cutover PR reports these results in its description.
+The single implementation PR tracks these results as its internal checkpoints complete and reports the final values in its description.
 
 | Gate | Required result |
 | --- | --- |
@@ -300,7 +324,7 @@ The initial performance targets are p95 durable admission below 50 milliseconds,
 
 Those targets must be recorded with host details and may be revised only from measured prototype evidence.
 
-The complete stack must be materially net negative in production source lines.
+The complete implementation diff must be materially net negative in production source lines.
 
 The previous 8,000-line reduction remains a target, not proof by itself, because moving the same complexity into new modules would still be a failed simplification.
 
