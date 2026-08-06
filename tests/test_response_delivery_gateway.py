@@ -307,6 +307,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].edits_event_id == "$placeholder"
         assert edit.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+        # The stored payload is the finished replace event, because recovery
+        # sends the row verbatim and cannot rebuild an envelope.
+        stored = outbox.rows["$cause", "final"].payload
+        assert stored["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}
+        assert stored["m.new_content"]["body"] == "the answer"
 
     async def test_a_rerun_turn_does_not_edit_the_answer_in_twice(
         self,
@@ -350,14 +355,16 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "x"})
-        edit = AsyncMock(return_value=edited)
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
         )
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.edit_message_result", edit):
+        direct = AsyncMock(return_value=edited)
+        with (
+            patch("mindroom.delivery_gateway.edit_message_result", direct),
+        ):
             # The stream ends on the placeholder, so its terminal edit is not
             # this turn's answer and must not claim the turn's final delivery.
             await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"body": PROGRESS_PLACEHOLDER}, PROGRESS_PLACEHOLDER)
@@ -368,7 +375,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             )
 
         assert outcome.event_id == "$placeholder"
-        assert edit.await_count == 2, "the answer was not delivered after a placeholder-only stream"
+        assert direct.await_count == 2, "the placeholder edit or the answer did not go out"
         assert list(outbox.rows) == [("$cause", "final")]
 
     async def test_a_real_terminal_edit_does_settle_the_turn(
@@ -394,3 +401,106 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
+
+    async def test_recovery_replays_a_final_edit_as_an_edit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A crash between claiming and acknowledging must not add a message.
+
+        Recovery has no request to rebuild from; it sends the row as frozen.
+        If what was frozen were the new body rather than the finished replace
+        event, the recovered answer would arrive as a second ordinary message
+        with the placeholder still above it -- two visible messages for one
+        turn, which is the thing the outbox exists to prevent.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = SimpleNamespace(event_id="$placeholder", content_sent={"body": "the answer"})
+
+        # A delivery that reached Matrix but whose acknowledgement was lost.
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=None)):
+            await gateway.deliver_final(
+                replace(self._final_request("the answer"), existing_event_id="$placeholder"),
+            )
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)) as send:
+            recovered = await gateway.recover_deliveries()
+
+        assert recovered == 1
+        sent = send.await_args.args[2]
+        assert sent["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}, (
+            "recovery sent a new message instead of replaying the edit"
+        )
+        assert send.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+
+    async def test_recovery_does_not_add_a_placeholder_after_the_answer(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A placeholder send whose outcome was lost must not resurface later.
+
+        If the placeholder never reached Matrix, the turn goes on to send its
+        answer as a message of its own. Resending the placeholder on the next
+        start would then put "Thinking..." into the room after the answer it
+        was supposed to precede -- a message from a turn that finished.
+
+        The row is left unacknowledged rather than deleted: it is the only
+        record that something may already exist under that transaction ID.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text=PROGRESS_PLACEHOLDER,
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)):
+            await gateway.deliver_final(self._final_request("the answer"))
+
+        assert outbox.rows["$cause", "initial"].acknowledged_event_id is None
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as send:
+            recovered = await gateway.recover_deliveries()
+
+        assert recovered == 0, "recovery resent a placeholder the answer had already overtaken"
+        send.assert_not_awaited()
+
+    async def test_a_replay_reports_what_was_sent_not_what_was_regenerated(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A rerun turn may hold different text than the room does.
+
+        The delivery it asks for was already made, so nothing is sent. What it
+        is told came back must be the message that exists, not the text it just
+        produced -- otherwise every consumer of the result records the wrong
+        body under the right event ID.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        sent = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "first"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)):
+            await gateway.deliver_final(self._final_request("first"))
+            replayed = await gateway.deliver_final(self._final_request("regenerated and different"))
+
+        assert replayed.event_id == "$sent"
+        # The cache is told what the room holds, which is the first answer.
+        # Handing it regenerated text would record a body the event does not
+        # have, under that event's ID.
+        notify = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message
+        assert notify.call_args.args[2]["body"] == "first", (
+            "a replayed delivery told the cache regenerated text was in the room"
+        )

@@ -193,6 +193,10 @@ class OutboxView(Protocol):
         """Freeze one delivery before network I/O and return what to send."""
         ...
 
+    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Return one delivery without claiming it."""
+        ...
+
     async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
         """Record the Matrix event one claimed delivery produced."""
         ...

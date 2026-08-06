@@ -1493,6 +1493,27 @@ class AgentBot:
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
 
+    async def _recover_unacknowledged_deliveries(self) -> None:
+        """Resend answers this bot could not confirm reaching Matrix.
+
+        After the first sync response, not before it. A send into an encrypted
+        room is refused until sync has rebuilt the local room and device state,
+        so recovery run at startup would spend its retry budget failing and
+        leave every encrypted room's owed answer unsent -- exactly the rooms
+        this matters in.
+
+        Resending is safe: each delivery carries the transaction ID its first
+        attempt used, so one the homeserver already accepted collapses back
+        onto the same event.
+        """
+        try:
+            recovered = await self._delivery_gateway.recover_deliveries()
+        except Exception:
+            self.logger.exception("Delivery recovery failed")
+            return
+        if recovered:
+            self.logger.info("Resent unacknowledged deliveries", deliveries=recovered)
+
     async def _run_sync_response_side_effects(
         self,
         *,
@@ -1501,6 +1522,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
+            await self._recover_unacknowledged_deliveries()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
@@ -1874,14 +1896,6 @@ class AgentBot:
             await self._prepare_matrix_sync_continuity()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
-            # Answers this bot generated but could not confirm reaching Matrix
-            # are owed to their rooms. Resending is safe -- each carries the
-            # transaction ID its first attempt used -- and it happens before
-            # sync starts so a recovered answer precedes anything that arrives
-            # after it.
-            recovered = await self._delivery_gateway.recover_deliveries()
-            if recovered:
-                self.logger.info("Resent unacknowledged deliveries", deliveries=recovered)
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)

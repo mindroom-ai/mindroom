@@ -76,6 +76,23 @@ class ResponseDelivery:
         )
         return event_id
 
+    async def _superseded_placeholder(self, delivery: OutboxDelivery) -> bool:
+        """Return whether this delivery is a placeholder the answer overtook.
+
+        A placeholder send whose outcome was never confirmed leaves a row
+        behind. If the turn went on to deliver its answer as a separate
+        message, resending that placeholder would put "Thinking..." into the
+        room *after* the answer it was supposed to precede.
+
+        The row is left unacknowledged rather than deleted, because an
+        attempted row is the only record that something may already be in the
+        room under its transaction ID.
+        """
+        if delivery.stage is not DeliveryStage.INITIAL:
+            return False
+        final = await self.store.load_delivery(turn_id=delivery.turn_id, stage=DeliveryStage.FINAL)
+        return final is not None and final.acknowledged_event_id is not None
+
     async def recover(self) -> int:
         """Resend every delivery whose Matrix outcome is unknown.
 
@@ -99,6 +116,8 @@ class ResponseDelivery:
                 return recovered
             cursor = (batch[-1].created_at_ns, batch[-1].turn_id, batch[-1].stage.value)
             for delivery in batch:
+                if await self._superseded_placeholder(delivery):
+                    continue
                 try:
                     await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
                 except Exception:

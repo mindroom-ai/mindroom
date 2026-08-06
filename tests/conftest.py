@@ -1039,9 +1039,20 @@ class FakeOutbox:
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
     ) -> tuple[OutboxDelivery, ...]:
-        """Return deliveries whose Matrix outcome is unknown, oldest first."""
-        del limit, after
-        return tuple(row for row in self.rows.values() if row.acknowledged_event_id is None)
+        """Return deliveries whose Matrix outcome is unknown, oldest first.
+
+        The cursor is honoured, because recovery relies on it to make
+        progress: a row it visits but does not acknowledge -- a failure, or a
+        placeholder its answer overtook -- must not come back on the next
+        page, or the scan never ends.
+        """
+        pending = sorted(
+            (row for row in self.rows.values() if row.acknowledged_event_id is None),
+            key=lambda row: (row.created_at_ns, row.turn_id, row.stage.value),
+        )
+        if after is not None:
+            pending = [row for row in pending if (row.created_at_ns, row.turn_id, row.stage.value) > after]
+        return tuple(pending[:limit])
 
 
 def make_outbox_mock() -> OutboxView:

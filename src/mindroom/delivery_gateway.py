@@ -32,7 +32,12 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    build_edit_event_content,
+    edit_message_result,
+    send_message_result,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.response_delivery import DeliveryStage, ResponseDelivery
@@ -501,6 +506,24 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    async def _acknowledged_delivery(
+        self,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        fallback: dict[str, Any],
+    ) -> DeliveredMatrixEvent:
+        """Return what was actually delivered for an already-acknowledged row.
+
+        The payload comes from the row, not from this caller. A rerun turn can
+        arrive with regenerated text, and reporting that as what is in the room
+        would tell every downstream consumer that the event says something it
+        does not -- under the event ID of the message that really was sent.
+        """
+        row = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        content = dict(row.payload) if row is not None else fallback
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+
     async def _send_claimed(
         self,
         claimed: OutboxDelivery,
@@ -591,7 +614,7 @@ class DeliveryGateway:
         # callback never ran. That is a turn re-running after its answer
         # reached the room; reporting it as a failed send would make a
         # delivered answer look lost and invite a duplicate.
-        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+        return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -680,15 +703,30 @@ class DeliveryGateway:
                 request.new_text,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
+        # What is stored is the finished wire event, not the text it was built
+        # from. Recovery sends the row exactly as frozen and has no request to
+        # rebuild from, so anything reconstructed at send time -- the replace
+        # envelope, the fallback body -- would be missing on the one path that
+        # matters, and the answer would come back as a second message with the
+        # placeholder still above it.
+        envelope = build_edit_event_content(
+            event_id=request.event_id,
+            new_content=content,
+            new_text=request.new_text,
+        )
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
+            # Live sends still go through the edit helper, which rebuilds the
+            # identical envelope from the identical inputs. Recovery cannot,
+            # having no request to rebuild from, so it sends the frozen one --
+            # the same bytes either way.
             nonlocal delivered
             edited = await edit_message_result(
                 client,
                 claimed.room_id,
-                claimed.edits_event_id or request.event_id,
-                dict(claimed.payload),
+                request.event_id,
+                content,
                 request.new_text,
                 retry_sync_recovery=request.retry_sync_recovery,
                 transaction_id=claimed.transaction_id,
@@ -705,7 +743,7 @@ class DeliveryGateway:
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
-                payload=content,
+                payload=envelope,
                 edits_event_id=request.event_id,
             )
         except _DeliveryRefusedError:
@@ -714,7 +752,7 @@ class DeliveryGateway:
             return delivered
         # Already acknowledged: this turn's answer reached the room on an
         # earlier run, so nothing was sent and the callback never ran.
-        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+        return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
