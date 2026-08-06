@@ -280,7 +280,36 @@ It must prove:
 
 Manual integration scripts follow the repository's existing `tests/manual/` convention.
 
-### Feasibility decision
+### Recorded feasibility decision
+
+The prototype is built, and `tests/manual/event_journal_measurements.py` reproduces every number below on demand.
+
+Measured on `macOS-26.5.2-arm64` with Python 3.13.10:
+
+| Measurement | Result | Target |
+| --- | --- | --- |
+| Durable admission, p95 | 0.14 ms | under 50 ms |
+| Bounded conversation read, p95 | 0.19 ms | under 50 ms |
+| Deepest cursor page | 0.12 ms | no degradation with depth |
+| Writer-queue wait, p95 | 5.8 ms | under 100 ms |
+| SQLite lock failures, 50 concurrent conversations | 0 | zero |
+| Concurrent admission throughput | ~9,800 per second | not set |
+| Conversation read query plan | covering index `visible_messages_page` | indexed |
+| Pending replay query plan | index `journal_events_pending` | indexed |
+| Database size per message | 658 bytes | not set |
+| Replacement source | 3,202 lines | smaller than replaced |
+| Replaced owners | 17,877 lines | — |
+| Projected net change | −14,675 lines | materially net negative |
+
+The nine crash boundaries all produce one terminal turn and at most one visible response, and the boundaries after the model result is durable never re-run the model.
+
+The live-server proof passes against a disposable Tuwunel, covering relation traversal, redaction of the currently visible edit, edit churn, deterministic transaction reuse, device-scoped deduplication, and bounded history exhaustion.
+
+No compatibility facade, second writer, retained edit chain, or second recovery classifier was needed, so none of the stop conditions were triggered.
+
+The remaining risk is not in these primitives; it is in the ingress restructuring the cutover requires, because coalescing, deferred turn settlement, and streaming currently run as background work that the pending worker would need to own.
+
+### Feasibility decision method
 
 Before any production cutover, record the prototype's source size, database size, admission latency, writer-queue latency, bounded-read latency, query plans, lock failures, and crash results.
 

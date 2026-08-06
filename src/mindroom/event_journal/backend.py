@@ -8,16 +8,15 @@ individual statement, and both backends implement exactly that.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from .schema import Dialect
 
-T = TypeVar("T")
 
-type Params = Sequence[Any]
+type _Params = Sequence[Any]
 type Row = Mapping[str, Any]
 
 
@@ -29,15 +28,15 @@ class Transaction(Protocol):
         """Return the backend spelling in use, for the rare divergent statement."""
         ...
 
-    def execute(self, sql: str, params: Params = ()) -> None:
+    def execute(self, sql: str, params: _Params = ()) -> None:
         """Run one statement."""
         ...
 
-    def fetchone(self, sql: str, params: Params = ()) -> Row | None:
+    def fetchone(self, sql: str, params: _Params = ()) -> Row | None:
         """Run one query and return its first row, if any."""
         ...
 
-    def fetchall(self, sql: str, params: Params = ()) -> tuple[Row, ...]:
+    def fetchall(self, sql: str, params: _Params = ()) -> tuple[Row, ...]:
         """Run one query and return every row."""
         ...
 
@@ -53,11 +52,11 @@ class Backend(Protocol):
         """Return the SQL spelling this backend uses."""
         ...
 
-    async def write(self, operation: Operation[T]) -> T:
+    async def write[T](self, operation: Operation[T]) -> T:
         """Run one operation in a serialized write transaction and commit it."""
         ...
 
-    async def read(self, operation: Operation[T]) -> T:
+    async def read[T](self, operation: Operation[T]) -> T:
         """Run one operation in a read transaction."""
         ...
 

@@ -22,11 +22,11 @@ if TYPE_CHECKING:
 
     from .backend import Transaction
 
-RELATES_TO = "m.relates_to"
-REL_TYPE = "rel_type"
-REPLACE_REL_TYPE = "m.replace"
-THREAD_REL_TYPE = "m.thread"
-NEW_CONTENT = "m.new_content"
+_RELATES_TO = "m.relates_to"
+_REL_TYPE = "rel_type"
+_REPLACE_REL_TYPE = "m.replace"
+_THREAD_REL_TYPE = "m.thread"
+_NEW_CONTENT = "m.new_content"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,14 +44,14 @@ class ProjectedEvent:
 
 
 def _relation(content: Mapping[str, object]) -> Mapping[str, object]:
-    relation = content.get(RELATES_TO)
+    relation = content.get(_RELATES_TO)
     return cast("Mapping[str, object]", relation) if isinstance(relation, dict) else {}
 
 
 def replacement_target(content: Mapping[str, object]) -> str | None:
     """Return the event this content replaces, if it is an edit."""
     relation = _relation(content)
-    if relation.get(REL_TYPE) != REPLACE_REL_TYPE:
+    if relation.get(_REL_TYPE) != _REPLACE_REL_TYPE:
         return None
     target = relation.get("event_id")
     return target if isinstance(target, str) and target else None
@@ -60,7 +60,7 @@ def replacement_target(content: Mapping[str, object]) -> str | None:
 def thread_root(content: Mapping[str, object]) -> str | None:
     """Return the thread this content belongs to, if any."""
     relation = _relation(content)
-    if relation.get(REL_TYPE) != THREAD_REL_TYPE:
+    if relation.get(_REL_TYPE) != _THREAD_REL_TYPE:
         return None
     root = relation.get("event_id")
     return root if isinstance(root, str) and root else None
@@ -68,7 +68,7 @@ def thread_root(content: Mapping[str, object]) -> str | None:
 
 def visible_content(content: Mapping[str, object]) -> Mapping[str, object]:
     """Return the body an edit installs, which lives under ``m.new_content``."""
-    new_content = content.get(NEW_CONTENT)
+    new_content = content.get(_NEW_CONTENT)
     return cast("Mapping[str, object]", new_content) if isinstance(new_content, dict) else content
 
 
@@ -101,7 +101,7 @@ def _loads(content_json: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", decoded)
 
 
-def is_tombstoned(
+def _is_tombstoned(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -118,7 +118,7 @@ def is_tombstoned(
     return row is not None
 
 
-def record_tombstone(
+def _record_tombstone(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -157,7 +157,7 @@ def project(
             receipt_order=receipt_order,
         )
         return
-    if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
+    if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
         return
     replaces = replacement_target(event.content)
     if replaces is None:
@@ -232,7 +232,7 @@ def _apply_unresolved_edit(
     )
     if held is None:
         return
-    if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+    if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
         return
     _install_revision(
         transaction,
@@ -262,7 +262,7 @@ def _project_edit(
         (principal_id, event.room_id, target_event_id),
     )
     if current is None:
-        if is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
+        if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
             return
         _hold_unresolved_edit(
             transaction,
@@ -375,7 +375,7 @@ def _project_redaction(
     target = event.redacts_event_id
     if target is None:
         return
-    record_tombstone(transaction, principal_id, event.room_id, target, receipt_order)
+    _record_tombstone(transaction, principal_id, event.room_id, target, receipt_order)
     transaction.execute(
         """
         DELETE FROM unresolved_edits
