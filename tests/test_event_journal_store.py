@@ -811,6 +811,27 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    async def test_a_seed_cannot_outrank_an_edit_the_server_stamps_later(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A local clock must not claim a position in the future.
+
+        Giving a seeded edit the wall clock let it outrank a genuine later edit
+        that had not been echoed yet. That edit was then rejected for good, and
+        canonicalizing the seed afterwards did not bring it back -- the answer
+        stayed at whatever the seed said. A seed only has to outrank the
+        revision it replaces.
+        """
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+        _, seeded = message("$edit1", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(seeded)
+
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+        await admit(alice, "$edit1", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+
+        assert await bodies(alice) == ["complete"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,

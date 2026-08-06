@@ -12,7 +12,7 @@ homeserver for the new truth instead of popping a local stack.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from .identity import encode_thread_id
@@ -199,10 +199,15 @@ def seed_outbound(
     """
     replaces = replacement_target(event.content)
     if replaces is not None:
+        # Never let a local clock claim a position in the future. The seed only
+        # has to outrank the revision it replaces; giving it the wall clock lets
+        # it outrank a genuine later edit that has not been echoed yet, and that
+        # edit is then rejected for good -- canonicalizing the seed afterwards
+        # does not bring it back.
         _project_edit(
             transaction,
             principal_id,
-            event,
+            replace(event, origin_server_ts=_seed_ordering_key(transaction, principal_id, event, replaces)),
             target_event_id=replaces,
             membership_epoch=membership_epoch,
             provisional=True,
@@ -230,6 +235,31 @@ def seed_outbound(
             membership_epoch,
         ),
     )
+
+
+def _seed_ordering_key(
+    transaction: Transaction,
+    principal_id: str,
+    event: ProjectedEvent,
+    target_event_id: str,
+) -> int:
+    """Return an ordering key one step past the revision this seed replaces.
+
+    A seeded edit is the newest thing this bot knows about, and nothing more.
+    Anything the server stamps later must still be able to beat it.
+    """
+    current = transaction.fetchone(
+        """
+        SELECT revision_ts FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        """,
+        (principal_id, event.room_id, target_event_id),
+    )
+    if current is None:
+        # The original has not arrived, so there is nothing to outrank yet; the
+        # held row competes only with other held edits from the same sender.
+        return 0
+    return int(current["revision_ts"]) + 1
 
 
 def _project_original(
