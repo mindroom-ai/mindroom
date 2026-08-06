@@ -19,7 +19,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -45,7 +44,6 @@ def _context(tmp_path: Path, *, thread_id: str | None = THREAD_ID) -> ToolRuntim
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
         conversation_reader=make_conversation_reader_mock(),
-        event_cache=make_event_cache_mock(),
     )
 
 

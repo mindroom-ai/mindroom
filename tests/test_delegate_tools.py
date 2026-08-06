@@ -27,7 +27,6 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
 )
 
@@ -564,7 +563,6 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             conversation_reader=make_conversation_reader_mock(),
             correlation_id="corr-parent",
@@ -654,7 +652,6 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             conversation_reader=make_conversation_reader_mock(),
             active_model_name="default",

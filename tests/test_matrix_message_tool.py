@@ -37,7 +37,6 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     make_latest_thread_event_id_mock,
     make_matrix_client_mock,
     make_visible_message,
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_RESOLVED_THREAD_ID = object()
-_DEFAULT_EVENT_CACHE = object()
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +83,6 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
     agent_thread_mode: str = "thread",
-    event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -130,7 +127,6 @@ def _make_context(
         runtime_paths=runtime_paths_for(config),
         conversation_cache=conversation_cache,
         conversation_reader=conversation_reader,
-        event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         storage_path=storage_path,
         attachment_ids=attachment_ids,
@@ -529,8 +525,7 @@ async def test_matrix_message_rejects_invalid_message_extras() -> None:
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""
     tool = MatrixMessageTools()
-    event_cache = MagicMock()
-    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
     ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value=None)
 
     with (
@@ -2746,8 +2741,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
 async def test_matrix_message_edit_happy_path() -> None:
     """Edit should update an existing message by target event ID."""
     tool = MatrixMessageTools()
-    event_cache = MagicMock()
-    ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
     ctx.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest")
     sent_content: dict[str, object] = {}
 

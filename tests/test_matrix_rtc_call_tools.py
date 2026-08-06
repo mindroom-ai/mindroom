@@ -100,7 +100,6 @@ def _runtime_context(
         client=MagicMock(),
         config=config,
         runtime_paths=runtime_paths,  # type: ignore[arg-type]
-        event_cache=MagicMock(),
         conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
         hook_registry=hook_registry or MagicMock(),  # type: ignore[arg-type]
@@ -443,7 +442,6 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
                 client=MagicMock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=MagicMock(),
                 conversation_cache=MagicMock(),
                 conversation_reader=make_conversation_reader_mock(),
                 hook_registry=MagicMock(),
@@ -687,7 +685,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 client=MagicMock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=MagicMock(),
                 conversation_cache=MagicMock(),
                 conversation_reader=make_conversation_reader_mock(),
                 hook_registry=MagicMock(),
