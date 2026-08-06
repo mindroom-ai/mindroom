@@ -181,7 +181,7 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     return bot
@@ -687,7 +687,7 @@ class TestCommandHandling:
             bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),
             )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -753,7 +753,7 @@ class TestCommandHandling:
             bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),
             )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -1663,7 +1663,7 @@ class TestRouterSkipsSingleAgent:
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
 
@@ -1693,7 +1693,7 @@ class TestRouterSkipsSingleAgent:
 
         bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_skips_shared_ingress_work_for_agent_owned_thread_follow_up(self) -> None:
@@ -1730,7 +1730,7 @@ class TestRouterSkipsSingleAgent:
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result(
                 [
                     _message(sender="@mindroom_general:localhost", body="I can help with that."),
@@ -1764,9 +1764,10 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
             "$thread_root",
+            source_event_id=event.event_id,
             caller_label="router_pre_ingress_skip",
         )
         bot._turn_controller._append_live_event_with_timing.assert_not_awaited()

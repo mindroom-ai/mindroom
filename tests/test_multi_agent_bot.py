@@ -25,7 +25,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
@@ -625,13 +625,8 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        snapshot = ThreadHistoryResult([], is_full_history=False)
-
-        with (
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", AsyncMock(return_value=snapshot)),
-        ):
-            await bot._on_message(mock_room, mock_event)
-            await drain_coalescing(bot)
+        await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
@@ -1105,14 +1100,12 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot")
     @patch("mindroom.response_runner.should_use_streaming")
     @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_get_latest_thread: AsyncMock,
         mock_should_use_streaming: AsyncMock,
-        mock_fetch_snapshot: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
@@ -1191,7 +1184,6 @@ class TestAgentBot(AgentBotTestBase):
                 event_id="prev2",
             ),
         ]
-        mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=True)
         # Thread participation is read from the projection, so the thread has
         # to actually contain this agent's earlier reply for it to answer
         # without a mention.
@@ -1290,7 +1282,6 @@ class TestAgentBot(AgentBotTestBase):
                 event_id="prev3",
             ),
         ]
-        mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=True)
         # A second agent joins the same thread; re-seeding is idempotent for
         # the two messages already admitted.
         await seed_thread_history(

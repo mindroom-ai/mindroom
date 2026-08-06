@@ -224,10 +224,6 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
             "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
             AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ),
-        patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-            AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-        ),
     ):
         await bot._on_message(room, event)
         await drain_coalescing(bot)

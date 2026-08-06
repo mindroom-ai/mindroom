@@ -325,6 +325,33 @@ class TestEchoOrdering:
 
         assert [message.logical_event_id for message in page.messages] == ["$answer", "$follow_up"]
 
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_ingress_admits_this_bot_s_own_echo(
+        self,
+        alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Admission is decided by provenance, never by who sent the event.
+
+        The tests below reach the store directly, which would keep passing even
+        if ingress learned to discard self-authored events on the way in. This
+        one goes through `_admit` so that a sender filter added there fails
+        here, because the echo route depends on there not being one.
+        """
+        ingress = JournalIngress(store=alice)
+
+        await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [message.logical_event_id for message in page.messages] == ["$answer"]
+        assert page.messages[0].sender == BOT
+        # Admitted as actionable like any other live event; the echo is dropped
+        # later, by ingress validation, not by refusing to record it.
+        assert [event.event_id for event in await alice.pending()] == ["$answer"]
+
     async def test_a_recovered_answer_orders_with_the_live_message_after_it(
         self,
         alice: PrincipalStore,

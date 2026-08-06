@@ -167,11 +167,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 AsyncMock(return_value="latest_thread_event"),
             ),
             patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
-            patch.object(
                 resolver,
                 "fetch_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
@@ -279,15 +274,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
             )
 
-            with (
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-                ),
-            ):
-                # Process the command
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            # Process the command
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # The bot should send an error message about needing threads
             bot.client.room_send.assert_called_once()
@@ -392,10 +381,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
             with (
                 patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-                ),
-                patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
                     AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
@@ -486,10 +471,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_id_for_event",
@@ -660,10 +641,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         install_generate_response_mock(bot, generate_response)
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),

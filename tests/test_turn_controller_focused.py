@@ -82,12 +82,13 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.dispatch_handoff import PreparedTextEvent
     from mindroom.hooks import MessageEnvelope
+    from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
@@ -291,14 +292,9 @@ class _Harness:
         await self.runner.settle_inbox_responses()
 
 
-def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> ConversationReader:
-    """Return a reader for a harness that has no journal store behind it.
-
-    Not the same thing as stubbing a reader that does: these harnesses build a
-    resolver directly, so there is no projection to reach and a fake page is
-    the honest analogue of the conversation-cache mock they already carry.
-    """
-    page = ConversationPage(
+def _conversation_page(messages: Iterable[ResolvedVisibleMessage]) -> ConversationPage:
+    """Return the projected page a reader would serve for these messages."""
+    return ConversationPage(
         messages=tuple(
             VisibleMessage(
                 logical_event_id=message.event_id,
@@ -310,11 +306,29 @@ def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> C
                 revision_ts=message.timestamp or 0,
                 content=dict(message.content),
             )
-            for message in (thread_history or ())
+            for message in messages
         ),
         refresh_pending=(),
         next_cursor=None,
     )
+
+
+def _serve_conversation(harness: _Harness, messages: Iterable[ResolvedVisibleMessage]) -> None:
+    """Point one harness's reader at these messages after it was constructed."""
+    page = _conversation_page(messages)
+    reader = harness.controller.deps.resolver.deps.conversation_reader
+    reader.read.return_value = page
+    reader.read_strict.return_value = page
+
+
+def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> ConversationReader:
+    """Return a reader for a harness that has no journal store behind it.
+
+    Not the same thing as stubbing a reader that does: these harnesses build a
+    resolver directly, so there is no projection to reach and a fake page is
+    the honest analogue of the conversation-cache mock they already carry.
+    """
+    page = _conversation_page(thread_history or ())
     return cast(
         "ConversationReader",
         SimpleNamespace(
@@ -2910,10 +2924,7 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
         },
         thread_id="$thread-root:localhost",
     )
-    harness.conversation_cache.get_strict_thread_history.return_value = thread_history_result(
-        [triggering_message],
-        is_full_history=True,
-    )
+    _serve_conversation(harness, [triggering_message])
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",

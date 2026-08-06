@@ -29,6 +29,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import ConversationPage
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -45,8 +46,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from mindroom.event_journal import ConversationPage
 
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1611,12 +1610,12 @@ class TestExtractedModuleLoggerRebinding:
         assert original_logger.warning.call_count == 1
         rebound_logger.warning.assert_not_called()
 
-    def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
+    def test_conversation_resolver_fetch_path_reads_the_projection(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Resolver full-history fetches should go through the explicit conversation-cache layer."""
+        """Resolver full-history fetches should come from the conversation projection."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1631,20 +1630,26 @@ class TestExtractedModuleLoggerRebinding:
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
         bot._conversation_cache.get_strict_thread_history = AsyncMock(
-            return_value=thread_history_result([], is_full_history=True),
+            side_effect=AssertionError("resolver read through the conversation cache"),
         )
+        empty_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
 
-        asyncio.run(
-            unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
-                "!room:localhost",
-                "$threadroot",
-            ),
-        )
+        with patch.object(
+            ConversationReader,
+            "read_strict",
+            new=AsyncMock(return_value=empty_page),
+        ) as mock_read_strict:
+            asyncio.run(
+                unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
+                    "!room:localhost",
+                    "$threadroot",
+                ),
+            )
 
-        bot._conversation_cache.get_strict_thread_history.assert_awaited_once()
-        assert bot._conversation_cache.get_strict_thread_history.await_args.args == (
-            "!room:localhost",
-            "$threadroot",
+        mock_read_strict.assert_awaited_once_with(
+            room_id="!room:localhost",
+            thread_id="$threadroot",
+            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
 
     @pytest.mark.asyncio

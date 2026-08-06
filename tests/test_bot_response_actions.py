@@ -1434,7 +1434,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
         event.source = {"content": {"body": "continue"}}
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=ThreadHistoryResult(
                 [
                     ResolvedVisibleMessage(

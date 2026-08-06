@@ -749,9 +749,10 @@ class TurnController:
             return False
 
         try:
-            thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+            thread_history = await self.deps.resolver.dispatch_thread_snapshot(
                 room.room_id,
                 thread_id,
+                source_event_id=event.event_id,
                 caller_label="router_pre_ingress_skip",
             )
         except asyncio.CancelledError:

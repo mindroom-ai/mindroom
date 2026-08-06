@@ -1138,7 +1138,7 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
 
     bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
     bot._turn_controller.deps.resolver.deps.conversation_cache.get_event = AsyncMock(side_effect=get_event)
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         side_effect=TimeoutError("dispatch read timed out"),
     )
     calls: list[list[str]] = []
@@ -7278,9 +7278,8 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
-        return_value=ThreadHistoryResult([], is_full_history=False),
-    )
+    snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
@@ -7290,9 +7289,10 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    snapshot.assert_awaited_once_with(
         room.room_id,
         "$thread",
+        source_event_id=event.event_id,
         caller_label="router_pre_ingress_skip",
     )
 
@@ -7318,7 +7318,8 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
@@ -7328,8 +7329,9 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     )
 
     assert should_skip is False
-    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+    snapshot.assert_awaited_once_with(
         room.room_id,
         "$maybe-root",
+        source_event_id=event.event_id,
         caller_label="router_pre_ingress_skip",
     )

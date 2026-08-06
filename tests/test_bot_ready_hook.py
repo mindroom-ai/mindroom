@@ -1022,10 +1022,10 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
             new=AsyncMock(return_value=(thread_roots, "next-token")),
         ) as mock_get_room_threads_page,
         patch.object(
-            bot._conversation_cache,
-            "get_dispatch_thread_snapshot",
+            bot._turn_controller.deps.resolver,
+            "dispatch_thread_snapshot",
             new=AsyncMock(side_effect=AssertionError("startup prewarm should bypass the live dispatch entrypoint")),
-        ) as mock_get_dispatch_thread_snapshot,
+        ) as mock_dispatch_thread_snapshot,
     ):
         await bot._on_sync_response(MagicMock())
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
@@ -1039,7 +1039,7 @@ async def test_bot_ready_starts_background_startup_thread_prewarm(tmp_path: Path
         "!room:localhost",
         ("$thread-a:localhost", "$thread-b:localhost"),
     )
-    mock_get_dispatch_thread_snapshot.assert_not_awaited()
+    mock_dispatch_thread_snapshot.assert_not_awaited()
     bot._conversation_cache.logger.info.assert_any_call(
         "startup_thread_prewarm_complete",
         room_id="!room:localhost",

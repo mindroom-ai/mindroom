@@ -2109,8 +2109,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(
-                bot._conversation_cache,
-                "get_strict_thread_history",
+                bot._conversation_resolver,
+                "fetch_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
             patch_response_runner_module(

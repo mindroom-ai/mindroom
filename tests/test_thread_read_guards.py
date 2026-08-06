@@ -14,6 +14,7 @@ import mindroom.matrix.cache as matrix_cache
 import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -48,6 +49,22 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
+
+
+async def _snapshot_read(
+    cache: MatrixConversationCache,
+    room_id: str,
+    thread_id: str,
+    *,
+    caller_label: str = "unknown",
+) -> ThreadHistoryResult:
+    """Read one thread the way live dispatch does, without a facade entrypoint."""
+    return await cache._reads.read_thread(
+        room_id,
+        thread_id,
+        mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+        caller_label=caller_label,
+    )
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
@@ -1598,7 +1615,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A gap raised mid-fetch survives, so the next dispatch-snapshot read refetches."""
         await _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(
             tmp_path,
-            read_thread=MatrixConversationCache.get_dispatch_thread_snapshot,
+            read_thread=_snapshot_read,
             force_refetch_reason="test_force_dispatch_refetch",
             expected_full_history=False,
         )
@@ -1725,4 +1742,4 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access._reads.fetch_dispatch_thread_snapshot_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
         with pytest.raises(RuntimeError, match="boom"):
-            await access.get_dispatch_thread_snapshot("!test:localhost", "$thread:localhost")
+            await _snapshot_read(access, "!test:localhost", "$thread:localhost")

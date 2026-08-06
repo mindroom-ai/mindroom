@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import sqlite3
 from contextlib import closing
@@ -388,7 +389,12 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
         ):
             read_methods = {
                 "get_thread_history": conversation_cache.get_thread_history,
-                "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
+                # No facade entrypoint reads this mode any more, so the table
+                # drives the read policy directly to keep covering it.
+                "get_dispatch_thread_snapshot": functools.partial(
+                    conversation_cache._reads.read_thread,
+                    mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+                ),
             }
             for method_name, _name, is_full_history, _queue_wait_ms in read_modes:
                 result = await read_methods[method_name](
@@ -436,9 +442,10 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
 
     try:
         result = await asyncio.wait_for(
-            conversation_cache.get_dispatch_thread_snapshot(
+            conversation_cache._reads.read_thread(
                 "!room:localhost",
                 "$thread:localhost",
+                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                 caller_label="dispatch_context",
             ),
             timeout=0.2,
@@ -490,9 +497,10 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
             AsyncMock(side_effect=AssertionError("coordinator timeout should not fetch")),
         ):
             result = await asyncio.wait_for(
-                conversation_cache.get_dispatch_thread_snapshot(
+                conversation_cache._reads.read_thread(
                     "!room:localhost",
                     "$thread:localhost",
+                    mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="dispatch_context",
                 ),
                 timeout=0.2,
@@ -535,9 +543,10 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
             AsyncMock(side_effect=never_returns),
         ):
             result = await asyncio.wait_for(
-                conversation_cache.get_dispatch_thread_snapshot(
+                conversation_cache._reads.read_thread(
                     "!room:localhost",
                     "$thread:localhost",
+                    mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="dispatch_context",
                 ),
                 timeout=0.2,
@@ -691,9 +700,10 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
                 AsyncMock(side_effect=AssertionError("spent dispatch deadline must not start fetch")),
             ) as fetch_dispatch_thread_snapshot,
         ):
-            result = await conversation_cache.get_dispatch_thread_snapshot(
+            result = await conversation_cache._reads.read_thread(
                 "!room:localhost",
                 "$thread:localhost",
+                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                 caller_label="dispatch_context",
             )
     finally:
