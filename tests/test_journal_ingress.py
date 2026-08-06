@@ -13,8 +13,8 @@ from mindroom.event_journal import EventClass, EventKind, SettlementOutcome
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
     JournalIngress,
-    event_class_for,
-    event_kind,
+    _event_class_for,
+    _event_kind,
     inbound_event,
     parse_journal_event,
     projected_event,
@@ -98,12 +98,12 @@ class TestProvenanceMapping:
         expected: EventClass,
     ) -> None:
         """Provenance decides whether work may start."""
-        assert event_class_for(provenance) is expected
+        assert _event_class_for(provenance) is expected
 
     async def test_every_provenance_is_mapped(self) -> None:
         """A new provenance must not silently default to actionable."""
         for provenance in nio.TimelineEventProvenance:
-            assert event_class_for(provenance) in EventClass
+            assert _event_class_for(provenance) in EventClass
 
 
 class TestEventKinds:
@@ -111,11 +111,11 @@ class TestEventKinds:
 
     async def test_a_text_message_is_a_message(self) -> None:
         """A text message is a message."""
-        assert event_kind(text_event("$m")) is EventKind.MESSAGE
+        assert _event_kind(text_event("$m")) is EventKind.MESSAGE
 
     async def test_a_redaction_is_a_redaction(self) -> None:
         """A redaction is a redaction."""
-        assert event_kind(redaction_event("$r", "$m")) is EventKind.REDACTION
+        assert _event_kind(redaction_event("$r", "$m")) is EventKind.REDACTION
 
     async def test_an_unrelated_event_has_no_kind(self) -> None:
         """An unrelated event has no kind."""
@@ -130,7 +130,7 @@ class TestEventKinds:
             },
         )
         assert isinstance(event, nio.Event)
-        assert event_kind(event) is None
+        assert _event_kind(event) is None
 
 
 class TestAdmissionAdapter:
@@ -188,7 +188,7 @@ class TestAdmissionAdapter:
             },
         )
         assert not isinstance(event, nio.RedactionEvent)
-        assert event_kind(event) is not EventKind.REDACTION
+        assert _event_kind(event) is not EventKind.REDACTION
 
 
 class TestReplayFidelity:

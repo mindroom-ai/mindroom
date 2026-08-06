@@ -49,13 +49,13 @@ logger = get_logger(__name__)
 # What is worth catching is a server that ignores `recurse` entirely and
 # silently returns only direct children: it omits the field, and a caller that
 # accepted that would quietly lose every edit hanging off a threaded reply.
-REQUIRED_RECURSION_DEPTH = 0
+_REQUIRED_RECURSION_DEPTH = 0
 
 _MESSAGES_PAGE_LIMIT = 100
 _MAX_MESSAGES_PAGES = 20
 
 
-class HydrationError(RuntimeError):
+class _HydrationError(RuntimeError):
     """A conversation could not be built from the server."""
 
 
@@ -64,7 +64,7 @@ def _is_redacted(source: Mapping[str, object]) -> bool:
     return isinstance(unsigned, dict) and "redacted_because" in unsigned
 
 
-def projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | None:
+def _projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | None:
     """Return the projection view of one fetched event, or nothing.
 
     A redacted event comes back from the server with its content stripped.
@@ -91,7 +91,7 @@ def projected_from_event(room_id: str, event: nio.Event) -> ProjectedEvent | Non
 
 
 @dataclass(frozen=True, slots=True)
-class Revision:
+class _Revision:
     """The revision of a logical message that is currently on the server."""
 
     event_id: str
@@ -99,16 +99,16 @@ class Revision:
     content: Mapping[str, object]
 
 
-def reduce_current_revision(
+def _reduce_current_revision(
     original: ProjectedEvent,
     relations: Sequence[ProjectedEvent],
-) -> Revision:
+) -> _Revision:
     """Return the revision the server would show for one logical message.
 
     Uses the same ordering rule as the live projection, so a refetched message
     and a message built from live events cannot disagree about which edit won.
     """
-    winner = Revision(
+    winner = _Revision(
         event_id=original.event_id,
         origin_server_ts=original.origin_server_ts,
         content=visible_content(original.content),
@@ -123,7 +123,7 @@ def reduce_current_revision(
             (winner.origin_server_ts, winner.event_id),
         ):
             continue
-        winner = Revision(
+        winner = _Revision(
             event_id=relation.event_id,
             origin_server_ts=relation.origin_server_ts,
             content=visible_content(relation.content),
@@ -137,7 +137,7 @@ class ConversationHydrator:
 
     store: PrincipalStore
     client: nio.AsyncClient
-    required_recursion_depth: int = REQUIRED_RECURSION_DEPTH
+    required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -182,9 +182,9 @@ class ConversationHydrator:
         root = await self.client.room_get_event(room_id, thread_id)
         if not isinstance(root, nio.RoomGetEventResponse):
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
-            raise HydrationError(msg)
+            raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        root_projected = projected_from_event(room_id, root.event)
+        root_projected = _projected_from_event(room_id, root.event)
         if root_projected is not None:
             events.append(root_projected)
         events.extend(await self._fetch_relations(room_id, thread_id))
@@ -204,7 +204,7 @@ class ConversationHydrator:
                 recurse=True,
                 minimum_recursion_depth=self.required_recursion_depth,
             ):
-                projected = projected_from_event(room_id, event)
+                projected = _projected_from_event(room_id, event)
                 if projected is not None:
                     events.append(projected)
         except nio.InsufficientRecursionDepthError as error:
@@ -213,7 +213,7 @@ class ConversationHydrator:
                 f"({error.reported!r}), so it did not honor the recursive request and the "
                 f"conversation would be missing indirectly related events"
             )
-            raise HydrationError(msg) from error
+            raise _HydrationError(msg) from error
         return tuple(events)
 
     async def _fetch_room(self, room_id: str) -> tuple[ProjectedEvent, ...]:
@@ -234,9 +234,9 @@ class ConversationHydrator:
             )
             if not isinstance(response, nio.RoomMessagesResponse):
                 msg = f"Could not fetch history for {room_id!r}: {response}"
-                raise HydrationError(msg)
+                raise _HydrationError(msg)
             for event in response.chunk:
-                projected = projected_from_event(room_id, event)
+                projected = _projected_from_event(room_id, event)
                 if projected is not None:
                     events.append(projected)
             if not response.chunk or not response.end:
@@ -259,11 +259,11 @@ class ConversationHydrator:
                 logical_event_id=request.logical_event_id,
             )
             return False
-        projected = projected_from_event(request.room_id, original.event)
+        projected = _projected_from_event(request.room_id, original.event)
         if projected is None:
             return await self.store.drop_refetched_message(request)
         relations = await self._fetch_relations(request.room_id, request.logical_event_id)
-        revision = reduce_current_revision(projected, relations)
+        revision = _reduce_current_revision(projected, relations)
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,

@@ -19,8 +19,8 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import EventClass, EventKind
 from mindroom.entity_resolution import mindroom_user_id
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
@@ -37,7 +37,6 @@ from tests.sync_continuity_helpers import load_sync_checkpoint
 
 if TYPE_CHECKING:
     from pathlib import Path
-
 
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:

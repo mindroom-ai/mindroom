@@ -30,11 +30,11 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
-from mindroom.event_journal import EventClass, EventKind
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope

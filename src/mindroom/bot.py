@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from tenacity import before_sleep_log, retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
@@ -96,22 +95,22 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .dispatch_callback_outcome import TurnDispatchOutcome
+from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from .entity_rooms import get_rooms_for_entity
 from .event_journal import EventClass, EventJournalStore, EventKind, SemanticConsumer
-from .matrix.journal_ingress import event_is_live as journal_event_is_live
+from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
     JournalCallbacks,
     JournalDispatcher,
 )
-from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from .entity_rooms import get_rooms_for_entity
-from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
-from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
+from .matrix.journal_ingress import event_is_live as journal_event_is_live
 from .matrix.room_member_joins import (
     RoomMemberJoin,
     emit_room_member_join_at_least_once,

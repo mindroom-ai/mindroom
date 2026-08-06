@@ -16,6 +16,8 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+from mindroom.logging_config import get_logger
+
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     AdmissionResult,
@@ -26,8 +28,6 @@ from .models import (
     SettlementOutcome,
 )
 from .projection import ProjectedEvent, project
-from mindroom.logging_config import get_logger
-
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:

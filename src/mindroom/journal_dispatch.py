@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -29,7 +29,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
     JournalIngress,
-    event_kind,
     inbound_event,
     parse_journal_event,
     projected_event,
@@ -42,7 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventClass, PrincipalStore
 
-from mindroom.event_journal import JournalEvent  # noqa: TC001 - a runtime ContextVar parameter
+from mindroom.event_journal import JournalEvent
 
 logger = get_logger(__name__)
 
@@ -55,13 +54,13 @@ _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_ev
 # turn. Their events stay pending until the turn is terminal.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
 
-type MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
-type MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
-type ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
-type ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
-type RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
-type RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
-type DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
+type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
+type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
+type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
+type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
+type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
 
 
 def event_kind_for_source_kind(source_kind: str) -> EventKind:
@@ -75,13 +74,13 @@ def event_kind_for_source_kind(source_kind: str) -> EventKind:
 class JournalCallbacks:
     """The typed Matrix callbacks the journal dispatches to."""
 
-    on_message: MessageCallback
-    on_media: MediaCallback
-    on_reaction: ReactionCallback
-    on_approval: ApprovalCallback
-    on_room_lifecycle: RoomLifecycleCallback
-    on_redaction: RedactionCallback
-    on_decryption_failure: DecryptionFailureCallback
+    on_message: _MessageCallback
+    on_media: _MediaCallback
+    on_reaction: _ReactionCallback
+    on_approval: _ApprovalCallback
+    on_room_lifecycle: _RoomLifecycleCallback
+    on_redaction: _RedactionCallback
+    on_decryption_failure: _DecryptionFailureCallback
     source_has_live_owner: Callable[[str], bool]
 
 
@@ -264,44 +263,16 @@ class JournalDispatcher:
         matrix_event: nio.Event,
     ) -> SettlementOutcome | None:
         """Dispatch to the one callback that owns this event's kind."""
+        binding = _BINDINGS.get(event.kind)
+        if binding is None or not isinstance(matrix_event, binding.event_types):
+            # The stored kind and the replayed event disagree, which means the
+            # payload is not the event that was admitted. Nothing can run.
+            return SettlementOutcome.INTENTIONALLY_IGNORED
         token = _RUNNING_EVENT.set(event)
         try:
-            match event.kind:
-                case EventKind.MESSAGE:
-                    if not isinstance(matrix_event, nio.RoomMessageText):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    return _turn_outcome(await self.callbacks.on_message(room, matrix_event))
-                case EventKind.MEDIA:
-                    if not isinstance(matrix_event, MATRIX_MEDIA_EVENT_TYPES):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    if self.callbacks.source_has_live_owner(matrix_event.event_id):
-                        return None
-                    return _turn_outcome(await self.callbacks.on_media(room, matrix_event))
-                case EventKind.REACTION:
-                    if not isinstance(matrix_event, nio.ReactionEvent):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    await self.callbacks.on_reaction(room, matrix_event)
-                case EventKind.APPROVAL:
-                    if not isinstance(matrix_event, nio.UnknownEvent):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    await self.callbacks.on_approval(room, matrix_event)
-                case EventKind.ROOM_LIFECYCLE:
-                    if not isinstance(matrix_event, nio.RoomMemberEvent):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    await self.callbacks.on_room_lifecycle(room, matrix_event)
-                case EventKind.REDACTION:
-                    if not isinstance(matrix_event, nio.RedactionEvent):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    await self.callbacks.on_redaction(room, matrix_event)
-                case EventKind.DECRYPTION_FAILURE:
-                    if not isinstance(matrix_event, nio.MegolmEvent):
-                        return SettlementOutcome.INTENTIONALLY_IGNORED
-                    await self.callbacks.on_decryption_failure(room, matrix_event)
-                case EventKind.INVITE:
-                    return SettlementOutcome.INTENTIONALLY_IGNORED
+            return await binding.run(self, room, matrix_event)
         finally:
             _RUNNING_EVENT.reset(token)
-        return SettlementOutcome.SUCCEEDED
 
     def semantic_consumer(self) -> SemanticConsumer | None:
         """Return the durable consumer already claimed for the running event."""
@@ -373,6 +344,61 @@ class JournalDispatcher:
                 raise JournalCorruptionError(msg)
             members.add((event.room_id, parsed.state_key))
         return frozenset(members)
+
+
+@dataclass(frozen=True, slots=True)
+class _Binding:
+    """The event types one kind accepts, and what to run for them."""
+
+    event_types: type | tuple[type, ...]
+    run: Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]
+
+
+async def _run_message(
+    dispatcher: JournalDispatcher,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageText,
+) -> SettlementOutcome | None:
+    return _turn_outcome(await dispatcher.callbacks.on_message(room, event))
+
+
+async def _run_media(
+    dispatcher: JournalDispatcher,
+    room: nio.MatrixRoom,
+    event: MatrixMediaEvent,
+) -> SettlementOutcome | None:
+    if dispatcher.callbacks.source_has_live_owner(event.event_id):
+        # The coalescing gate still owns this source and will hand it back.
+        return None
+    return _turn_outcome(await dispatcher.callbacks.on_media(room, event))
+
+
+def _completing(
+    callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[None]]],
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]:
+    """Wrap a callback whose work is finished when it returns."""
+
+    async def run(
+        dispatcher: JournalDispatcher,
+        room: nio.MatrixRoom,
+        event: Any,  # noqa: ANN401 - the binding already checked the type
+    ) -> SettlementOutcome | None:
+        await callback(dispatcher.callbacks)(room, event)
+        return SettlementOutcome.SUCCEEDED
+
+    return run
+
+
+_BINDINGS: dict[EventKind, _Binding] = {
+    EventKind.MESSAGE: _Binding(nio.RoomMessageText, _run_message),
+    EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _run_media),
+    EventKind.REACTION: _Binding(nio.ReactionEvent, _completing(lambda c: c.on_reaction)),
+    EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
+    EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
+    EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),
+    EventKind.DECRYPTION_FAILURE: _Binding(nio.MegolmEvent, _completing(lambda c: c.on_decryption_failure)),
+}
+
 
 def _turn_outcome(outcome: TurnDispatchOutcome) -> SettlementOutcome | None:
     """Translate a turn callback's report into a settlement decision."""

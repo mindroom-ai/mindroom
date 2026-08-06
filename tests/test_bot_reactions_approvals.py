@@ -1171,10 +1171,9 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await _dispatch_reaction(bot, room, event)
         await _cancel_dispatch_retry(bot)
-        assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.TOOL_APPROVAL_REACTION
-        )
+        assert (await bot._journal_dispatcher.store.pending())[
+            0
+        ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1639,10 +1638,9 @@ class TestAgentBot(AgentBotTestBase):
             )
             await bot._journal_dispatcher.drain_once()
         await _cancel_dispatch_retry(bot)
-        assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.CONFIG_CONFIRMATION
-        )
+        assert (await bot._journal_dispatcher.store.pending())[
+            0
+        ].semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION
 
         restarted = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1695,10 +1693,9 @@ class TestAgentBot(AgentBotTestBase):
             )
             await bot._journal_dispatcher.drain_once()
         await _cancel_dispatch_retry(bot)
-        assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.INTERACTIVE_REACTION
-        )
+        assert (await bot._journal_dispatcher.store.pending())[
+            0
+        ].semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1735,17 +1732,17 @@ class TestAgentBot(AgentBotTestBase):
             raise asyncio.CancelledError(message)
 
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
-        with (
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
-            pytest.raises(asyncio.CancelledError, match="cancel after reaction hook side effect"),
-        ):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await bot._journal_dispatcher.admit_out_of_band(
                 room,
                 event,
                 EventKind.REACTION,
                 EventClass.ACTIONABLE,
             )
-            await bot._journal_dispatcher.drain_once()
+            # Cancellation propagates out of the worker: a cancelled turn is
+            # not a failed one, so the event stays pending untouched.
+            with pytest.raises(asyncio.CancelledError):
+                await bot._journal_dispatcher.drain_once()
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.REACTION_HOOKS
 

@@ -28,7 +28,7 @@ _BATCH_SIZE = 128
 # Returning ``None`` means the handler started work that outlives it — a turn
 # that is still running — so the event stays pending and whoever owns that work
 # settles it. Returning an outcome means the work is finished.
-type EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None]]
+type _EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None]]
 
 
 @dataclass
@@ -42,7 +42,7 @@ class PendingEventWorker:
     """
 
     store: PrincipalStore
-    handle: EventHandler
+    handle: _EventHandler
     _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)

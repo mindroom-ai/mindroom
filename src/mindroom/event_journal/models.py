@@ -28,7 +28,6 @@ class EventKind(StrEnum):
     MEDIA = "media"
     REACTION = "reaction"
     APPROVAL = "approval"
-    INVITE = "invite"
     ROOM_LIFECYCLE = "room_lifecycle"
     REDACTION = "redaction"
     DECRYPTION_FAILURE = "decryption_failure"
@@ -58,7 +57,7 @@ class SemanticConsumer(StrEnum):
     REACTION_HOOKS = "reaction_hooks"
 
     @property
-    def event_kind(self) -> EventKind:
+    def _event_kind(self) -> EventKind:
         """Return the only event kind allowed to claim this consumer."""
         if self is SemanticConsumer.APPROVAL_REPLY:
             return EventKind.MESSAGE

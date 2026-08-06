@@ -20,7 +20,6 @@ import pytest
 import yaml
 
 from mindroom.event_journal import EventClass, EventJournalStore, EventKind, InboundEvent
-
 from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityStore

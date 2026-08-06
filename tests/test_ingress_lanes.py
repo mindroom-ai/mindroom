@@ -17,14 +17,14 @@ from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
-from mindroom.event_journal import EventClass, EventKind
-from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import EventClass, EventKind
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -47,11 +47,11 @@ from tests.test_live_message_coalescing import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import EventJournalStore
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.event_journal import EventJournalStore
     from mindroom.handled_turns import TurnRecord
 
 

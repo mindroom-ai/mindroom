@@ -20,12 +20,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class StaleConversationError(RuntimeError):
+class _StaleConversationError(RuntimeError):
     """A strict read could not obtain the server-authoritative content."""
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationReader:
+class _ConversationReader:
     """Bounded conversation reads, hydrated on first use."""
 
     store: PrincipalStore
@@ -87,5 +87,5 @@ class ConversationReader:
                 f"Conversation {room_id}/{thread_id} has "
                 f"{len(page.refresh_pending)} message(s) awaiting a server refetch"
             )
-            raise StaleConversationError(msg)
+            raise _StaleConversationError(msg)
         return page

@@ -34,7 +34,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
-from mindroom.event_journal.sqlite_backend import BUSY_TIMEOUT_MILLISECONDS
+from mindroom.event_journal.sqlite_backend import _BUSY_TIMEOUT_MILLISECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -170,7 +170,7 @@ async def measure_concurrency(store: PrincipalStore, report: Report, *, conversa
     report.record("writer_queue_p95_ms", _p95(queue_waits))
     report.record("writer_queue_target_met", _p95(queue_waits) < TARGET_WRITER_QUEUE_P95_MS)
     report.record("concurrent_throughput_per_second", round(conversations * 20 / elapsed, 1))
-    report.record("sqlite_busy_timeout_ms", BUSY_TIMEOUT_MILLISECONDS)
+    report.record("sqlite_busy_timeout_ms", _BUSY_TIMEOUT_MILLISECONDS)
 
 
 def measure_query_plans(database_path: Path, report: Report) -> None:

@@ -38,8 +38,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventJournalStore, EventKind
-from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -48,6 +46,7 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import EventClass, EventJournalStore, EventKind
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import (
@@ -56,6 +55,7 @@ from mindroom.inbound_turn_normalizer import (
     TextNormalizationRequest,
 )
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget

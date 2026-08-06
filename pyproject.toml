@@ -43,7 +43,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.37",
+  "mindroom-nio[e2e]>=0.37",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -496,6 +496,10 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
+[tool.uv.sources]
+# Tracks the branch until mindroom-nio 0.37.0 is released. The recursive
+# relations API it adds is a hard prerequisite for conversation hydration.
+mindroom-nio = { git = "https://github.com/mindroom-ai/mindroom-nio.git", branch = "feat/recursive-relations" }
 
 [tool.ruff]
 target-version = "py312"

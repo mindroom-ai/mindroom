@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-BUSY_TIMEOUT_MILLISECONDS = 10_000
+_BUSY_TIMEOUT_MILLISECONDS = 10_000
 _WRITE_QUEUE_SIZE = 512
 
 
@@ -60,7 +60,7 @@ def _configure(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = NORMAL")
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MILLISECONDS}")
+    connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
 
 
 @dataclass

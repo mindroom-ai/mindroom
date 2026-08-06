@@ -34,13 +34,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
+_TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
-type MatrixEvent = nio.Event | nio.InviteEvent
+type _MatrixEvent = nio.Event | nio.InviteEvent
 
 
 async def _ignore_historical_event(_room: nio.MatrixRoom, _event: nio.Event) -> None:
@@ -57,9 +57,9 @@ class _RoomIdEvent(Protocol):
     room_id: str
 
 
-def is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     """Return whether one event is a tool-approval response."""
-    return isinstance(event, nio.UnknownEvent) and event.type == TOOL_APPROVAL_RESPONSE_EVENT_TYPE
+    return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
 
 
 # Ordered: the first matching rule owns the event. Media types are checked
@@ -70,12 +70,12 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
     (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
     (lambda event: isinstance(event, MATRIX_MEDIA_EVENT_TYPES), EventKind.MEDIA),
-    (is_tool_approval_response, EventKind.APPROVAL),
+    (_is_tool_approval_response, EventKind.APPROVAL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
 )
 
 
-def event_kind(event: nio.Event) -> EventKind | None:
+def _event_kind(event: nio.Event) -> EventKind | None:
     """Return the single semantic purpose one timeline event carries.
 
     An event maps to at most one kind, which is what makes "no event may create
@@ -88,7 +88,7 @@ def event_kind(event: nio.Event) -> EventKind | None:
     return None
 
 
-def event_class_for(provenance: nio.TimelineEventProvenance) -> EventClass:
+def _event_class_for(provenance: nio.TimelineEventProvenance) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
@@ -101,7 +101,7 @@ def event_class_for(provenance: nio.TimelineEventProvenance) -> EventClass:
     return EventClass.ACTIONABLE
 
 
-def event_source(event: MatrixEvent) -> dict[str, object]:
+def _event_source(event: _MatrixEvent) -> dict[str, object]:
     """Return the exact replay input for one event.
 
     nio attaches decryption results to the parsed event rather than to its
@@ -139,7 +139,7 @@ def inbound_event(
         event_class=event_class,
         sender=event.sender,
         origin_server_ts=event.server_timestamp,
-        source=event_source(event),
+        source=_event_source(event),
     )
 
 
@@ -246,7 +246,7 @@ class JournalIngress:
 
     def admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
-        kind = event_kind(event)
+        kind = _event_kind(event)
         if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
             return EventKind.ROOM_LIFECYCLE
         return kind
@@ -268,7 +268,7 @@ class JournalIngress:
         kind = self.admission_kind(event)
         if kind is None:
             return
-        event_class = event_class_for(provenance)
+        event_class = _event_class_for(provenance)
         try:
             await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),

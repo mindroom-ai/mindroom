@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import nio
-
-from mindroom.event_journal import EventClass, EventKind
-from mindroom.matrix import journal_ingress
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -22,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -30,6 +28,7 @@ from mindroom.hooks import (
     HookRegistry,
     hook,
 )
+from mindroom.matrix import journal_ingress
 from mindroom.matrix.client_thread_history import BulkThreadRefreshStats
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent

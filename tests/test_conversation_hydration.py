@@ -12,11 +12,11 @@ import pytest
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
     ConversationHydrator,
-    HydrationError,
-    projected_from_event,
-    reduce_current_revision,
+    _HydrationError,
+    _projected_from_event,
+    _reduce_current_revision,
 )
-from mindroom.matrix.conversation_reads import ConversationReader, StaleConversationError
+from mindroom.matrix.conversation_reads import _ConversationReader, _StaleConversationError
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
@@ -171,44 +171,44 @@ class TestRevisionReduction:
 
     async def test_the_original_wins_when_there_are_no_edits(self) -> None:
         """The original wins when there are no edits."""
-        original = projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
 
-        revision = reduce_current_revision(original, ())
+        revision = _reduce_current_revision(original, ())
 
         assert revision.event_id == "$m"
         assert revision.content["body"] == "first"
 
     async def test_the_newest_edit_wins(self) -> None:
         """The newest edit wins."""
-        original = projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
         relations = [
-            projected_from_event(ROOM, parse(raw("$e1", "second", ts=2_000, replaces="$m"))),
-            projected_from_event(ROOM, parse(raw("$e2", "third", ts=3_000, replaces="$m"))),
+            _projected_from_event(ROOM, parse(raw("$e1", "second", ts=2_000, replaces="$m"))),
+            _projected_from_event(ROOM, parse(raw("$e2", "third", ts=3_000, replaces="$m"))),
         ]
 
-        revision = reduce_current_revision(original, [r for r in relations if r is not None])
+        revision = _reduce_current_revision(original, [r for r in relations if r is not None])
 
         assert revision.content["body"] == "third"
 
     async def test_an_edit_from_another_sender_is_ignored(self) -> None:
         """An edit from another sender is ignored."""
-        original = projected_from_event(ROOM, parse(raw("$m", "first")))
+        original = _projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
-        forged = projected_from_event(
+        forged = _projected_from_event(
             ROOM,
             parse(raw("$e", "forged", sender=BOB, ts=9_000, replaces="$m")),
         )
         assert forged is not None
 
-        revision = reduce_current_revision(original, [forged])
+        revision = _reduce_current_revision(original, [forged])
 
         assert revision.content["body"] == "first"
 
     async def test_a_redacted_event_projects_to_nothing(self) -> None:
         """The server already stripped it; storing an empty body would show one."""
-        assert projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True))) is None
+        assert _projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True))) is None
 
 
 class TestThreadHydration:
@@ -263,7 +263,7 @@ class TestThreadHydration:
             reported_depth=None,
         )
 
-        with pytest.raises(HydrationError, match="recursion depth"):
+        with pytest.raises(_HydrationError, match="recursion depth"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -307,7 +307,7 @@ class TestThreadHydration:
         """A failed hydration is retried not cached."""
         client = FakeClient(events={}, relations={})
 
-        with pytest.raises(HydrationError):
+        with pytest.raises(_HydrationError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         client.events["$root"] = raw("$root", "root")
@@ -491,7 +491,7 @@ class TestReadModes:
         """A non strict read omits rather than waits."""
         await self._hidden_message(alice)
         client = FakeClient(events={}, relations={})
-        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
         page = await reader.read(room_id=ROOM, thread_id=None, limit=10)
 
@@ -511,7 +511,7 @@ class TestReadModes:
             events=(),
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
-        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
         page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
@@ -530,7 +530,7 @@ class TestReadModes:
             events=(),
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
-        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        reader = _ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
-        with pytest.raises(StaleConversationError):
+        with pytest.raises(_StaleConversationError):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)

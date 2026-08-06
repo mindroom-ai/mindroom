@@ -11,8 +11,8 @@ from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands import config_confirmation
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import SemanticConsumer
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import SemanticConsumer
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
-    from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.ingress_validation import IngressValidator
+    from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator

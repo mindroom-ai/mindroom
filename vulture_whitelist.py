@@ -310,17 +310,12 @@ _.get_thread_event_ids  # thread-membership row set; edit-sender rule coverage i
 INITIAL  # unused variable (src/mindroom/event_journal/models.py)
 FINAL  # unused variable (src/mindroom/event_journal/models.py)
 
-# The event-journal owners, which are complete and tested but not yet wired
-# into `bot.py`. Each entry disappears as its call site replaces the owner it
-# supersedes; none of them are dynamic entry points.
-wake  # unused method (src/mindroom/pending_event_worker.py)
-drain_once  # unused method (src/mindroom/pending_event_worker.py)
-PendingEventWorker  # unused class (src/mindroom/pending_event_worker.py)
-open_sqlite  # unused method (src/mindroom/event_journal/store.py)
-open_postgres  # unused method (src/mindroom/event_journal/store.py)
-principal  # unused method (src/mindroom/event_journal/store.py)
-load_delivery  # unused method (src/mindroom/event_journal/store.py)
-parse_journal_event  # unused function (src/mindroom/matrix/journal_ingress.py)
-JournalIngress  # unused class (src/mindroom/matrix/journal_ingress.py)
+# The conversation projection and delivery outbox, which are complete and
+# tested but not yet wired into `bot.py`. Each entry disappears as its call
+# site replaces the owner it supersedes.
+_ConversationReader  # unused class (src/mindroom/matrix/conversation_reads.py)
 read_strict  # unused method (src/mindroom/matrix/conversation_reads.py)
-ConversationReader  # unused class (src/mindroom/matrix/conversation_reads.py)
+ingress_admission_kind  # unused method (src/mindroom/journal_dispatch.py)
+_RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
+load_delivery  # unused method (src/mindroom/event_journal/store.py)
+recover  # unused method (src/mindroom/response_delivery.py)

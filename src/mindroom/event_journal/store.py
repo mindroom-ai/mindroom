@@ -37,9 +37,9 @@ if TYPE_CHECKING:
     )
     from .projection import ProjectedEvent
 
-DEFAULT_PENDING_LIMIT = 256
-DEFAULT_REFRESH_LIMIT = 64
-DEFAULT_UNACKNOWLEDGED_LIMIT = 256
+_DEFAULT_PENDING_LIMIT = 256
+_DEFAULT_REFRESH_LIMIT = 64
+_DEFAULT_UNACKNOWLEDGED_LIMIT = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +64,7 @@ class PrincipalStore:
             lambda transaction: journal.admit(transaction, self._principal_id, event, projected),
         )
 
-    async def pending(self, *, limit: int = DEFAULT_PENDING_LIMIT) -> tuple[JournalEvent, ...]:
+    async def pending(self, *, limit: int = _DEFAULT_PENDING_LIMIT) -> tuple[JournalEvent, ...]:
         """Return actionable events awaiting semantic work, in receipt order."""
         return await self._backend.read(
             lambda transaction: journal.pending(transaction, self._principal_id, limit=limit),
@@ -106,7 +106,7 @@ class PrincipalStore:
         self,
         kind: EventKind,
         *,
-        limit: int = DEFAULT_PENDING_LIMIT,
+        limit: int = _DEFAULT_PENDING_LIMIT,
     ) -> tuple[JournalEvent, ...]:
         """Return pending events of one kind, in receipt order."""
         return await self._backend.read(
@@ -165,7 +165,7 @@ class PrincipalStore:
         *,
         room_id: str,
         thread_id: str | None,
-        limit: int = DEFAULT_REFRESH_LIMIT,
+        limit: int = _DEFAULT_REFRESH_LIMIT,
     ) -> tuple[RefreshRequest, ...]:
         """Return logical messages in one conversation that owe a point refetch."""
         return await self._backend.read(
@@ -316,7 +316,7 @@ class PrincipalStore:
     async def unacknowledged_deliveries(
         self,
         *,
-        limit: int = DEFAULT_UNACKNOWLEDGED_LIMIT,
+        limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
     ) -> tuple[OutboxDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
         return await self._backend.read(

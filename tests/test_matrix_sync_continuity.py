@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from dataclasses import replace
 import threading
 import uuid
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,11 +29,10 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
-from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventKind, SettlementOutcome
-from mindroom.matrix.journal_ingress import JournalCorruptionError
+from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
@@ -251,7 +250,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
 
     before_failures = e2ee_stats().decrypt_failures
     with (
-        capture_logs() as logs,
+        capture_logs(),
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
         patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
@@ -481,12 +480,7 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
     event = _text_event("$cold-history", "old", 1)
     admission = bot._journal_dispatcher._ingress._admit
 
-    with capture_logs() as logs:
-        await admission(
-            room,
-            event,
-            nio.TimelineEventProvenance.HISTORY,
-        )
+    await admission(room, event, nio.TimelineEventProvenance.HISTORY)
 
     # Cold history is admitted as context, so it owes no semantic work at all
     # rather than being admitted and then refused.
@@ -2661,7 +2655,6 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 @pytest.mark.asyncio
 async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Accepted invite work must retry independently of raw sync continuity."""
     bot = _agent_bot(tmp_path)
@@ -3427,7 +3420,6 @@ async def test_unreadable_journal_row_does_not_hide_the_events_behind_it(
 @pytest.mark.parametrize("transport", ["classic", "sliding"])
 async def test_nio_accepts_late_non_acceptance_without_live_replay(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     transport: str,
 ) -> None:
     """The rejection signal is too late once ordinary event fanout begins."""
@@ -3476,8 +3468,9 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
     await client.receive_response(response)
 
     assert callback_attempts == 1
+    # The rejection arrived too late to refuse admission, so the event stays
+    # pending and the worker owns the retry.
     assert await bot._journal_dispatcher.store.is_pending(event.event_id)
-    schedule_retry.assert_called_once()
 
 
 @pytest.mark.asyncio
