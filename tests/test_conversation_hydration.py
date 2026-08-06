@@ -12,7 +12,6 @@ import pytest
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
     _HYDRATED_PROMPT_WINDOW_MESSAGES,
-    _MAX_MESSAGES_PAGES,
     _MESSAGES_PAGE_LIMIT,
     ConversationHydrator,
     _HydrationError,
@@ -92,6 +91,11 @@ class FakeClient:
     # A room whose history outlives any startup walk, which is what a
     # long-lived room actually looks like.
     endless_history: bool = False
+    # What each endless page is made of. A streamed answer is one original
+    # followed by a run of edits, so a page of a busy MindRoom room carries far
+    # fewer logical messages than it carries events.
+    endless_originals_per_page: int = 1
+    endless_edits_per_page: int = 0
 
     async def room_get_event(
         self,
@@ -142,12 +146,11 @@ class FakeClient:
         del room_id, start, direction, limit
         self.history_pages += 1
         if self.endless_history:
-            page = self.history_pages
             return nio.RoomMessagesResponse(
                 ROOM,
-                [parse(raw(f"$page{page}", f"message {page}", ts=1_000 + page))],
+                self._endless_page(self.history_pages),
                 "start",
-                f"token-{page}",
+                f"token-{self.history_pages}",
             )
         if self.history_pages > 1:
             return nio.RoomMessagesResponse(ROOM, [], "start", self.history_end_token)
@@ -158,10 +161,29 @@ class FakeClient:
             self.history_end_token,
         )
 
+    def _endless_page(self, page: int) -> list[nio.Event]:
+        """Return one page of an inexhaustible room."""
+        events: list[nio.Event] = []
+        for index in range(self.endless_originals_per_page):
+            original = f"$page{page}-{index}"
+            events.append(parse(raw(original, f"message {page}-{index}", ts=1_000 + page)))
+            events.extend(
+                parse(
+                    raw(
+                        f"{original}-edit{edit}",
+                        f"message {page}-{index} v{edit}",
+                        ts=1_001 + page + edit,
+                        replaces=original,
+                    ),
+                )
+                for edit in range(self.endless_edits_per_page)
+            )
+        return events
 
-def hydrator(store: PrincipalStore, client: FakeClient) -> ConversationHydrator:
+
+def hydrator(store: PrincipalStore, client: FakeClient, **bounds: int) -> ConversationHydrator:
     """Return a hydrator wired to a fake homeserver."""
-    return ConversationHydrator(store=store, client=client)  # type: ignore[arg-type]
+    return ConversationHydrator(store=store, client=client, **bounds)  # type: ignore[arg-type]
 
 
 async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) -> None:
@@ -367,12 +389,53 @@ class TestRoomHydration:
         Stopping once the window is full is the contract being met, not a
         shortfall: a caller needing older history paginates Matrix directly.
         """
-        client = FakeClient(endless_history=True)
+        client = FakeClient(endless_history=True, endless_originals_per_page=_MESSAGES_PAGE_LIMIT)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
-        assert client.history_pages == _MAX_MESSAGES_PAGES
-        assert _MAX_MESSAGES_PAGES * _MESSAGES_PAGE_LIMIT == _HYDRATED_PROMPT_WINDOW_MESSAGES
+        assert client.history_pages == _HYDRATED_PROMPT_WINDOW_MESSAGES // _MESSAGES_PAGE_LIMIT
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_the_window_counts_messages_a_prompt_can_read_not_events(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Edits revise a message; they do not fill the window with new ones.
+
+        MindRoom streams by editing, so the ratio of Matrix events to logical
+        messages in its own rooms is an order of magnitude, not a rounding
+        error. A walk that stopped after a fixed number of pages would call a
+        handful of messages a full prompt window and hydrate almost nothing.
+        """
+        client = FakeClient(
+            endless_history=True,
+            endless_originals_per_page=1,
+            endless_edits_per_page=_MESSAGES_PAGE_LIMIT - 1,
+        )
+        window = 5
+
+        await hydrator(alice, client, prompt_window_messages=window).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == window
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=window * 2)
+        assert len(page.messages) == window
+
+    async def test_a_room_of_nothing_but_edits_still_stops(self, alice: PrincipalStore) -> None:
+        """The window is what hydration aims for, not what it will spend."""
+        client = FakeClient(
+            endless_history=True,
+            endless_originals_per_page=1,
+            endless_edits_per_page=_MESSAGES_PAGE_LIMIT - 1,
+        )
+
+        await hydrator(
+            alice,
+            client,
+            prompt_window_messages=1_000,
+            max_fetched_events=_MESSAGES_PAGE_LIMIT * 3,
+        ).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == 3
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:

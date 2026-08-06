@@ -58,7 +58,14 @@ _MESSAGES_PAGE_LIMIT = 100
 # can read is present" rather than "this room is fully mirrored". A caller that
 # needs older history than this paginates Matrix directly.
 _HYDRATED_PROMPT_WINDOW_MESSAGES = 2_000
-_MAX_MESSAGES_PAGES = _HYDRATED_PROMPT_WINDOW_MESSAGES // _MESSAGES_PAGE_LIMIT
+# Raw Matrix events and logical messages are not the same quantity, and in this
+# product they are not even the same order of magnitude: a streamed answer is
+# one original followed by a long tail of `m.replace` edits, all of which
+# reduce to a single line in a prompt. Counting pages would therefore have
+# hydration stop at a window that is mostly edits — a handful of messages in an
+# edit-heavy room. The window is counted in logical messages, and this ceiling
+# exists only so that one pathological room cannot walk its entire history.
+_MAX_FETCHED_EVENTS = 20_000
 
 
 class _HydrationError(RuntimeError):
@@ -144,6 +151,8 @@ class ConversationHydrator:
     store: PrincipalStore
     client: nio.AsyncClient
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
+    prompt_window_messages: int = _HYDRATED_PROMPT_WINDOW_MESSAGES
+    max_fetched_events: int = _MAX_FETCHED_EVENTS
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -231,11 +240,15 @@ class ConversationHydrator:
 
         Stopping at the window is the whole point rather than a shortfall: what
         hydration promises is the range a prompt can read, so a room with more
-        history than that is hydrated once the window is full.
+        history than that is hydrated once the window is full. The window is
+        measured in logical messages, because that is the unit a prompt is
+        built from; an edit does not add a message to it, it revises one.
         """
         events: list[ProjectedEvent] = []
+        logical = 0
+        fetched = 0
         start: str | None = None
-        for _ in range(_MAX_MESSAGES_PAGES):
+        while True:
             response = await self.client.room_messages(
                 room_id,
                 start=start,
@@ -245,14 +258,29 @@ class ConversationHydrator:
             if not isinstance(response, nio.RoomMessagesResponse):
                 msg = f"Could not fetch history for {room_id!r}: {response}"
                 raise _HydrationError(msg)
+            fetched += len(response.chunk)
             for event in response.chunk:
                 projected = _projected_from_event(room_id, event)
-                if projected is not None:
-                    events.append(projected)
-            if not response.chunk or not response.end:
-                break
+                if projected is None:
+                    continue
+                events.append(projected)
+                if projected.replaces_event_id is None:
+                    logical += 1
+            if logical >= self.prompt_window_messages or not response.chunk or not response.end:
+                return tuple(events)
+            if fetched >= self.max_fetched_events:
+                # Not the window being met, so it is said out loud. A room that
+                # reaches this is one where reading further costs more than the
+                # older messages are worth to a prompt.
+                logger.warning(
+                    "conversation_hydration_event_ceiling_reached",
+                    room_id=room_id,
+                    fetched_events=fetched,
+                    logical_messages=logical,
+                    prompt_window_messages=self.prompt_window_messages,
+                )
+                return tuple(events)
             start = response.end
-        return tuple(events)
 
     async def refresh(self, request: RefreshRequest) -> bool:
         """Refetch one logical message whose visible revision was redacted.
