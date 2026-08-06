@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -86,9 +86,6 @@ def _gateway(tmp_path: Path, outbox: OutboxView | None = None) -> DeliveryGatewa
                 deps=SimpleNamespace(
                     conversation_reader=SimpleNamespace(
                         latest_thread_event_id=AsyncMock(return_value="$root"),
-                    ),
-                    conversation_cache=SimpleNamespace(
-                        notify_outbound_message=Mock(),
                     ),
                 ),
             ),
@@ -653,32 +650,3 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert retried.recovered == 1
         assert retried.complete
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
-
-    async def test_a_replay_reports_what_was_sent_not_what_was_regenerated(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A rerun turn may hold different text than the room does.
-
-        The delivery it asks for was already made, so nothing is sent. What it
-        is told came back must be the message that exists, not the text it just
-        produced -- otherwise every consumer of the result records the wrong
-        body under the right event ID.
-        """
-        outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        sent = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "first"})
-
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)):
-            await gateway.deliver_final(self._final_request("first"))
-            replayed = await gateway.deliver_final(self._final_request("regenerated and different"))
-
-        assert replayed.event_id == "$sent"
-        # The cache is told what the room holds, which is the first answer.
-        # Handing it regenerated text would record a body the event does not
-        # have, under that event's ID.
-        notify = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message
-        assert notify.call_args.args[2]["body"] == "first", (
-            "a replayed delivery told the cache regenerated text was in the room"
-        )

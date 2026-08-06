@@ -8,7 +8,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -687,7 +687,6 @@ class TestMaybeGenerateThreadSummary:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_cache = MagicMock()
         self.conversation_reader = make_conversation_reader_mock()
-        self.conversation_cache.notify_outbound_message = Mock()
         # The pre-delivery pin guard reads from source; default it to "no pin".
         self.conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(return_value=[])
         with (
@@ -2982,7 +2981,6 @@ class TestSummaryWritersLeavePinStateAlone:
         """
         client = _mock_client()
         conversation_cache = MagicMock()
-        conversation_cache.notify_outbound_message = Mock()
 
         await send_thread_summary_event(
             client,
@@ -3002,7 +3000,6 @@ class TestSummaryWritersLeavePinStateAlone:
         """An explicit pin decision must reach the Matrix event, not just the call."""
         client = _mock_client()
         conversation_cache = MagicMock()
-        conversation_cache.notify_outbound_message = Mock()
 
         await send_thread_summary_event(
             client,
@@ -3057,7 +3054,6 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     """
     client = _mock_client()
     conversation_cache = MagicMock()
-    conversation_cache.notify_outbound_message = Mock()
 
     await send_thread_summary_event(
         client,
@@ -3088,7 +3084,6 @@ class TestPinLandingDuringGeneration:
 
     def _cache(self, source_history: list | None = None) -> MagicMock:
         conversation_cache = MagicMock()
-        conversation_cache.notify_outbound_message = Mock()
         # The guard must read from source, not through the cache: a pin written
         # by another runtime is not in this runtime's cache yet.
         conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
@@ -3201,7 +3196,6 @@ class TestTruncatedHistoryIsNotCounted:
                 _mock_config(),
                 _mock_runtime_paths(),
                 conversation_cache=MagicMock(
-                    notify_outbound_message=Mock(),
                     refresh_strict_thread_history_from_source=AsyncMock(return_value=[]),
                 ),
                 conversation_reader=make_conversation_reader_mock(),

@@ -441,7 +441,6 @@ class MatrixVoiceMessageTools(Toolkit):
             waveform=prepared_audio.waveform,
             thread_id=effective_thread_id,
             latest_thread_event_id=latest_thread_event_id,
-            conversation_cache=context.conversation_cache,
         )
         if event_id is None:
             return self._payload(

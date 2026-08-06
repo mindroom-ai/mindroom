@@ -7,7 +7,7 @@ import tempfile
 from collections import defaultdict, deque
 from pathlib import Path
 from threading import Lock
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -62,8 +62,6 @@ def _make_context(
             content={"body": "message", "msgtype": "m.text"},
         ),
     )
-    resolved_conversation_cache.notify_outbound_message = Mock()
-    resolved_conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -285,11 +283,6 @@ async def test_matrix_api_send_event_records_threaded_room_message() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
@@ -321,11 +314,6 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
         message_type="m.room.message",
         content=content,
         ignore_unverified_devices=True,
-    )
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
     )
 
 
@@ -360,11 +348,6 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$send:localhost"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
@@ -395,11 +378,6 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
@@ -505,11 +483,6 @@ async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeep
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
@@ -580,7 +553,6 @@ async def test_matrix_api_send_event_errors_when_thread_classification_fails() -
         "tool": "matrix_api",
     }
     ctx.client.room_send.assert_not_awaited()
-    ctx.conversation_cache.notify_outbound_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -695,7 +667,6 @@ async def test_matrix_api_redact_happy_path() -> None:
         event_id="$target:localhost",
         reason="cleanup",
     )
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$target:localhost")
 
 
 @pytest.mark.asyncio
@@ -773,10 +744,6 @@ async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeepi
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
 
 
 @pytest.mark.asyncio
@@ -805,7 +772,6 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
         "tool": "matrix_api",
     }
     ctx.client.room_redact.assert_not_awaited()
-    ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -911,7 +877,6 @@ async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bo
 
     assert payload["status"] == "ok"
     ctx.conversation_cache.get_event.assert_any_await(ctx.room_id, "$plain-two")
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$plain-two")
 
 
 @pytest.mark.asyncio
@@ -936,10 +901,6 @@ async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact()
 
     assert payload["status"] == "ok"
     assert payload["redaction_event_id"] == "$redaction:localhost"
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
 
 
 @pytest.mark.asyncio

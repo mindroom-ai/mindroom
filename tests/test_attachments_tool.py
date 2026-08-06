@@ -653,7 +653,6 @@ async def test_send_context_attachments_reuses_ephemeral_encrypted_media(tmp_pat
         attachment,
         thread_id=context.resolved_thread_id,
         latest_thread_event_id=context.resolved_thread_id,
-        conversation_cache=context.conversation_cache,
     )
     send_file.assert_not_awaited()
     assert not (tmp_path / "attachments").exists()

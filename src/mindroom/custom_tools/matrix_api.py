@@ -662,24 +662,6 @@ class MatrixApiTools(Toolkit):
         return None
 
     @staticmethod
-    async def _record_send_event_outbound_cache_write(
-        context: ToolRuntimeContext,
-        *,
-        room_id: str,
-        event_type: str,
-        event_id: str,
-        content: dict[str, object],
-    ) -> None:
-        """Record a successful room-message send in the local conversation cache."""
-        if event_type != "m.room.message":
-            return
-        context.conversation_cache.notify_outbound_message(
-            room_id,
-            event_id,
-            content,
-        )
-
-    @staticmethod
     async def _redaction_thread_resolution_error(
         context: ToolRuntimeContext,
         *,
@@ -826,13 +808,6 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomSendResponse):
-            await self._record_send_event_outbound_cache_write(
-                context,
-                room_id=room_id,
-                event_type=normalized_event_type,
-                event_id=response.event_id,
-                content=normalized_content,
-            )
             self._audit_write(
                 context=context,
                 room_id=room_id,
@@ -1182,10 +1157,6 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
-            context.conversation_cache.notify_outbound_redaction(
-                room_id,
-                normalized_event_id,
-            )
             self._audit_write(
                 context=context,
                 room_id=room_id,

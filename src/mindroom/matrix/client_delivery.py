@@ -22,7 +22,6 @@ from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 logger = get_logger(__name__)
@@ -558,7 +557,6 @@ async def send_file_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -596,12 +594,6 @@ async def send_file_message(
         content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content)
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 
@@ -613,7 +605,6 @@ async def send_runtime_encrypted_media_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Send an existing encrypted MXC object without writing or uploading plaintext bytes."""
     msgtype = _msgtype_for_mimetype(attachment.mime_type)
@@ -635,12 +626,6 @@ async def send_runtime_encrypted_media_message(
         content,
         operation="send_runtime_encrypted_media_message",
     )
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 
@@ -656,7 +641,6 @@ async def send_audio_message(
     waveform: Sequence[int] | None = None,
     thread_id: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload an in-memory audio payload and send it as a Matrix voice message."""
     if not _can_send_to_encrypted_room(client, room_id, operation="send_audio_message"):
@@ -700,12 +684,6 @@ async def send_audio_message(
         content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content)
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 

@@ -2652,7 +2652,6 @@ class AgentBot:
         if isinstance(response, nio.RoomRedactError):
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
-        self._conversation_cache.notify_outbound_redaction(room_id, event_id)
         return True
 
 

@@ -32,7 +32,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
+from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
     bulk_refresh_room_thread_histories,
@@ -168,33 +168,6 @@ class ConversationCacheProtocol(Protocol):
 
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence and purge one authoritative batch of departed rooms."""
-
-    def notify_outbound_message(
-        self,
-        room_id: str,
-        event_id: str | None,
-        content: dict[str, Any],
-    ) -> None:
-        """Schedule one locally sent message or edit for advisory cache bookkeeping.
-
-        This is advisory post-send bookkeeping and must fail open.
-        Callers should treat Matrix delivery as complete before this local cache work runs.
-        """
-
-    def notify_outbound_event(self, room_id: str, event_source: dict[str, Any]) -> None:
-        """Schedule one locally sent outbound event for advisory cache bookkeeping."""
-
-    def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted message for advisory cache bookkeeping.
-
-        This is advisory post-redaction bookkeeping and must fail open.
-        """
-
-    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
-        """Reserve one known outbound response thread for later relation-free edits."""
-
-    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
-        """Release one outbound response thread reservation after terminal delivery."""
 
     async def append_live_event(
         self,
@@ -422,7 +395,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _reads: ThreadReadPolicy = field(init=False, repr=False)
     _refill_single_flight: _ThreadRefillSingleFlight = field(init=False, repr=False)
     _write_cache_ops: ThreadMutationCacheOps = field(init=False, repr=False)
-    _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
     _live: ThreadLiveWritePolicy = field(init=False, repr=False)
     _sync: ThreadSyncWritePolicy = field(init=False, repr=False)
 
@@ -446,11 +418,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             runtime=self.runtime,
         )
         self._refill_single_flight = _ThreadRefillSingleFlight(_owner=self)
-        self._outbound = ThreadOutboundWritePolicy(
-            resolver=resolver,
-            cache_ops=self._write_cache_ops,
-            require_client=self._require_client,
-        )
         self._live = ThreadLiveWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
@@ -956,78 +923,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(error),
             )
             return None
-
-    def notify_outbound_message(
-        self,
-        room_id: str,
-        event_id: str | None,
-        content: dict[str, Any],
-    ) -> None:
-        """Schedule one locally sent message or edit for advisory cache bookkeeping."""
-        self._evict_turn_event_lookups_for_outbound_event(
-            room_id,
-            event_id=event_id,
-            event_info=EventInfo.from_event({"type": "m.room.message", "content": content}),
-        )
-        self._outbound.notify_outbound_message(room_id, event_id, content)
-
-    def notify_outbound_event(
-        self,
-        room_id: str,
-        event_source: dict[str, Any],
-    ) -> None:
-        """Schedule one locally sent outbound event for advisory cache bookkeeping."""
-        event_id = event_source.get("event_id")
-        self._evict_turn_event_lookups_for_outbound_event(
-            room_id,
-            event_id=event_id if isinstance(event_id, str) else None,
-            event_info=EventInfo.from_event(event_source),
-        )
-        self._outbound.notify_outbound_event(room_id, event_source)
-
-    def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted message for advisory cache bookkeeping."""
-        self._evict_turn_event_lookups_for_room(room_id)
-        self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
-
-    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
-        """Reserve one known outbound response thread for later relation-free edits."""
-        self._outbound.reserve_thread_response(room_id, event_id, thread_id)
-
-    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
-        """Release one outbound response thread reservation after terminal delivery."""
-        self._outbound.release_thread_response(room_id, event_id)
-
-    def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
-        """Discard point-read memoization invalidated by one successful outbound mutation."""
-        turn_cache = self._turn_event_cache.get()
-        if turn_cache is None:
-            return
-        normalized_event_id = event_id.strip()
-        for cache_key in tuple(turn_cache):
-            if cache_key[:2] == (room_id, normalized_event_id):
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_event_lookups_for_room(self, room_id: str) -> None:
-        """Discard point reads that one outbound redaction could change indirectly."""
-        turn_cache = self._turn_event_cache.get()
-        if turn_cache is None:
-            return
-        for cache_key in tuple(turn_cache):
-            if cache_key[0] == room_id:
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_event_lookups_for_outbound_event(
-        self,
-        room_id: str,
-        *,
-        event_id: str | None,
-        event_info: EventInfo,
-    ) -> None:
-        """Discard point reads changed by one outbound event or edit."""
-        for changed_event_id in (event_id, event_info.original_event_id):
-            if isinstance(changed_event_id, str):
-                self._evict_turn_event_lookup(room_id, changed_event_id)
 
     async def append_live_event(
         self,

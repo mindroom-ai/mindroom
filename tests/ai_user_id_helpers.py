@@ -342,11 +342,7 @@ def _build_response_runner(
         return_value=thread_history_result([], is_full_history=True),
     )
     bot._conversation_resolver.deps = SimpleNamespace(
-        conversation_cache=SimpleNamespace(
-            notify_outbound_message=MagicMock(),
-            notify_outbound_event=MagicMock(),
-            notify_outbound_redaction=MagicMock(),
-        ),
+        conversation_cache=SimpleNamespace(),
         conversation_reader=make_conversation_reader_mock(),
     )
     bot._conversation_state_writer = MagicMock()

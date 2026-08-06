@@ -659,11 +659,6 @@ class DeliveryGateway:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the send"
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                resolved_target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
         self.deps.logger.error(
@@ -772,11 +767,6 @@ class DeliveryGateway:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the edit"
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
@@ -1096,11 +1086,6 @@ class DeliveryGateway:
         )
         delivered = await send_message_result(self._client(), target.room_id, content)
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Sent compaction lifecycle notice", event_id=delivered.event_id, **target.log_context)
             return delivered.event_id
         self.deps.logger.error("Failed to send compaction lifecycle notice", **target.log_context)
@@ -1195,11 +1180,6 @@ class DeliveryGateway:
             body,
         )
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Edited compaction lifecycle notice", event_id=event_id, **target.log_context)
             return
         self.deps.logger.error("Failed to edit compaction lifecycle notice", event_id=event_id, **target.log_context)
@@ -1233,7 +1213,6 @@ class DeliveryGateway:
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
-            conversation_cache=self.deps.resolver.deps.conversation_cache,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)

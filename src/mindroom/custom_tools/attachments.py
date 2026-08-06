@@ -334,7 +334,6 @@ async def send_resolved_attachments(
     which the projection cannot supply until the earlier send echoes back.
     """
     attachment_event_ids: list[str] = []
-    assert context.conversation_cache is not None
     latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
         room_id=room_id,
         thread_id=thread_id,
@@ -348,7 +347,6 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                conversation_cache=context.conversation_cache,
             )
             attachment_label = str(attachment)
         else:
@@ -358,7 +356,6 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                conversation_cache=context.conversation_cache,
             )
             attachment_label = attachment.attachment_id
         if attachment_event_id is None:

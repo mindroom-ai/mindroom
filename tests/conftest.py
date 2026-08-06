@@ -1160,9 +1160,6 @@ def make_conversation_cache_mock() -> AsyncMock:
 
     conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
     conversation_cache.append_live_event = AsyncMock()
-    conversation_cache.notify_outbound_message = MagicMock()
-    conversation_cache.notify_outbound_event = MagicMock()
-    conversation_cache.notify_outbound_redaction = MagicMock()
     return conversation_cache
 
 

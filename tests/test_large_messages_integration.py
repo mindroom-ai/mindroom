@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import MagicMock
 
 import nio
 import pytest
@@ -291,34 +291,6 @@ async def test_streaming_initial_message_over_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_large_initial_message_records_transformed_content_to_cache() -> None:
-    """Streaming write-through should cache the exact oversized event content Matrix stored."""
-    client = MockClient()
-    config = MockConfig()
-    conversation_cache = AsyncMock()
-    conversation_cache.notify_outbound_message = Mock()
-
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:room", None, None),
-        config=config,
-        runtime_paths=_runtime_paths(),
-        conversation_cache=conversation_cache,
-    )
-
-    streaming.accumulated_text = "a" * 60000
-    streaming.last_update = float("-inf")
-
-    await streaming._send_or_edit_message(client, is_final=True)
-
-    sent_content = client.messages_sent[0][2]
-    conversation_cache.notify_outbound_message.assert_called_once_with(
-        "!test:room",
-        "$event_1",
-        sent_content,
-    )
-
-
-@pytest.mark.asyncio
 async def test_streaming_edit_grows_over_limit() -> None:
     """Test streaming where edit grows beyond limit."""
     client = MockClient()
@@ -355,39 +327,6 @@ async def test_streaming_edit_grows_over_limit() -> None:
     assert edit_content["m.new_content"]["msgtype"] == "m.file"
     assert "io.mindroom.long_text" in edit_content["m.new_content"]
     assert len(edit_content["m.new_content"]["body"]) < 35000
-
-
-@pytest.mark.asyncio
-async def test_streaming_large_edit_records_transformed_content_to_cache() -> None:
-    """Streaming edit write-through should cache the exact transformed edit event."""
-    client = MockClient()
-    config = MockConfig()
-    conversation_cache = AsyncMock()
-    conversation_cache.notify_outbound_message = Mock()
-
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:room", None, None),
-        config=config,
-        runtime_paths=_runtime_paths(),
-        conversation_cache=conversation_cache,
-    )
-
-    streaming.accumulated_text = "Small start"
-    streaming.last_update = float("-inf")
-    await streaming._send_or_edit_message(client, is_final=False)
-    conversation_cache.notify_outbound_message.reset_mock()
-
-    streaming.accumulated_text = "b" * 35000
-    streaming.last_update = float("-inf")
-
-    await streaming._send_or_edit_message(client, is_final=True)
-
-    edit_content = client.messages_sent[1][2]
-    conversation_cache.notify_outbound_message.assert_called_once_with(
-        "!test:room",
-        "$event_2",
-        edit_content,
-    )
 
 
 @pytest.mark.asyncio

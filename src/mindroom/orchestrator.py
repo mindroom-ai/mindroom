@@ -46,7 +46,6 @@ from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
-    StaleStreamCleanupActor,
     recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
@@ -127,6 +126,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
+
+    import nio
 
     from mindroom.event_journal import ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -1128,14 +1129,11 @@ class _MultiAgentOrchestrator:
         target_room_ids: set[str] | None = None,
     ) -> None:
         """Recover interrupted responses from one concurrent room scan."""
-        actors: dict[str, StaleStreamCleanupActor] = {}
+        actors: dict[str, nio.AsyncClient] = {}
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
                 continue
-            actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
-                client=bot.client,
-                conversation_cache=bot._conversation_cache,
-            )
+            actors[bot.agent_user.user_id] = bot.client
         if not actors:
             return
         router_bot = self._router_bot()

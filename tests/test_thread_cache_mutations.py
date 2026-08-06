@@ -14,7 +14,7 @@ from nio.api import RelationshipType
 import mindroom.matrix.cache as matrix_cache
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.matrix import thread_bookkeeping
-from mindroom.matrix.cache import ConversationEventCache, thread_writes
+from mindroom.matrix.cache import thread_writes
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
@@ -84,7 +84,6 @@ def test_matrix_cache_package_does_not_export_thread_policy_wrappers() -> None:
     assert not hasattr(matrix_cache, "ThreadWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadReadPolicy")
     assert not hasattr(matrix_cache, "_ThreadMutationCacheOps")
-    assert not hasattr(matrix_cache, "_ThreadOutboundWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadLiveWritePolicy")
     assert not hasattr(matrix_cache, "_ThreadSyncWritePolicy")
 
@@ -100,7 +99,7 @@ def test_thread_writes_does_not_keep_message_impact_wrapper() -> None:
 
 
 class TestThreadMutationHelpers:
-    """Direct mutation-helper coverage for outbound/live/sync message and redaction paths."""
+    """Direct mutation-helper coverage for live and sync message and redaction paths."""
 
     @pytest.mark.asyncio
     async def test_departure_fences_reads_before_ordered_purge_can_start(self, tmp_path: Path) -> None:
@@ -285,10 +284,7 @@ class TestThreadMutationHelpers:
             await root.close()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "context",
-        ["outbound", "live", "sync"],
-    )
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_message_mutation_room_level_skips_invalidation(
         self,
         context: str,
@@ -319,10 +315,7 @@ class TestThreadMutationHelpers:
         event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "context",
-        ["outbound", "live", "sync"],
-    )
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_message_mutation_unknown_invalidates_room_once(
         self,
         context: str,
@@ -350,10 +343,7 @@ class TestThreadMutationHelpers:
         event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "context",
-        ["outbound", "live", "sync"],
-    )
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_message_mutation_threaded_success_uses_context_reasons(
         self,
         context: str,
@@ -424,7 +414,7 @@ class TestThreadMutationHelpers:
         event_cache.mark_room_threads_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_redaction_mutation_room_level_redacts_without_thread_invalidations(
         self,
         context: str,
@@ -447,7 +437,7 @@ class TestThreadMutationHelpers:
         logger.debug.assert_not_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_redaction_mutation_unknown_invalidates_room_once(self, context: str) -> None:
         """Unknown redactions should fail closed with one room-thread invalidation."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -469,7 +459,7 @@ class TestThreadMutationHelpers:
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_redaction_mutation_threaded_success_uses_context_reason(self, context: str) -> None:
         """Threaded redactions should gap-mark the owning thread once on success."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -492,7 +482,7 @@ class TestThreadMutationHelpers:
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
+    @pytest.mark.parametrize("context", ["live", "sync"])
     async def test_thread_redaction_mutation_threaded_failure_uses_failure_reason(self, context: str) -> None:
         """Threaded redaction failures should gap-mark once with the failure reason."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -527,703 +517,8 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         assert not hasattr(access, "_writes")
-        assert not hasattr(access, "_run_fail_open_outbound_write")
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            RuntimeError("cache write failed"),
-            asyncio.CancelledError(),
-        ],
-    )
-    def test_notify_outbound_message_swallows_internal_write_failure(self, error: BaseException) -> None:
-        """The public outbound bookkeeping boundary must fail open for ordinary failures and cancellation."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        access._outbound._require_client = Mock(side_effect=error)
-
-        access.notify_outbound_message(
-            "!room:localhost",
-            "$event:localhost",
-            {"body": "hello", "msgtype": "m.text"},
-        )
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            RuntimeError("cache write failed"),
-            asyncio.CancelledError(),
-        ],
-    )
-    def test_notify_outbound_redaction_swallows_internal_write_failure(self, error: BaseException) -> None:
-        """The public outbound redaction bookkeeping boundary must fail open too."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        access._outbound._schedule_fail_open_room_update = Mock(side_effect=error)
-
-        access.notify_outbound_redaction(
-            "!room:localhost",
-            "$event:localhost",
-        )
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_message_plain_edit_lookup_miss_invalidates_room_threads(self) -> None:
-        """Plain room-mode edits should fail closed when mutation lookup cannot prove room-level state."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-        client = _make_client_mock()
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_message(
-            "!room:localhost",
-            "$edit:localhost",
-            {
-                "body": "* updated",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "updated", "msgtype": "m.text"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message:localhost"},
-            },
-        )
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.mark_room_threads_gap.assert_awaited_once_with(
-            "!room:localhost",
-            reason="outbound_thread_lookup_unavailable",
-        )
-        event_cache.mark_thread_gap.assert_not_awaited()
-        event_cache.apply_thread_mutation_append.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_event_threaded_edit_uses_claimed_thread_barrier(self) -> None:
-        """Outbound threaded edits should use the claimed thread barrier instead of the room barrier."""
-        coordinator = _runtime_write_coordinator()
-        event_cache = _runtime_event_cache()
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-        sibling_thread_update_started = asyncio.Event()
-        release_sibling_thread_update = asyncio.Event()
-        thread_invalidation_started = asyncio.Event()
-
-        async def blocking_sibling_thread_update() -> None:
-            sibling_thread_update_started.set()
-            await release_sibling_thread_update.wait()
-
-        async def apply_thread_mutation_append(
-            room_id: str,
-            thread_id: str,
-            _event_source: dict[str, object],
-            *,
-            append_failed_reason: str,
-        ) -> ThreadAppendOutcome:
-            assert room_id == "!room:localhost"
-            assert thread_id == "$claimed-thread:localhost"
-            assert append_failed_reason == "outbound_append_failed"
-            thread_invalidation_started.set()
-            return ThreadAppendOutcome.APPENDED
-
-        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
-        sibling_thread_task = coordinator.queue_thread_update(
-            "!room:localhost",
-            "$sibling-thread:localhost",
-            blocking_sibling_thread_update,
-            name="matrix_cache_blocking_sibling_thread_update",
-            coordination_scope=event_cache.principal_id,
-        )
-        await asyncio.wait_for(sibling_thread_update_started.wait(), timeout=1.0)
-
-        access.notify_outbound_event(
-            "!room:localhost",
-            {
-                "type": "m.room.message",
-                "room_id": "!room:localhost",
-                "event_id": "$edit:localhost",
-                "content": {
-                    "body": "* updated",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "updated",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed-thread:localhost"},
-                    },
-                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-message:localhost"},
-                },
-            },
-        )
-        try:
-            await asyncio.wait_for(thread_invalidation_started.wait(), timeout=1.0)
-            await asyncio.wait_for(
-                coordinator.wait_for_thread_idle(
-                    "!room:localhost",
-                    "$claimed-thread:localhost",
-                    coordination_scope=event_cache.principal_id,
-                ),
-                timeout=1.0,
-            )
-            assert sibling_thread_task.done() is False
-
-            event_cache.apply_thread_mutation_append.assert_awaited_once()
-            append_args = event_cache.apply_thread_mutation_append.await_args.args
-            assert append_args[0] == "!room:localhost"
-            assert append_args[1] == "$claimed-thread:localhost"
-            assert append_args[2]["event_id"] == "$edit:localhost"
-            event_cache.mark_thread_gap.assert_not_awaited()
-        finally:
-            release_sibling_thread_update.set()
-            await asyncio.wait_for(
-                asyncio.gather(sibling_thread_task, return_exceptions=True),
-                timeout=1.0,
-            )
-            await _wait_for_room_cache_idle(coordinator)
 
     # Resolver disagreement cases now stay covered by the room-barrier fallback for lookup-dependent outbound mutations.
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
-        self,
-    ) -> None:
-        """Unknown redactions should not poison room caches when nothing was actually removed."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(event_cache=event_cache),
-        )
-
-        access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.mark_room_threads_gap.assert_not_awaited()
-        event_cache.mark_thread_gap.assert_not_awaited()
-        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$room-message:localhost")
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_room_message_persists_point_lookup(self) -> None:
-        """Known room-level sends should be readable before their sync echo arrives."""
-        event_cache = _runtime_event_cache()
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_message(
-            "!room:localhost",
-            "$message:localhost",
-            {"body": "sent locally", "msgtype": "m.text"},
-        )
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.store_events_batch.assert_awaited_once()
-        [(event_id, room_id, event_source)] = event_cache.store_events_batch.await_args.args[0]
-        assert event_id == "$message:localhost"
-        assert room_id == "!room:localhost"
-        assert event_source["type"] == "m.room.message"
-        assert event_source["content"]["body"] == "sent locally"
-        event_cache.mark_thread_gap.assert_not_awaited()
-        event_cache.mark_room_threads_gap.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_outbound_send_redaction_and_sync_echo_preserve_read_your_redaction(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """Coordinator ordering and tombstones must keep a late sync echo from restoring a local redaction."""
-        room_id = "!room:localhost"
-        event_id = "$message:localhost"
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-        sync_echo = nio.RoomMessageText.from_dict(
-            {
-                "content": {"body": "sent locally", "msgtype": "m.text"},
-                "event_id": event_id,
-                "sender": "@agent:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        response = MagicMock()
-        response.__class__ = nio.SyncResponse
-        response.rooms = MagicMock(
-            join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
-        )
-
-        async with access.turn_scope():
-            access.notify_outbound_message(
-                room_id,
-                event_id,
-                {"body": "sent locally", "msgtype": "m.text"},
-            )
-            outbound_read = await access.get_event(room_id, event_id)
-            assert isinstance(outbound_read, nio.RoomGetEventResponse)
-            assert outbound_read.event.source["content"]["body"] == "sent locally"
-
-            access.notify_outbound_redaction(room_id, event_id)
-            client.room_get_event.side_effect = None
-            client.room_get_event.return_value = nio.RoomGetEventError(
-                "redacted",
-                status_code="M_NOT_FOUND",
-            )
-            redacted_read = await access.get_event(room_id, event_id)
-            assert isinstance(redacted_read, nio.RoomGetEventError)
-            assert await event_cache.get_event(room_id, event_id) is None
-
-        await asyncio.gather(*access.cache_sync_timeline(response))
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        assert await event_cache.get_event(room_id, event_id) is None
-
-    @pytest.mark.asyncio
-    async def test_outbound_room_edit_refreshes_memoized_original_immediately(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """A same-turn read after an outbound edit must see the edited original."""
-        room_id = "!room:localhost"
-        original_event_id = "$original:localhost"
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-        await event_cache.store_event(
-            original_event_id,
-            room_id,
-            {
-                "event_id": original_event_id,
-                "sender": "@agent:localhost",
-                "origin_server_ts": 1000,
-                "room_id": room_id,
-                "type": "m.room.message",
-                "content": {"body": "original", "msgtype": "m.text"},
-            },
-        )
-
-        async with access.turn_scope():
-            original_read = await access.get_event(room_id, original_event_id)
-            assert isinstance(original_read, nio.RoomGetEventResponse)
-            assert original_read.event.source["content"]["body"] == "original"
-
-            access.notify_outbound_message(
-                room_id,
-                "$edit:localhost",
-                {
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {"body": "edited", "msgtype": "m.text"},
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": original_event_id,
-                    },
-                },
-            )
-            edited_read = await access.get_event(room_id, original_event_id)
-
-        assert isinstance(edited_read, nio.RoomGetEventResponse)
-        assert edited_read.event.source["content"]["body"] == "edited"
-        client.room_get_event.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_outbound_edit_redaction_refreshes_memoized_original_immediately(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """A same-turn read after redacting an edit must restore the original payload."""
-        room_id = "!room:localhost"
-        original_event_id = "$original:localhost"
-        edit_event_id = "$edit:localhost"
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-        await event_cache.store_events_batch(
-            [
-                (
-                    original_event_id,
-                    room_id,
-                    {
-                        "event_id": original_event_id,
-                        "sender": "@agent:localhost",
-                        "origin_server_ts": 1000,
-                        "room_id": room_id,
-                        "type": "m.room.message",
-                        "content": {"body": "original", "msgtype": "m.text"},
-                    },
-                ),
-                (
-                    edit_event_id,
-                    room_id,
-                    {
-                        "event_id": edit_event_id,
-                        "sender": "@agent:localhost",
-                        "origin_server_ts": 2000,
-                        "room_id": room_id,
-                        "type": "m.room.message",
-                        "content": {
-                            "body": "* edited",
-                            "msgtype": "m.text",
-                            "m.new_content": {"body": "edited", "msgtype": "m.text"},
-                            "m.relates_to": {
-                                "rel_type": "m.replace",
-                                "event_id": original_event_id,
-                            },
-                        },
-                    },
-                ),
-            ],
-        )
-
-        async with access.turn_scope():
-            edited_read = await access.get_event(room_id, original_event_id)
-            assert isinstance(edited_read, nio.RoomGetEventResponse)
-            assert edited_read.event.source["content"]["body"] == "edited"
-
-            access.notify_outbound_redaction(room_id, edit_event_id)
-            original_read = await access.get_event(room_id, original_event_id)
-
-        assert isinstance(original_read, nio.RoomGetEventResponse)
-        assert original_read.event.source["content"]["body"] == "original"
-        client.room_get_event.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_outbound_send_sync_echo_replaces_synthetic_payload_without_duplication(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """A canonical clear sync echo should improve the locally synthesized point-cache row."""
-        room_id = "!room:localhost"
-        event_id = "$message:localhost"
-        client = _make_client_mock(user_id="@agent:localhost")
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-        sync_echo = nio.RoomMessageText.from_dict(
-            {
-                "content": {"body": "canonical echo", "msgtype": "m.text"},
-                "event_id": event_id,
-                "sender": "@agent:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        response = MagicMock()
-        response.__class__ = nio.SyncResponse
-        response.rooms = MagicMock(
-            join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
-        )
-
-        access.notify_outbound_message(
-            room_id,
-            event_id,
-            {"body": "synthetic local row", "msgtype": "m.text"},
-        )
-        await asyncio.gather(*access.cache_sync_timeline(response))
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-        cached_event = await event_cache.get_event(room_id, event_id)
-        recent_events = await event_cache.get_recent_room_events(
-            room_id,
-            event_type="m.room.message",
-            since_ts_ms=0,
-            limit=10,
-        )
-
-        assert cached_event is not None
-        assert cached_event["content"]["body"] == "canonical echo"
-        assert cached_event["origin_server_ts"] == 1234567890
-        assert [event["event_id"] for event in recent_events].count(event_id) == 1
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_reaction_persists_lookup_without_thread_invalidation(self) -> None:
-        """Outbound reactions should be cached for later redaction lookups without staling thread history."""
-        event_cache = _runtime_event_cache()
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_event(
-            "!room:localhost",
-            {
-                "type": "m.reaction",
-                "room_id": "!room:localhost",
-                "event_id": "$reaction:localhost",
-                "sender": "@agent:localhost",
-                "content": {
-                    "m.relates_to": {
-                        "rel_type": "m.annotation",
-                        "event_id": "$thread-reply:localhost",
-                        "key": "🛑",
-                    },
-                },
-            },
-        )
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.store_events_batch.assert_awaited_once()
-        stored_batch = event_cache.store_events_batch.await_args.args[0]
-        assert len(stored_batch) == 1
-        stored_event_id, stored_room_id, stored_event_source = stored_batch[0]
-        assert stored_event_id == "$reaction:localhost"
-        assert stored_room_id == "!room:localhost"
-        assert stored_event_source["type"] == "m.reaction"
-        assert stored_event_source["room_id"] == "!room:localhost"
-        assert stored_event_source["event_id"] == "$reaction:localhost"
-        assert stored_event_source["sender"] == "@agent:localhost"
-        assert stored_event_source["content"]["m.relates_to"]["event_id"] == "$thread-reply:localhost"
-        assert stored_event_source["content"]["m.relates_to"]["key"] == "🛑"
-        assert isinstance(stored_event_source.get("origin_server_ts"), int)
-        event_cache.mark_thread_gap.assert_not_awaited()
-        event_cache.mark_room_threads_gap.assert_not_awaited()
-        # A successful threaded mutation now writes no marker at all, so this is the only assertion
-        # left that would catch a reaction being appended into thread cache.
-        event_cache.apply_thread_mutation_append.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_reaction_normalizes_event_for_real_cache(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Synthetic outbound reactions should be normalized before durable cache persistence."""
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        try:
-            access.notify_outbound_event(
-                "!room:localhost",
-                {
-                    "type": "m.reaction",
-                    "room_id": "!room:localhost",
-                    "event_id": "$reaction:localhost",
-                    "sender": "@agent:localhost",
-                    "content": {
-                        "m.relates_to": {
-                            "rel_type": "m.annotation",
-                            "event_id": "$thread-reply:localhost",
-                            "key": "🛑",
-                        },
-                    },
-                },
-            )
-            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-            cached_event = await event_cache.get_event("!room:localhost", "$reaction:localhost")
-        finally:
-            await event_cache.close()
-
-        assert cached_event is not None
-        assert cached_event["event_id"] == "$reaction:localhost"
-        assert cached_event["content"]["m.relates_to"]["key"] == "🛑"
-        assert isinstance(cached_event.get("origin_server_ts"), int)
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_message_plain_reply_to_threaded_target_updates_thread_cache(self) -> None:
-        """Plain replies to known threaded targets should still do outbound thread bookkeeping."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(
-            side_effect=lambda room_id, event_id: (
-                "$thread-root:localhost"
-                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
-                else None
-            ),
-        )
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_message(
-            "!room:localhost",
-            "$plain-reply:localhost",
-            {
-                "body": "bridged reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-            },
-        )
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.apply_thread_mutation_append.assert_awaited_once()
-        awaited = event_cache.apply_thread_mutation_append.await_args
-        assert awaited.args[:2] == ("!room:localhost", "$thread-root:localhost")
-        assert awaited.kwargs["append_failed_reason"] == "outbound_append_failed"
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_message_reference_to_threaded_target_updates_thread_cache(self) -> None:
-        """References to known threaded targets should still do outbound thread bookkeeping."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(
-            side_effect=lambda room_id, event_id: (
-                "$thread-root:localhost"
-                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
-                else None
-            ),
-        )
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-        client.room_get_event = AsyncMock(return_value=_thread_reply_lookup_response())
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_message(
-            "!room:localhost",
-            "$reference:localhost",
-            {
-                "body": "reference",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.reference", "event_id": "$thread-reply:localhost"},
-            },
-        )
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.apply_thread_mutation_append.assert_awaited_once()
-        awaited = event_cache.apply_thread_mutation_append.await_args
-        assert awaited.args[:2] == ("!room:localhost", "$thread-root:localhost")
-        assert awaited.kwargs["append_failed_reason"] == "outbound_append_failed"
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_redaction_transitive_target_updates_thread_cache(self) -> None:
-        """Transitive-threaded redactions should still gap-mark the owning thread."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(
-            side_effect=lambda room_id, event_id: (
-                "$thread-root:localhost"
-                if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost")
-                else None
-            ),
-        )
-        event_cache.redact_event = AsyncMock(return_value=True)
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-
-        def room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
-            if event_id == "$plain-two:localhost":
-                event = nio.RoomMessageText.from_dict(
-                    {
-                        "content": {
-                            "body": "plain two",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-one:localhost"}},
-                        },
-                        "event_id": event_id,
-                        "sender": "@bridge:localhost",
-                        "origin_server_ts": 3000,
-                        "room_id": "!room:localhost",
-                        "type": "m.room.message",
-                    },
-                )
-                return _make_room_get_event_response(event)
-            if event_id == "$plain-one:localhost":
-                event = nio.RoomMessageText.from_dict(
-                    {
-                        "content": {
-                            "body": "plain one",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                        },
-                        "event_id": event_id,
-                        "sender": "@bridge:localhost",
-                        "origin_server_ts": 2000,
-                        "room_id": "!room:localhost",
-                        "type": "m.room.message",
-                    },
-                )
-                return _make_room_get_event_response(event)
-            if event_id == "$thread-reply:localhost":
-                return _thread_reply_lookup_response()
-            message = f"unexpected lookup for {event_id}"
-            raise AssertionError(message)
-
-        async def room_get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-            return room_get_event_response(event_id)
-
-        client.room_get_event = AsyncMock(side_effect=room_get_event)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_redaction("!room:localhost", "$plain-two:localhost")
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.mark_thread_gap.assert_awaited_once_with(
-            "!room:localhost",
-            "$thread-root:localhost",
-            reason="outbound_redaction",
-        )
-        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$plain-two:localhost")
-
-    @pytest.mark.asyncio
-    async def test_notify_outbound_redaction_of_reaction_does_not_invalidate_thread_cache(self) -> None:
-        """Reaction redactions should not gap-mark thread message history."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
-        event_cache.redact_event = AsyncMock(return_value=True)
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = "@agent:localhost"
-        client.room_get_event = AsyncMock(
-            return_value=_make_room_get_event_response(
-                nio.ReactionEvent.from_dict(
-                    {
-                        "content": {
-                            "m.relates_to": {
-                                "rel_type": "m.annotation",
-                                "event_id": "$thread-reply:localhost",
-                                "key": "👍",
-                            },
-                        },
-                        "event_id": "$reaction:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567890,
-                        "room_id": "!room:localhost",
-                        "type": "m.reaction",
-                    },
-                ),
-            ),
-        )
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=client, event_cache=event_cache),
-        )
-
-        access.notify_outbound_redaction("!room:localhost", "$reaction:localhost")
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        event_cache.mark_thread_gap.assert_not_awaited()
-        event_cache.mark_room_threads_gap.assert_not_awaited()
-        event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$reaction:localhost")
 
     @pytest.mark.asyncio
     async def test_turn_scope_does_not_memoize_thread_reads(self) -> None:
@@ -1571,16 +866,27 @@ class TestMatrixConversationCacheThreadReads:
                 [root_event, stale_reply_event],
                 fetch_started_at=time.time(),
             )
-            first_access.notify_outbound_message(
-                "!test:localhost",
-                "$edit:localhost",
+            unresolvable_edit = nio.RoomMessageText.from_dict(
                 {
-                    "body": "* updated",
-                    "msgtype": "m.text",
-                    "m.new_content": {"body": "updated", "msgtype": "m.text"},
-                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing:localhost"},
+                    "content": {
+                        "body": "* updated",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "updated", "msgtype": "m.text"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing:localhost"},
+                    },
+                    "event_id": "$edit:localhost",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 4000,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
                 },
             )
+            sync_response = MagicMock()
+            sync_response.__class__ = nio.SyncResponse
+            sync_response.rooms = MagicMock(
+                join={"!test:localhost": MagicMock(timeline=MagicMock(events=[unresolvable_edit], limited=False))},
+            )
+            await asyncio.gather(*first_access.cache_sync_timeline(sync_response))
             await _wait_for_room_cache_idle(first_access.runtime.event_cache_write_coordinator)
 
             event_cache = await _reopen_event_cache(event_cache)
