@@ -1690,6 +1690,7 @@ class LiveFuzzRunner:
             return await self._run_saturation()
 
         await self.oracle.initialize()
+        await self._await_first_baseline_response()
         await self._send_roots(range(self.scenario.thread_count))
         return await self._run_batches(
             self.scenario.batches,
@@ -2290,6 +2291,28 @@ class LiveFuzzRunner:
             return self.client
         client_index = max(thread - 1, 0)
         return self.clients[client_index]
+
+    async def _await_first_baseline_response(self) -> None:
+        """Send one message and wait for its reply before the scenario starts.
+
+        MindRoom's no-loss guarantee begins after its first baseline response,
+        not when its API reports healthy. Until then the agent is still doing
+        its initial Matrix sync, and everything in that first timeline is
+        classified as room history the agent must not answer — correctly, since
+        a bot joining a room may not reply to the backlog it finds there.
+
+        Traffic sent before that boundary is therefore outside the contract,
+        and a scenario that starts there measures the race rather than the
+        behaviour under test. One warm-up exchange establishes that the agent
+        is answering, which is the only observable that actually means it.
+        """
+        content = self._message_content("Live fuzz warm up")
+        event_id = await self.client.send_event("m.room.message", "live-fuzz-warm-up", content)
+        self.oracle.expect("warm-up", event_id)
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
 
     async def _send_roots(self, threads: Collection[int]) -> None:
         async def send_root(thread: int) -> tuple[int, str, _SentPayload]:
