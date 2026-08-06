@@ -2171,7 +2171,7 @@ class TestMultiAgentOrchestrator:
             "general": responder_bot,
         }
 
-        await orchestrator._recover_ready_turn_dispatch_obligations()
+        await orchestrator._recover_ready_turn_journal_events()
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
         responder_bot.first_sync_complete = True
@@ -2253,11 +2253,11 @@ class TestMultiAgentOrchestrator:
         bot.recover_pending_turn_journal_events = AsyncMock()
         orchestrator.agent_bots = {"general": bot}
 
-        await orchestrator._recover_ready_turn_dispatch_obligations()
+        await orchestrator._recover_ready_turn_journal_events()
         bot.recover_pending_turn_journal_events.assert_not_awaited()
 
         bot.first_sync_complete = True
-        await orchestrator._recover_ready_turn_dispatch_obligations()
+        await orchestrator._recover_ready_turn_journal_events()
 
         bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
@@ -2300,7 +2300,7 @@ class TestMultiAgentOrchestrator:
             "failed": stuck_bot,
         }
 
-        await orchestrator._recover_ready_turn_dispatch_obligations()
+        await orchestrator._recover_ready_turn_journal_events()
 
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
         healthy_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
@@ -2404,7 +2404,7 @@ class TestMultiAgentOrchestrator:
             "general": member_bot,
         }
 
-        await orchestrator._recover_ready_turn_dispatch_obligations()
+        await orchestrator._recover_ready_turn_journal_events()
         team_bot.recover_pending_turn_journal_events.assert_not_awaited()
 
         with (

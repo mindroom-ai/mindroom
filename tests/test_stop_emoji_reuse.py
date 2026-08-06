@@ -72,7 +72,7 @@ def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarg
         ),
     )
     bot._delivery_gateway.finalize_user_stopped_response = AsyncMock(return_value=True)
-    bot._dispatch_obligation_runner.receipt_order = AsyncMock(return_value=1)
+    bot._journal_dispatcher.receipt_order = AsyncMock(return_value=1)
 
 
 @pytest.mark.asyncio

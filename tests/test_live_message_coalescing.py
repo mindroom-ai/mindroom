@@ -50,7 +50,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -490,10 +490,8 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         body="!help" if terminal_path == "non_owner_command" else "ignore me",
     )
     dispatch = _prepared_dispatch(event_id=event.event_id, body=event.body)
-    runner = bot._dispatch_obligation_runner
-    runner._retry_initial_delay_seconds = 0.001
-    runner._retry_max_delay_seconds = 0.001
-    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    dispatcher = bot._journal_dispatcher
+    await dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
     plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     with (
@@ -527,10 +525,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
     else:
         plan_turn.assert_not_awaited()
     assert not bot._turn_store.is_durably_handled(event.event_id)
-    await _wait_for(
-        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
-        deadline_seconds=1,
-    )
+    assert not await dispatcher.store.is_pending(event.event_id)
 
 
 @pytest.mark.asyncio
@@ -7102,8 +7097,8 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     with (
         patch.object(
-            bot._dispatch_obligation_runner,
-            "retry_pending_turn_source",
+            bot._journal_dispatcher,
+            "retry_turn_source",
             new=retry_pending_source,
         ),
         patch.object(
@@ -7129,7 +7124,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     assert outcome is _IngressAdmissionOutcome.ADMITTED
     assert drain_result.dispatch_failure_count == 1
-    retry_pending_source.assert_called_once_with(sidecar.event_id, DispatchCallbackKind.MEDIA)
+    retry_pending_source.assert_called_once_with(sidecar.event_id)
 
 
 @pytest.mark.asyncio
