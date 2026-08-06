@@ -1897,3 +1897,92 @@ on every recovered oversized answer, and a stored payload that does not
 describe the event it produced. The fix is to prepare the wire payload before
 enqueueing and give both the live and recovery paths a send-already-prepared
 primitive, so nothing is rebuilt after the claim.
+
+## Membership fencing is live (2026-08-06)
+
+`advance_membership_epoch` had no production caller, which made every fence
+built on it -- hydration, approval cards, unattempted outbox rows, and the
+reply-fallback read -- correct but unreachable. Two independent reviews found
+this in the same round.
+
+`MembershipFence` (`src/mindroom/event_journal/membership.py`) now owns the
+decision and `bot.py` calls it at the two membership transitions: immediately
+on a local leave, and for sync-reported departures.
+
+The interesting part is not the wiring but the exactly-once rule. One departure
+reaches the bot twice -- locally, and again when sync reports it -- and both
+reviews proposed guarding the second with `_local_departures_awaiting_sync`.
+That set is wrong for the job: `_on_room_joined` discards from it, so a rejoin
+between the leave and its echo re-arms the guard and the echo fences a second
+time. The second fence deletes the conversation just hydrated under the *new*
+membership along with any answer queued for it, which is the exact damage the
+epoch exists to prevent.
+
+The fence therefore keeps its own record of departures awaiting an echo, and a
+join does not clear it: the echo is still owed, and when it arrives it still
+describes the departure that was already accounted for.
+`test_a_rejoin_before_the_echo_keeps_its_projection` pins this.
+
+A cache-trust reset deliberately does not advance the epoch. Legacy
+certification failure is not a Matrix membership transition.
+
+## The read cutover's remaining reply-fallback defects (2026-08-06)
+
+Two found by review, both real, one of them a genuine regression.
+
+**A redacted revision was offered as a reply target.** `latest_visible_event_id`
+returned `revision_event_id` unconditionally. When the revision currently on
+screen is redacted, `_project_redaction` clears the body but keeps the row and
+its revision pointer, so the query answered with a deleted event and a reply
+quoting it renders as nothing. The row's logical event is not redacted -- a
+redaction of the logical event deletes the whole row -- so it is the correct
+answer in that window, and the query now returns it.
+
+Not a regression: returning the *revision* rather than the logical event. The
+old cache path did the same thing (`visible_event_id` is `latest_event_id`,
+which is the edit's ID), so the spec argument against it, whatever its merits,
+is about a choice this cutover inherited rather than one it made.
+
+**A caller that just sent was made to guess.** Deleting outbound seeding made
+reads after a send echo-ordered, and the plan already says a turn that must
+know its own last message uses the event ID from the send response. Two
+compound sends did not: the voice tool discarded `companion_event_id` and
+re-queried, and the message tool passed only the thread root to its first
+attachment. Both chained under the message before the one they had just sent.
+
+`ConversationReader.latest_thread_event_id` now takes
+`known_latest_thread_event_id` alongside the `reply_to_event_id` and
+`existing_event_id` short-circuits it already owned, so one place decides what
+outranks what. The shared test double follows the same precedence, because one
+that answered a fixed value would let a caller silently stop passing it.
+
+## The cache census, as the remaining work plan (2026-08-06)
+
+Confirmed against HEAD by review. The 8c -> 8e -> 8f macro-order holds, with
+the membership fence landing first (done above). The census added seven items
+the phase list had missed:
+
+- Raw-room replay proof (`turn_controller.py`, `dispatch_replay_guard.py`)
+  reads recent room events and resolves their thread IDs through the cache.
+- `ThreadReadMode` and the point-read `turn_scope` memoization still leak
+  cache-specific semantics into the already-cut-over resolver and turn
+  controller.
+- Hook context reads the cache-only `AgentMessageSnapshot`.
+- Sidecar resolution keeps legacy event-ownership and MXC branches in
+  `message_content.py`, though the hydrator already resolves current-revision
+  sidecars without the cache.
+- Tool-runtime construction refuses to build a context without an event cache
+  that no production tool consumes.
+- Thread export is a third direct old-history consumer and needs its own slim
+  Matrix pagination path, because the projection is bounded and non-exporting
+  by design.
+- `sync_continuity` imports its persisted checkpoint type from the
+  certification owner slated for deletion, so that type must move first without
+  changing the persisted format.
+
+8c is narrowed on the same evidence: only two production consumers of
+`get_event` exist, and one of them dies with the cache. The replacement is
+relation resolution against the projection with a Matrix point fetch when the
+event was never observed, memoized for the turn and persisting no raw event
+JSON -- not a durable general-purpose lookup, which would rebuild the cache
+this phase exists to delete.

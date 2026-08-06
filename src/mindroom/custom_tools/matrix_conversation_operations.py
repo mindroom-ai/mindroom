@@ -300,6 +300,10 @@ class MatrixMessageOperations:
                     require_joined_room=False,
                     inherit_context_thread=False,
                     workspace_root=self._tool_output_workspace_root,
+                    # The text this call just sent is the newest event in the
+                    # thread. Its echo has not come back yet, so the projection
+                    # would answer with whatever preceded it.
+                    known_latest_thread_event_id=event_id,
                 )
                 if send_result is not None:
                     attachment_thread_id = send_result.thread_id

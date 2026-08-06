@@ -629,6 +629,90 @@ class TestBoundedReads:
         assert seen == sorted(identifiers)
 
 
+class TestLatestVisibleEvent:
+    """The reply target a thread-blind client is pointed at."""
+
+    async def test_an_empty_thread_has_no_latest_event(self, alice: PrincipalStore) -> None:
+        """An empty thread has no latest event."""
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
+
+    async def test_the_newest_reply_wins(self, alice: PrincipalStore) -> None:
+        """The newest reply wins."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$early", ts=2_000, thread_id="$root")
+        await admit(alice, "$late", ts=3_000, thread_id="$root")
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$late"
+
+    async def test_an_edited_message_answers_with_the_revision_on_screen(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An edit is the event actually in the room, so it is what a reply quotes."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$child", ts=2_000, thread_id="$root")
+        await admit(alice, "$child-edit", ts=3_000, thread_id="$root", content=edit("$child", "revised"))
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$child-edit"
+
+    async def test_a_redacted_revision_answers_with_its_logical_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Quoting a deleted edit renders as nothing; the original is still there."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$child", ts=2_000, thread_id="$root")
+        await admit(alice, "$child-edit", ts=3_000, thread_id="$root", content=edit("$child", "revised"))
+        await admit(alice, "$redaction", ts=4_000, kind=EventKind.REDACTION, redacts="$child-edit")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=10)
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$child"]
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$child"
+
+    async def test_a_redacted_logical_event_falls_through_to_the_message_behind_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Redacting the message itself removes the row, so the previous one answers."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$early", ts=2_000, thread_id="$root")
+        await admit(alice, "$late", ts=3_000, thread_id="$root")
+        await admit(alice, "$redaction", ts=4_000, kind=EventKind.REDACTION, redacts="$late")
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$early"
+
+    async def test_a_root_only_thread_has_no_latest_event(self, alice: PrincipalStore) -> None:
+        """The root is stored in the room conversation, so a childless thread is empty.
+
+        The caller falls back to the thread ID, which is the root's own event ID,
+        so merging it here would only arrive at the same answer twice.
+        """
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$root-edit", ts=2_000, content=edit("$root", "revised"))
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
+
+    async def test_another_thread_in_the_room_does_not_answer(self, alice: PrincipalStore) -> None:
+        """Another thread in the room does not answer."""
+        await admit(alice, "$other", ts=9_000, thread_id="$other-root")
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
+
+    async def test_a_rejoin_stops_the_previous_membership_from_answering(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A rejoin can expose different history, so the old tail cannot be quoted."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$reply"
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
+
+
 class TestSchemaUpgrade:
     """A database that predates a column has to gain it, not fail on it."""
 
@@ -663,6 +747,38 @@ class TestSchemaUpgrade:
 
             page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=5)
             assert [m.content["body"] for m in page.messages] == ["hello"]
+        finally:
+            await store.close()
+
+    async def test_a_card_table_predating_its_resolution_column_still_works(
+        self,
+        legacy_approval_cards_store: EventJournalStore,
+    ) -> None:
+        """Approval cards shipped before decisions were recorded on them.
+
+        Every statement naming ``resolution_json`` runs after store opening, so
+        the upgrade has to have happened by then -- on both backends, since one
+        guards the add itself and the other inspects the existing columns.
+        """
+        store = legacy_approval_cards_store
+        try:
+            principal = store.principal("agent@alice")
+            await principal.remember_approval_card(room_id=ROOM, card_event_id="$card", card={"body": "run it?"})
+
+            stored = await principal.pending_approval_card(room_id=ROOM, card_event_id="$card")
+            assert stored is not None
+            assert stored.resolution is None
+
+            await principal.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+            resolved = await principal.pending_approval_card(room_id=ROOM, card_event_id="$card")
+            assert resolved is not None
+            assert resolved.resolution == {"status": "approved"}
+            assert [c.resolution for c in await principal.pending_approval_cards(room_id=ROOM)] == [
+                {"status": "approved"},
+            ]
+
+            await principal.forget_approval_card(card_event_id="$card")
+            assert await principal.pending_approval_cards(room_id=ROOM) == ()
         finally:
             await store.close()
 

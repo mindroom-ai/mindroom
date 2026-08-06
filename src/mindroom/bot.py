@@ -97,7 +97,14 @@ from .delivery_gateway import (
 from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
-from .event_journal import ApprovalView, EventClass, EventJournalStore, EventKind, SemanticConsumer
+from .event_journal import (
+    ApprovalView,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    MembershipFence,
+    SemanticConsumer,
+)
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -505,6 +512,9 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
             ),
+        )
+        self._membership_fence = MembershipFence(
+            store=self._journal_store.principal(self._journal_principal_id),
         )
         self._conversation_reader = ConversationReader(
             store=self._journal_store.principal(self._journal_principal_id),
@@ -1846,6 +1856,7 @@ class AgentBot:
         departed_room_ids: set[str],
     ) -> None:
         """Fence departed rooms and refresh joined-room cache access for one sync response."""
+        await self._membership_fence.fence_reported_departures(departed_room_ids)
         if departed_room_ids:
             await self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
         for room_id in departed_room_ids:
@@ -2024,6 +2035,7 @@ class AgentBot:
     async def _purge_left_room(self, room_id: str) -> None:
         """Fence and purge one principal-owned room immediately after departure."""
         self._local_departures_awaiting_sync.add(room_id)
+        await self._membership_fence.fence_local_departure(room_id)
         await self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
         await self._conversation_cache.purge_rooms((room_id,))
 

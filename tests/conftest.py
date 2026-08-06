@@ -705,6 +705,55 @@ async def journal_store(
         await store.close()
 
 
+_LEGACY_APPROVAL_CARDS_DDL = """
+    CREATE TABLE approval_cards (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, card_event_id TEXT NOT NULL,
+        card_json TEXT NOT NULL, membership_epoch BIGINT NOT NULL, created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, card_event_id)
+    )
+"""
+
+
+@pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
+async def legacy_approval_cards_store(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> AsyncGenerator["EventJournalStore", None]:
+    """Return a store opened onto an `approval_cards` table that predates `resolution_json`.
+
+    `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it is, so
+    the column arrives only if the upgrade path runs. Both backends have their
+    own upgrade path and neither can vouch for the other.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
+
+    if str(request.param) == "sqlite":
+        database_path = tmp_path / "legacy_event_journal.db"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(_LEGACY_APPROVAL_CARDS_DDL)
+        store = EventJournalStore.open_sqlite(database_path)
+    else:
+        import psycopg  # noqa: PLC0415
+        from psycopg import sql  # noqa: PLC0415
+
+        database_url = request.getfixturevalue("postgres_journal_url")
+        schema = f"journal_{uuid.uuid4().hex}"
+        with psycopg.connect(database_url, autocommit=True) as db:
+            db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            db.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+            db.execute(_LEGACY_APPROVAL_CARDS_DDL)
+        separator = "&" if "?" in database_url else "?"
+        store = EventJournalStore.open_postgres(
+            f"{database_url}{separator}options=-csearch_path%3D{schema}",
+        )
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
 @pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
 def event_cache_factory(
     request: pytest.FixtureRequest,
@@ -1058,6 +1107,31 @@ class FakeOutbox:
 def make_outbox_mock() -> OutboxView:
     """Return an outbox a delivery test can actually send through."""
     return cast("OutboxView", FakeOutbox())
+
+
+def make_latest_thread_event_id_mock(projected: str | None = None) -> AsyncMock:
+    """Return a reply-fallback stand-in that follows the real precedence.
+
+    A double that answered one fixed value would let a caller stop passing
+    ``known_latest_thread_event_id`` -- or start passing one where a deliberate
+    reply target already decided the answer -- and still pass. ``projected`` is
+    what the projection would report; without it, an empty thread answers with
+    its own root, exactly as the real reader does.
+    """
+
+    async def _answer(
+        *,
+        room_id: str,  # noqa: ARG001 - part of the signature under test
+        thread_id: str | None,
+        reply_to_event_id: str | None = None,
+        existing_event_id: str | None = None,
+        known_latest_thread_event_id: str | None = None,
+    ) -> str | None:
+        if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
+            return None
+        return known_latest_thread_event_id or projected or thread_id
+
+    return AsyncMock(side_effect=_answer)
 
 
 def make_conversation_reader_mock() -> ConversationReader:

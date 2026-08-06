@@ -9,6 +9,7 @@ Three facts live here, each with exactly one owner:
 
 from .approvals import StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
+from .membership import MembershipFence, MembershipView
 from .models import (
     AdmissionResult,
     ConversationCursor,
@@ -52,6 +53,8 @@ __all__ = [
     "HydrationView",
     "InboundEvent",
     "JournalEvent",
+    "MembershipFence",
+    "MembershipView",
     "OutboxDelivery",
     "OutboxView",
     "PrincipalStore",

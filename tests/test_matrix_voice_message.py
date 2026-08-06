@@ -23,6 +23,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_event_cache_mock,
+    make_latest_thread_event_id_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -79,7 +80,7 @@ def _context(
     conversation_cache = make_conversation_cache_mock()
     conversation_cache.notify_outbound_message = MagicMock()
     conversation_reader = make_conversation_reader_mock()
-    conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest")
+    conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock("$latest")
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -184,6 +185,7 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
     context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id="!room:localhost",
         thread_id="$thread-root",
+        known_latest_thread_event_id=None,
     )
     mock_send.assert_awaited_once_with(
         context.client,
@@ -325,6 +327,21 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
     mock_send.assert_awaited_once()
     assert mock_send.await_args.kwargs["caption"] == "Audio body"
     assert mock_send.await_args.kwargs["thread_id"] == "$thread-root"
+    # The companion text is the newest event in the thread by the time the audio
+    # goes out. Its echo has not arrived, so the projection still answers
+    # `$latest` -- which is what the companion itself correctly replied to.
+    assert mock_send.await_args.kwargs["latest_thread_event_id"] == "$companion-event"
+    # The companion text resolved its own fallback from the projection; the
+    # audio was handed the companion instead of reading a projection that
+    # cannot have seen it yet.
+    assert [call.kwargs for call in context.conversation_reader.latest_thread_event_id.await_args_list] == [
+        {"room_id": "!room:localhost", "thread_id": "$thread-root"},
+        {
+            "room_id": "!room:localhost",
+            "thread_id": "$thread-root",
+            "known_latest_thread_event_id": "$companion-event",
+        },
+    ]
 
     payload = _payload(result)
     assert payload["status"] == "ok"

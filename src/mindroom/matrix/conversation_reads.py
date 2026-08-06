@@ -110,6 +110,7 @@ class ConversationReader:
         thread_id: str | None,
         reply_to_event_id: str | None = None,
         existing_event_id: str | None = None,
+        known_latest_thread_event_id: str | None = None,
     ) -> str | None:
         """Return the event an MSC3440 reply fallback should point at.
 
@@ -117,15 +118,22 @@ class ConversationReader:
         an existing event, or one that already knows what it is replying to,
         needs no fallback and gets ``None`` so it keeps what it has.
 
+        ``known_latest_thread_event_id`` is the send response of a message this
+        same execution just put in the thread. Reads issued after a send are
+        echo-ordered, not read-your-writes, so the projection would answer with
+        whatever preceded it; a caller holding the newer fact is believed.
+
         The thread root is the answer when the projection has nothing newer.
         That is right for an empty thread and it is also the safe reading of a
-        thread whose newest message is this bot's own, still waiting for its
-        echo -- a reply anchored one message back still renders in the thread,
-        because the ``m.thread`` relation is what places it. This fallback only
-        decides what a client that ignores threads shows it under.
+        thread whose newest message is another principal's, still waiting for
+        its echo -- a reply anchored one message back still renders in the
+        thread, because the ``m.thread`` relation is what places it. This
+        fallback only decides what a client that ignores threads shows it under.
         """
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
             return None
+        if known_latest_thread_event_id is not None:
+            return known_latest_thread_event_id
         return await self.store.latest_visible_event_id(room_id=room_id, thread_id=thread_id) or thread_id
 
     async def read(

@@ -38,6 +38,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_event_cache_mock,
+    make_latest_thread_event_id_mock,
     make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
@@ -86,13 +87,6 @@ def _make_context(
     agent_thread_mode: str = "thread",
     event_cache: object = _DEFAULT_EVENT_CACHE,
 ) -> ToolRuntimeContext:
-    async def _latest_thread_event_id(
-        *_args: object,
-        thread_id: str | None = None,
-        **_kwargs: object,
-    ) -> str | None:
-        return thread_id
-
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
         Config(
@@ -116,7 +110,7 @@ def _make_context(
     conversation_cache = make_conversation_cache_mock()
     conversation_cache.notify_outbound_message = Mock()
     conversation_reader = make_conversation_reader_mock()
-    conversation_reader.latest_thread_event_id = AsyncMock(side_effect=_latest_thread_event_id)
+    conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
@@ -709,7 +703,9 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     ctx.conversation_reader.latest_thread_event_id.assert_has_awaits(
         [
             call(room_id=ctx.room_id, thread_id=None),
-            call(room_id=ctx.room_id, thread_id="$evt"),
+            # The attachment is told what the text send returned rather than
+            # being left to read a projection that has not seen it yet.
+            call(room_id=ctx.room_id, thread_id="$evt", known_latest_thread_event_id="$evt"),
         ],
     )
     mock_send.assert_awaited_once()
@@ -824,7 +820,9 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.room_id,
         attachment.local_path,
         thread_id=ctx.thread_id,
-        latest_thread_event_id=ctx.thread_id,
+        # The reply text this same call just sent, not the thread root a
+        # projection read would still be answering with until its echo lands.
+        latest_thread_event_id="$reply_evt",
         conversation_cache=ctx.conversation_cache,
     )
 
@@ -882,7 +880,8 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.room_id,
         attachment.local_path,
         thread_id=explicit_thread_id,
-        latest_thread_event_id=explicit_thread_id,
+        # The text this same call just sent into the explicit thread.
+        latest_thread_event_id="$send_evt",
         conversation_cache=ctx.conversation_cache,
     )
 

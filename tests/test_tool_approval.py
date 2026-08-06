@@ -108,6 +108,14 @@ class FakeApprovalCards:
         await self.remember_approval_card(room_id=room_id, card_event_id=card_event_id, card=card)
 
 
+class UnwritableApprovalCards(FakeApprovalCards):
+    """A store that remembers cards but cannot commit a decision to one."""
+
+    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:  # noqa: ARG002 - matches the view it stands in for
+        msg = f"cannot record a decision for {card_event_id!r}"
+        raise RuntimeError(msg)
+
+
 def _recording_point_lookup(
     cards: FakeApprovalCards,
     seen: list[tuple[str, str]],
@@ -2566,7 +2574,78 @@ async def test_concurrent_cached_response_events_emit_one_expired_edit(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Path) -> None:
+async def test_a_decision_that_cannot_be_recorded_is_never_shown(tmp_path: Path) -> None:
+    """A store that failed leaves a row still reading as unanswered.
+
+    Showing the decision anyway would release the tool and let the next
+    startup expire a card whose tool has already run, so the edit is not even
+    attempted and the card stays clickable.
+    """
+    cards = UnwritableApprovalCards()
+
+    async def sender(room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
+        await cards.store_card(
+            "$approval",
+            room_id,
+            {
+                "event_id": "$approval",
+                "room_id": room_id,
+                "sender": "@mindroom_router:localhost",
+                "type": "io.mindroom.tool_approval",
+                "origin_server_ts": int(datetime.now(UTC).timestamp() * 1000),
+                "content": content,
+            },
+        )
+        return SentApprovalEvent("$approval")
+
+    sender_mock = AsyncMock(side_effect=sender)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender_mock,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender_mock)
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    editor.assert_not_awaited()
+    assert result.resolved is False
+    assert decision.status == "expired"
+    assert decision.reason == "Tool approval request could not be delivered to Matrix."
+    assert cards.resolutions == {}
+    assert set(cards.cards) == {"$approval"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_does_not_give_one_decision_two_meanings(tmp_path: Path) -> None:
+    """The tool gets what was written down, because the room will get it too.
+
+    Composed on purpose: a live half that ends in denial and a restart half
+    that shows approval each look correct alone, and only disagree when the
+    same card crosses both. Once ``resolution_json`` commits, the decision is
+    settled -- the edit failing means the room has not been told yet, not that
+    the user decided something else.
+    """
     cards = FakeApprovalCards()
 
     async def sender(room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
@@ -2621,11 +2700,29 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
         reason=None,
     )
 
+    # The edit failed, so the room does not show it yet.
     assert first_result.resolved is False
-    assert decision.status == "denied"
-    assert decision.reason == "Tool approval request could not be delivered to Matrix."
+    # But the decision is committed, and it is the one the user made.
+    assert decision.status == "approved"
+    assert cards.resolutions["$approval"]["status"] == "approved"
+    # A second click cannot replace a decision already recorded, and does not
+    # spend a second edit trying.
     assert second_result.resolved is False
     assert editor.await_count == 1
+
+    # A later process finds the recorded decision and shows the same thing the
+    # live tool acted on -- not the opposite of it.
+    restarted = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await restarted.discard_pending_on_startup() == 1
+    assert editor.await_args.args[2]["status"] == "approved"
+    assert cards.cards == {}
 
 
 @pytest.mark.asyncio

@@ -801,6 +801,81 @@ class TestPointRefetch:
         assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
 
 
+class TestReplyFallback:
+    """What a thread-blind client is told this message is replying to."""
+
+    @staticmethod
+    def _reader(store: PrincipalStore) -> ConversationReader:
+        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
+
+    async def test_the_newest_projected_reply_answers(self, alice: PrincipalStore) -> None:
+        """The newest projected reply answers."""
+        await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
+
+        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$reply"
+
+    async def test_an_empty_thread_answers_with_its_root(self, alice: PrincipalStore) -> None:
+        """An empty thread answers with its root."""
+        await admit_all(alice, [raw("$root", "root")])
+
+        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$root"
+
+    async def test_a_caller_that_just_sent_is_believed_over_the_projection(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Reads after a send are echo-ordered, so the sender holds the newer fact."""
+        await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
+
+        answer = await self._reader(alice).latest_thread_event_id(
+            room_id=ROOM,
+            thread_id="$root",
+            known_latest_thread_event_id="$just-sent",
+        )
+
+        assert answer == "$just-sent"
+
+    async def test_a_known_event_does_not_invent_a_fallback_outside_a_thread(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room-level send has no thread relation to hang a fallback on."""
+        answer = await self._reader(alice).latest_thread_event_id(
+            room_id=ROOM,
+            thread_id=None,
+            known_latest_thread_event_id="$just-sent",
+        )
+
+        assert answer is None
+
+    async def test_a_caller_replying_deliberately_keeps_its_own_target(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An explicit reply target outranks both the projection and a known send."""
+        await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
+        reader = self._reader(alice)
+
+        assert (
+            await reader.latest_thread_event_id(
+                room_id=ROOM,
+                thread_id="$root",
+                reply_to_event_id="$chosen",
+                known_latest_thread_event_id="$just-sent",
+            )
+            is None
+        )
+        assert (
+            await reader.latest_thread_event_id(
+                room_id=ROOM,
+                thread_id="$root",
+                existing_event_id="$being-edited",
+                known_latest_thread_event_id="$just-sent",
+            )
+            is None
+        )
+
+
 class TestReadModes:
     """The two callers, and what each is allowed to see."""
 

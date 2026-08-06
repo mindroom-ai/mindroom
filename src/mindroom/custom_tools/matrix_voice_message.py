@@ -308,6 +308,11 @@ class MatrixVoiceMessageTools(Toolkit):
         latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
             room_id=room_id,
             thread_id=thread_id,
+            # The companion text was just sent into this thread, so it is the
+            # newest event by construction. The projection would answer with
+            # whatever preceded it until that echo arrives, chaining the audio
+            # under the wrong message for a thread-blind client.
+            known_latest_thread_event_id=companion_event_id,
         )
         if latest_thread_event_id is not None:
             return latest_thread_event_id, None

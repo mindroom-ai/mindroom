@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_latest_thread_event_id_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,13 +42,6 @@ def _tool_context(
     attachment_ids: tuple[str, ...] = (),
     process_env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
-    async def _latest_thread_event_id(
-        *_args: object,
-        thread_id: str | None = None,
-        **_kwargs: object,
-    ) -> str | None:
-        return thread_id
-
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
     runtime_paths = resolve_runtime_paths(
@@ -65,7 +58,7 @@ def _tool_context(
     )
     conversation_cache = AsyncMock()
     conversation_reader = AsyncMock()
-    conversation_reader.latest_thread_event_id.side_effect = _latest_thread_event_id
+    conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     return ToolRuntimeContext(
         agent_name="openclaw",
         target=MessageTarget.resolve(
@@ -765,6 +758,7 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id=context.room_id,
         thread_id=context.thread_id,
+        known_latest_thread_event_id=None,
     )
     first_call = mock_send.await_args_list[0]
     second_call = mock_send.await_args_list[1]
@@ -946,6 +940,7 @@ async def test_send_context_attachments_inherits_resolved_thread_scope(tmp_path:
     ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id=ctx.room_id,
         thread_id="$thread-root:localhost",
+        known_latest_thread_event_id=None,
     )
     assert mocked.await_args.kwargs["thread_id"] == "$thread-root:localhost"
 

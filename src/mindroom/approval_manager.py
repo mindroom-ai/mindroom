@@ -11,6 +11,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -63,6 +64,19 @@ _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
+
+
+class _ResolutionOutcome(Enum):
+    """How far one decision got between being committed and being shown."""
+
+    # Nothing was written down. The card is still unanswered by every reader of
+    # it, so a later click or a startup expiry remains the correct outcome.
+    UNRECORDED = "unrecorded"
+    # Committed, but the room has not been told. Startup redelivers it; the
+    # decision itself is settled and cannot be replaced.
+    RECORDED = "recorded"
+    # Committed and shown. The card is finished and has been dropped.
+    DELIVERED = "delivered"
 
 
 class ToolApprovalTransportError(RuntimeError):
@@ -796,12 +810,13 @@ class _ApprovalManager:
                 card_event_id=pending.card_event_id,
             )
         with self._claimed_resolution(pending.card_event_id):
-            delivered = await self._emit_resolution(
+            outcome = await self._emit_resolution(
                 pending,
                 status="expired",
                 reason=reason,
                 resolved_by=resolved_by,
             )
+            delivered = outcome is _ResolutionOutcome.DELIVERED
             with self._live_lock:
                 if delivered:
                     self._resolved_card_event_ids.add(pending.card_event_id)
@@ -818,24 +833,32 @@ class _ApprovalManager:
         decision: ApprovalDecision,
     ) -> bool:
         pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-        delivered = await self._emit_resolution(
+        outcome = await self._emit_resolution(
             pending,
             status=decision.status,
             reason=decision.reason,
             resolved_by=decision.resolved_by,
         )
-        if delivered:
-            self._complete_waiter(waiter.card_event_id, decision)
-            return True
-        fail_closed_decision = decision
-        if decision.status == "approved":
-            fail_closed_decision = self._new_decision(
-                status="denied",
-                reason=_DEFAULT_SEND_FAILURE_REASON,
-                resolved_by=decision.resolved_by,
+        if outcome is _ResolutionOutcome.UNRECORDED:
+            # Nothing was committed, so the card is still genuinely unanswered:
+            # it stays clickable, and a later startup may expire it. Releasing
+            # the tool on the strength of a decision no durable record agrees
+            # with is the one outcome that cannot be walked back.
+            self._complete_waiter(
+                waiter.card_event_id,
+                self._new_decision(
+                    status="expired",
+                    reason=_DEFAULT_SEND_FAILURE_REASON,
+                    resolved_by=decision.resolved_by,
+                ),
             )
-        self._complete_waiter(waiter.card_event_id, fail_closed_decision)
-        return False
+            return False
+        # Committed. The waiter gets exactly what was written down, whether or
+        # not the room has been told yet -- a decision that ran the tool while
+        # the record says otherwise is a card with two meanings, and startup
+        # would go on to make the room show the one that did not happen.
+        self._complete_waiter(waiter.card_event_id, decision)
+        return outcome is _ResolutionOutcome.DELIVERED
 
     async def _emit_resolution(
         self,
@@ -844,9 +867,9 @@ class _ApprovalManager:
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
-    ) -> bool:
+    ) -> _ResolutionOutcome:
         if self._edit_event is None:
-            return False
+            return _ResolutionOutcome.UNRECORDED
         resolution = self._resolved_event_content(
             pending,
             status=status,
@@ -859,8 +882,11 @@ class _ApprovalManager:
         # redeliver; recording it afterwards would leave one that looks
         # unanswered, and startup would expire a decision the room already
         # shows -- possibly an approval whose tool has already run.
-        await self._record_resolution(pending.card_event_id, resolution)
-        return await self._deliver_resolution(pending, resolution)
+        if not await self._record_resolution(pending.card_event_id, resolution):
+            return _ResolutionOutcome.UNRECORDED
+        if await self._deliver_resolution(pending, resolution):
+            return _ResolutionOutcome.DELIVERED
+        return _ResolutionOutcome.RECORDED
 
     async def _deliver_resolution(self, pending: PendingApproval, resolution: dict[str, Any]) -> bool:
         """Show one already-recorded decision, dropping the card once it lands."""
@@ -884,9 +910,17 @@ class _ApprovalManager:
             await self._forget_card(pending.card_event_id)
         return delivered
 
-    async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> None:
+    async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> bool:
+        """Commit one decision, reporting whether the durable record now agrees.
+
+        A store that was never configured remembers no card, so it owes no
+        decision either and there is nothing left disagreeing. A configured
+        store that failed is the dangerous case: its row exists and still reads
+        as unanswered, so showing the decision anyway would let the next
+        startup expire a card whose tool has already run.
+        """
         if self._cards is None:
-            return
+            return True
         try:
             await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
         except Exception:
@@ -895,6 +929,8 @@ class _ApprovalManager:
                 event_id=card_event_id,
                 exc_info=True,
             )
+            return False
+        return True
 
     def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
         """Return the live waiter's own view of one card.

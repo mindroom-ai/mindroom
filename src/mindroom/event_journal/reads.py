@@ -136,20 +136,24 @@ def latest_visible_event_id(
     ``m.in_reply_to`` fallback for clients that do not understand threads, and
     what those render is the event that is actually in the room.
 
-    A message awaiting a refetch still answers. Its body is withheld from every
-    read, but its identity is not in doubt, and pointing a reply at it is
-    correct whether or not its text is currently servable.
+    Unless that revision was redacted. A message keeps its row when the edit
+    currently on screen is deleted -- the body is withheld pending a refetch,
+    but the message did not stop existing -- and quoting a redacted event
+    renders as nothing. Its logical event is the answer in that window: a
+    redaction of the logical event deletes the whole row, so a row that is
+    still here has an original that is still in the room.
     """
     row = transaction.fetchone(
         """
-        SELECT revision_event_id FROM visible_messages
+        SELECT CASE WHEN content_json IS NULL THEN logical_event_id ELSE revision_event_id END AS reply_target
+        FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND thread_id = ?
         ORDER BY created_ts DESC, logical_event_id DESC
         LIMIT 1
         """,
         (principal_id, room_id, encode_thread_id(thread_id)),
     )
-    return None if row is None else str(row["revision_event_id"])
+    return None if row is None else str(row["reply_target"])
 
 
 def pending_refreshes(
