@@ -631,6 +631,7 @@ def _obligation_runner(
     store = EventJournalStore.open_sqlite(tracking_path / "event_journal.db")
     return JournalDispatcher(
         store=store.principal(f"{entity_name}@{principal_id}"),
+        self_sender=principal_id,
         callbacks=JournalCallbacks(
             on_message=harness.controller.handle_text_event,
             on_media=harness.controller.handle_media_event,

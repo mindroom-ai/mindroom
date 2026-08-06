@@ -148,6 +148,28 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert bot_no_stream.enable_streaming is False
 
+    def test_journal_admission_is_given_a_matrix_id_not_a_journal_principal(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The value a sender is compared against has to be a sender.
+
+        Both admission and hydration decide whether a streaming edit is this
+        bot's own transport by comparing ``event.sender``. The journal
+        principal is ``agent_name@matrix_id``, which no Matrix event can ever
+        carry, so wiring that here would make the rule match nothing at all —
+        and nothing else in the system would notice.
+        """
+        config = self.create_mock_config(tmp_path)
+
+        bot = AgentBot(mock_agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!test:localhost"])
+
+        matrix_id = bot.matrix_id.full_id
+        assert bot._journal_dispatcher.self_sender == matrix_id
+        assert bot._conversation_reader.hydrator.self_sender == matrix_id
+        assert bot._journal_principal_id != matrix_id
+
     @pytest.mark.asyncio
     async def test_ensure_user_account_accepts_passwordless_managed_account(
         self,

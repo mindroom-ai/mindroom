@@ -116,6 +116,7 @@ visibility = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
@@ -127,10 +128,22 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.media",
+    "mindroom.matrix.transport_progress",
 ]
 visibility = [
     "mindroom.bot",
     "mindroom.journal_dispatch",
+]
+
+[[modules]]
+path = "mindroom.matrix.transport_progress"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+]
+visibility = [
+    "mindroom.matrix.conversation_hydration",
+    "mindroom.matrix.journal_ingress",
 ]
 
 [[modules]]
@@ -166,6 +179,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.message_content",
     "mindroom.matrix.sidecar_content",
+    "mindroom.matrix.transport_progress",
 ]
 visibility = [
     "mindroom.bot",

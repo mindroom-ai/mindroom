@@ -89,6 +89,10 @@ class JournalDispatcher:
     """Admit Matrix events durably, then run their callbacks from the journal."""
 
     store: DispatchView
+    # This bot's raw Matrix user ID, threaded through to admission so its own
+    # streaming progress edits are recognized as transport and left out of the
+    # conversation projection.
+    self_sender: str
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
@@ -116,6 +120,7 @@ class JournalDispatcher:
         self._worker = PendingEventWorker(store=self.store, handle=self._run_event)
         self._ingress = JournalIngress(
             store=self.store,
+            self_sender=self.self_sender,
             on_admitted=self._worker.wake,
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
@@ -191,7 +196,7 @@ class JournalDispatcher:
         try:
             await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),
-                projected_event(room.room_id, event, kind),
+                projected_event(room.room_id, event, kind, self_sender=self.self_sender),
             )
         except Exception:
             if self.on_persist_failure is not None:

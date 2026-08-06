@@ -485,7 +485,11 @@ async def prove_history_exhaustion(
     room_id = room.room_id
     await _send(client, room_id, _text("only message"))
 
-    hydrator = ConversationHydrator(store=store, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
+    hydrator = ConversationHydrator(
+        store=store,
+        runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
+        self_sender=client.user_id,
+    )
     await hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
 
     findings.record(
@@ -524,7 +528,7 @@ async def _admit_from_server(
     kind = EventKind.REDACTION if isinstance(event, nio.RedactionEvent) else EventKind.MESSAGE
     await store.admit(
         inbound_event(room_id, event, kind, EventClass.ACTIONABLE),
-        projected_event(room_id, event, kind),
+        projected_event(room_id, event, kind, self_sender=client.user_id),
     )
     await store.settle(event_id, SettlementOutcome.SUCCEEDED)
 
@@ -542,7 +546,11 @@ async def run_proof(homeserver: str) -> Findings:
                 msg = f"room creation failed: {room}"
                 raise TypeError(msg)
             room_id = room.room_id
-            hydrator = ConversationHydrator(store=store, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
+            hydrator = ConversationHydrator(
+                store=store,
+                runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
+                self_sender=client.user_id,
+            )
 
             await prove_recursion_depth(client, room_id, findings)
             await prove_edit_redaction(client, store, hydrator, room_id, findings)
