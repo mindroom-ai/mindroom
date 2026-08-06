@@ -255,7 +255,7 @@ The harness must cover these boundaries:
 2. After journal commit but before nio records callback acceptance.
 3. After callback acceptance but before the pending worker starts.
 4. After durable turn creation but before model execution.
-5. After the model result is durable but before outbox enqueue.
+5. After the model returns but before its result is durable.
 6. After outbox enqueue but before claim commits.
 7. After claim commits but before network I/O.
 8. After Matrix accepts the transaction but before acknowledgement is stored.
@@ -286,22 +286,26 @@ The prototype is built, and `tests/manual/event_journal_measurements.py` reprodu
 
 Measured on `macOS-26.5.2-arm64` with Python 3.13.10:
 
+Read measurements are taken against a conversation of 100,000 messages, walked to its end over 2,001 cursor pages, because an index that only helps the newest page would look fine over a small table.
+
 | Measurement | Result | Target |
 | --- | --- | --- |
 | Durable admission, p95 | 0.14 ms | under 50 ms |
-| Bounded conversation read, p95 | 0.19 ms | under 50 ms |
-| Deepest cursor page | 0.12 ms | no degradation with depth |
-| Writer-queue wait, p95 | 5.8 ms | under 100 ms |
+| Bounded conversation read, p95 | 0.16 ms | under 50 ms |
+| Deepest cursor page, at 100,000 messages | 4.44 ms | no degradation with depth |
+| Cursor pages walked | 2,001 | reaches the start of the conversation |
+| Writer-queue wait, p95 | 7.4 ms | under 100 ms |
 | SQLite lock failures, 50 concurrent conversations | 0 | zero |
-| Concurrent admission throughput | ~9,800 per second | not set |
+| Concurrent admission throughput | ~9,600 per second | not set |
 | Conversation read query plan | covering index `visible_messages_page` | indexed |
 | Pending replay query plan | index `journal_events_pending` | indexed |
-| Database size per message | 658 bytes | not set |
-| Replacement source | 3,202 lines | smaller than replaced |
-| Replaced owners | 17,877 lines | — |
-| Projected net change | −14,675 lines | materially net negative |
+| Database size per message | 636 bytes | not set |
+| Replacement source | 3,654 lines | smaller than replaced |
+| Replaced owners | 15,870 lines | — |
+| Projected net change | −12,216 lines | materially net negative |
 
-The nine crash boundaries all produce one terminal turn and at most one visible response, and the boundaries after the model result is durable never re-run the model.
+The nine crash boundaries all produce one terminal turn and at most one visible response.
+Enqueueing is what makes an answer durable, so boundary five costs a model run and every boundary after it re-uses the stored payload instead of asking the model again.
 
 The live-server proof passes against a disposable Tuwunel, covering relation traversal, redaction of the currently visible edit, edit churn, deterministic transaction reuse, device-scoped deduplication, and bounded history exhaustion.
 
@@ -356,6 +360,28 @@ Before the implementation PR can merge, remove the Matrix cache package, convers
 Reduce checkpoint publication to successful durable admission plus nio's exact unrecovered-room result.
 
 Do not preserve deleted cache interfaces to keep implementation-specific tests green.
+
+#### Cached facts the projection does not yet own
+
+An audit of what the Matrix cache persists against who consumes it found two durable facts that the latest-visible projection cannot represent as designed.
+Both must have a named owner before the cache package is deleted, because deleting it otherwise removes a behavior rather than replacing it.
+
+**Resolved sidecar text.**
+`_download_mxc_text` in `src/mindroom/matrix/message_content.py` downloads, decrypts, and durably caches the plaintext behind an MXC reference, so rebuilding a conversation does not refetch and re-decrypt the same oversized message every time.
+The projection stores the Matrix content, which holds the reference and not the resolved text.
+Attach the resolved text to the visible revision as one nullable value, cleared whenever the revision changes: an edit, a redaction, or a membership epoch advance all invalidate it, and a value that outlived any of those would serve the wrong body.
+
+**Tool-approval card recovery.**
+`ApprovalManager._cached_trusted_pending_approval_for_card` in `src/mindroom/approval_manager.py` reads an arbitrary `io.mindroom.tool_approval` event and its edits from the cache to recover pending approval state after a restart.
+Neither new owner can substitute for it: `visible_messages` models conversation messages, and the journal clears a settled event's payload on purpose.
+Give approvals their own small durable projection, owned by the approval subsystem, rather than widening either.
+
+### 3a. Outbound sends must fold into the projection
+
+Every successful visible send must update the projection when Matrix acknowledges it, through one common path.
+This covers Matrix tools and summaries, not only ordinary AI responses.
+Without it a conversation omits MindRoom's own newly sent message until its sync echo arrives, so a turn that reads its own conversation immediately after answering sees a room it has already spoken in as one it has not.
+The cache has this behavior today; its absence would be a regression, not a simplification.
 
 ### 3. Delivery ownership cutover
 

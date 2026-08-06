@@ -19,9 +19,11 @@ from mindroom.matrix.journal_ingress import (
     parse_journal_event,
     projected_event,
 )
-from mindroom.pending_event_worker import PendingEventWorker
+from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
@@ -481,3 +483,127 @@ class TestPendingEventWorker:
         await restarted.drain_once()
 
         assert handled == ["$m"]
+
+    async def test_a_backlog_larger_than_one_batch_is_fully_drained(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A bound that drops the remainder abandons durable work silently.
+
+        Driven through the pump rather than a drain, because only the pump has
+        to arrange its own next look: nothing admits a further event afterwards
+        to wake it, so a scan that stops at one page strands the rest forever.
+        """
+        count = _BATCH_SIZE + 1
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            handled.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        for index in range(count):
+            await self._admit(alice, text_event(f"$m{index:04d}", ts=1_000 + index))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await _eventually(lambda: len(handled) == count)
+        await worker.stop()
+
+        assert await alice.pending() == ()
+
+    async def test_work_admitted_while_a_lane_runs_is_still_dispatched(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The lost wakeup that leaves a live room permanently unanswered.
+
+        The pump is woken while the room's lane is busy, so it cannot start a
+        second one. Unless the finishing lane arranges another look, the event
+        admitted during that window stays pending forever even though the
+        process is healthy and still syncing.
+        """
+        released = asyncio.Event()
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            if event.event_id == "$slow":
+                await released.wait()
+            handled.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await self._admit(alice, text_event("$slow", ts=1_000))
+        worker.start()
+        await _eventually(lambda: worker._lanes != {})
+
+        await self._admit(alice, text_event("$late", ts=2_000))
+        worker.wake()
+        await asyncio.sleep(0)
+        released.set()
+
+        await _eventually(lambda: handled == ["$slow", "$late"])
+        await worker.stop()
+
+    async def test_a_deferred_turn_does_not_hide_the_events_behind_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A turn still running stays pending, so a scan must look past it.
+
+        A full page of in-flight turns is exactly what a busy bot looks like.
+        If the scan stops at the first one it cannot act on, every event queued
+        behind them is invisible until those turns happen to finish.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+            handled.append(event.event_id)
+            return None if event.event_id.startswith("$busy") else SettlementOutcome.SUCCEEDED
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), room_id=f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        handled.clear()
+
+        await self._admit(alice, text_event("$behind", ts=9_000), room_id="!behind:x")
+        worker.wake()
+
+        await _eventually(lambda: handled == ["$behind"])
+        await worker.stop()
+
+    async def test_a_failed_lane_is_retried_without_another_admission(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing else wakes the pump, so the failure has to schedule its own retry."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                msg = "model unavailable"
+                raise RuntimeError(msg)
+            return SettlementOutcome.SUCCEEDED
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        await _eventually(lambda: len(attempts) >= 2, seconds=10)
+        await worker.stop()
+
+        assert attempts == ["$m", "$m"]
+
+
+async def _eventually(predicate: Callable[[], bool], *, seconds: float = 5.0) -> None:
+    """Wait for a background pump to reach a state, without fixed sleeps."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    msg = "The worker never reached the expected state"
+    raise AssertionError(msg)

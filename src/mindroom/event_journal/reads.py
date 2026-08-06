@@ -131,16 +131,36 @@ def pending_refreshes(
     thread_id: str | None,
     limit: int,
 ) -> tuple[RefreshRequest, ...]:
-    """Return logical messages in one conversation that owe a point refetch."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_PAGE_COLUMNS} FROM visible_messages
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND refresh_token IS NOT NULL
-        ORDER BY created_ts DESC, logical_event_id DESC
-        LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, room_id, encode_thread_id(thread_id), limit),
+    """Return logical messages in one conversation that owe a point refetch.
+
+    A thread's root is stored in the room conversation, so a read of the thread
+    merges it in. This has to merge it the same way: a root whose visible
+    revision was redacted is missing from the thread read, and a repair pass
+    that could not see it would leave that read permanently incomplete.
+    """
+    rows = list(
+        transaction.fetchall(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND refresh_token IS NOT NULL
+            ORDER BY created_ts DESC, logical_event_id DESC
+            LIMIT ?
+            """,  # noqa: S608 - a fixed column list, not interpolated input
+            (principal_id, room_id, encode_thread_id(thread_id), limit),
+        ),
     )
+    if thread_id is not None:
+        root = transaction.fetchone(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ? AND refresh_token IS NOT NULL
+            """,  # noqa: S608 - a fixed column list, not interpolated input
+            (principal_id, room_id, thread_id),
+        )
+        if root is not None and all(row["logical_event_id"] != thread_id for row in rows):
+            rows.append(root)
+            rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
+            del rows[limit:]
     return tuple(_refresh_request(row) for row in rows)
 
 
@@ -174,11 +194,16 @@ def mark_conversation_hydrated(
     room_id: str,
     thread_id: str | None,
     expected_membership_epoch: int,
+    hydrated_from_ts: int | None = None,
 ) -> bool:
     """Record a completed hydration, unless membership moved under it.
 
     Hydration and this record commit together, so a conversation is never
     marked hydrated against events that a rejoin has already invalidated.
+
+    ``hydrated_from_ts`` records the floor of the window that was actually
+    fetched, so "hydrated" never silently means "complete" for a room whose
+    history outran the walk.
     """
     row = transaction.fetchone(
         """
@@ -192,14 +217,35 @@ def mark_conversation_hydrated(
         return False
     transaction.execute(
         """
-        INSERT INTO conversation_hydration (principal_id, room_id, thread_id, membership_epoch)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO conversation_hydration (
+            principal_id, room_id, thread_id, membership_epoch, hydrated_from_ts
+        )
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
-            membership_epoch = excluded.membership_epoch
+            membership_epoch = excluded.membership_epoch,
+            hydrated_from_ts = excluded.hydrated_from_ts
         """,
-        (principal_id, room_id, encode_thread_id(thread_id), current_epoch),
+        (principal_id, room_id, encode_thread_id(thread_id), current_epoch, hydrated_from_ts),
     )
     return True
+
+
+def hydrated_from_ts(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> int | None:
+    """Return the oldest point hydration reached, or ``None`` if it reached the start."""
+    row = transaction.fetchone(
+        """
+        SELECT hydrated_from_ts FROM conversation_hydration
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        """,
+        (principal_id, room_id, encode_thread_id(thread_id)),
+    )
+    return None if row is None or row["hydrated_from_ts"] is None else int(row["hydrated_from_ts"])
 
 
 def _visible_message(row: Row) -> VisibleMessage:

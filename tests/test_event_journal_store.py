@@ -387,6 +387,26 @@ class TestRedaction:
         still_pending = await alice.pending_refreshes(room_id=ROOM, thread_id=None)
         assert still_pending == requests
 
+    async def test_a_thread_read_can_repair_its_own_root(self, alice: PrincipalStore) -> None:
+        """A read that can see a message must be able to repair it.
+
+        The root belongs to the room conversation, so a thread read merges it
+        in. If the repair pass cannot see it by the same rule, a strict thread
+        read raises forever: it reports the root as needing a refetch that
+        nothing will ever be asked to perform.
+        """
+        await admit(alice, "$root", content=text("first"))
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+        await admit(alice, "$edit", ts=3_000, content=edit("$root", "deleted"))
+        await admit(alice, "$redaction", ts=4_000, redacts="$edit", kind=EventKind.REDACTION)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$root"]
+
+        requests = await alice.pending_refreshes(room_id=ROOM, thread_id="$root")
+
+        assert [request.logical_event_id for request in requests] == ["$root"]
+
     async def test_a_successful_refetch_installs_the_server_revision(
         self,
         alice: PrincipalStore,
@@ -616,6 +636,43 @@ class TestMembershipEpoch:
         await alice.advance_membership_epoch(ROOM)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_rejoining_removes_what_the_previous_membership_projected(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Otherwise the two memberships merge into one conversation.
+
+        Dropping only the hydration marker leaves the old messages readable,
+        so the next hydration adds the new membership's view on top of a
+        history this membership may not be entitled to see at all.
+        """
+        epoch = await alice.membership_epoch(ROOM)
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(message("$before")[1],),
+            expected_membership_epoch=epoch,
+        )
+        assert await bodies(alice) == ["$before"]
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await bodies(alice) == []
+
+    async def test_rejoining_keeps_the_proof_that_an_event_was_answered(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The dedup record has to outlive any rejoin, or the turn runs twice."""
+        admission, projected = message("$answered")
+        await alice.admit(admission, projected)
+        await alice.settle("$answered", SettlementOutcome.SUCCEEDED)
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.load_event("$answered") is not None
+        assert await alice.admit(*message("$answered")) is AdmissionResult.DUPLICATE
 
     async def test_hydration_racing_a_rejoin_installs_nothing(self, alice: PrincipalStore) -> None:
         """A partly applied hydration would look complete to the next reader."""

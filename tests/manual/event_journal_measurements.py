@@ -46,6 +46,11 @@ ROOM = "!measure:example.org"
 SENDER = "@alice:example.org"
 PRINCIPAL = "measurement"
 
+# The conversation size the plan's read targets are stated against. Deep
+# paging over a small table would measure the page cache, not the index.
+CONVERSATION_SIZE = 100_000
+_ADMISSION_SAMPLE = 2_000
+
 # The plan's initial targets, recorded here so a regression is visible rather
 # than merely slower.
 TARGET_ADMISSION_P95_MS = 50.0
@@ -97,7 +102,7 @@ def _p95(samples: Sequence[float]) -> float:
     return round(ordered[min(int(len(ordered) * 0.95), len(ordered) - 1)] * 1000, 3)
 
 
-async def measure_admission(store: PrincipalStore, report: Report, *, count: int = 2_000) -> None:
+async def measure_admission(store: PrincipalStore, report: Report, *, count: int = _ADMISSION_SAMPLE) -> None:
     """Time durable admission, which is on the sync callback's critical path."""
     samples: list[float] = []
     for index in range(count):
@@ -108,6 +113,21 @@ async def measure_admission(store: PrincipalStore, report: Report, *, count: int
     report.record("admission_p95_ms", _p95(samples))
     report.record("admission_mean_ms", round(statistics.mean(samples) * 1000, 3))
     report.record("admission_target_met", _p95(samples) < TARGET_ADMISSION_P95_MS)
+
+
+async def grow_conversation(store: PrincipalStore, report: Report, *, total: int = CONVERSATION_SIZE) -> None:
+    """Fill the room conversation to the scale the read targets are about.
+
+    Reads are measured against this, not against the admission sample. An
+    index that looks fine over a couple of thousand rows says nothing about a
+    room a bot has actually lived in, which is the case deep paging exists for.
+    """
+    started = time.perf_counter()
+    for index in range(_ADMISSION_SAMPLE, total):
+        inbound, projected = _event(index)
+        await store.admit(inbound, projected)
+    report.record("conversation_messages", total)
+    report.record("conversation_seed_seconds", round(time.perf_counter() - started, 1))
 
 
 async def measure_bounded_reads(store: PrincipalStore, report: Report, *, pages: int = 200) -> None:
@@ -130,7 +150,9 @@ async def measure_deep_paging(store: PrincipalStore, report: Report) -> None:
     cursor = None
     pages = 0
     samples: list[float] = []
-    while pages < 200:
+    # Walk the whole conversation rather than a prefix of it: the point is
+    # what the last page costs, not the first.
+    while pages < CONVERSATION_SIZE // 50 + 1:
         started = time.perf_counter()
         page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
         samples.append(time.perf_counter() - started)
@@ -249,6 +271,7 @@ async def run(report: Report) -> None:
         store = store_root.principal(PRINCIPAL)
         try:
             await measure_admission(store, report)
+            await grow_conversation(store, report)
             await measure_bounded_reads(store, report)
             await measure_deep_paging(store, report)
             await measure_concurrency(store, report)
@@ -256,7 +279,7 @@ async def run(report: Report) -> None:
             report.record("database_bytes", database_path.stat().st_size)
             report.record(
                 "database_bytes_per_message",
-                round(database_path.stat().st_size / (2_000 + 50 * 20), 1),
+                round(database_path.stat().st_size / (CONVERSATION_SIZE + 50 * 20), 1),
             )
         finally:
             await store_root.close()

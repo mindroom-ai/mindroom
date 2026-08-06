@@ -5,10 +5,10 @@ below stops the process at one specific moment, restarts everything that is
 not durable, and then checks the two properties that matter: exactly one
 terminal turn, and at most one visible response.
 
-The model is counted as well. Re-running a completed model call is not a
-correctness bug in the Matrix sense, but it is a real cost and a real source
-of divergence between the durable result and what the room shows, so the
-boundaries after the result is durable must not re-run it.
+The model is counted as well. Enqueueing is what makes an answer durable, so a
+crash before it costs a model run and a crash after it must not: the stored
+payload is the answer, and asking the model for another one would only produce
+a result that can never become visible.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from mindroom.event_journal import (
     EventKind,
     SettlementOutcome,
 )
+from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.pending_event_worker import PendingEventWorker
 from mindroom.response_delivery import ResponseDelivery
@@ -89,20 +90,27 @@ class TurnRuntime:
         return ResponseDelivery(store=self.store, send=self.homeserver.send)
 
     async def handle(self, event: JournalEvent) -> SettlementOutcome:
-        """Run one turn: model, durable result, enqueue, claim, send, settle."""
-        self.model_runs += 1
-        answer = f"answer to {event.event_id}"
-        if self.crash_after_model:
-            msg = "crashed after the model finished"
-            raise CrashError(msg)
+        """Run one turn: model, durable result, enqueue, claim, send, settle.
 
-        await self.store.enqueue_delivery(
-            turn_id=event.event_id,
-            stage=DeliveryStage.FINAL,
-            room_id=event.room_id,
-            thread_id=event.thread_id,
-            payload={"msgtype": "m.text", "body": answer},
-        )
+        A turn whose answer is already durable resumes from it. Spending the
+        model again could only produce an answer the outbox would discard, so
+        a restart picks up where the durable result left off.
+        """
+        durable = await self.store.load_delivery(turn_id=event.event_id, stage=DeliveryStage.FINAL)
+        if durable is None:
+            self.model_runs += 1
+            answer = f"answer to {event.event_id}"
+            if self.crash_after_model:
+                msg = "crashed after the model finished"
+                raise CrashError(msg)
+
+            await self.store.enqueue_delivery(
+                turn_id=event.event_id,
+                stage=DeliveryStage.FINAL,
+                room_id=event.room_id,
+                thread_id=event.thread_id,
+                payload={"msgtype": "m.text", "body": answer},
+            )
         if self.crash_after_enqueue:
             msg = "crashed after enqueue, before claim"
             raise CrashError(msg)
@@ -214,19 +222,22 @@ class TestCrashMatrix:
         await assert_settled_once(runtime)
         assert runtime.model_runs == 1
 
-    async def test_five_after_the_result_is_durable_before_enqueue(
+    async def test_five_after_the_model_before_the_result_is_durable(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """Five after the result is durable before enqueue."""
+        """Nothing is durable yet, so the answer has to be produced again."""
         await admit(runtime.store)
         runtime.crash_after_model = True
         await runtime.worker().drain_once()
+
+        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
 
         runtime.crash_after_model = False
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
+        assert runtime.model_runs == 2
 
     async def test_six_after_enqueue_before_the_claim_commits(
         self,
@@ -246,6 +257,7 @@ class TestCrashMatrix:
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
 
     async def test_seven_after_the_claim_before_network_io(
         self,
@@ -290,6 +302,7 @@ class TestCrashMatrix:
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
 
     async def test_nine_after_acknowledgement_before_settlement(
         self,
@@ -307,6 +320,56 @@ class TestCrashMatrix:
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+
+class TestRecoveryIsComplete:
+    """Startup recovery either sends everything it owes, or is not recovery."""
+
+    async def test_more_deliveries_than_one_batch_are_all_sent(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A bound that stops at one page leaves answers permanently unsent."""
+        count = _UNACKNOWLEDGED_BATCH + 1
+        for index in range(count):
+            await runtime.store.enqueue_delivery(
+                turn_id=f"turn-{index:04d}",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": f"answer {index}"},
+            )
+
+        recovered = await runtime.delivery.recover()
+
+        assert recovered == count
+        assert runtime.homeserver.visible_messages == count
+        assert await runtime.store.unacknowledged_deliveries() == ()
+
+    async def test_one_failing_delivery_does_not_block_the_rest(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A delivery that cannot be sent stays unacknowledged, so it repeats.
+
+        Recovery has to remember it rather than re-reading it forever, or the
+        first failure makes every later answer unreachable.
+        """
+        for index in range(2):
+            await runtime.store.enqueue_delivery(
+                turn_id=f"turn-{index}",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": f"answer {index}"},
+            )
+        runtime.homeserver.fail_next_send = True
+
+        recovered = await runtime.delivery.recover()
+
+        assert recovered == 1
+        assert runtime.homeserver.visible_messages == 1
 
 
 class TestModelIsNotRerun:

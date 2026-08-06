@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
+    _MAX_MESSAGES_PAGES,
     ConversationHydrator,
     _HydrationError,
     _projected_from_event,
@@ -86,6 +87,9 @@ class FakeClient:
     relation_calls: int = 0
     history_pages: int = 0
     history_end_token: str | None = None
+    # A room whose history outlives any startup walk, which is what a
+    # long-lived room actually looks like.
+    endless_history: bool = False
 
     async def room_get_event(
         self,
@@ -135,6 +139,14 @@ class FakeClient:
         """Return one page of history, then successful exhaustion."""
         del room_id, start, direction, limit
         self.history_pages += 1
+        if self.endless_history:
+            page = self.history_pages
+            return nio.RoomMessagesResponse(
+                ROOM,
+                [parse(raw(f"$page{page}", f"message {page}", ts=1_000 + page))],
+                "start",
+                f"token-{page}",
+            )
         if self.history_pages > 1:
             return nio.RoomMessagesResponse(ROOM, [], "start", self.history_end_token)
         return nio.RoomMessagesResponse(
@@ -342,6 +354,37 @@ class TestRoomHydration:
 
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert await bodies(alice) == ["first"]
+        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id=None) is None
+
+    async def test_a_bounded_walk_records_the_floor_it_reached(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hydrated marker must not silently mean a complete conversation.
+
+        A long-lived room has more history than a startup walk should read, so
+        the walk stops. What it may not do is record that partial view as the
+        whole conversation: a later reader paging back has to be able to tell
+        that there is history the projection was never given.
+        """
+        client = FakeClient(endless_history=True)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == _MAX_MESSAGES_PAGES
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id=None) == 1_001
+
+    async def test_a_thread_is_always_complete(self, alice: PrincipalStore) -> None:
+        """Relations return the whole tree, so a thread has no window floor."""
+        client = FakeClient(
+            events={"$root": raw("$root", "root")},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.hydrated_from_ts(room_id=ROOM, thread_id="$root") is None
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:
         """Hydration does not create pending work."""

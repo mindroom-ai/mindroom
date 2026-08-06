@@ -60,11 +60,18 @@ def advance_membership_epoch(
     principal_id: str,
     room_id: str,
 ) -> int:
-    """Invalidate everything hydrated for a room the bot has left and rejoined.
+    """Invalidate everything derived for a room the bot has left and rejoined.
 
     Rejoining can expose a different slice of history than the bot saw before,
     so anything derived from the previous membership has to stop being trusted
-    rather than be merged with the new view.
+    rather than be merged with the new view. Clearing the hydration marker
+    alone would not do that: the projected messages it produced would still be
+    readable, and the next hydration would merge the two memberships into one
+    conversation. The projection is therefore dropped with it, and rebuilt from
+    what the new membership can actually see.
+
+    The journal rows survive on purpose. They are the proof that an event
+    already produced its one turn, and that has to outlive any rejoin.
     """
     epoch = current_membership_epoch(transaction, principal_id, room_id) + 1
     transaction.execute(
@@ -75,10 +82,11 @@ def advance_membership_epoch(
         """,
         (principal_id, room_id, epoch),
     )
-    transaction.execute(
-        "DELETE FROM conversation_hydration WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
+    for table in ("conversation_hydration", "visible_messages", "unresolved_edits", "redaction_tombstones"):
+        transaction.execute(
+            f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
+            (principal_id, room_id),
+        )
     return epoch
 
 
@@ -132,16 +140,24 @@ def pending(
     principal_id: str,
     *,
     limit: int,
+    after_receipt_order: int | None = None,
 ) -> tuple[JournalEvent, ...]:
-    """Return actionable events awaiting semantic work, in receipt order."""
+    """Return actionable events awaiting semantic work, in receipt order.
+
+    ``after_receipt_order`` resumes the scan past events a caller has already
+    seen. Without it, a caller whose first page is entirely events it cannot
+    act on yet — turns still running — could never reach the ones behind them.
+    """
+    cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"
+    cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     rows = transaction.fetchall(
         f"""
         SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND state = 'pending'
+        WHERE principal_id = ? AND state = 'pending'{cursor_clause}
         ORDER BY receipt_order
         LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, limit),
+        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+        (principal_id, *cursor_params, limit),
     )
     return _decode_rows(rows)
 

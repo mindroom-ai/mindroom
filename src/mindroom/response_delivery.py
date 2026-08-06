@@ -82,21 +82,34 @@ class ResponseDelivery:
         Run at startup. A delivery the homeserver already accepted is resent
         under the same transaction ID and collapses back to the same event, so
         recovery cannot duplicate a visible message.
+
+        Every unacknowledged delivery is walked, not one page of them. The
+        store reads in bounded batches, but stopping after the first would
+        report success while leaving answers the user is waiting for unsent.
         """
         recovered = 0
-        for delivery in await self.store.unacknowledged_deliveries():
-            try:
-                await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
-            except Exception:
-                logger.exception(
-                    "response_delivery_recovery_failed",
-                    turn_id=delivery.turn_id,
-                    stage=delivery.stage.value,
-                    room_id=delivery.room_id,
-                )
-                continue
-            recovered += 1
-        return recovered
+        failed: set[tuple[str, str]] = set()
+        while True:
+            batch = await self.store.unacknowledged_deliveries()
+            remaining = [delivery for delivery in batch if (delivery.turn_id, delivery.stage.value) not in failed]
+            if not remaining:
+                return recovered
+            for delivery in remaining:
+                try:
+                    await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
+                except Exception:
+                    logger.exception(
+                        "response_delivery_recovery_failed",
+                        turn_id=delivery.turn_id,
+                        stage=delivery.stage.value,
+                        room_id=delivery.room_id,
+                    )
+                    # Acknowledgement is what removes a delivery from this
+                    # query, so a failure that is not remembered would be
+                    # retried forever instead of letting the rest through.
+                    failed.add((delivery.turn_id, delivery.stage.value))
+                    continue
+                recovered += 1
 
 
 __all__ = ["DeliveryStage", "ResponseDelivery", "SendDelivery"]

@@ -102,10 +102,6 @@ class JournalDispatcher:
     background_task_owner: object | None = None
     _worker: PendingEventWorker = field(init=False, repr=False)
     _ingress: JournalIngress = field(init=False, repr=False)
-    # Events whose turn is running in this process. They stay pending durably
-    # so a crash replays them, but redispatching them while the turn is alive
-    # would answer the same message twice.
-    _handed_off: set[str] = field(default_factory=set, init=False, repr=False)
     # The event objects nio already parsed, kept until their callback runs.
     # Replaying from the stored payload is what recovery is for; doing it for
     # an event that is still in hand would parse every event twice and discard
@@ -164,13 +160,13 @@ class JournalDispatcher:
         """Run everything currently pending to completion.
 
         This is the explicit recovery entry point, so it releases turn replay
-        and forgets which events it had handed to a turn. A turn that deferred without taking
+        and treats nothing as in flight. A turn that deferred without taking
         ownership — the router declining an unready candidate, say — would
         otherwise never be reconsidered. Duplicate turns are prevented by
         `TurnStore` claiming its sources, not by this bookkeeping.
         """
         self._turn_replay_released = True
-        self._handed_off.clear()
+        self._worker.forget_all_deferrals()
         return await self._worker.drain_once()
 
     async def admit_out_of_band(
@@ -231,15 +227,12 @@ class JournalDispatcher:
         if event.kind in TURN_BACKED_KINDS and (
             event.event_id in self._terminal_sources or self.turn_is_terminal(event.event_id)
         ):
-            # Checked before the in-flight guard on purpose. A turn that has
-            # already reported itself terminal owes nothing more, and running
-            # its callback again would ask the turn engine to redo work it has
-            # finished.
-            self._handed_off.discard(event.event_id)
+            # A turn that has already reported itself terminal owes nothing
+            # more, and running its callback again would ask the turn engine to
+            # redo work it has finished.
+            self._worker.release((event.event_id,))
             self._terminal_sources.discard(event.event_id)
             return SettlementOutcome.SUCCEEDED
-        if event.event_id in self._handed_off:
-            return None
         if (
             event.kind in TURN_BACKED_KINDS
             and not self._turn_replay_released
@@ -271,10 +264,7 @@ class JournalDispatcher:
         if room is None:
             room = self.room_for_id(event.room_id)
         with turn_dispatch_recovery_scope(active=replaying and event.kind in TURN_BACKED_KINDS):
-            outcome = await self._invoke(event, room, matrix_event)
-        if outcome is None:
-            self._handed_off.add(event.event_id)
-        return outcome
+            return await self._invoke(event, room, matrix_event)
 
     async def _invoke(
         self,
@@ -328,26 +318,23 @@ class JournalDispatcher:
         scheduling a coroutine from an arbitrary thread onto a loop nothing
         awaits, which is how a finished turn ends up looking pending forever.
         """
-        self._handed_off.difference_update(event_ids)
+        self._worker.release(event_ids)
         self._terminal_sources.update(event_ids)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
-        self._handed_off.difference_update(event_ids)
+        self._worker.release(event_ids)
         self._terminal_sources.difference_update(event_ids)
         await self.store.settle_many(event_ids, SettlementOutcome.INTENTIONALLY_IGNORED)
 
     def retry_turn_source(self, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""
-        self._handed_off.discard(event_id)
-        self._terminal_sources.discard(event_id)
-        self._worker.wake()
+        self.retry_turn_sources((event_id,))
 
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
-        for event_id in event_ids:
-            self._handed_off.discard(event_id)
-            self._terminal_sources.discard(event_id)
+        self._worker.release(event_ids)
+        self._terminal_sources.difference_update(event_ids)
         self._worker.wake()
 
     async def unsettled_event_ids(self) -> frozenset[str]:

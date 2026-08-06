@@ -1571,7 +1571,7 @@ class ExactReplyOracle:
                 if time.monotonic() >= settled_after:
                     return
         missing = {
-            logical_ref: len(self.response_ids[event_id])
+            f"{logical_ref} ({event_id})": len(self.response_ids[event_id])
             for event_id, logical_ref in self.expected_sources.items()
             if len(self.response_ids[event_id]) != 1
         }

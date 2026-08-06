@@ -164,14 +164,20 @@ class ConversationHydrator:
 
     async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
         epoch = await self.store.membership_epoch(room_id)
-        events = (
-            await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
-        )
+        if thread_id is not None:
+            # A thread is fetched through its relation tree, which the server
+            # returns in full, so there is no window to record.
+            events: tuple[ProjectedEvent, ...] = await self._fetch_thread(room_id, thread_id)
+            reached_start = True
+        else:
+            events, reached_start = await self._fetch_room(room_id)
+        hydrated_from_ts = None if reached_start else min((event.origin_server_ts for event in events), default=0)
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,
             thread_id=thread_id,
             events=events,
             expected_membership_epoch=epoch,
+            hydrated_from_ts=hydrated_from_ts,
         )
         if not installed:
             # Membership moved while the fetch was in flight, so this view is of
@@ -216,12 +222,18 @@ class ConversationHydrator:
             raise _HydrationError(msg) from error
         return tuple(events)
 
-    async def _fetch_room(self, room_id: str) -> tuple[ProjectedEvent, ...]:
-        """Walk a bounded amount of room history, once.
+    async def _fetch_room(self, room_id: str) -> tuple[tuple[ProjectedEvent, ...], bool]:
+        """Walk room history back to its beginning, once.
 
         A server that has run out of history answers with an empty chunk and no
         ``end`` token. That is successful exhaustion, not a failure, and
         treating it as one is what used to leave rooms permanently unready.
+
+        A long-lived room has more history than any startup walk should read,
+        so the budget is real and will be reached. What must not happen is
+        recording that walk as the whole conversation: the caller is told
+        whether the start was reached, and stores the floor of the window it
+        actually got when it was not.
         """
         events: list[ProjectedEvent] = []
         start: str | None = None
@@ -240,9 +252,16 @@ class ConversationHydrator:
                 if projected is not None:
                     events.append(projected)
             if not response.chunk or not response.end:
-                break
+                return tuple(events), True
             start = response.end
-        return tuple(events)
+        logger.info(
+            "conversation_hydration_window_bounded",
+            room_id=room_id,
+            pages=_MAX_MESSAGES_PAGES,
+            page_limit=_MESSAGES_PAGE_LIMIT,
+            events=len(events),
+        )
+        return tuple(events), False
 
     async def refresh(self, request: RefreshRequest) -> bool:
         """Refetch one logical message whose visible revision was redacted.
