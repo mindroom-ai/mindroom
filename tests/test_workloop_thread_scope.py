@@ -60,6 +60,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_event_cache_mock,
+    make_outbox_mock,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -756,6 +757,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 

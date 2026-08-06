@@ -111,6 +111,7 @@ path = "mindroom.event_journal"
 depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.bot",
+    "mindroom.delivery_gateway",
     "mindroom.journal_dispatch",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
@@ -199,7 +200,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.bot"]
+visibility = ["mindroom.bot", "mindroom.delivery_gateway"]
 
 [[modules]]
 path = "mindroom.reaction_dispatch"
@@ -1104,8 +1105,10 @@ depends_on = [
 path = "mindroom.delivery_gateway"
 depends_on = [
     "mindroom.constants",
+    "mindroom.event_journal",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
+    "mindroom.response_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]

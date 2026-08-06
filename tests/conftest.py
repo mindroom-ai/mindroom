@@ -52,7 +52,7 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
-from mindroom.event_journal import ConversationPage, VisibleMessage
+from mindroom.event_journal import ConversationPage, DeliveryStage, OutboxDelivery, OutboxView, VisibleMessage
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -977,6 +977,76 @@ def serve_conversation_reader(
     )
     reader.read.return_value = page
     reader.read_strict.return_value = page
+
+
+class FakeOutbox:
+    """An in-memory outbox with the real claim-before-send semantics.
+
+    A plain mock would let a test pass while the delivery never went through
+    the outbox at all. This keeps the two rules that matter: a claimed row's
+    payload is frozen, and an acknowledged row replays its recorded event ID
+    instead of sending again.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+
+    async def enqueue_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        edits_event_id: str | None = None,
+    ) -> str:
+        """Record intent, leaving an already-attempted row's payload alone."""
+        key = (turn_id, stage.value)
+        existing = self.rows.get(key)
+        if existing is not None:
+            return existing.transaction_id
+        transaction_id = f"tx-{turn_id}-{stage.value}"
+        self.rows[key] = OutboxDelivery(
+            turn_id=turn_id,
+            stage=stage,
+            room_id=room_id,
+            thread_id=thread_id,
+            transaction_id=transaction_id,
+            payload=dict(payload),
+            edits_event_id=edits_event_id,
+            acknowledged_event_id=None,
+            created_at_ns=len(self.rows),
+        )
+        return transaction_id
+
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before any network call."""
+        return self.rows.get((turn_id, stage.value))
+
+    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Return one delivery without claiming it."""
+        return self.rows.get((turn_id, stage.value))
+
+    async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
+        """Record the Matrix event one claimed delivery produced."""
+        key = (turn_id, stage.value)
+        self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
+
+    async def unacknowledged_deliveries(
+        self,
+        *,
+        limit: int = 256,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[OutboxDelivery, ...]:
+        """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        del limit, after
+        return tuple(row for row in self.rows.values() if row.acknowledged_event_id is None)
+
+
+def make_outbox_mock() -> OutboxView:
+    """Return an outbox a delivery test can actually send through."""
+    return cast("OutboxView", FakeOutbox())
 
 
 def make_conversation_reader_mock() -> ConversationReader:

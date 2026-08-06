@@ -548,6 +548,7 @@ class AgentBot:
                     store=self._journal_store.principal(self._journal_principal_id),
                     sender=runtime_matrix_id.full_id,
                 ),
+                outbox=self._journal_store.principal(self._journal_principal_id),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(

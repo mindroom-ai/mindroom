@@ -145,7 +145,11 @@ async def _send_prepared_room_message(
                 room_id,
                 message_type,
                 content_sent,
-                uuid4(),
+                # A deterministic ID is the only thing that makes a resend
+                # collapse onto the event the homeserver already accepted. A
+                # fresh UUID here would turn every outbox retry on an
+                # uncached room into a second visible message.
+                transaction_id if transaction_id is not None else uuid4(),
             )
             return await client._send(
                 nio.RoomSendResponse,
@@ -312,6 +316,7 @@ async def send_message_result(
     *,
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -365,6 +370,7 @@ async def send_message_result(
         cache_bypass=cache_bypass,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
     if response is None:
         emit_timing_event(

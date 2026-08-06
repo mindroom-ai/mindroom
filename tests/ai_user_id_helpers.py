@@ -53,6 +53,7 @@ from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     make_conversation_reader_mock,
     make_event_cache_mock,
+    make_outbox_mock,
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -422,6 +423,7 @@ def _build_response_runner(
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
     _set_gateway_method(

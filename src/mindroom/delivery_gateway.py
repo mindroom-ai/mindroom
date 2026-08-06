@@ -12,6 +12,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.event_journal import OutboxDelivery, OutboxView  # noqa: TC001
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -31,10 +32,11 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.outbound_projection import OutboundProjection  # noqa: TC001
+from mindroom.response_delivery import DeliveryStage, ResponseDelivery
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -81,6 +83,10 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
         "terminal_update_exception:",
     )
+
+
+class _DeliveryRefusedError(RuntimeError):
+    """Matrix declined one outbox delivery, leaving it unacknowledged."""
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,13 @@ class SendTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
+    # The turn this send belongs to, when it belongs to one. Present, the send
+    # goes through the outbox and carries a transaction ID derived from this
+    # value, so a resend after a crash collapses onto the event the homeserver
+    # already accepted. Absent, the send is not a turn -- a voice echo, a
+    # command confirmation -- and takes the direct path, because a synthetic
+    # turn ID would put a row in the outbox that recovery cannot reason about.
+    delivery_turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +329,7 @@ class DeliveryGatewayDeps:
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbound_projection: OutboundProjection
+    outbox: OutboxView
 
 
 @dataclass(frozen=True)
@@ -474,9 +488,68 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    async def _send_content(
+        self,
+        request: SendTextRequest,
+        room_id: str,
+        content: dict[str, Any],
+    ) -> DeliveredMatrixEvent | None:
+        """Send one built message, through the outbox when it belongs to a turn.
+
+        A send with no turn behind it -- a voice echo, a command confirmation,
+        a reconciliation notice -- takes the direct path. It has no identity
+        that survives a restart, so there is nothing for recovery to key on and
+        a durable row would only be a row nobody can resolve.
+        """
+        client = self._client()
+        if request.delivery_turn_id is None:
+            return await send_message_result(
+                client,
+                room_id,
+                content,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        delivered: DeliveredMatrixEvent | None = None
+
+        async def send(claimed: OutboxDelivery) -> str:
+            # The payload comes from the claimed row, not from the caller. A
+            # turn that ran twice sends what the first attempt froze: content
+            # regenerated after a claim would go out under a transaction ID the
+            # homeserver has already seen, be dropped as a duplicate, and leave
+            # the durable result and the room disagreeing forever.
+            nonlocal delivered
+            delivered = await send_message_result(
+                client,
+                claimed.room_id,
+                dict(claimed.payload),
+                retry_sync_recovery=request.retry_sync_recovery,
+                transaction_id=claimed.transaction_id,
+            )
+            if delivered is None:
+                msg = f"Matrix refused delivery for turn {claimed.turn_id!r}"
+                raise _DeliveryRefusedError(msg)
+            return delivered.event_id
+
+        try:
+            event_id = await ResponseDelivery(store=self.deps.outbox, send=send).deliver(
+                turn_id=request.delivery_turn_id,
+                stage=DeliveryStage.FINAL,
+                room_id=room_id,
+                thread_id=request.target.resolved_thread_id,
+                payload=content,
+            )
+        except _DeliveryRefusedError:
+            return None
+        if delivered is not None:
+            return delivered
+        # The delivery was already acknowledged, so nothing was sent and the
+        # callback never ran. That is a turn re-running after its answer
+        # reached the room; reporting it as a failed send would make a
+        # delivered answer look lost and invite a duplicate.
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
-        client = self._client()
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -515,12 +588,7 @@ class DeliveryGateway:
             content[SKIP_MENTIONS_KEY] = True
         failure_reason = "send_message_result returned None"
         try:
-            delivered = await send_message_result(
-                client,
-                resolved_target.room_id,
-                content,
-                retry_sync_recovery=request.retry_sync_recovery,
-            )
+            delivered = await self._send_content(request, resolved_target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the send"
@@ -767,6 +835,10 @@ class DeliveryGateway:
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
                 retry_sync_recovery=True,
+                # The Matrix event that caused this turn. The handled-turn
+                # ledger already keys on it, and it re-derives to the same
+                # value after a restart, which a generated ID would not.
+                delivery_turn_id=request.identity.response_envelope.source_event_id,
             ),
         )
         if event_id is None:

@@ -35,6 +35,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     make_event_cache_mock,
+    make_outbox_mock,
     message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -310,6 +311,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             ),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
     return gateway, before_hooks, after_hooks

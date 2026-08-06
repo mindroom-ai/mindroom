@@ -51,6 +51,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    make_outbox_mock,
     message_origin,
     replace_edit_regenerator_deps,
     request_envelope,
@@ -518,6 +519,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -650,6 +652,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -732,6 +735,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -815,6 +819,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -888,6 +893,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 

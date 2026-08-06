@@ -82,6 +82,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    make_outbox_mock,
     message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
@@ -4052,6 +4053,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbound_projection=MagicMock(record_sent=AsyncMock()),
+                outbox=make_outbox_mock(),
             ),
         )
         object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -4155,6 +4157,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbound_projection=MagicMock(record_sent=AsyncMock()),
+                outbox=make_outbox_mock(),
             ),
         )
         outcome = await gateway.finalize_streamed_response(
@@ -4260,6 +4263,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbound_projection=MagicMock(record_sent=AsyncMock()),
+                outbox=make_outbox_mock(),
             ),
         )
 

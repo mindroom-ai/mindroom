@@ -43,6 +43,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_outbox_mock,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -148,6 +149,7 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
             ),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -434,6 +436,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -480,6 +483,7 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -664,6 +668,7 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -844,6 +849,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -978,6 +984,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
@@ -1042,6 +1049,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -1120,6 +1128,7 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
             resolver=Mock(),
             response_hooks=response_hooks,
             outbound_projection=MagicMock(record_sent=AsyncMock()),
+            outbox=make_outbox_mock(),
         ),
     )
 
