@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -58,6 +59,7 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_delivery import RecoveryOutcome
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -1521,6 +1523,41 @@ async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
     assert bot._room_member_join_hooks_armed is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_recovery_retries_after_a_later_sync_when_the_first_pass_failed(
+    tmp_path: Path,
+) -> None:
+    """Owed answers must not wait for a restart when the first pass could not send.
+
+    The first sync response can arrive while a room is still unrecovered, and
+    nio refuses ordinary sends into one. Treating "first sync observed" as
+    "recovery finished" would leave that room's answer unsent for the life of
+    the process.
+    """
+    bot = _sliding_response_bot(tmp_path)
+    bot._first_sync_done = False
+    outcomes = [RecoveryOutcome(recovered=0, failed=1), RecoveryOutcome(recovered=1, failed=0)]
+    recover = AsyncMock(side_effect=outcomes)
+
+    with (
+        patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover)),
+        patch.object(bot, "_register_room_member_callback_after_initial_sync"),
+        patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
+        patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        await bot._run_sync_response_side_effects(first_sync_response=True)
+        assert bot._delivery_recovery_owed is True
+
+        await bot._run_sync_response_side_effects(first_sync_response=False)
+        assert bot._delivery_recovery_owed is False
+
+        # Nothing is owed now, so an ordinary sync response costs no pass.
+        await bot._run_sync_response_side_effects(first_sync_response=False)
+
+    assert recover.await_count == 2
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:

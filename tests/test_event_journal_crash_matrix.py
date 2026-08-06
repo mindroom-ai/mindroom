@@ -281,7 +281,7 @@ class TestCrashMatrix:
         claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
 
-        recovered = await runtime.delivery.recover()
+        recovered = (await runtime.delivery.recover()).recovered
 
         assert recovered == 1
         assert runtime.homeserver.visible_messages == 1
@@ -347,7 +347,7 @@ class TestRecoveryIsComplete:
                 payload={"msgtype": "m.text", "body": f"answer {index}"},
             )
 
-        recovered = await runtime.delivery.recover()
+        recovered = (await runtime.delivery.recover()).recovered
 
         assert recovered == count
         assert runtime.homeserver.visible_messages == count
@@ -374,7 +374,7 @@ class TestRecoveryIsComplete:
             )
         runtime.homeserver.fail_sends_until = _UNACKNOWLEDGED_BATCH
 
-        recovered = await runtime.delivery.recover()
+        recovered = (await runtime.delivery.recover()).recovered
 
         assert recovered == 1
         assert runtime.homeserver.visible_messages == 1
@@ -398,7 +398,7 @@ class TestRecoveryIsComplete:
             )
         runtime.homeserver.fail_next_send = True
 
-        recovered = await runtime.delivery.recover()
+        recovered = (await runtime.delivery.recover()).recovered
 
         assert recovered == 1
         assert runtime.homeserver.visible_messages == 1
@@ -523,8 +523,13 @@ class TestInitialAndFinalStages:
 
         assert initial != final
 
-    async def test_recovery_resends_both_stages_once(self, runtime: TurnRuntime) -> None:
-        """Recovery resends both stages once."""
+    async def test_recovery_sends_the_answer_and_drops_the_placeholder(self, runtime: TurnRuntime) -> None:
+        """A turn whose answer is owed does not also owe its placeholder.
+
+        The placeholder exists to stand in until the answer arrives. Once the
+        answer is a durable row, sending both puts "thinking" in the room next
+        to the reply it was standing in for, and nothing ever edits it away.
+        """
         for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "answer")):
             await runtime.store.enqueue_delivery(
                 turn_id=SOURCE,
@@ -534,12 +539,12 @@ class TestInitialAndFinalStages:
                 payload={"msgtype": "m.text", "body": body},
             )
 
-        assert await runtime.delivery.recover() == 2
-        assert runtime.homeserver.visible_messages == 2
+        assert (await runtime.delivery.recover()).recovered == 1
+        assert runtime.homeserver.visible_messages == 1
         sends_after_recovery = runtime.homeserver.sends
 
-        # Acknowledged deliveries leave the recovery set, so a second restart
-        # is not a second send.
-        assert await runtime.delivery.recover() == 0
+        # Acknowledged deliveries leave the recovery set, and the skipped
+        # placeholder is still skipped, so a second restart sends nothing.
+        assert (await runtime.delivery.recover()).recovered == 0
         assert runtime.homeserver.sends == sends_after_recovery
-        assert runtime.homeserver.visible_messages == 2
+        assert runtime.homeserver.visible_messages == 1

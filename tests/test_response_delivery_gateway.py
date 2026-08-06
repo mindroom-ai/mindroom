@@ -429,7 +429,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)) as send:
             recovered = await gateway.recover_deliveries()
 
-        assert recovered == 1
+        assert recovered.recovered == 1
         sent = send.await_args.args[2]
         assert sent["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}, (
             "recovery sent a new message instead of replaying the edit"
@@ -473,8 +473,81 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as send:
             recovered = await gateway.recover_deliveries()
 
-        assert recovered == 0, "recovery resent a placeholder the answer had already overtaken"
+        assert recovered.recovered == 0, "recovery resent a placeholder the answer had already overtaken"
         send.assert_not_awaited()
+
+    async def test_an_unacknowledged_answer_also_supersedes_the_placeholder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A placeholder is overtaken by an answer that exists, acknowledged or not.
+
+        Crashing between claiming the answer and recording it leaves both rows
+        unacknowledged. Recovery walks them oldest first, so a rule that only
+        skips the placeholder once the answer is acknowledged would send the
+        placeholder *and then* the answer -- two visible messages, in that
+        order, for one turn.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text=PROGRESS_PLACEHOLDER,
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+            # The answer is claimed and then lost on the wire, exactly as a
+            # crash after claim and before acknowledgement leaves it.
+            await gateway.deliver_final(self._final_request("the answer"))
+
+        assert outbox.rows["$cause", "initial"].acknowledged_event_id is None
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as send:
+            recovered = await gateway.recover_deliveries()
+
+        assert recovered.recovered == 1
+        assert [call.args[2].get("body") for call in send.await_args_list] == ["the answer"], (
+            "recovery sent the placeholder alongside the answer"
+        )
+
+    async def test_a_pass_that_could_not_send_reports_the_debt_it_left(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A recovery pass that failed is not a recovery pass that finished.
+
+        The caller schedules the next attempt on this, so a pass reporting
+        success while leaving an answer unsent would strand it until the
+        process restarted.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.deliver_final(self._final_request("the answer"))
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            failed_pass = await gateway.recover_deliveries()
+
+        assert failed_pass.failed == 1
+        assert not failed_pass.complete
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)):
+            retried = await gateway.recover_deliveries()
+
+        assert retried.recovered == 1
+        assert retried.complete
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
 
     async def test_a_replay_reports_what_was_sent_not_what_was_regenerated(
         self,

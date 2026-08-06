@@ -40,7 +40,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.response_delivery import DeliveryStage, ResponseDelivery
+from mindroom.response_delivery import DeliveryStage, RecoveryOutcome, ResponseDelivery
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -551,17 +551,17 @@ class DeliveryGateway:
             raise _DeliveryRefusedError(msg)
         return delivered
 
-    async def recover_deliveries(self) -> int:
+    async def recover_deliveries(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome this process cannot know.
 
-        Run once at startup. A delivery the homeserver already accepted is
-        resent under the same transaction ID and collapses back onto the same
-        event, so recovery cannot duplicate a visible answer -- which is what
-        makes resending unconditionally the safe choice over trying to work out
-        what happened.
+        A delivery the homeserver already accepted is resent under the same
+        transaction ID and collapses back onto the same event, so recovery
+        cannot duplicate a visible answer -- which is what makes resending
+        unconditionally the safe choice over trying to work out what happened.
 
-        A send that fails again leaves its row unacknowledged and is logged by
-        the recovery pass, which moves on. Nothing escapes here.
+        A send that fails again leaves its row unacknowledged and is counted in
+        the returned outcome, which is how the caller knows to come back.
+        Nothing escapes here.
         """
 
         async def send(claimed: OutboxDelivery) -> str:

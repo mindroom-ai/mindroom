@@ -322,6 +322,8 @@ class AgentBot:
     last_sync_time: datetime | None
     _last_sync_monotonic: float | None
     _first_sync_done: bool
+    # Set when a recovery pass left rows unsent, so later syncs try again.
+    _delivery_recovery_owed: bool
     _classic_sync_rebuild_pending: bool
     _classic_sync_rebuild_attempt: int
     _sync_shutting_down: bool
@@ -382,6 +384,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._delivery_recovery_owed = False
         self._classic_sync_rebuild_pending = False
         self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
@@ -1507,17 +1510,26 @@ class AgentBot:
         leave every encrypted room's owed answer unsent -- exactly the rooms
         this matters in.
 
+        The first response is not always enough, though. It can arrive while a
+        room is still unrecovered, and nio refuses ordinary sends into one. So
+        the pass runs again after later sync responses until it completes with
+        nothing left owed; tying "recovery finished" to "first sync observed"
+        would strand an owed answer until the process restarted.
+
         Resending is safe: each delivery carries the transaction ID its first
         attempt used, so one the homeserver already accepted collapses back
         onto the same event.
         """
         try:
-            recovered = await self._delivery_gateway.recover_deliveries()
+            outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")
             return
-        if recovered:
-            self.logger.info("Resent unacknowledged deliveries", deliveries=recovered)
+        self._delivery_recovery_owed = not outcome.complete
+        if outcome.recovered:
+            self.logger.info("Resent unacknowledged deliveries", deliveries=outcome.recovered)
+        if not outcome.complete:
+            self.logger.warning("Deliveries still unsent after recovery", deliveries=outcome.failed)
 
     async def _run_sync_response_side_effects(
         self,
@@ -1527,7 +1539,9 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
+        if first_sync_response or self._delivery_recovery_owed:
             await self._recover_unacknowledged_deliveries()
+        if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
@@ -2027,6 +2041,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._delivery_recovery_owed = False
         self._classic_sync_rebuild_pending = False
         self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False

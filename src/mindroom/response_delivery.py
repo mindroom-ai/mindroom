@@ -25,6 +25,19 @@ type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryOutcome:
+    """What one recovery pass sent, and what it still owes."""
+
+    recovered: int
+    failed: int
+
+    @property
+    def complete(self) -> bool:
+        """Return whether nothing is left for a later pass to retry."""
+        return self.failed == 0
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseDelivery:
     """Claim-before-send delivery against one principal's outbox."""
 
@@ -80,9 +93,17 @@ class ResponseDelivery:
         """Return whether this delivery is a placeholder the answer overtook.
 
         A placeholder send whose outcome was never confirmed leaves a row
-        behind. If the turn went on to deliver its answer as a separate
-        message, resending that placeholder would put "Thinking..." into the
-        room *after* the answer it was supposed to precede.
+        behind. If the turn went on to write an answer at all, resending that
+        placeholder would put "Thinking..." into the room next to the answer
+        it was supposed to precede -- and in this same pass, before it, since
+        the older row is recovered first.
+
+        The FINAL row existing is the proof, not the FINAL row being
+        acknowledged. An unacknowledged FINAL is still a turn that got past
+        the placeholder, and recovery sends it in the same pass. An
+        edit-shaped FINAL cannot be stranded by this: its target event ID only
+        exists because the placeholder send returned one, so the placeholder
+        really is in the room whether or not the row records it.
 
         The row is left unacknowledged rather than deleted, because an
         attempted row is the only record that something may already be in the
@@ -90,21 +111,25 @@ class ResponseDelivery:
         """
         if delivery.stage is not DeliveryStage.INITIAL:
             return False
-        final = await self.store.load_delivery(turn_id=delivery.turn_id, stage=DeliveryStage.FINAL)
-        return final is not None and final.acknowledged_event_id is not None
+        return await self.store.load_delivery(turn_id=delivery.turn_id, stage=DeliveryStage.FINAL) is not None
 
-    async def recover(self) -> int:
+    async def recover(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome is unknown.
 
-        Run at startup. A delivery the homeserver already accepted is resent
-        under the same transaction ID and collapses back to the same event, so
-        recovery cannot duplicate a visible message.
+        A delivery the homeserver already accepted is resent under the same
+        transaction ID and collapses back to the same event, so recovery
+        cannot duplicate a visible message.
 
         Every unacknowledged delivery is walked, not one page of them. The
         store reads in bounded batches, but stopping after the first would
         report success while leaving answers the user is waiting for unsent.
+
+        The failure count is what the caller schedules on. A pass that could
+        not send is not a pass that finished, and the rows it left behind are
+        answers a user is waiting for.
         """
         recovered = 0
+        failed = 0
         # A failure leaves the row unacknowledged, so it stays in the query's
         # window. Filtering it in memory is not enough: a whole page of
         # failures would be re-read forever and everything behind it starved.
@@ -113,7 +138,7 @@ class ResponseDelivery:
         while True:
             batch = await self.store.unacknowledged_deliveries(after=cursor)
             if not batch:
-                return recovered
+                return RecoveryOutcome(recovered=recovered, failed=failed)
             cursor = (batch[-1].created_at_ns, batch[-1].turn_id, batch[-1].stage.value)
             for delivery in batch:
                 if await self._superseded_placeholder(delivery):
@@ -127,10 +152,11 @@ class ResponseDelivery:
                         stage=delivery.stage.value,
                         room_id=delivery.room_id,
                     )
-                    # Left unacknowledged deliberately: the next recovery pass
+                    # Left unacknowledged deliberately: a later recovery pass
                     # picks it up again, while this pass moves on to the rest.
+                    failed += 1
                     continue
                 recovered += 1
 
 
-__all__ = ["DeliveryStage", "ResponseDelivery", "SendDelivery"]
+__all__ = ["DeliveryStage", "RecoveryOutcome", "ResponseDelivery", "SendDelivery"]
