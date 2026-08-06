@@ -362,10 +362,6 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest:localhost"),
-            ),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",

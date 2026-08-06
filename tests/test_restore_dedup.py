@@ -15,7 +15,6 @@ from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow,
 
 def _conversation_cache() -> AsyncMock:
     access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed.return_value = None
     access.notify_outbound_message = Mock()
     return access
 

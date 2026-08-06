@@ -13,18 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-
     from .thread_cache_state import ThreadCacheGap
-
-
-def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) -> str | None:
-    """Return the latest visible event ID from one resolved thread history."""
-    if not history:
-        return None
-    return history[-1].visible_event_id or history[-1].event_id or None
 
 
 def thread_cache_gap_reason(gap: ThreadCacheGap) -> str:

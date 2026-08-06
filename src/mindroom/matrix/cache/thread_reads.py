@@ -18,9 +18,6 @@ Read-side invariants:
    ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
    modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
    context or a direct source refresh.
-
-4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
-   ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
 """
 
 from __future__ import annotations
@@ -32,13 +29,11 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_dispatch_thread_read_timeout_seconds
-from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.timing import elapsed_ms_since
@@ -302,39 +297,3 @@ class ThreadReadPolicy:
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )
-
-    async def get_latest_thread_event_id_if_needed(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None = None,
-        existing_event_id: str | None = None,
-        *,
-        caller_label: str = "latest_thread_event_lookup",
-    ) -> str | None:
-        """Resolve the latest visible thread event when MSC3440 fallback needs it."""
-        if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
-            return None
-        try:
-            thread_history = await self.read_thread(
-                room_id,
-                thread_id,
-                mode=ThreadReadMode.ADVISORY_FULL,
-                caller_label=caller_label,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to refresh latest thread event ID; falling back to thread root",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return thread_id
-        if thread_history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_STALE_CACHE:
-            self.logger.warning(
-                "Ignoring stale cached thread tail for latest-event lookup; falling back to thread root",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-            return thread_id
-        return latest_visible_thread_event_id(thread_history) or thread_id

@@ -1265,7 +1265,7 @@ class TestSendStreamingResponseRoomMode:
 
     @pytest.mark.asyncio
     async def test_room_mode_skips_latest_thread_lookup(self) -> None:
-        """In room mode, send_streaming_response should not call get_latest_thread_event_id_if_needed."""
+        """A room-level send has no thread relation, so it needs no reply fallback."""
         config = _runtime_bound_config(
             Config(
                 agents={},

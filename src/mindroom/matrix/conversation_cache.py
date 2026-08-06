@@ -169,17 +169,6 @@ class ConversationCacheProtocol(Protocol):
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence and purge one authoritative batch of departed rooms."""
 
-    async def get_latest_thread_event_id_if_needed(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None = None,
-        existing_event_id: str | None = None,
-        *,
-        caller_label: str = "latest_thread_event_lookup",
-    ) -> str | None:
-        """Resolve the latest visible thread event when MSC3440 fallback needs it."""
-
     def notify_outbound_message(
         self,
         room_id: str,
@@ -967,24 +956,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(error),
             )
             return None
-
-    async def get_latest_thread_event_id_if_needed(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        reply_to_event_id: str | None = None,
-        existing_event_id: str | None = None,
-        *,
-        caller_label: str = "latest_thread_event_lookup",
-    ) -> str | None:
-        """Resolve the latest visible thread event when MSC3440 fallback needs it."""
-        return await self._reads.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            reply_to_event_id=reply_to_event_id,
-            existing_event_id=existing_event_id,
-            caller_label=caller_label,
-        )
 
     def notify_outbound_message(
         self,

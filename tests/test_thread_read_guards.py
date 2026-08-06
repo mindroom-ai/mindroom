@@ -24,7 +24,6 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from tests.event_cache_test_support import advisory_thread_read, strict_thread_read
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
@@ -1624,106 +1623,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             force_refetch_reason="test_force_dispatch_refetch",
             expected_full_history=False,
         )
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_lookup_refetches_invalidated_thread_tail(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """MSC3440 fallback should use the refetched latest visible thread event, not a stale cached tail."""
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        root_event = _text_event(
-            event_id="$thread_root:localhost",
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-        )
-        old_reply = _text_event(
-            event_id="$reply_old:localhost",
-            body="Old tail",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            thread_id="$thread_root:localhost",
-        )
-        new_reply = _text_event(
-            event_id="$reply_new:localhost",
-            body="New tail",
-            sender="@agent:localhost",
-            server_timestamp=3000,
-            thread_id="$thread_root:localhost",
-        )
-        initial_client = _relations_client(
-            root_event=root_event,
-            thread_events=[old_reply],
-            next_batch="s_initial",
-        )
-        refreshed_client = _relations_client(
-            root_event=root_event,
-            thread_events=[old_reply, new_reply],
-            next_batch="s_new_tail",
-        )
-
-        try:
-            access = MatrixConversationCache(
-                logger=MagicMock(),
-                runtime=_conversation_runtime(client=initial_client, event_cache=event_cache),
-            )
-            await advisory_thread_read(access, "!test:localhost", "$thread_root:localhost")
-            await event_cache.mark_thread_gap(
-                "!test:localhost",
-                "$thread_root:localhost",
-                reason="test_tail_refresh",
-            )
-
-            restarted_access = MatrixConversationCache(
-                logger=MagicMock(),
-                runtime=_conversation_runtime(client=refreshed_client, event_cache=event_cache),
-            )
-            latest_event_id = await restarted_access.get_latest_thread_event_id_if_needed(
-                "!test:localhost",
-                "$thread_root:localhost",
-            )
-        finally:
-            await event_cache.close()
-
-        assert latest_event_id == "$reply_new:localhost"
-        assert refreshed_client.room_messages.await_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_lookup_falls_back_to_thread_root_on_refresh_failure(self) -> None:
-        """MSC3440 latest-event resolution must fail open when thread refresh fails."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
-
-        latest_event_id = await access.get_latest_thread_event_id_if_needed("!test:localhost", "$thread:localhost")
-
-        assert latest_event_id == "$thread:localhost"
-
-    @pytest.mark.asyncio
-    async def test_latest_thread_event_lookup_rejects_stale_cached_tail(self) -> None:
-        """MSC3440 latest-event resolution must not reuse a stale cached tail after a failed refetch."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        access._reads.fetch_thread_history_from_client = AsyncMock(
-            return_value=thread_history_result(
-                [
-                    _message(event_id="$thread:localhost", body="Root"),
-                    _message(event_id="$reply:localhost", body="Cached tail"),
-                ],
-                is_full_history=True,
-                diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE},
-            ),
-        )
-
-        latest_event_id = await access.get_latest_thread_event_id_if_needed("!test:localhost", "$thread:localhost")
-
-        assert latest_event_id == "$thread:localhost"
 
     @pytest.mark.asyncio
     async def test_dispatch_thread_history_does_not_fall_back_to_stale_cache(self) -> None:

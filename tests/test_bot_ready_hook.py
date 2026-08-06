@@ -762,7 +762,6 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
         await ctx.send_message("!room:localhost", "I'm ready!")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -1898,7 +1897,6 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
 
     sender = bot._hook_context_support.message_sender()
     assert sender is not None
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
         event_id = await sender("!room:localhost", "hello", None, "test-plugin:bot:ready", None)

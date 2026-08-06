@@ -113,7 +113,6 @@ def _make_context(
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
     conversation_cache = AsyncMock()
-    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     conversation_cache.notify_outbound_message = Mock()
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(

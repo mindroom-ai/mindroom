@@ -527,7 +527,6 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
@@ -538,7 +537,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_history: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
-        mock_get_latest_thread: AsyncMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
@@ -555,8 +553,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
-        # Mock get_latest_thread_event_id_if_needed
-        mock_get_latest_thread.return_value = "latest_thread_event"
 
         config = self._config_for_storage(tmp_path)
         mention_id = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"
@@ -1101,10 +1097,8 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
-    @patch("mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
-        mock_get_latest_thread: AsyncMock,
         mock_should_use_streaming: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -1130,9 +1124,6 @@ class TestAgentBot(AgentBotTestBase):
         fake_member.name = "MockAgent"
         fake_member.instructions = []
         mock_create_agent.return_value = fake_member
-
-        # Mock get_latest_thread_event_id_if_needed to return a valid event ID
-        mock_get_latest_thread.return_value = "latest_thread_event"
 
         bot = AgentBot(
             mock_agent_user,

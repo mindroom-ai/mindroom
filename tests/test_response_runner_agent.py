@@ -2226,10 +2226,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest:localhost"),
-            ),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
         ):
             await bot._response_runner.generate_response(

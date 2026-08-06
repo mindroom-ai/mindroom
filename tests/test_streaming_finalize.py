@@ -142,7 +142,6 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
             resolver=SimpleNamespace(
                 deps=SimpleNamespace(
                     conversation_cache=SimpleNamespace(
-                        get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
                         notify_outbound_message=Mock(),
                     ),
                 ),

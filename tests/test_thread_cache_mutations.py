@@ -1329,39 +1329,6 @@ class TestMatrixConversationCacheThreadReads:
         assert mock_get_event.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:
-        """Thread reads should fail open when runtime support omitted the write coordinator."""
-        config = _conversation_runtime_config()
-        runtime = BotRuntimeState(
-            client=AsyncMock(spec=nio.AsyncClient),
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            enable_streaming=True,
-            orchestrator=None,
-            event_cache=_runtime_event_cache(),
-            event_cache_write_coordinator=None,
-        )
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=runtime,
-        )
-        access._reads.fetch_thread_history_from_client = AsyncMock(
-            return_value=thread_history_result([], is_full_history=True),
-        )
-
-        latest_event_id = await access.get_latest_thread_event_id_if_needed(
-            "!room:localhost",
-            "$thread-root:localhost",
-        )
-
-        assert latest_event_id == "$thread-root:localhost"
-        access._reads.fetch_thread_history_from_client.assert_awaited_once()
-        fetch_args = access._reads.fetch_thread_history_from_client.await_args
-        assert fetch_args.args == ("!room:localhost", "$thread-root:localhost")
-        assert fetch_args.kwargs["caller_label"] == "latest_thread_event_lookup"
-        assert fetch_args.kwargs["coordinator_queue_wait_ms"] >= 0.0
-
-    @pytest.mark.asyncio
     async def test_get_event_persists_inline_without_write_coordinator(self) -> None:
         """Point lookup fills should persist inline when runtime support omitted the coordinator."""
         room_id = "!room:localhost"

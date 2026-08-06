@@ -162,10 +162,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                AsyncMock(return_value="latest_thread_event"),
-            ),
             patch.object(
                 resolver,
                 "fetch_thread_history",
@@ -547,10 +543,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         with (
             patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="general")),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                AsyncMock(return_value="$latest:localhost"),
-            ),
             patch(
                 "mindroom.delivery_gateway.send_message_result",
                 AsyncMock(
