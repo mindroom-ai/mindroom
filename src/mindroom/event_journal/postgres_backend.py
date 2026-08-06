@@ -16,6 +16,10 @@ from psycopg.rows import dict_row
 
 from .schema import POSTGRES_DIALECT, Dialect, add_column_statement, added_columns, render, schema_statements
 
+# An arbitrary constant that only this schema setup uses, so the lock it
+# takes cannot collide with an application advisory lock.
+_SCHEMA_LOCK_KEY = 7_403_118_615_233_901
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -107,6 +111,14 @@ class PostgresBackend:
 
     def _create_schema(self) -> None:
         with self._writer.cursor(row_factory=dict_row) as cursor:
+            # Two processes opening an old database at once would each take a
+            # shared lock creating the indexes, then each try to upgrade it for
+            # ADD COLUMN, and PostgreSQL would resolve that by killing one of
+            # them. `IF NOT EXISTS` prevents a duplicate column, not a lock
+            # upgrade deadlock. Serializing the whole of schema setup on a
+            # transaction-scoped advisory lock costs nothing at steady state,
+            # because the statements are all no-ops once the schema exists.
+            cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
             for table, column, definition in added_columns():

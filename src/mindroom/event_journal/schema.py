@@ -102,6 +102,11 @@ _TABLES = (
         edit_ts BIGINT NOT NULL,
         thread_id TEXT NOT NULL,
         content_json TEXT NOT NULL,
+        -- A held edit can be one this bot seeded from its own send, and the
+        -- bit has to survive the wait: the original may not arrive until after
+        -- the edit, and installing a locally timed revision as authoritative
+        -- would make the real echo look like a stale duplicate.
+        provisional INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, target_event_id, sender)
     )
     """,
@@ -185,6 +190,7 @@ _INDEXES = (
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("visible_messages", "provisional", "INTEGER NOT NULL DEFAULT 0"),
     ("visible_messages", "revision_provisional", "INTEGER NOT NULL DEFAULT 0"),
+    ("unresolved_edits", "provisional", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

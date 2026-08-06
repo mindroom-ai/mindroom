@@ -306,7 +306,7 @@ def _apply_unresolved_edit(
     """
     held = transaction.fetchone(
         """
-        SELECT edit_event_id, edit_ts, content_json FROM unresolved_edits
+        SELECT edit_event_id, edit_ts, content_json, provisional FROM unresolved_edits
         WHERE principal_id = ? AND room_id = ? AND target_event_id = ? AND sender = ?
         """,
         (principal_id, event.room_id, event.event_id, event.sender),
@@ -330,6 +330,10 @@ def _apply_unresolved_edit(
         revision_event_id=held["edit_event_id"],
         revision_ts=int(held["edit_ts"]),
         content=visible_content(_loads(held["content_json"])),
+        # A held edit this bot seeded is still a guess about ordering. Losing
+        # that here would install a locally timed revision as authoritative,
+        # and its own echo would then look like a stale duplicate.
+        provisional=bool(held["provisional"]),
     )
 
 
@@ -359,6 +363,7 @@ def _project_edit(
             event,
             target_event_id=target_event_id,
             membership_epoch=membership_epoch,
+            provisional=provisional,
         )
         return
     if current["sender"] != event.sender:
@@ -405,6 +410,7 @@ def _hold_unresolved_edit(
     *,
     target_event_id: str,
     membership_epoch: int,
+    provisional: bool,
 ) -> None:
     """Keep at most one latest edit per target and sender."""
     del membership_epoch
@@ -424,13 +430,14 @@ def _hold_unresolved_edit(
         """
         INSERT INTO unresolved_edits (
             principal_id, room_id, target_event_id, sender,
-            edit_event_id, edit_ts, thread_id, content_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            edit_event_id, edit_ts, thread_id, content_json, provisional
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, target_event_id, sender) DO UPDATE SET
             edit_event_id = excluded.edit_event_id,
             edit_ts = excluded.edit_ts,
             thread_id = excluded.thread_id,
-            content_json = excluded.content_json
+            content_json = excluded.content_json,
+            provisional = excluded.provisional
         """,
         (
             principal_id,
@@ -441,6 +448,7 @@ def _hold_unresolved_edit(
             event.origin_server_ts,
             encode_thread_id(event.thread_id),
             _dumps(event.content),
+            1 if provisional else 0,
         ),
     )
 

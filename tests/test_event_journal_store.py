@@ -756,6 +756,27 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    async def test_an_edit_seeded_before_its_original_stays_provisional(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A held edit waits in a different table, and the guess has to wait with it.
+
+        Seeding an edit whose original has not been projected yet parks it in
+        `unresolved_edits`. If the locally generated timestamp is forgotten
+        while it waits, the original's arrival installs it as authoritative,
+        and the edit's own echo then looks like a stale duplicate of itself --
+        so the real later edit loses and the answer freezes.
+        """
+        _, seeded_edit = message("$edit1", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(seeded_edit)
+
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await admit(alice, "$edit1", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,
