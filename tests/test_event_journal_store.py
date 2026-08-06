@@ -662,11 +662,13 @@ def _seed_orderings() -> list[tuple[str, ...]]:
     return [
         order
         for order in itertools.permutations(steps)
-        # We send the first edit before the second, and each echo follows its
-        # own send. Orders violating that describe events this bot never emits.
+        # We send the first edit before the second. Nothing constrains an echo
+        # relative to its own seed: the send awaits the network and only seeds
+        # after it returns, so sync can deliver the echo while that coroutine is
+        # still suspended -- the race `test_an_edit_echo_that_beats_its_own_seed
+        # _still_wins` exists for. An earlier version of this filter required
+        # each seed before its echo and so excluded exactly that ordering.
         if order.index("seed1") < order.index("seed2")
-        and order.index("seed1") < order.index("echo1")
-        and order.index("seed2") < order.index("echo2")
     ]
 
 

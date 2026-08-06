@@ -2029,11 +2029,11 @@ class AgentBot:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)
         if failures:
-            # Every step ran, and the caller still has to hear about it. A
-            # config reload removes this bot from the runtime map only if stop
-            # returns, and then starts a replacement that opens the same
-            # database under the same principal -- so certifying a partial stop
-            # as a clean one is how two generations end up sharing a store.
+            # Every step ran, and the caller still has to hear about it.
+            # `stop_entities` pops from the runtime map only after its gather
+            # returns, so raising keeps this bot registered and stops the reload
+            # before it creates a replacement on a store that never closed.
+            # Swallowing is what would certify a partial stop as a clean one.
             raise failures[0]
         self.logger.info("Stopped agent bot")
 
