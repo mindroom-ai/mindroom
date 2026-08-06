@@ -20,7 +20,7 @@ from mindroom.matrix.conversation_hydration import (
     _projected_from_event,
     _reduce_current_revision,
 )
-from mindroom.matrix.conversation_reads import ConversationReader, _StaleConversationError
+from mindroom.matrix.conversation_reads import ConversationReader, _StaleConversationError, projected_thread_history
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
@@ -864,3 +864,61 @@ class TestReadModes:
 
         with pytest.raises(_StaleConversationError):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+
+class TestWindowTruncation:
+    """A bounded page is not the whole conversation."""
+
+    async def test_a_page_with_more_behind_it_is_not_full_history(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A conversation longer than the read window reports itself truncated.
+
+        Consumers do not all just render what they get. Thread summaries count
+        the messages returned and record that count as the size of the thread,
+        so a suffix reported as complete is written down as the whole history
+        and the next pass compares against it.
+        """
+        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(5)])
+        client = FakeClient()
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=3)
+        history = projected_thread_history(page, complete=True)
+
+        assert len(history) == 3
+        assert page.next_cursor is not None
+        assert not history.is_full_history
+
+    async def test_a_page_that_reaches_the_start_is_full_history(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing behind the page means the page is the conversation.
+
+        The mirror of the case above: without it, "not full history" could be
+        hard-coded and still pass.
+        """
+        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(3)])
+        client = FakeClient()
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        history = projected_thread_history(page, complete=True)
+
+        assert len(history) == 3
+        assert page.next_cursor is None
+        assert history.is_full_history

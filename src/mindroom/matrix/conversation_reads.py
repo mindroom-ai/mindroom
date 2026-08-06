@@ -68,7 +68,11 @@ def projected_thread_history(
     )
     return thread_history_result(
         messages,
-        is_full_history=complete and not page.refresh_pending,
+        # A page with more behind it is not the whole conversation, however
+        # hard the caller worked for it. Consumers that count what they got and
+        # record the total -- thread summaries do -- would otherwise write the
+        # size of a suffix down as the size of the thread.
+        is_full_history=complete and not page.refresh_pending and page.next_cursor is None,
         diagnostics=diagnostics,
     )
 
