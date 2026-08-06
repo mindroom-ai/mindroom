@@ -74,6 +74,10 @@ _HYDRATED_PROMPT_WINDOW_MESSAGES = 2_000
 # twenty-thousand-event walk on every single read of that room, which is a far
 # worse outcome than a prompt with less history than its maximum.
 _MAX_FETCHED_EVENTS = 20_000
+# A separate bound, because it measures a different thing. Deriving it from the
+# event ceiling made a room that returns one event per page stop after two
+# pages while reporting that it had read twenty thousand events.
+_MAX_MESSAGES_REQUESTS = 400
 
 
 class _HydrationError(RuntimeError):
@@ -164,6 +168,7 @@ class ConversationHydrator:
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     prompt_window_messages: int = _HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
+    max_requests: int = _MAX_MESSAGES_REQUESTS
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -182,14 +187,6 @@ class ConversationHydrator:
             msg = "Matrix client is not ready for conversation hydration"
             raise RuntimeError(msg)
         return client
-
-    def _max_pages(self) -> int:
-        """Bound the walk in requests as well as in events.
-
-        The event ceiling cannot stop a run of empty pages, since those add
-        nothing to the count they are measured by.
-        """
-        return max(1, self.max_fetched_events // _MESSAGES_PAGE_LIMIT)
 
     async def ensure_hydrated(self, *, room_id: str, thread_id: str | None) -> None:
         """Hydrate a conversation once, sharing one task among concurrent readers."""
@@ -312,15 +309,22 @@ class ConversationHydrator:
             # there is no more. A token that does not move is refusing to make
             # progress, which is the one shape that could spin forever, because
             # an empty page does not advance the event count either.
-            if not response.end or response.end == start:
+            if not response.end:
                 return tuple(events)
-            if fetched >= self.max_fetched_events or pages >= self._max_pages():
+            if response.end == start:
+                # The server is handing back the position it was given. That is
+                # not exhaustion and not a full window, so completing here would
+                # install a hydration marker over a conversation nobody read.
+                msg = f"Homeserver stopped advancing history for {room_id!r} at token {start!r}"
+                raise _HydrationError(msg)
+            if fetched >= self.max_fetched_events or pages >= self.max_requests:
                 # Not the window being met, so it is said out loud. A room that
                 # reaches this is one where reading further costs more than the
                 # older messages are worth to a prompt.
                 logger.warning(
-                    "conversation_hydration_event_ceiling_reached",
+                    "conversation_hydration_ceiling_reached",
                     room_id=room_id,
+                    requests=pages,
                     fetched_events=fetched,
                     logical_messages=logical,
                     prompt_window_messages=self.prompt_window_messages,

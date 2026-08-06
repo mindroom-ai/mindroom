@@ -468,13 +468,39 @@ class TestRoomHydration:
         assert client.history_pages == 2
         assert await bodies(alice) == ["older"]
 
-    async def test_a_token_that_does_not_move_stops_the_walk(self, alice: PrincipalStore) -> None:
-        """An empty page adds nothing to the count the ceiling measures."""
+    async def test_a_token_that_does_not_move_fails_rather_than_completing(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A server repeating the position it was given has not exhausted anything.
+
+        Returning quietly would install a hydration marker over a conversation
+        nobody managed to read, and hydration runs once per membership, so the
+        room would stay empty until the bot rejoined it.
+        """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+        with pytest.raises(_HydrationError):
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert client.history_pages == 2
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_the_request_ceiling_is_not_the_event_ceiling(self, alice: PrincipalStore) -> None:
+        """One event per page must not be mistaken for a full event budget.
+
+        Deriving the request bound from the event bound made a sparse room stop
+        after two pages while reporting that it had read the whole event
+        allowance.
+        """
+        client = FakeClient(endless_history=True, endless_originals_per_page=1)
+
+        await hydrator(alice, client, max_fetched_events=200, max_requests=5).ensure_hydrated(
+            room_id=ROOM,
+            thread_id=None,
+        )
+
+        assert client.history_pages == 5
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:
         """Hydration does not create pending work."""

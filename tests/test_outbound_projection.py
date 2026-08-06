@@ -183,3 +183,36 @@ async def test_a_streamed_answer_reads_as_its_final_text(
 
     page = await alice.read_conversation(room_id=_ROOM_ID, thread_id=None, limit=10)
     assert [(m.logical_event_id, m.content["body"]) for m in page.messages] == [("$sent", "complete")]
+
+
+async def test_a_failed_seed_does_not_fail_an_accepted_send(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """Matrix has already accepted the event by the time seeding runs.
+
+    This path carries no deterministic transaction ID, so a caller that
+    retried on this failure would post a second visible message. A lost seed
+    costs a reader the window before the echo; a lost send costs the user a
+    duplicate answer.
+    """
+    projection = OutboundProjection(store=alice, sender=_AGENT_USER_ID)
+    gateway = _gateway(tmp_path, projection)
+    delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "the answer"})
+
+    with (
+        patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)),
+        patch.object(
+            type(alice),
+            "seed_outbound_message",
+            AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        ),
+    ):
+        event_id = await gateway.send_text(
+            SendTextRequest(
+                target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                response_text="the answer",
+            ),
+        )
+
+    assert event_id == "$sent"

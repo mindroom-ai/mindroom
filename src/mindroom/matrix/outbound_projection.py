@@ -19,18 +19,22 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.event_journal import ProjectedEvent, thread_root
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import SeedingView
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
 class OutboundProjection:
     """Seeds one principal's projection from its own accepted sends."""
 
-    store: PrincipalStore
+    store: SeedingView
     sender: str
 
     async def record_sent(
@@ -40,7 +44,30 @@ class OutboundProjection:
         event_id: str,
         content: Mapping[str, object],
     ) -> None:
-        """Record a message this bot sent and Matrix accepted."""
+        """Record a message this bot sent and Matrix accepted.
+
+        Never raises. By the time this runs the homeserver has already accepted
+        the event, and this send path carries no deterministic transaction ID,
+        so a caller that retried on this failure would create a second visible
+        message. Losing the seed costs a reader the window before the echo
+        arrives; failing the send costs the user a duplicate answer.
+        """
+        try:
+            await self._seed(room_id=room_id, event_id=event_id, content=content)
+        except Exception:
+            logger.exception(
+                "outbound_projection_seed_failed",
+                room_id=room_id,
+                event_id=event_id,
+            )
+
+    async def _seed(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        content: Mapping[str, object],
+    ) -> None:
         await self.store.seed_outbound_message(
             ProjectedEvent(
                 event_id=event_id,
