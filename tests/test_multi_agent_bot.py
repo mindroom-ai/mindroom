@@ -201,12 +201,12 @@ class TestAgentBot(AgentBotTestBase):
         # and then login with whatever user account was ensured
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
-        # Every timeline event, including an undecryptable one, is admitted
-        # through one durable callback. Only invites and membership events,
-        # which are not admitted from the timeline, register their own.
+        assert (
+            mock_client.add_event_callback.call_count == 15
+        )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
         mock_client.add_event_admission_callback.assert_called_once()
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
-        assert registered_event_types == [nio.InviteEvent, nio.RoomMemberEvent]
+        assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
         invite_callback = next(
             call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
         )
@@ -310,7 +310,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
-        assert mock_client.add_event_callback.call_count == 2
+        assert mock_client.add_event_callback.call_count == 15
         mock_client.add_event_admission_callback.assert_called_once()
 
     @pytest.mark.asyncio

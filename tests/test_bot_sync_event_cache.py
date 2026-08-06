@@ -13,6 +13,8 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.runner import _DispatchObligationTaskWrapper
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -77,9 +79,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ):
                 await bot.start()
                 assert bot.client is start_client
-                # Every timeline event now arrives through one admission
-                # callback rather than a per-kind registration.
-                start_client.add_event_admission_callback.assert_called_once()
+                redaction_callback = next(
+                    callback.args[0]
+                    for callback in start_client.add_event_callback.call_args_list
+                    if callback.args[1] is nio.RedactionEvent
+                )
+                assert isinstance(redaction_callback, _DispatchObligationTaskWrapper)
+                assert redaction_callback.callback_kind is DispatchCallbackKind.REDACTION
 
                 await bot.stop()
 

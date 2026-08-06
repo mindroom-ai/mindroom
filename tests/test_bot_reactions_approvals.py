@@ -23,7 +23,7 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventKind, SemanticConsumer
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchSemanticConsumer
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
@@ -85,7 +85,11 @@ def _detached_approval_card() -> dict[str, Any]:
 
 
 async def _cancel_dispatch_retry(bot: AgentBot) -> None:
-    await bot._journal_dispatcher.stop()
+    retry_task = bot._dispatch_obligation_runner._retry_task
+    assert retry_task is not None
+    retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retry_task
 
 
 def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageText:
@@ -161,8 +165,7 @@ async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.Room
     source.setdefault("type", "m.room.message")
     event.source = source
     event.decrypted = False
-    await bot._journal_dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    await bot._journal_dispatcher.drain_once()
+    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -296,9 +299,9 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._journal_dispatcher),
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
                 "semantic_consumer",
-                new=MagicMock(return_value=SemanticConsumer.INTERACTIVE_REACTION),
+                new=MagicMock(return_value=DispatchSemanticConsumer.INTERACTIVE_REACTION),
             ),
             patch(
                 "mindroom.bot.interactive.handle_reaction",
@@ -339,9 +342,9 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._journal_dispatcher),
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
                 "semantic_consumer",
-                new=MagicMock(return_value=SemanticConsumer.CONFIG_CONFIRMATION),
+                new=MagicMock(return_value=DispatchSemanticConsumer.CONFIG_CONFIRMATION),
             ),
             patch(
                 "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
@@ -381,6 +384,7 @@ class TestAgentBot(AgentBotTestBase):
                     "_execute_interactive_selection",
                     new=AsyncMock(side_effect=OSError("pending write failed")),
                 ),
+                pytest.raises(OSError, match="pending write failed"),
             ):
                 await _dispatch_reaction(bot, room, event)
 
@@ -1109,21 +1113,13 @@ class TestAgentBot(AgentBotTestBase):
             message = "crash after approval reply side effect"
             raise RuntimeError(message)
 
-        journal = bot._journal_dispatcher.store
-        with patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.MESSAGE,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+        with (
+            patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=consume_then_crash),
+            pytest.raises(RuntimeError, match="crash after approval reply side effect"),
+        ):
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
         await _cancel_dispatch_retry(bot)
-
-        # The crash leaves the event pending, but its consumer claim is durable,
-        # so the replay cannot route the reply anywhere else.
-        pending = await journal.pending()
-        assert pending[0].semantic_consumer is SemanticConsumer.APPROVAL_REPLY
+        assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.APPROVAL_REPLY
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, restarted)
@@ -1131,13 +1127,13 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.maybe_handle_tool_approval_reply",
             new=AsyncMock(return_value=False),
         ) as approval_reply:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=True)
 
         approval_reply.assert_awaited_once()
         assert approval_reply.await_args.kwargs["before_consume"] is None
         assert approval_reply.await_args.kwargs["authorization_prevalidated"] is True
         handle_text_event.assert_not_awaited()
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_interrupted_approval_reaction_replay_cannot_become_hook_input(
@@ -1168,12 +1164,13 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.approval_inbound.handle_matrix_approval_action",
                 new=AsyncMock(side_effect=fail_after_claim),
             ),
+            pytest.raises(RuntimeError, match="crash after approval reaction side effect"),
         ):
             await _dispatch_reaction(bot, room, event)
         await _cancel_dispatch_retry(bot)
         assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.TOOL_APPROVAL_REACTION
+            bot._dispatch_obligation_store.pending()[0].semantic_consumer
+            is DispatchSemanticConsumer.TOOL_APPROVAL_REACTION
         )
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1183,10 +1180,10 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.approval_inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=False, resolved=False)),
         ):
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         assert unexpected_hooks == []
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_interrupted_stop_reaction_replay_cannot_become_hook_input(
@@ -1219,18 +1216,13 @@ class TestAgentBot(AgentBotTestBase):
                 "finalize",
                 new=AsyncMock(side_effect=failure),
             ),
+            pytest.raises(RuntimeError, match="crash after stop reaction side effect"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
-        pending = await bot._journal_dispatcher.store.pending()
-        assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
-        stop_receipt_order = pending[0].receipt_order
+        pending = bot._dispatch_obligation_store.pending()
+        assert pending[0].semantic_consumer is DispatchSemanticConsumer.STOP_REACTION
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1240,7 +1232,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
         ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
         assert unexpected_hooks == []
@@ -1248,7 +1240,7 @@ class TestAgentBot(AgentBotTestBase):
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_receipt_order == stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_interrupted_stop_claim_suppresses_preceding_edit_after_restart(
@@ -1281,17 +1273,12 @@ class TestAgentBot(AgentBotTestBase):
                 "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
+            pytest.raises(RuntimeError, match="crash after stop claim"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
+        pending = bot._dispatch_obligation_store.pending()
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1300,14 +1287,14 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
         ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_receipt_order == stop_receipt_order
         assert unexpected_hooks == []
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_stop_replay_preserves_visible_partial_finalized_by_live_cancellation(
@@ -1339,17 +1326,12 @@ class TestAgentBot(AgentBotTestBase):
                 "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
+            pytest.raises(RuntimeError, match="crash after stop claim"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
+        pending = bot._dispatch_obligation_store.pending()
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         bot._turn_store.record_turn_durably(
             with_user_stop(
                 pending_turn,
@@ -1365,14 +1347,14 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
         ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_not_awaited()
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_receipt_order is not None
         assert stopped_record.user_stop_settled_receipt_order == stopped_record.user_stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_failed_stop_delivery_suppresses_model_recovery_and_retries_after_restart(
@@ -1404,18 +1386,13 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
                 new=AsyncMock(return_value=False),
             ),
+            pytest.raises(RuntimeError, match="Failed to finalize user-stopped response"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
 
-        pending = await bot._journal_dispatcher.store.pending()
-        stop_receipt_order = pending[0].receipt_order
+        pending = bot._dispatch_obligation_store.pending()
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         stopped_record = bot._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.completed is True
@@ -1427,7 +1404,7 @@ class TestAgentBot(AgentBotTestBase):
             terminal_source_event_ids=("$source",),
         )
         assert len(pending) == 1
-        assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
+        assert pending[0].semantic_consumer is DispatchSemanticConsumer.STOP_REACTION
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1436,14 +1413,14 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
             new=AsyncMock(return_value=True),
         ) as finalize_stopped_response:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
         assert unexpected_hooks == []
         finalized_record = restarted._turn_store.get_turn_record("$source")
         assert finalized_record is not None
         assert finalized_record.user_stop_settled_receipt_order == stop_receipt_order
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_older_stop_callback_preserves_later_edit_and_its_stop_button(
@@ -1495,19 +1472,15 @@ class TestAgentBot(AgentBotTestBase):
         event = _reaction_event("🛑", "$stale-stop-reaction")
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._journal_dispatcher),
+                unwrap_extracted_collaborator(bot._dispatch_obligation_runner),
                 "receipt_order",
                 new=AsyncMock(return_value=2),
             ),
             patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup,
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
+            replay_task = asyncio.create_task(
+                bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION),
             )
-            replay_task = asyncio.create_task(bot._journal_dispatcher.drain_once())
             assert await asyncio.to_thread(cancellation_check_started.wait, 2)
             assert later_edit_task.done() is False
             lifecycle_lock.release()
@@ -1630,18 +1603,13 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.bot.config_confirmation.resume_committed_confirmation",
                 new=AsyncMock(side_effect=failure),
             ),
+            pytest.raises(RuntimeError, match="crash after config reaction claim"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.CONFIG_CONFIRMATION
+            bot._dispatch_obligation_store.pending()[0].semantic_consumer
+            is DispatchSemanticConsumer.CONFIG_CONFIRMATION
         )
 
         restarted = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1651,11 +1619,11 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
             new=AsyncMock(return_value=None),
         ) as resolve_pending:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         resolve_pending.assert_awaited_once()
         assert unexpected_hooks == []
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_interrupted_interactive_reaction_replays_only_its_durable_consumer(
@@ -1686,18 +1654,13 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+            pytest.raises(RuntimeError, match="crash after interactive reaction claim"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         assert (
-            (await bot._journal_dispatcher.store.pending())[0].semantic_consumer
-            is SemanticConsumer.INTERACTIVE_REACTION
+            bot._dispatch_obligation_store.pending()[0].semantic_consumer
+            is DispatchSemanticConsumer.INTERACTIVE_REACTION
         )
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1707,11 +1670,11 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.interactive.handle_reaction",
             new=AsyncMock(return_value=None),
         ) as interactive_handler:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         interactive_handler.assert_awaited_once()
         assert unexpected_hooks == []
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_interrupted_hook_reaction_replays_hooks_without_reentering_builtins(
@@ -1739,15 +1702,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
             pytest.raises(asyncio.CancelledError, match="cancel after reaction hook side effect"),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
-                room,
-                event,
-                EventKind.REACTION,
-                EventClass.ACTIONABLE,
-            )
-            await bot._journal_dispatcher.drain_once()
-        pending = await bot._journal_dispatcher.store.pending()
-        assert pending[0].semantic_consumer is SemanticConsumer.REACTION_HOOKS
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+        assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.REACTION_HOOKS
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1761,11 +1717,11 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.bot.interactive.handle_reaction",
             new=AsyncMock(return_value=None),
         ) as interactive_handler:
-            await restarted._journal_dispatcher.drain_once()
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
         assert emissions == [event.event_id, event.event_id]
         interactive_handler.assert_not_awaited()
-        assert await restarted._journal_dispatcher.store.pending() == ()
+        assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio
     async def test_checkmark_reaction_reaches_approval_manager_with_card_id_and_sender(
@@ -1784,7 +1740,6 @@ class TestAgentBot(AgentBotTestBase):
         event.reacts_to = "$approval"
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
-        event.server_timestamp = 1234567890
         event.source = {"content": {}}
 
         async def consume(

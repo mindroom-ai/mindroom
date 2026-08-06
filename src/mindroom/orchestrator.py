@@ -534,7 +534,7 @@ class _MultiAgentOrchestrator:
                 running_bots.append(bot)
         return running_bots
 
-    async def _recover_ready_turn_journal_events(self) -> None:
+    async def _recover_ready_turn_dispatch_obligations(self) -> None:
         """Recover fleet-dependent turns whose required runtimes are ready."""
         async with self._dispatch_recovery_lock:
             config = self.config
@@ -558,7 +558,7 @@ class _MultiAgentOrchestrator:
                 ):
                     continue
                 try:
-                    await bot.recover_pending_turn_journal_events()
+                    await bot.recover_pending_turn_dispatch_obligations()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -578,7 +578,7 @@ class _MultiAgentOrchestrator:
             return
         self._dispatch_recovery_task = create_background_task(
             self._run_scheduled_turn_dispatch_recovery(),
-            name="recover_ready_turn_journal_events",
+            name="recover_ready_turn_dispatch_obligations",
             owner=self._dispatch_recovery_task_owner,
         )
 
@@ -590,7 +590,7 @@ class _MultiAgentOrchestrator:
                 self._dispatch_recovery_requested = False
                 await run_with_retry(
                     "Recovering ready turn dispatch obligations",
-                    self._recover_ready_turn_journal_events,
+                    self._recover_ready_turn_dispatch_obligations,
                     update_runtime_state=False,
                 )
         finally:

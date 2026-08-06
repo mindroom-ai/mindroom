@@ -25,10 +25,7 @@ _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRY_DELAY_SECONDS = 30.0
 _BATCH_SIZE = 128
 
-# Returning ``None`` means the handler started work that outlives it — a turn
-# that is still running — so the event stays pending and whoever owns that work
-# settles it. Returning an outcome means the work is finished.
-type EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None]]
+type EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome]]
 
 
 @dataclass
@@ -154,6 +151,5 @@ class PendingEventWorker:
                 )
                 self._failed_rooms.add(room_id)
                 return
-            if outcome is not None:
-                await self.store.settle(event.event_id, outcome)
+            await self.store.settle(event.event_id, outcome)
         self._failed_rooms.discard(room_id)

@@ -807,7 +807,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     router_bot.enable_streaming = True
     router_bot.running = True
     router_bot._set_presence_with_model_info = AsyncMock()
-    router_bot.recover_pending_turn_journal_events = AsyncMock()
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (

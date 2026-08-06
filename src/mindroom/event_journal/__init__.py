@@ -19,7 +19,6 @@ from .models import (
     JournalEvent,
     OutboxDelivery,
     RefreshRequest,
-    SemanticConsumer,
     SettlementOutcome,
     VisibleMessage,
 )
@@ -40,7 +39,6 @@ __all__ = [
     "PrincipalStore",
     "ProjectedEvent",
     "RefreshRequest",
-    "SemanticConsumer",
     "SettlementOutcome",
     "VisibleMessage",
     "decode_thread_id",

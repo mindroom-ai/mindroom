@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import nio
-
-from mindroom.event_journal import EventClass, EventKind
-from mindroom.matrix import journal_ingress
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -22,6 +19,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.storage import DispatchObligation
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -190,29 +189,24 @@ def _plugin(name: str, callbacks: list[object]) -> object:
     )()
 
 
-def _observe_provenance(event_id: str, provenance: nio.TimelineEventProvenance) -> None:
-    """Set the delivery provenance the call-runtime callbacks read."""
-    journal_ingress._DELIVERY_PROVENANCE.set((event_id, provenance))
-
-
 @pytest.mark.asyncio
 async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
     """Startup cleanup must run after recovery and preserve every raw unsettled source."""
     bot = _agent_bot(tmp_path)
     call_order: list[str] = []
     unsettled_source_event_ids = frozenset({"$pending"})
-    bot._journal_dispatcher.drain_once = AsyncMock(
-        side_effect=lambda: (call_order.append("recover"), 0)[1],
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(
+        side_effect=lambda **_kwargs: call_order.append("recover"),
     )
-    bot._journal_dispatcher.unsettled_event_ids = AsyncMock(
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(
         side_effect=lambda: (call_order.append("unsettled"), unsettled_source_event_ids)[1],
     )
     bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
 
-    await bot.recover_pending_turn_journal_events()
+    await bot.recover_pending_turn_dispatch_obligations()
 
     assert call_order == ["recover", "unsettled", "cleanup"]
-    bot._journal_dispatcher.drain_once.assert_awaited_once_with()
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
     bot._turn_store.cleanup.assert_called_once_with(
         unsettled_source_event_ids=unsettled_source_event_ids,
     )
@@ -222,15 +216,28 @@ async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_p
 async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: Path) -> None:
     """Ledger pruning failure must remain visible to the orchestrator retry owner."""
     bot = _agent_bot(tmp_path)
-    bot._journal_dispatcher.drain_once = AsyncMock(return_value=0)
-    bot._journal_dispatcher.unsettled_event_ids = AsyncMock(return_value=frozenset())
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock()
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(return_value=frozenset())
     bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
 
     with pytest.raises(OSError, match="disk unavailable"):
-        await bot.recover_pending_turn_journal_events()
+        await bot.recover_pending_turn_dispatch_obligations()
 
-    bot._journal_dispatcher.drain_once.assert_awaited_once_with()
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
     bot._turn_store.cleanup.assert_called_once_with(unsettled_source_event_ids=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_non_turn_recovery_retries_store_enumeration_failure(tmp_path: Path) -> None:
+    """A transient discovery failure must not strand accepted non-turn callbacks."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(side_effect=[OSError("disk unavailable"), None])
+
+    with patch("mindroom.bot.wait_exponential", return_value=lambda _retry_state: 0):
+        await bot._recover_non_turn_dispatch_obligations()
+
+    assert bot._dispatch_obligation_runner.recover_pending.await_count == 2
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_with(turn_backed=False)
 
 
 @pytest.mark.asyncio
@@ -331,18 +338,30 @@ async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
     call_callback = client.add_event_callback.call_args_list[1].args[0]
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.HISTORY)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
-    _observe_provenance(call_event.event_id, nio.TimelineEventProvenance.HISTORY)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await call_callback(room, call_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     call_manager.on_room_membership_event.assert_not_awaited()
     call_manager.on_room_event.assert_not_awaited()
 
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.LIVE)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await membership_callback(room, membership_event)
-    _observe_provenance(call_event.event_id, nio.TimelineEventProvenance.LIVE)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await call_callback(room, call_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -374,9 +393,15 @@ async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tm
         bot._register_call_manager_callbacks(client)
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.HISTORY)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.LIVE)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     call_manager.on_room_membership_event.assert_not_awaited()
@@ -401,18 +426,25 @@ async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_p
         },
     )
     assert isinstance(membership_event, nio.RoomMemberEvent)
-    await bot._journal_dispatcher.admit_out_of_band(
-        room,
-        membership_event,
-        EventKind.ROOM_LIFECYCLE,
-        EventClass.ACTIONABLE,
+    bot._dispatch_obligation_store.create_pending(
+        DispatchObligation(
+            principal_id=bot._dispatch_obligation_store.principal_id,
+            entity_name=bot._dispatch_obligation_store.entity_name,
+            source_event_id=membership_event.event_id,
+            callback_kind=DispatchCallbackKind.ROOM_LIFECYCLE,
+            room_id=room.room_id,
+            event_source=dict(membership_event.source),
+        ),
     )
 
     with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
         bot._register_call_manager_callbacks(client)
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
-    _observe_provenance(membership_event.event_id, nio.TimelineEventProvenance.HISTORY)
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 

@@ -17,8 +17,7 @@ from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
-from mindroom.event_journal import EventClass, EventKind
-from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -47,7 +46,6 @@ from tests.test_live_message_coalescing import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import EventJournalStore
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
@@ -548,9 +546,7 @@ async def test_failed_lane_readiness_reports_original_callback_source_kind() -> 
 
 
 @pytest.mark.asyncio
-async def test_ignored_source_remains_owned_during_durable_settlement(
-    journal_store: EventJournalStore,
-) -> None:
+async def test_ignored_source_remains_owned_during_durable_settlement() -> None:
     """Redelivery must defer while an ignored media source writes its terminal tombstone."""
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
@@ -583,30 +579,24 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
 
-    callbacks = JournalCallbacks(
+    callbacks = DispatchObligationRunner.callbacks_for(
         on_message=cast("Callable", noop),
         on_media=on_media,
         on_reaction=cast("Callable", noop),
         on_approval=cast("Callable", noop),
+        on_invite=cast("Callable", noop),
         on_room_lifecycle=cast("Callable", noop),
         on_redaction=cast("Callable", noop),
         on_decryption_failure=cast("Callable", noop),
         source_has_live_owner=gate.has_pending_source_event,
     )
-    dispatcher = JournalDispatcher(
-        store=journal_store.principal("agent@lane"),
-        callbacks=callbacks,
-        room_for_id=lambda _room_id: _room(),
-        turn_is_terminal=lambda _event_id: False,
+    outcome = await callbacks[DispatchCallbackKind.MEDIA](
+        _room(),
+        _image_event(event_id=source_event_id),
     )
-    event = _image_event(event_id=source_event_id)
-    await dispatcher.admit_out_of_band(_room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)
-    await dispatcher.drain_once()
 
-    # The gate still owns this source, so the media callback must not run and
-    # the event must stay pending for the gate to hand back.
+    assert outcome.value == "deferred"
     on_media.assert_not_awaited()
-    assert [pending.event_id for pending in await dispatcher.store.pending()] == [source_event_id]
 
     release_settlement.set()
     await slot.settled.wait()
@@ -1074,7 +1064,6 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
     reaction_event.sender = "@user:localhost"
     reaction_event.key = "👍"
     reaction_event.reacts_to = "$question"
-    reaction_event.server_timestamp = 1100
     reaction_event.source = {"content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$question"}}}
 
     with interactive._thread_lock:

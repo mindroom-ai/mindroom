@@ -3996,11 +3996,9 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         mock_generate_response.return_value = _delivery_resolution(None)
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
-        # The worker records the failure and leaves the event pending rather
-        # than propagating it, so the question stays retryable.
-        await dispatch_reaction_durably(bot, room, reaction_event)
+        with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+            await dispatch_reaction_durably(bot, room, reaction_event)
 
-        assert await bot._journal_dispatcher.store.is_pending(reaction_event.event_id)
         assert bot._turn_store.is_handled("$question:example.com") is False
         assert _response_event_id(bot, "$question:example.com") == "$ack_event:example.com"
         request = mock_generate_response.await_args.args[0]

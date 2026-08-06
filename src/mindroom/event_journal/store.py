@@ -27,12 +27,10 @@ if TYPE_CHECKING:
         ConversationCursor,
         ConversationPage,
         DeliveryStage,
-        EventKind,
         InboundEvent,
         JournalEvent,
         OutboxDelivery,
         RefreshRequest,
-        SemanticConsumer,
         SettlementOutcome,
     )
     from .projection import ProjectedEvent
@@ -86,46 +84,6 @@ class PrincipalStore:
         """Mark one event's semantic work terminal."""
         await self._backend.write(
             lambda transaction: journal.settle(transaction, self._principal_id, event_id, outcome),
-        )
-
-    async def settle_many(self, event_ids: tuple[str, ...], outcome: SettlementOutcome) -> None:
-        """Settle every event that one terminal turn accounted for."""
-        if not event_ids:
-            return
-        await self._backend.write(
-            lambda transaction: journal.settle_many(transaction, self._principal_id, event_ids, outcome),
-        )
-
-    async def unsettled_event_ids(self) -> frozenset[str]:
-        """Return every event that still owes semantic work."""
-        return await self._backend.read(
-            lambda transaction: journal.unsettled_event_ids(transaction, self._principal_id),
-        )
-
-    async def pending_of_kind(
-        self,
-        kind: EventKind,
-        *,
-        limit: int = DEFAULT_PENDING_LIMIT,
-    ) -> tuple[JournalEvent, ...]:
-        """Return pending events of one kind, in receipt order."""
-        return await self._backend.read(
-            lambda transaction: journal.pending_of_kind(transaction, self._principal_id, kind, limit=limit),
-        )
-
-    async def claim_semantic_consumer(
-        self,
-        event_id: str,
-        consumer: SemanticConsumer,
-    ) -> SemanticConsumer:
-        """Record the sole consumer of one event, returning whoever holds it."""
-        return await self._backend.write(
-            lambda transaction: journal.claim_semantic_consumer(
-                transaction,
-                self._principal_id,
-                event_id,
-                consumer,
-            ),
         )
 
     async def membership_epoch(self, room_id: str) -> int:
@@ -361,18 +319,18 @@ class EventJournalStore:
     backend: Backend
 
     @classmethod
-    def open_sqlite(cls, database_path: Path) -> EventJournalStore:
+    async def open_sqlite(cls, database_path: Path) -> EventJournalStore:
         """Open a single-writer SQLite store."""
         from .sqlite_backend import SqliteBackend  # noqa: PLC0415 - backend chosen at runtime
 
-        return cls(backend=SqliteBackend.open(database_path))
+        return cls(backend=await SqliteBackend.open(database_path))
 
     @classmethod
-    def open_postgres(cls, database_url: str) -> EventJournalStore:
+    async def open_postgres(cls, database_url: str) -> EventJournalStore:
         """Open a PostgreSQL store."""
         from .postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
 
-        return cls(backend=PostgresBackend.open(database_url))
+        return cls(backend=await PostgresBackend.open(database_url))
 
     def principal(self, principal_id: str) -> PrincipalStore:
         """Return the bound view for one bot."""

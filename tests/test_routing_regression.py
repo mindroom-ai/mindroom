@@ -25,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -482,54 +482,62 @@ class TestRoutingRegression:
             room_id=room_id,
         )
         mock_suggest_responder.return_value = "healthy"
-        await router_bot._journal_dispatcher.admit_out_of_band(
+        await router_bot._dispatch_obligation_runner.persist(
             room,
             event,
-            EventKind.MESSAGE,
-            EventClass.ACTIONABLE,
+            DispatchCallbackKind.MESSAGE,
         )
 
-        await router_bot.recover_pending_turn_journal_events()
+        await router_bot.recover_pending_turn_dispatch_obligations()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_journal_events()
+        await router_bot.recover_pending_turn_dispatch_obligations()
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not await router_bot._journal_dispatcher.store.is_pending(event.event_id)
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
 
         blocked_event = _router_readiness_event("$blocked-recovery")
         mock_suggest_responder.reset_mock(return_value=True)
         mock_suggest_responder.return_value = "stuck"
         router_bot.client.room_send.reset_mock()
-        await router_bot._journal_dispatcher.admit_out_of_band(
+        await router_bot._dispatch_obligation_runner.persist(
             room,
             blocked_event,
-            EventKind.MESSAGE,
-            EventClass.ACTIONABLE,
+            DispatchCallbackKind.MESSAGE,
         )
 
-        await router_bot.recover_pending_turn_journal_events()
+        await router_bot.recover_pending_turn_dispatch_obligations()
         await drain_coalescing(router_bot)
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
+        assert router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+        assert not router_bot._dispatch_obligation_runner._retry_keys
 
         stuck_bot._first_sync_done = True
         router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
             {"event_id": "$stuck-router-response"},
             room_id=room_id,
         )
-        await router_bot.recover_pending_turn_journal_events()
+        await router_bot.recover_pending_turn_dispatch_obligations()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_journal_events()
+        await router_bot.recover_pending_turn_dispatch_obligations()
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
 
     @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:

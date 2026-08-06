@@ -464,7 +464,7 @@ async def run_proof(homeserver: str) -> Findings:
     findings = Findings()
     client, user_id = await _register(homeserver)
     with tempfile.TemporaryDirectory(prefix="journal-live-proof-") as directory:
-        store_root = EventJournalStore.open_sqlite(Path(directory) / "journal.db")
+        store_root = await EventJournalStore.open_sqlite(Path(directory) / "journal.db")
         store = store_root.principal(PRINCIPAL)
         try:
             room = await client.room_create(preset=nio.RoomPreset.public_chat)

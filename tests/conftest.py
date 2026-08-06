@@ -683,7 +683,7 @@ async def journal_store(
 
     backend = str(request.param)
     if backend == "sqlite":
-        store = EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
+        store = await EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
     else:
         import psycopg  # noqa: PLC0415
         from psycopg import sql  # noqa: PLC0415
@@ -693,7 +693,7 @@ async def journal_store(
         with psycopg.connect(database_url, autocommit=True) as db:
             db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         separator = "&" if "?" in database_url else "?"
-        store = EventJournalStore.open_postgres(
+        store = await EventJournalStore.open_postgres(
             f"{database_url}{separator}options=-csearch_path%3D{schema}",
         )
     try:
