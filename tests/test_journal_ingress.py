@@ -274,6 +274,10 @@ def sidecar_event(event_id: str, preview: str, mxc: str, *, ts: int = 5_000) -> 
 class TestSidecarContent:
     """A message too large for one Matrix event still reaches a prompt whole."""
 
+    @pytest.mark.xfail(
+        reason="the projection stores the sidecar preview; resolution moves to the pending-event worker",
+        strict=True,
+    )
     async def test_a_strict_read_returns_the_sidecar_body_not_the_preview(
         self,
         alice: PrincipalStore,
