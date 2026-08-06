@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -333,7 +333,7 @@ def initialize_approval_runtime(
     *,
     sender: MatrixEventSender,
     editor: MatrixEventEditor,
-    event_cache: ConversationEventCache,
+    cards: ApprovalView | None,
     approval_room_ids: ApprovalRoomProvider,
     transport_sender: TransportSenderProvider,
 ) -> None:
@@ -342,7 +342,7 @@ def initialize_approval_runtime(
         runtime_paths,
         sender=sender,
         editor=editor,
-        event_cache=event_cache,
+        cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
     )

@@ -1024,6 +1024,106 @@ class TestOutbox:
         assert stored.acknowledged_event_id == "$first"
 
 
+class TestApprovalCards:
+    """A card the bot sent stays answerable until its decision lands."""
+
+    @staticmethod
+    def card(event_id: str, *, sender: str = ALICE) -> dict[str, object]:
+        """Return one approval-card event source."""
+        return {
+            "event_id": event_id,
+            "sender": sender,
+            "type": "io.mindroom.tool_approval",
+            "content": {"approval_id": event_id.lstrip("$"), "status": "pending"},
+        }
+
+    async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
+        """A remembered card reads back whole."""
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") == self.card("$card")
+
+    async def test_a_forgotten_card_is_gone(self, alice: PrincipalStore) -> None:
+        """Resolving a card is what removes it, so presence means pending."""
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.forget_approval_card(card_event_id="$card")
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_a_card_is_not_readable_from_another_room(self, alice: PrincipalStore) -> None:
+        """A card belongs to the room it was sent in."""
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        assert await alice.pending_approval_card(room_id=OTHER_ROOM, card_event_id="$card") is None
+        assert await alice.pending_approval_cards(room_id=OTHER_ROOM) == ()
+
+    async def test_remembering_twice_keeps_the_first_card(self, alice: PrincipalStore) -> None:
+        """A repeated send acknowledgement must not rewrite the card body."""
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.remember_approval_card(
+            room_id=ROOM,
+            card_event_id="$card",
+            card={**self.card("$card"), "sender": BOB},
+        )
+
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored["sender"] == ALICE
+
+    async def test_a_rooms_cards_come_back_oldest_first(self, alice: PrincipalStore) -> None:
+        """Startup expiry walks the room's cards in the order they were sent."""
+        for index in range(3):
+            await alice.remember_approval_card(
+                room_id=ROOM,
+                card_event_id=f"$card-{index}",
+                card=self.card(f"$card-{index}"),
+            )
+
+        stored = await alice.pending_approval_cards(room_id=ROOM)
+        assert [card["event_id"] for card in stored] == ["$card-0", "$card-1", "$card-2"]
+
+    async def test_the_scan_honors_its_limit(self, alice: PrincipalStore) -> None:
+        """A bounded scan is what tells the caller its own view was truncated."""
+        for index in range(5):
+            await alice.remember_approval_card(
+                room_id=ROOM,
+                card_event_id=f"$card-{index}",
+                card=self.card(f"$card-{index}"),
+            )
+
+        assert len(await alice.pending_approval_cards(room_id=ROOM, limit=2)) == 2
+
+    async def test_rejoining_makes_the_previous_memberships_cards_unrecoverable(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A card asked in a membership the bot has left is not this one's to answer.
+
+        Expiring it would edit a message in a room the bot has since rejoined,
+        answering a question nobody in the current membership asked.
+        """
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_one_principals_cards_are_invisible_to_another(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Two bots in one database do not answer each other's approvals."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        assert await bob.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+        assert await bob.pending_approval_cards(room_id=ROOM) == ()
+        assert await alice.pending_approval_cards(room_id=ROOM) != ()
+
+
 class TestConcurrency:
     """Concurrent conversations must not produce lock failures."""
 

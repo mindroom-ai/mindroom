@@ -88,10 +88,6 @@ _TABLES = (
         content_json TEXT,
         refresh_token BIGINT,
         membership_epoch BIGINT NOT NULL,
-        -- Set on a row this bot seeded from its own send, whose ordering
-        -- metadata is a local guess: a Matrix send response carries only the
-        -- event ID, and `origin_server_ts` is the server's to assign. The
-        -- self-authored sync echo replaces those values and clears this.
         PRIMARY KEY (principal_id, room_id, logical_event_id)
     )
     """,
@@ -105,10 +101,6 @@ _TABLES = (
         edit_ts BIGINT NOT NULL,
         thread_id TEXT NOT NULL,
         content_json TEXT NOT NULL,
-        -- A held edit can be one this bot seeded from its own send, and the
-        -- bit has to survive the wait: the original may not arrive until after
-        -- the edit, and installing a locally timed revision as authoritative
-        -- would make the real echo look like a stale duplicate.
         PRIMARY KEY (principal_id, room_id, target_event_id, sender)
     )
     """,
@@ -154,6 +146,17 @@ _TABLES = (
         PRIMARY KEY (principal_id, turn_id, stage)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_cards (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        card_json TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, card_event_id)
+    )
+    """,
 )
 
 
@@ -180,6 +183,10 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS response_outbox_unacknowledged
     ON response_outbox (principal_id, created_at_ns)
     WHERE acknowledged_event_id IS NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS approval_cards_room
+    ON approval_cards (principal_id, room_id, created_at_ns)
     """,
 )
 

@@ -318,7 +318,7 @@ async def _wait_for_sent_pending(
                 pending = (
                     None
                     if card_event_id is None
-                    else await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+                    else store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
                 )
                 if pending is not None:
                     return pending

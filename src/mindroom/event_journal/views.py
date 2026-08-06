@@ -16,7 +16,7 @@ type-check.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -211,8 +211,45 @@ class OutboxView(Protocol):
         ...
 
 
+class ApprovalView(Protocol):
+    """The approval cards this bot owes a decision on, and nothing else."""
+
+    async def remember_approval_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        """Record one sent approval card as awaiting a decision."""
+        ...
+
+    async def forget_approval_card(self, *, card_event_id: str) -> None:
+        """Drop one approval card that has reached a terminal state."""
+        ...
+
+    async def pending_approval_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one card still awaiting a decision under this membership."""
+        ...
+
+    async def pending_approval_cards(
+        self,
+        *,
+        room_id: str,
+        limit: int = ...,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return one room's cards still awaiting a decision, oldest first."""
+        ...
+
+
 __all__ = [
     "AdmissionView",
+    "ApprovalView",
     "ConversationReadView",
     "DispatchView",
     "HydrationView",

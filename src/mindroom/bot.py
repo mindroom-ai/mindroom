@@ -97,7 +97,7 @@ from .delivery_gateway import (
 from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
-from .event_journal import EventClass, EventJournalStore, EventKind, SemanticConsumer
+from .event_journal import ApprovalView, EventClass, EventJournalStore, EventKind, SemanticConsumer
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -844,6 +844,11 @@ class AgentBot:
     def orchestrator(self, value: OrchestratorRuntime | None) -> None:
         """Update the current orchestrator."""
         self._runtime_view.orchestrator = value
+
+    @property
+    def approval_cards(self) -> ApprovalView:
+        """Return this bot's durable store of approval cards awaiting a decision."""
+        return self._journal_store.principal(self._journal_principal_id)
 
     @property
     def event_cache(self) -> ConversationEventCache:

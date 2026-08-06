@@ -17,9 +17,7 @@ from uuid import uuid4
 from mindroom.approval_events import (
     PendingApproval,
     PendingApprovalStatus,
-    is_original_approval_card,
     parse_approval_datetime,
-    terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
@@ -29,7 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -245,7 +243,7 @@ class _ActiveApprovalSend:
 class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
-    Cached approval cards support terminal cleanup only; they never make an
+    Recovered approval cards support terminal cleanup only; they never make an
     approval actionable after its live waiter is gone.
     """
 
@@ -255,14 +253,14 @@ class _ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
+        cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
         self._edit_event = editor
-        self._event_cache = event_cache
+        self._cards = cards
         self._approval_room_ids = approval_room_ids
         self._transport_sender = transport_sender
         self._live_lock = threading.RLock()
@@ -364,12 +362,8 @@ class _ApprovalManager:
 
         discarded = 0
         for room_id in self._configured_approval_room_ids():
-            for card_event in await self._scan_cached_room_cards(
-                room_id,
-                since_ts_ms=0,
-                limit=_STARTUP_DISCARD_SCAN_LIMIT,
-            ):
-                pending = await self._trusted_pending_from_card_event(
+            for card_event in await self._recoverable_room_cards(room_id):
+                pending = self._trusted_pending_from_card_event(
                     card_event,
                     room_id=room_id,
                     transport_sender=transport_sender,
@@ -412,7 +406,7 @@ class _ApprovalManager:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
-        pending = await self._cached_trusted_pending_approval_for_card(
+        pending = await self._recovered_pending_approval_for_card(
             room_id=room_id,
             card_event_id=card_event_id,
         )
@@ -464,7 +458,7 @@ class _ApprovalManager:
     ) -> ApprovalActionResult:
         if live_waiter.room_id != room_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
-        pending = await self._pending_approval_for_card(
+        pending = self._pending_approval_for_card(
             room_id=live_waiter.room_id,
             card_event_id=live_waiter.card_event_id,
         )
@@ -491,7 +485,7 @@ class _ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
+        cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
     ) -> None:
@@ -500,8 +494,8 @@ class _ApprovalManager:
             self._send_event = sender
         if editor is not None:
             self._edit_event = editor
-        if event_cache is not None:
-            self._event_cache = event_cache
+        if cards is not None:
+            self._cards = cards
         if approval_room_ids is not None:
             self._approval_room_ids = approval_room_ids
         if transport_sender is not None:
@@ -564,6 +558,7 @@ class _ApprovalManager:
                 approval_id=approval_id,
                 sent_event=sent_event,
             )
+            await self._remember_card(waiter)
             shutdown_reason = self._current_shutdown_reason()
             if shutdown_reason is not None:
                 await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
@@ -600,6 +595,7 @@ class _ApprovalManager:
             approval_id=approval_id,
             sent_event=sent_event,
         )
+        await self._remember_card(waiter)
         try:
             await self._settle_bound_waiter_as_cancelled(waiter)
         finally:
@@ -821,7 +817,7 @@ class _ApprovalManager:
         if self._edit_event is None:
             return False
         try:
-            return await self._edit_event(
+            delivered = await self._edit_event(
                 pending.room_id,
                 pending.card_event_id,
                 self._resolved_event_content(
@@ -841,42 +837,51 @@ class _ApprovalManager:
                 exc_info=True,
             )
             return False
+        # Dropped only once the room shows the decision. An edit that never
+        # landed leaves a card the user can still click, and the row is the
+        # only thing that lets the next startup expire it.
+        if delivered:
+            await self._forget_card(pending.card_event_id)
+        return delivered
 
-    async def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
+    def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
+        """Return the live waiter's own view of one card.
+
+        Deliberately does not consult the durable store. A live waiter is the
+        in-process authority on a card this process is still waiting on, and a
+        card store write that silently failed would otherwise turn a real
+        pending approval into a click that does nothing.
+        """
         live_waiter = self._live_waiter_for_card(card_event_id)
         if live_waiter is None or live_waiter.room_id != room_id:
             return None
         try:
-            pending = PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
+            return PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
         except (TypeError, ValueError):
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
 
-    async def _cached_trusted_pending_approval_for_card(
+    async def _recovered_pending_approval_for_card(
         self,
         *,
         room_id: str,
         card_event_id: str,
     ) -> PendingApproval | None:
-        if self._event_cache is None:
+        if self._cards is None:
             return None
-        card_event = await self._event_cache.get_event(room_id, card_event_id)
-        if card_event is None or not is_original_approval_card(card_event):
+        card_event = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        if card_event is None:
             return None
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return None
-        return await self._trusted_pending_from_card_event(
+        return self._trusted_pending_from_card_event(
             card_event,
             room_id=room_id,
             transport_sender=transport_sender,
             expected_card_event_id=card_event_id,
         )
 
-    async def _trusted_pending_from_card_event(
+    def _trusted_pending_from_card_event(
         self,
         card_event: dict[str, Any],
         *,
@@ -895,54 +900,57 @@ class _ApprovalManager:
             expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
         ) or pending.card_sender_id != transport_sender:
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
+        # A stored card is written pending and dropped when its decision lands,
+        # so its own body should never say otherwise. Checked anyway, because
+        # believing a terminal card is pending would resolve it a second time.
+        return pending if pending.latest_status(None) == "pending" else None
 
-    async def _latest_edit(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        sender: str | None = None,
-    ) -> dict[str, Any] | None:
-        if self._event_cache is None:
-            return None
-        return await self._event_cache.get_latest_edit(room_id, card_event_id, sender=sender)
+    async def _remember_card(self, waiter: _LiveApprovalWaiter) -> None:
+        """Make one sent card recoverable by whoever restarts next.
 
-    async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
-        latest_edit = await self._latest_edit(
-            room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
-        )
-        if terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
-            return latest_edit
-        return None
+        Recorded even for a card that is about to be cancelled, because the
+        cancellation is itself a Matrix edit that can fail: without the row,
+        a card left visible in the room would answer nobody forever.
+        """
+        if self._cards is None:
+            return
+        try:
+            await self._cards.remember_approval_card(
+                room_id=waiter.room_id,
+                card_event_id=waiter.card_event_id,
+                card=waiter.card_event,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record approval card for recovery",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+                exc_info=True,
+            )
 
-    async def _scan_cached_room_cards(
-        self,
-        room_id: str,
-        *,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        if self._event_cache is None:
-            return []
-        events = await self._event_cache.get_recent_room_events(
-            room_id,
-            event_type="io.mindroom.tool_approval",
-            since_ts_ms=since_ts_ms,
-            limit=limit,
-        )
-        if len(events) >= limit:
+    async def _forget_card(self, card_event_id: str) -> None:
+        if self._cards is None:
+            return
+        try:
+            await self._cards.forget_approval_card(card_event_id=card_event_id)
+        except Exception:
+            logger.warning(
+                "Failed to drop a resolved approval card",
+                event_id=card_event_id,
+                exc_info=True,
+            )
+
+    async def _recoverable_room_cards(self, room_id: str) -> tuple[dict[str, Any], ...]:
+        if self._cards is None:
+            return ()
+        cards = await self._cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_DISCARD_SCAN_LIMIT)
+        if len(cards) >= _STARTUP_DISCARD_SCAN_LIMIT:
             logger.warning(
                 "approval_startup_scan_truncated",
                 room_id=room_id,
-                scan_limit=limit,
+                scan_limit=_STARTUP_DISCARD_SCAN_LIMIT,
             )
-        return [event for event in events if is_original_approval_card(event)]
+        return cards
 
     async def shutdown(self, *, reason: str) -> None:
         """Expire pending approvals and drain approval cleanup tasks."""
@@ -1321,7 +1329,7 @@ def initialize_approval_store(
     *,
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
-    event_cache: ConversationEventCache | None = None,
+    cards: ApprovalView | None = None,
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
 ) -> _ApprovalManager:
@@ -1332,7 +1340,7 @@ def initialize_approval_store(
         _MANAGER.configure_transport(
             sender=sender,
             editor=editor,
-            event_cache=event_cache,
+            cards=cards,
             approval_room_ids=approval_room_ids,
             transport_sender=transport_sender,
         )
@@ -1346,7 +1354,7 @@ def initialize_approval_store(
         runtime_paths,
         sender=sender,
         editor=editor,
-        event_cache=event_cache,
+        cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
     )

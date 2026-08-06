@@ -128,8 +128,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import FrameType
 
+    from mindroom.event_journal import ApprovalView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
-    from mindroom.matrix.cache import ConversationEventCache
 
     from .constants import RuntimePaths
     from .orchestration.config_updates import ConfigUpdatePlan
@@ -261,7 +261,6 @@ class _MultiAgentOrchestrator:
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
-    _router_principal_id: str | None = field(default=None, init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -298,7 +297,7 @@ class _MultiAgentOrchestrator:
         self._approval_transport = ApprovalMatrixTransport(
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
-            event_cache_provider=self._approval_event_cache,
+            cards_provider=self._approval_cards,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -394,15 +393,17 @@ class _MultiAgentOrchestrator:
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
         bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
 
-    def _approval_event_cache(self) -> ConversationEventCache:
-        """Return the router principal's isolated cache before or after bot construction."""
+    def _approval_cards(self) -> ApprovalView | None:
+        """Return the router principal's approval-card store, once it exists.
+
+        Bound before the router bot is built as well as after, because the
+        transport is configured on every config reload. The store belongs to
+        the bot, so the early call has nothing to give; the manager treats a
+        missing store as "no card is recoverable", and the rebind that follows
+        bot construction supplies the real one.
+        """
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is not None:
-            return router_bot.event_cache
-        if self._router_principal_id is None:
-            msg = "Router Matrix principal is unavailable for approval cache binding"
-            raise RuntimeError(msg)
-        return self._runtime_support.event_cache.for_principal(self._router_principal_id)
+        return None if router_bot is None else router_bot.approval_cards
 
     def _rebind_runtime_support_services(self) -> None:
         """Rebind the current runtime support services to every managed bot."""
@@ -846,8 +847,6 @@ class _MultiAgentOrchestrator:
         bot.hook_registry = self.hook_registry
         self._bind_runtime_support_services(bot)
         self.agent_bots[entity_name] = bot
-        if entity_name == ROUTER_AGENT_NAME:
-            self._router_principal_id = agent_user.user_id
         return bot
 
     def _build_hook_registry(self, config: Config) -> HookRegistry:
@@ -1033,7 +1032,6 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self._router_principal_id = entity_users[ROUTER_AGENT_NAME].user_id
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)

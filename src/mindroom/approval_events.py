@@ -135,23 +135,6 @@ def _full_arguments_available(content: dict[str, Any]) -> bool:
     return sidecar_upload_is_usable(url, file_info, room_encrypted=False)
 
 
-def is_original_approval_card(event: dict[str, Any]) -> bool:
-    """Return whether an event is an original approval card, not a replacement edit."""
-    content = event.get("content")
-    return (
-        event.get("type") == "io.mindroom.tool_approval"
-        and isinstance(content, dict)
-        and not _is_replace_content(content)
-    )
-
-
-def terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
-    """Return whether a cached terminal edit is trusted for one approval card."""
-    if edit is None:
-        return True
-    return edit.get("sender") == card_sender_id
-
-
 def _required_str(event: dict[str, Any], key: str) -> str:
     value = event.get(key)
     if isinstance(value, str) and value:

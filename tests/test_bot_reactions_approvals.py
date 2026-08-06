@@ -51,7 +51,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
@@ -61,6 +61,28 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+class _FakeApprovalCards:
+    """The approval cards a bot still owes a decision on, recording its lookups."""
+
+    def __init__(self) -> None:
+        self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.lookups: list[tuple[str, str]] = []
+
+    async def remember_approval_card(self, *, room_id: str, card_event_id: str, card: Mapping[str, Any]) -> None:
+        self.cards.setdefault(card_event_id, (room_id, dict(card)))
+
+    async def forget_approval_card(self, *, card_event_id: str) -> None:
+        self.cards.pop(card_event_id, None)
+
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+        self.lookups.append((room_id, card_event_id))
+        entry = self.cards.get(card_event_id)
+        return None if entry is None or entry[0] != room_id else entry[1]
+
+    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[dict[str, Any], ...]:
+        return tuple(card for card_room, card in self.cards.values() if card_room == room_id)[:limit]
 
 
 def _detached_approval_card() -> dict[str, Any]:
@@ -800,11 +822,10 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        event_cache = MagicMock()
-        event_cache.get_event = AsyncMock(return_value=None)
+        cards = _FakeApprovalCards()
         store = initialize_approval_store(
             runtime_paths,
-            event_cache=event_cache,
+            cards=cards,
         )
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$ordinary-rich-reply"
@@ -826,7 +847,7 @@ class TestAgentBot(AgentBotTestBase):
             handle_text_event.assert_awaited_once()
             assert handle_text_event.await_args.args == (room, event)
             assert isinstance(handle_text_event.await_args.kwargs["receipt_time"], float)
-            event_cache.get_event.assert_awaited_once_with("!test:localhost", "$ordinary-message")
+            assert cards.lookups == [("!test:localhost", "$ordinary-message")]
             assert store is get_approval_store()
         finally:
             await _shutdown_approval_store()
@@ -844,14 +865,17 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        event_cache = MagicMock()
-        event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
-        event_cache.get_latest_edit = AsyncMock(return_value=None)
+        cards = _FakeApprovalCards()
+        await cards.remember_approval_card(
+            room_id="!test:localhost",
+            card_event_id="$approval",
+            card=_detached_approval_card(),
+        )
         editor = AsyncMock(return_value=True)
         initialize_approval_store(
             runtime_paths,
             editor=editor,
-            event_cache=event_cache,
+            cards=cards,
             transport_sender=lambda: "@mindroom_router:localhost",
         )
         event = MagicMock(spec=nio.RoomMessageText)
@@ -890,13 +914,17 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        event_cache = MagicMock()
-        event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
+        cards = _FakeApprovalCards()
+        await cards.remember_approval_card(
+            room_id="!test:localhost",
+            card_event_id="$approval",
+            card=_detached_approval_card(),
+        )
         editor = AsyncMock(return_value=True)
         initialize_approval_store(
             runtime_paths,
             editor=editor,
-            event_cache=event_cache,
+            cards=cards,
             transport_sender=lambda: "@mindroom_router:localhost",
         )
         event = MagicMock(spec=nio.RoomMessageText)
@@ -922,7 +950,7 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_message(bot, room, event)
 
             handle_text_event.assert_awaited_once()
-            event_cache.get_event.assert_not_awaited()
+            assert cards.lookups == []
             editor.assert_not_awaited()
         finally:
             await _shutdown_approval_store()

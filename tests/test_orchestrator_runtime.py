@@ -2995,8 +2995,13 @@ class TestMultiAgentOrchestrator:
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
-    async def test_sync_runtime_support_services_rebinds_approval_store_cache(self, tmp_path: Path) -> None:
-        """Approval store transport should track replaced runtime cache objects."""
+    async def test_sync_runtime_support_services_rebinds_approval_cards(self, tmp_path: Path) -> None:
+        """Approval transport should track the router bot that owns the card store.
+
+        The cards belong to the router's journal, not to runtime support, so a
+        reload that replaces the router bot has to hand the manager the new
+        store; keeping the old one would recover cards from a closed database.
+        """
         config = _runtime_bound_config(
             Config(
                 agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
@@ -3006,17 +3011,15 @@ class TestMultiAgentOrchestrator:
         )
         runtime_paths = runtime_paths_for(config)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-        old_cache = MagicMock()
-        new_cache = MagicMock()
-        router_cache = MagicMock()
-        new_cache.for_principal.return_value = router_cache
-        orchestrator._router_principal_id = "@mindroom_router:localhost"
+        old_cards = MagicMock()
+        router_cards = MagicMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_cards=router_cards)}
         support = SimpleNamespace(
-            event_cache=new_cache,
+            event_cache=MagicMock(),
             event_cache_write_coordinator=MagicMock(),
             startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
-        store = initialize_approval_store(runtime_paths, event_cache=old_cache)
+        store = initialize_approval_store(runtime_paths, cards=old_cards)
 
         try:
             with (
@@ -3027,8 +3030,7 @@ class TestMultiAgentOrchestrator:
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
 
             assert get_approval_store() is store
-            assert store._event_cache is router_cache
-            new_cache.for_principal.assert_called_once_with("@mindroom_router:localhost")
+            assert store._cards is router_cards
         finally:
             await _shutdown_approval_store()
 

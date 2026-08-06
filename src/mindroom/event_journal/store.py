@@ -9,9 +9,9 @@ rather than something it is trusted not to do.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from . import journal, outbox, reads
+from . import approvals, journal, outbox, reads
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 _DEFAULT_PENDING_LIMIT = 256
 _DEFAULT_REFRESH_LIMIT = 64
 _DEFAULT_UNACKNOWLEDGED_LIMIT = 256
+_DEFAULT_ROOM_CARD_LIMIT = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +345,66 @@ class PrincipalStore:
                 self._principal_id,
                 limit=limit,
                 after=after,
+            ),
+        )
+
+    async def remember_approval_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        """Record one sent approval card as awaiting a decision."""
+        await self._backend.write(
+            lambda transaction: approvals.remember(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+                card=card,
+            ),
+        )
+
+    async def forget_approval_card(self, *, card_event_id: str) -> None:
+        """Drop one approval card that has reached a terminal state."""
+        await self._backend.write(
+            lambda transaction: approvals.forget(
+                transaction,
+                self._principal_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
+    async def pending_approval_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one card still awaiting a decision under this membership."""
+        return await self._backend.read(
+            lambda transaction: approvals.pending_card(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
+    async def pending_approval_cards(
+        self,
+        *,
+        room_id: str,
+        limit: int = _DEFAULT_ROOM_CARD_LIMIT,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return one room's cards still awaiting a decision, oldest first."""
+        return await self._backend.read(
+            lambda transaction: approvals.pending_cards(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                limit=limit,
             ),
         )
 

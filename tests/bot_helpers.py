@@ -578,7 +578,7 @@ async def _wait_for_live_pending(
                 approval_id = sender.await_args.args[2]["approval_id"]
                 card_event_id = store._live_card_event_id_for_approval(approval_id)
                 if card_event_id is not None:
-                    pending = await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+                    pending = store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
                     if pending is not None:
                         return pending
             await asyncio.sleep(0)
@@ -593,7 +593,7 @@ async def _live_pending_approval(
     card_event_id = store._live_card_event_id_for_approval(approval_id)
     if card_event_id is None:
         return None
-    return await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+    return store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
 
 
 async def _wait_for_pending_approval_id(store: _ApprovalManager, approval_ids: list[str]) -> str:
