@@ -1706,3 +1706,65 @@ asks, so only the revision that won is ever resolved.
 **"Eager worker resolution contradicts the consumer budget"** describes eager
 resolution, which is not what was built. Resolution is lazy and bounded by the
 page the reader asked for.
+
+## Delivery cutover: what the phase actually requires (2026-08-06)
+
+`ResponseDelivery` (`src/mindroom/response_delivery.py`) is complete and has
+**no production caller**. Nothing constructs it, so `enqueue_delivery`,
+`claim_delivery`, `acknowledge_delivery`, and `unacknowledged_deliveries` are
+reachable only from tests. The cutover is wiring, not new mechanism.
+
+### The blocker
+
+The outbox keys every row on `(turn_id, stage)`, and the transaction ID is
+derived from them (`delivery_transaction_id(principal_id, turn_id, stage)`).
+That is what makes a resend a no-op on the homeserver. **No delivery request
+carries a turn identity.** `SendTextRequest`, `EditTextRequest`, and
+`FinalDeliveryRequest` all take a `MessageTarget` and nothing that survives a
+restart as the same turn.
+
+The identity to use is `MessageEnvelope.source_event_id`: it is the Matrix
+event that caused the turn, it is what the handled-turn ledger already keys on
+(`same_turn_identity`, `turn_record.py:538`), and it is stable across restarts.
+`ResponseIdentity` already carries the envelope, so `FinalDeliveryRequest` can
+derive it today; `SendTextRequest` cannot.
+
+### Do not route `send_text` wholesale
+
+`SendTextRequest` has callers that are not response turns at all:
+`visible_voice_echo.py`, `commands/config_confirmation.py`, `bot.py:424`,
+`turn_controller.py:1682` and `:1768`,
+`visible_response_reconciliation.py:152`. Giving those a synthetic turn ID
+would put rows in the outbox that no recovery pass can reason about, and two
+unrelated sends sharing a derived ID would silently collapse into one visible
+message on the homeserver.
+
+Only deliveries that carry a `ResponseIdentity` belong in the outbox.
+
+### Order of work
+
+1. Add the turn identity to the response-carrying delivery requests, derived
+   from the envelope rather than generated, so the same turn re-derives it
+   after a restart.
+2. Construct `ResponseDelivery` in the bot and route `FinalDeliveryRequest`
+   through it as `DeliveryStage.FINAL`. This is the delivery whose loss or
+   duplication is visible to a user.
+3. Route the streaming placeholder as `DeliveryStage.INITIAL`, which needs an
+   identity on that one `SendTextRequest` call site
+   (`response_runner.py:1309`) and not on the others.
+4. Run `ResponseDelivery.recover()` at startup, after which contract 2 --
+   settling the journal source at outbox enqueue rather than at TurnStore
+   adoption -- becomes expressible.
+
+Intermediate streaming edits stay off the outbox: contract 4 makes them
+transport-only, and giving each one a durable row would put a claim-before-send
+round trip in the streaming loop.
+
+### What contract 2 protects against
+
+Enqueue happens in the same transaction that settles the journal source. The
+hazard is a crash between "the model produced an answer" and "the answer is
+durably owed to a room": settling at TurnStore adoption marks the source done
+while nothing durable yet says what to send, so recovery has no reason to send
+anything and the turn is lost silently. Settling at enqueue means the source
+stops being pending only once the delivery exists, and recovery finds it.
