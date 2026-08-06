@@ -1418,6 +1418,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "event_id": "$reply-new:localhost",
             "sender": "@agent:localhost",
             "origin_server_ts": 3000,
+            "room_id": "!room:localhost",
             "type": "m.room.message",
             "content": {
                 "body": "New reply",
@@ -1425,16 +1426,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
             },
         }
+        new_event = nio.RoomMessageText.from_dict(new_event_source)
         new_event_info = EventInfo.from_event(new_event_source)
 
         read_task = asyncio.create_task(advisory_thread_read(access, "!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
-            access._outbound._apply_outbound_event_notification(
+            access._live.append_live_event(
                 "!room:localhost",
-                "$reply-new:localhost",
-                new_event_source,
-                new_event_info,
+                new_event,
+                event_info=new_event_info,
             ),
         )
         await asyncio.wait_for(raw_append_committed.wait(), timeout=1.0)

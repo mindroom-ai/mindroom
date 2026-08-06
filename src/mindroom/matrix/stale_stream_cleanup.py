@@ -104,14 +104,6 @@ class _InterruptedThread:
 
 
 @dataclass(frozen=True)
-class StaleStreamCleanupActor:
-    """One bot account that may repair its own stale messages."""
-
-    client: nio.AsyncClient
-    conversation_cache: ConversationCacheProtocol | None
-
-
-@dataclass(frozen=True)
 class _StaleStreamRecoveryResult:
     """Aggregate outcome from one startup recovery sweep."""
 
@@ -192,7 +184,7 @@ def _requester_resolution_message(
 
 
 async def recover_stale_streaming_messages(
-    actors: dict[str, StaleStreamCleanupActor],
+    actors: dict[str, nio.AsyncClient],
     *,
     resume_client: nio.AsyncClient | None,
     resume_conversation_cache: ConversationCacheProtocol | None,
@@ -219,15 +211,15 @@ async def recover_stale_streaming_messages(
 
     async def recover_room(
         room_id: str,
-        joined_actors: dict[str, StaleStreamCleanupActor],
+        joined_actors: dict[str, nio.AsyncClient],
     ) -> tuple[int, list[_InterruptedThread]]:
-        scan_actor = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
-        if scan_actor is None:
-            scan_actor = joined_actors[min(joined_actors)]
+        scan_client = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
+        if scan_client is None:
+            scan_client = joined_actors[min(joined_actors)]
         async with semaphore:
             try:
                 return await _cleanup_stale_streaming_room(
-                    scan_actor.client,
+                    scan_client,
                     room_id=room_id,
                     actors=joined_actors,
                     bot_user_ids=all_bot_user_ids,
@@ -275,16 +267,16 @@ async def recover_stale_streaming_messages(
 
 
 async def _joined_room_actors(
-    actors: dict[str, StaleStreamCleanupActor],
-) -> dict[str, dict[str, StaleStreamCleanupActor]]:
+    actors: dict[str, nio.AsyncClient],
+) -> dict[str, dict[str, nio.AsyncClient]]:
     """Return each joined room once with every available bot account in it."""
 
     async def joined_rooms_for_actor(
         bot_user_id: str,
-        actor: StaleStreamCleanupActor,
-    ) -> tuple[str, StaleStreamCleanupActor, list[str]]:
+        client: nio.AsyncClient,
+    ) -> tuple[str, nio.AsyncClient, list[str]]:
         try:
-            joined_rooms = await get_joined_rooms(actor.client)
+            joined_rooms = await get_joined_rooms(client)
         except Exception:
             logger.warning(
                 "Failed to list joined rooms during stale stream recovery",
@@ -292,15 +284,15 @@ async def _joined_room_actors(
                 exc_info=True,
             )
             joined_rooms = None
-        return bot_user_id, actor, joined_rooms or []
+        return bot_user_id, client, joined_rooms or []
 
     joined_room_results = await asyncio.gather(
-        *(joined_rooms_for_actor(bot_user_id, actor) for bot_user_id, actor in actors.items()),
+        *(joined_rooms_for_actor(bot_user_id, client) for bot_user_id, client in actors.items()),
     )
-    room_actors: dict[str, dict[str, StaleStreamCleanupActor]] = {}
-    for bot_user_id, actor, joined_room_ids in joined_room_results:
+    room_actors: dict[str, dict[str, nio.AsyncClient]] = {}
+    for bot_user_id, client, joined_room_ids in joined_room_results:
         for room_id in joined_room_ids:
-            room_actors.setdefault(room_id, {})[bot_user_id] = actor
+            room_actors.setdefault(room_id, {})[bot_user_id] = client
     return room_actors
 
 
@@ -349,12 +341,6 @@ async def _auto_resume_interrupted_threads(
             delay_due = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
-                if conversation_cache is not None:
-                    conversation_cache.notify_outbound_message(
-                        interrupted_thread.room_id,
-                        delivered.event_id,
-                        delivered.content_sent,
-                    )
                 logger.info(
                     "Queued auto-resume after restart",
                     room_id=interrupted_thread.room_id,
@@ -481,7 +467,7 @@ async def _cleanup_stale_streaming_room(
     scan_client: nio.AsyncClient,
     *,
     room_id: str,
-    actors: dict[str, StaleStreamCleanupActor],
+    actors: dict[str, nio.AsyncClient],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
@@ -522,11 +508,11 @@ async def _cleanup_stale_streaming_room(
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
         bot_user_id = state.bot_user_id
-        actor = actors.get(bot_user_id) if bot_user_id is not None else None
-        if bot_user_id is None or actor is None:
+        actor_client = actors.get(bot_user_id) if bot_user_id is not None else None
+        if bot_user_id is None or actor_client is None:
             continue
         edited, interrupted = await _process_stale_room_candidate(
-            actor,
+            actor_client,
             bot_user_id=bot_user_id,
             room_id=room_id,
             target_event_id=target_event_id,
@@ -549,7 +535,7 @@ async def _cleanup_stale_streaming_room(
 
 
 async def _process_stale_room_candidate(
-    actor: StaleStreamCleanupActor,
+    client: nio.AsyncClient,
     *,
     bot_user_id: str,
     room_id: str,
@@ -576,21 +562,20 @@ async def _process_stale_room_candidate(
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
-            actor.client,
+            client,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
             bot_user_ids=bot_user_ids,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=actor.conversation_cache,
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
     if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
         return False, None
     return await _handle_interrupted_message(
-        actor.client,
+        client,
         room_id=room_id,
         target_event_id=target_event_id,
         state=state,
@@ -599,7 +584,6 @@ async def _process_stale_room_candidate(
         bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=actor.conversation_cache,
         agent_name=agent_name,
         prior_edit_succeeded=prior_edit_succeeded,
     )
@@ -616,7 +600,6 @@ async def _handle_interrupted_message(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
@@ -636,7 +619,6 @@ async def _handle_interrupted_message(
         state=state,
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
         prior_edit_succeeded=prior_edit_succeeded,
     )
     await _redact_stop_reactions(
@@ -657,7 +639,6 @@ async def _repair_restart_marked_message_metadata(
     state: _MessageState,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
 ) -> bool:
     """Repair non-terminal stream metadata on already restart-marked messages."""
@@ -676,7 +657,6 @@ async def _repair_restart_marked_message_metadata(
             preserved_content=_terminal_stream_content(state.latest_content),
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=conversation_cache,
         )
     except Exception as exc:
         logger.warning(
@@ -697,7 +677,6 @@ async def _cleanup_one_stale_message(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
@@ -710,7 +689,6 @@ async def _cleanup_one_stale_message(
         preserved_content=_terminal_stream_content(state.latest_content),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
     )
     if not edit_succeeded:
         return False, None
@@ -745,7 +723,6 @@ async def _cleanup_candidate_message(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
@@ -761,7 +738,6 @@ async def _cleanup_candidate_message(
             bot_user_ids=bot_user_ids,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=conversation_cache,
             agent_name=agent_name,
         )
     except Exception as exc:
@@ -1450,7 +1426,6 @@ async def _edit_stale_message(
     preserved_content: dict[str, Any] | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> bool:
     """Edit a stale message.
 
@@ -1484,12 +1459,6 @@ async def _edit_stale_message(
         extra_content=extra_content,
     )
     if delivered is not None:
-        if conversation_cache is not None:
-            conversation_cache.notify_outbound_message(
-                room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
         return True
 
     logger.warning(

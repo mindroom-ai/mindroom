@@ -20,7 +20,6 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -401,46 +400,6 @@ def _message_mutation_event_info(*, original_event_id: str = "$target:localhost"
             },
         },
     )
-
-
-def _outbound_streaming_edit_content(
-    *,
-    body: str,
-    original_event_id: str = "$stream-original:localhost",
-    thread_id: str = "$thread:localhost",
-    stream_status: str = STREAM_STATUS_STREAMING,
-) -> dict[str, object]:
-    """Return one outbound streaming edit content payload."""
-    return {
-        "body": f"* {body}",
-        "msgtype": "m.text",
-        "m.new_content": {
-            "body": body,
-            "msgtype": "m.text",
-            STREAM_STATUS_KEY: stream_status,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-    }
-
-
-def _outbound_plain_edit_content(
-    *,
-    body: str,
-    original_event_id: str = "$plain-original:localhost",
-    thread_id: str = "$thread:localhost",
-) -> dict[str, object]:
-    """Return one outbound non-streaming edit content payload."""
-    return {
-        "body": f"* {body}",
-        "msgtype": "m.text",
-        "m.new_content": {
-            "body": body,
-            "msgtype": "m.text",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-    }
 
 
 async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache:

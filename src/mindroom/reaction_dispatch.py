@@ -128,7 +128,6 @@ class ReactionDispatcher:
             await self.deps.stop_manager.remove_stop_button(
                 self._client(),
                 event.reacts_to,
-                notify_outbound_redaction=self.deps.conversation_cache.notify_outbound_redaction,
             )
 
         stopped = await self.deps.user_stop_reconciler.finalize(

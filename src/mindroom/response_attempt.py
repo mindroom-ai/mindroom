@@ -40,8 +40,6 @@ class ResponseAttemptDeps:
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
     config: Config
-    notify_outbound_event: Callable[[str, dict[str, object]], None]
-    notify_outbound_redaction: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -165,7 +163,6 @@ class ResponseAttemptRunner:
                     await self.deps.stop_manager.add_stop_button(
                         self.deps.client,
                         message_id,
-                        notify_outbound_event=self.deps.notify_outbound_event,
                     )
 
             try:
@@ -193,7 +190,6 @@ class ResponseAttemptRunner:
                     tracked_message_id,
                     self.deps.client,
                     remove_button=show_stop_button and not button_already_removed,
-                    notify_outbound_redaction=self.deps.notify_outbound_redaction,
                 )
 
             return message_id

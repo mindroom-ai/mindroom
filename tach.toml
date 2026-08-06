@@ -2118,16 +2118,9 @@ path = "mindroom.matrix.cache.write_coordinator"
 depends_on = []
 
 [[modules]]
-path = "mindroom.matrix.cache.outbound_thread_reservations"
-depends_on = []
-visibility = ["mindroom.matrix.cache.thread_writes"]
-
-[[modules]]
 path = "mindroom.matrix.cache.thread_writes"
 depends_on = [
-    "mindroom.constants",
     "mindroom.matrix.cache.event_normalization",
-    "mindroom.matrix.cache.outbound_thread_reservations",
     "mindroom.matrix.event_info",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.thread_bookkeeping",
@@ -4262,7 +4255,6 @@ exclusive = true
 
 [[interfaces]]
 expose = [
-    "ThreadOutboundWritePolicy",
     "ThreadLiveWritePolicy",
     "ThreadSyncWritePolicy",
 ]

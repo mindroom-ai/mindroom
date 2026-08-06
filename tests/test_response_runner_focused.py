@@ -77,7 +77,7 @@ from tests.response_runner_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
     from typing import Literal
 
@@ -206,10 +206,9 @@ class RecordingStopManager(StopManager):
         client: AsyncClient,
         remove_button: bool = True,
         delay: float = 5.0,
-        notify_outbound_redaction: Callable[[str, str], None] | None = None,
     ) -> None:
         """Record the clear request and drop tracking without the production delay."""
-        del client, remove_button, delay, notify_outbound_redaction
+        del client, remove_button, delay
         self.cleared.append(message_id)
         self.tracked_messages.pop(message_id, None)
 
@@ -225,8 +224,6 @@ def _attempt_runner(tmp_path: Path, stop_manager: StopManager) -> tuple[Response
             logger=get_logger("tests.response_attempt"),
             show_stop_button=lambda: False,
             config=_config(tmp_path),
-            notify_outbound_event=MagicMock(),
-            notify_outbound_redaction=MagicMock(),
         ),
     )
     return runner, gateway

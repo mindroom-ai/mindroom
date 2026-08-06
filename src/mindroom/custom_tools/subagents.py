@@ -387,8 +387,6 @@ async def _send_matrix_text(
         content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     delivered = await send_message_result(context.client, room_id, content)
     if delivered is not None:
-        context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
-    if delivered is not None:
         return delivered.event_id
     return None
 

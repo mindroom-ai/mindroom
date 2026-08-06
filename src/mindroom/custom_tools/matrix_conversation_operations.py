@@ -108,12 +108,6 @@ class MatrixMessageOperations:
         )
         delivered = await send_message_result(context.client, room_id, content)
         if delivered is not None:
-            context.conversation_cache.notify_outbound_message(
-                room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
-        if delivered is not None:
             return delivered.event_id
         return None
 
@@ -669,12 +663,6 @@ class MatrixMessageOperations:
                 target=target,
                 message="Failed to edit message in Matrix.",
             )
-        context.conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
-
         if interactive_response.interactive_metadata is not None:
             register_interactive_question(
                 target,

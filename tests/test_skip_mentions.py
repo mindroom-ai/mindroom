@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -288,7 +288,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks = MagicMock()
     response_hooks._apply_before_response = before_hooks
     response_hooks.emit_after_response = after_hooks
-    conversation_cache = SimpleNamespace(notify_outbound_message=Mock())
+    conversation_cache = SimpleNamespace()
     conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -372,8 +372,10 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_path: Path) -> None:
-    """Threaded sends should write through to the conversation cache immediately."""
+async def test_delivery_gateway_send_text_builds_threaded_relation_from_the_resolved_latest_event(
+    tmp_path: Path,
+) -> None:
+    """Threaded sends should carry the thread relation resolved from the latest thread event."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", None)
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
@@ -394,12 +396,9 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
 
     assert event_id == "$response"
     assert send.await_args.kwargs["retry_sync_recovery"] is True
-    gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
-    record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
-    assert record_args[0] == "!test:server"
-    assert record_args[1] == "$response"
-    assert record_args[2]["m.relates_to"]["event_id"] == "$thread"
-    assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+    sent_content = send.await_args.args[2]
+    assert sent_content["m.relates_to"]["event_id"] == "$thread"
+    assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
         room_id="!test:server",
         thread_id="$thread",
@@ -408,8 +407,8 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_path: Path) -> None:
-    """Threaded edits should treat edit_message success as an event ID and write through immediately."""
+async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_path: Path) -> None:
+    """Threaded edits should treat edit_message success as an event ID and drop the thread relation."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id = AsyncMock(
@@ -431,13 +430,7 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
 
     assert edited is True
     assert edit.await_args.kwargs["retry_sync_recovery"] is True
-    gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
-    record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
-    assert record_args[0] == "!test:server"
-    assert record_args[1] == "$edit-event"
-    assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
-    assert record_args[2]["m.relates_to"]["event_id"] == "$original"
-    assert "m.relates_to" not in record_args[2]["m.new_content"]
+    assert "m.relates_to" not in edit.await_args.args[3]
     # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
     # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_not_awaited()

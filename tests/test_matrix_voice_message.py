@@ -78,7 +78,6 @@ def _context(
 ) -> ToolRuntimeContext:
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     conversation_cache = make_conversation_cache_mock()
-    conversation_cache.notify_outbound_message = MagicMock()
     conversation_reader = make_conversation_reader_mock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock("$latest")
     return ToolRuntimeContext(
@@ -198,7 +197,6 @@ async def test_matrix_voice_message_generates_speech_and_sends_to_context_thread
         waveform=[512] * 30,
         thread_id="$thread-root",
         latest_thread_event_id="$latest",
-        conversation_cache=context.conversation_cache,
     )
 
     payload = _payload(result)

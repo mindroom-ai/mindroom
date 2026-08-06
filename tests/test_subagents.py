@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -113,8 +113,6 @@ def _make_context(
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
     conversation_cache = AsyncMock()
-    conversation_cache.notify_outbound_message = Mock()
-    conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name=agent_name,
         target=MessageTarget.resolve(

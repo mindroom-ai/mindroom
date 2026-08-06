@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -402,52 +402,6 @@ class TestSendFileMessage:
                 file,
                 thread_id="$root:localhost",
             )
-
-    @pytest.mark.asyncio
-    async def test_threaded_send_records_outbound_message_when_cache_available(self, tmp_path: Path) -> None:
-        """Threaded file sends should write through to the conversation cache immediately."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
-        conversation_cache = AsyncMock()
-        conversation_cache.notify_outbound_message = Mock()
-        file = tmp_path / "data.csv"
-        file.write_text("a,b,c", encoding="utf-8")
-
-        with patch(
-            "mindroom.matrix.client_delivery.send_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$evt:localhost",
-                    content_sent={
-                        "msgtype": "m.file",
-                        "body": "data.csv",
-                        "url": "mxc://localhost/t1",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": "$root:localhost",
-                            "is_falling_back": True,
-                            "m.in_reply_to": {"event_id": "$precomputed:localhost"},
-                        },
-                    },
-                ),
-            ),
-        ):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                thread_id="$root:localhost",
-                latest_thread_event_id="$precomputed:localhost",
-                conversation_cache=conversation_cache,
-            )
-
-        assert event_id == "$evt:localhost"
-        conversation_cache.notify_outbound_message.assert_called_once()
-        record_args = conversation_cache.notify_outbound_message.call_args.args
-        assert record_args[0] == "!room:localhost"
-        assert record_args[1] == "$evt:localhost"
-        assert record_args[2]["m.relates_to"]["event_id"] == "$root:localhost"
-        assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
 
     @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:

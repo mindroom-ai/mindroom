@@ -11,8 +11,8 @@ Who may mutate thread state, and how:
    It only classifies one mutation into ``MutationThreadImpact``: THREADED(thread_id), ROOM_LEVEL, or UNKNOWN.
 
 2. Mutation-driven thread-cache writes go through exactly one path:
-   the three write policies in ``mindroom.matrix.cache.thread_writes``
-   (``ThreadOutboundWritePolicy``, ``ThreadLiveWritePolicy``, ``ThreadSyncWritePolicy``),
+   the two write policies in ``mindroom.matrix.cache.thread_writes``
+   (``ThreadLiveWritePolicy`` and ``ThreadSyncWritePolicy``),
    which all resolve impact through this module's ``ThreadMutationResolver``,
    apply it through ``mindroom.matrix.cache.thread_write_cache_ops.ThreadMutationCacheOps``,
    and order every write through the room or certified per-thread
@@ -26,9 +26,8 @@ Who may mutate thread state, and how:
 3. Custom tools may not write thread state.
    A tool that sends or redacts Matrix events (see ``mindroom.custom_tools.matrix_api``) must resolve
    impact pre-send via ``resolve_event_thread_impact_for_client`` or
-   ``resolve_redaction_thread_impact_for_client`` and refuse the Matrix operation when impact is UNKNOWN;
-   after a successful send it reports through ``ConversationCacheProtocol.notify_outbound_*``,
-   which routes into the same outbound write policy.
+   ``resolve_redaction_thread_impact_for_client`` and refuse the Matrix operation when impact is UNKNOWN.
+   The sync echo of that send is what reaches the cache.
 
 4. The impact mapping is total and UNKNOWN fails closed:
    THREADED means invalidate-then-append that one thread,
@@ -84,7 +83,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
 
 
-MutationWriteContext = Literal["outbound", "live", "sync"]
+MutationWriteContext = Literal["live", "sync"]
 
 
 def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:

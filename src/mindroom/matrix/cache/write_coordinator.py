@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 _UpdateTask = asyncio.Task[Any]
 _UpdateCoroFactory = typing.Callable[[], typing.Coroutine[Any, Any, object]]
-_CoalesceKey = tuple[str, str]
 _CoordinationRoomKey = tuple[str, str]
 
 
@@ -61,7 +60,6 @@ class _QueuedUpdate:
     start_signal: asyncio.Future[None]
     update_state: _QueuedUpdateState
     thread_id: str | None = None
-    coalesce_key: _CoalesceKey | None = None
     started: bool = False
 
 
@@ -71,8 +69,6 @@ _RoomQueueEntry = _QueuedRoomFence | _QueuedUpdate
 @dataclass
 class _QueuedUpdateState:
     update_coro_factory: _UpdateCoroFactory
-    coalesced_update_count: int = 0
-    coalesce_log_context: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -278,71 +274,6 @@ class EventCacheWriteCoordinator:
 
         self._cleanup_room_state(room_key)
 
-    def _coalescible_pending_entry(
-        self,
-        state: _RoomSchedulerState,
-        *,
-        kind: typing.Literal["room", "thread"],
-        thread_id: str | None,
-        coalesce_key: _CoalesceKey,
-    ) -> _QueuedUpdate | None:
-        for entry in reversed(state.entries):
-            if not isinstance(entry, _QueuedUpdate):
-                continue
-            if entry.started or entry.task.done():
-                continue
-            same_order_lane = kind == "room" or entry.kind == "room" or entry.thread_id == thread_id
-            if not same_order_lane:
-                continue
-            if entry.kind == kind and entry.thread_id == thread_id and entry.coalesce_key == coalesce_key:
-                return entry
-            return None
-        return None
-
-    def _coalesce_pending_update(
-        self,
-        state: _RoomSchedulerState,
-        *,
-        kind: typing.Literal["room", "thread"],
-        thread_id: str | None,
-        update_coro_factory: _UpdateCoroFactory,
-        coalesce_key: _CoalesceKey | None,
-        coalesce_log_context: dict[str, object] | None,
-    ) -> asyncio.Task[object] | None:
-        if coalesce_key is None:
-            return None
-        entry = self._coalescible_pending_entry(
-            state,
-            kind=kind,
-            thread_id=thread_id,
-            coalesce_key=coalesce_key,
-        )
-        if entry is None:
-            return None
-        entry.update_state.update_coro_factory = update_coro_factory
-        entry.update_state.coalesced_update_count += 1
-        entry.update_state.coalesce_log_context = dict(coalesce_log_context or {})
-        return entry.task
-
-    def _log_coalesced_update_if_needed(
-        self,
-        *,
-        kind: typing.Literal["room", "thread"],
-        name: str,
-        update_state: _QueuedUpdateState,
-    ) -> None:
-        dropped_update_count = update_state.coalesced_update_count
-        if dropped_update_count <= 0:
-            return
-        log_context = {
-            "barrier_kind": kind,
-            "operation": name,
-            "coalesced_update_count": dropped_update_count,
-            "dropped_update_count": dropped_update_count,
-            **update_state.coalesce_log_context,
-        }
-        self.logger.info("Coalesced outbound streaming edit cache updates", **log_context)
-
     def _release_active_entry(
         self,
         room_key: _CoordinationRoomKey,
@@ -407,26 +338,10 @@ class EventCacheWriteCoordinator:
         update_coro_factory: _UpdateCoroFactory,
         name: str,
         emit_timing: bool = False,
-        coalesce_key: _CoalesceKey | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         room_key, room_state = self._coordination_room_state(room_id, coordination_scope)
-        coalesced_task = self._coalesce_pending_update(
-            room_state,
-            kind=kind,
-            thread_id=thread_id,
-            update_coro_factory=update_coro_factory,
-            coalesce_key=coalesce_key,
-            coalesce_log_context=coalesce_log_context,
-        )
-        if coalesced_task is not None:
-            return coalesced_task
-
-        update_state = _QueuedUpdateState(
-            update_coro_factory=update_coro_factory,
-            coalesce_log_context=dict(coalesce_log_context or {}),
-        )
+        update_state = _QueuedUpdateState(update_coro_factory=update_coro_factory)
         instrument_timing = emit_timing and timing_enabled()
         predecessor_count = self._pending_chain_length(self._pending_entry_tasks(room_state.entries))
         loop = asyncio.get_running_loop()
@@ -436,11 +351,6 @@ class EventCacheWriteCoordinator:
             current_task = asyncio.current_task()
             assert current_task is not None
             with bound_log_context(task_name=current_task.get_name()):
-                self._log_coalesced_update_if_needed(
-                    kind=kind,
-                    name=name,
-                    update_state=update_state,
-                )
                 return await update_state.update_coro_factory()
 
         if not instrument_timing:
@@ -474,13 +384,6 @@ class EventCacheWriteCoordinator:
                     else:
                         predecessor_wait_ms = elapsed_ms_between(queued_at, update_started)
                         update_run_ms = elapsed_ms_between(update_started, finished)
-                    coalescing_context: dict[str, object] = {}
-                    if update_state.coalesced_update_count:
-                        coalescing_context = {
-                            "coalesced_update_count": update_state.coalesced_update_count,
-                            "dropped_update_count": update_state.coalesced_update_count,
-                            **update_state.coalesce_log_context,
-                        }
                     emit_timing_event(
                         "Event cache update timing",
                         barrier_kind=kind,
@@ -491,7 +394,6 @@ class EventCacheWriteCoordinator:
                         update_run_ms=update_run_ms,
                         total_ms=total_ms,
                         outcome=outcome,
-                        **coalescing_context,
                     )
 
         task = create_background_task(
@@ -506,7 +408,6 @@ class EventCacheWriteCoordinator:
             start_signal=start_signal,
             update_state=update_state,
             thread_id=thread_id,
-            coalesce_key=coalesce_key,
         )
 
         room_state.entries.append(entry)
@@ -580,8 +481,6 @@ class EventCacheWriteCoordinator:
         *,
         name: str,
         emit_timing: bool = True,
-        coalesce_key: _CoalesceKey | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
@@ -592,8 +491,6 @@ class EventCacheWriteCoordinator:
             update_coro_factory=update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
-            coalesce_log_context=coalesce_log_context,
             coordination_scope=coordination_scope,
         )
 
@@ -605,8 +502,6 @@ class EventCacheWriteCoordinator:
         *,
         name: str,
         emit_timing: bool = False,
-        coalesce_key: _CoalesceKey | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
@@ -617,8 +512,6 @@ class EventCacheWriteCoordinator:
             update_coro_factory=update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
-            coalesce_log_context=coalesce_log_context,
             coordination_scope=coordination_scope,
         )
 

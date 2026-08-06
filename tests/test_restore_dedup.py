@@ -14,9 +14,7 @@ from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow,
 
 
 def _conversation_cache() -> AsyncMock:
-    access = AsyncMock()
-    access.notify_outbound_message = Mock()
-    return access
+    return AsyncMock()
 
 
 def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str = "pending", idx: int = 1) -> dict:
