@@ -20,7 +20,7 @@ from .identity import encode_thread_id
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from .backend import Transaction
+    from .backend import Row, Transaction
 
 _RELATES_TO = "m.relates_to"
 _REL_TYPE = "rel_type"
@@ -403,6 +403,25 @@ def _project_edit(
     )
 
 
+def _held_edit_yields_to(held: Row, event: ProjectedEvent, *, provisional: bool) -> bool:
+    """Return whether an incoming edit should replace the one already held.
+
+    The same rules the installed-revision path uses, because a held edit is
+    the installed revision of a message that has not arrived yet. Comparing
+    timestamps alone lets a locally seeded edit outrank the server's own
+    account of that very edit, and then the original's arrival makes the guess
+    permanent.
+    """
+    same_edit = held["edit_event_id"] == event.event_id
+    if same_edit:
+        # One of these is the echo of the other. Authority decides, not time.
+        return not provisional and bool(held["provisional"])
+    return _is_newer(
+        (event.origin_server_ts, event.event_id),
+        (int(held["edit_ts"]), held["edit_event_id"]),
+    )
+
+
 def _hold_unresolved_edit(
     transaction: Transaction,
     principal_id: str,
@@ -416,15 +435,12 @@ def _hold_unresolved_edit(
     del membership_epoch
     held = transaction.fetchone(
         """
-        SELECT edit_event_id, edit_ts FROM unresolved_edits
+        SELECT edit_event_id, edit_ts, provisional FROM unresolved_edits
         WHERE principal_id = ? AND room_id = ? AND target_event_id = ? AND sender = ?
         """,
         (principal_id, event.room_id, target_event_id, event.sender),
     )
-    if held is not None and not _is_newer(
-        (event.origin_server_ts, event.event_id),
-        (int(held["edit_ts"]), held["edit_event_id"]),
-    ):
+    if held is not None and not _held_edit_yields_to(held, event, provisional=provisional):
         return
     transaction.execute(
         """

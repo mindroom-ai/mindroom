@@ -1906,6 +1906,10 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
         event_cache=None,
         event_cache_write_coordinator=None,
     )
+    # This bot is hand-built with object.__new__, so it only has what the test
+    # sets. stop() releases the journal lane, which a real bot always has.
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._journal_store = MagicMock(close=AsyncMock())
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()

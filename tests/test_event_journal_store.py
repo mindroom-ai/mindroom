@@ -777,6 +777,40 @@ class TestOutboundSeeding:
 
         assert await bodies(alice) == ["complete"]
 
+    async def test_a_held_edits_echo_wins_even_before_the_original_arrives(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A held edit is the installed revision of a message that has not arrived.
+
+        So it needs the same rules: when the server's account of that very edit
+        turns up while the edit is still parked, authority decides and not
+        time. Comparing timestamps let a locally seeded edit outrank its own
+        echo, and the original's arrival then made the guess permanent.
+        """
+        _, seeded_edit = message("$edit1", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(seeded_edit)
+
+        await admit(alice, "$edit1", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
+    async def test_a_late_seed_cannot_overwrite_a_held_authoritative_edit(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The mirror ordering: the echo is held first, the seed arrives after."""
+        await admit(alice, "$edit1", sender=BOB, ts=2_000, content=edit("$mine", "half"))
+
+        _, late_seed = message("$edit1", sender=BOB, ts=9_000, content=edit("$mine", "half"))
+        await alice.seed_outbound_message(late_seed)
+        await admit(alice, "$mine", sender=BOB, ts=1_000, content=text("partial"))
+        await admit(alice, "$edit2", sender=BOB, ts=3_000, content=edit("$mine", "complete"))
+
+        assert await bodies(alice) == ["complete"]
+
     async def test_a_seed_never_overwrites_what_the_server_already_said(
         self,
         alice: PrincipalStore,
