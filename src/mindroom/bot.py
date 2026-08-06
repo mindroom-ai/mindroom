@@ -2016,18 +2016,25 @@ class AgentBot:
             if cancelled_tasks > 0:
                 self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
 
-        # Released before the Matrix client, because a client that fails to
-        # close must not strand them. The journal lane and its backend belong
-        # to this bot, not the process: a config reload replaces the bot while
-        # the old lane may still hold unsettled work, and the replacement opens
-        # the same database under the same principal -- two generations able to
-        # execute one callback, with connections accumulating behind them.
-        await self._journal_dispatcher.stop()
-        await self._journal_store.close()
+        # Each of these owns a resource this bot alone holds, and none of them
+        # may skip the others. A lane that already faulted makes dispatcher stop
+        # raise, and before this isolation that exception skipped the store and
+        # the client and then aborted the config reload's removal of this
+        # generation -- leaving it registered, half-stopped, while its
+        # replacement opened the same database under the same principal.
+        await self._release("journal dispatcher", self._journal_dispatcher.stop())
+        await self._release("journal store", self._journal_store.close())
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
-            await self.client.close()
+            await self._release("matrix client", self.client.close())
         self.logger.info("Stopped agent bot")
+
+    async def _release(self, what: str, closing: Awaitable[None]) -> None:
+        """Await one shutdown step, reporting failure rather than propagating it."""
+        try:
+            await closing
+        except Exception:
+            self.logger.exception("Failed to release resource during stop", resource=what)
 
     async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
         """Send a welcome message if the room has no messages yet.
