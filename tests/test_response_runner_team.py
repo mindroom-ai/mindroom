@@ -25,7 +25,6 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
@@ -38,7 +37,6 @@ from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
     _configured_team_user,
-    _empty_full_thread_history,
     _handled_response_event_id,
     _hook_envelope,
     _hook_plugin,
@@ -362,14 +360,12 @@ class TestAgentBot(AgentBotTestBase):
                 source_kind=MESSAGE_SOURCE_KIND,
             ),
         )
-        history = ThreadHistoryResult([], is_full_history=True)
 
         with (
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 new=AsyncMock(return_value="$latest:localhost"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -1031,7 +1027,6 @@ class TestAgentBot(AgentBotTestBase):
         _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
-        history = _empty_full_thread_history()
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
@@ -1044,7 +1039,6 @@ class TestAgentBot(AgentBotTestBase):
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1115,7 +1109,6 @@ class TestAgentBot(AgentBotTestBase):
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -1123,7 +1116,6 @@ class TestAgentBot(AgentBotTestBase):
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1182,7 +1174,6 @@ class TestAgentBot(AgentBotTestBase):
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        history = _empty_full_thread_history()
 
         with (
             patch_response_runner_module(
@@ -1190,7 +1181,6 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 team_response=AsyncMock(return_value="Team handled"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(

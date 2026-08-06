@@ -321,5 +321,3 @@ recover  # unused method (src/mindroom/response_delivery.py)
 # The reverse case: conversation-cache read methods that production no longer
 # calls, kept only because `matrix/cache/` still exists and its own tests still
 # exercise its read policy through them. Both entries go with the package.
-get_thread_history  # unused method (src/mindroom/matrix/conversation_cache.py)
-get_strict_thread_history  # unused method (src/mindroom/matrix/conversation_cache.py)

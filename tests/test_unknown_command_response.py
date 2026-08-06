@@ -11,7 +11,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -220,10 +219,6 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
 
     with (
         patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
-        patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-            AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ),
     ):
         await bot._on_message(room, event)
         await drain_coalescing(bot)

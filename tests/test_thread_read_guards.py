@@ -26,6 +26,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from tests.event_cache_test_support import advisory_thread_read, strict_thread_read
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
@@ -258,7 +259,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
 
-        read_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$other-thread:localhost"))
+        read_task = asyncio.create_task(advisory_thread_read(access, "!test:localhost", "$other-thread:localhost"))
         await asyncio.wait_for(read_finished.wait(), timeout=1.0)
         await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
 
@@ -321,7 +322,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 coordinator=coordinator,
             ),
         )
-        read_task = asyncio.create_task(access.get_strict_thread_history(room_id, thread_id))
+        read_task = asyncio.create_task(strict_thread_read(access, room_id, thread_id))
         mutation_task: asyncio.Task[object] | None = None
 
         try:
@@ -350,7 +351,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_fetch.set()
             history = await asyncio.wait_for(read_task, timeout=1.0)
             mutation_outcome = await asyncio.wait_for(mutation_task, timeout=1.0)
-            cached_history = await access.get_strict_thread_history(room_id, thread_id)
+            cached_history = await strict_thread_read(access, room_id, thread_id)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
             gap_after_read = await event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
@@ -514,7 +515,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         live_task = asyncio.create_task(access.apply_redaction("!test:localhost", redaction_event))
         await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
 
-        read_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$other-thread:localhost"))
+        read_task = asyncio.create_task(advisory_thread_read(access, "!test:localhost", "$other-thread:localhost"))
         await asyncio.wait_for(read_finished.wait(), timeout=1.0)
         await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
 
@@ -885,7 +886,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 logger=MagicMock(),
                 runtime=_conversation_runtime(client=initial_client, event_cache=event_cache),
             )
-            initial_history = await access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            initial_history = await advisory_thread_read(access, "!test:localhost", "$thread_root:localhost")
 
             sync_response = MagicMock()
             sync_response.__class__ = nio.SyncResponse
@@ -901,9 +902,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 logger=MagicMock(),
                 runtime=_conversation_runtime(client=restarted_client, event_cache=event_cache),
             )
-            refreshed_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            refreshed_history = await advisory_thread_read(
+                restarted_access,
+                "!test:localhost",
+                "$thread_root:localhost",
+            )
             restarted_client.room_messages.reset_mock()
-            cached_history = await restarted_access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            cached_history = await advisory_thread_read(restarted_access, "!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
 
@@ -1024,7 +1029,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
             await asyncio.wait_for(prewarm_started.wait(), timeout=1.0)
             dispatch_task = asyncio.create_task(
-                bot._conversation_cache.get_strict_thread_history(room_id, thread_id),
+                strict_thread_read(bot._conversation_cache, room_id, thread_id),
             )
             await asyncio.wait_for(live_scan_started.wait(), timeout=1.0)
             history = await asyncio.wait_for(dispatch_task, timeout=1.0)
@@ -1111,7 +1116,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             allow_prewarm_fetch_finish.set()
             prewarm_stats = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
-            history = await bot._conversation_cache.get_strict_thread_history(room_id, thread_id)
+            history = await strict_thread_read(bot._conversation_cache, room_id, thread_id)
         finally:
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
@@ -1183,14 +1188,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             dispatch_task = asyncio.create_task(
-                bot._conversation_cache.get_strict_thread_history(room_id, thread_id),
+                strict_thread_read(bot._conversation_cache, room_id, thread_id),
             )
             await asyncio.wait_for(dispatch_fetch_started.wait(), timeout=1.0)
 
             allow_dispatch_fetch_finish.set()
             dispatch_history = await asyncio.wait_for(dispatch_task, timeout=1.0)
 
-            history = await bot._conversation_cache.get_strict_thread_history(room_id, thread_id)
+            history = await strict_thread_read(bot._conversation_cache, room_id, thread_id)
         finally:
             allow_dispatch_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
@@ -1270,7 +1275,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             page.end = None
             bot.client.room_messages = AsyncMock(return_value=page)
 
-            history = await bot._conversation_cache.get_strict_thread_history(room_id, thread_id)
+            history = await strict_thread_read(bot._conversation_cache, room_id, thread_id)
         finally:
             allow_write_commit.set()
             await _close_bound_runtime_support(bot, support)
@@ -1321,7 +1326,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 logger=MagicMock(),
                 runtime=_conversation_runtime(client=initial_client, event_cache=event_cache),
             )
-            await access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            await advisory_thread_read(access, "!test:localhost", "$thread_root:localhost")
 
             sync_response = MagicMock()
             sync_response.__class__ = nio.SyncResponse
@@ -1349,7 +1354,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
         with pytest.raises(RuntimeError, match="boom"):
-            await access.get_thread_history("!test:localhost", "$thread:localhost")
+            await advisory_thread_read(access, "!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
     async def test_thread_read_refetches_once_mutation_starts_after_room_barrier(self) -> None:
@@ -1423,7 +1428,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         }
         new_event_info = EventInfo.from_event(new_event_source)
 
-        read_task = asyncio.create_task(access.get_thread_history("!room:localhost", "$thread:localhost"))
+        read_task = asyncio.create_task(advisory_thread_read(access, "!room:localhost", "$thread:localhost"))
         await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
         write_task = asyncio.create_task(
             access._outbound._apply_outbound_event_notification(
@@ -1545,7 +1550,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             replacement_of="$missing:localhost",
             new_body="Updated",
         )
-        read_task = asyncio.create_task(access.get_thread_history(room_id, thread_id))
+        read_task = asyncio.create_task(advisory_thread_read(access, room_id, thread_id))
 
         try:
             await asyncio.wait_for(reader_ready.wait(), timeout=1.0)
@@ -1589,7 +1594,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A gap raised mid-fetch survives, so the next thread-history read refetches."""
         await _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(
             tmp_path,
-            read_thread=MatrixConversationCache.get_thread_history,
+            read_thread=advisory_thread_read,
             force_refetch_reason="test_force_thread_history_refetch",
             expected_full_history=True,
         )
@@ -1602,7 +1607,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A gap raised mid-fetch survives, so the next dispatch-history read refetches."""
         await _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(
             tmp_path,
-            read_thread=MatrixConversationCache.get_strict_thread_history,
+            read_thread=strict_thread_read,
             force_refetch_reason="test_force_dispatch_history_refetch",
             expected_full_history=True,
         )
@@ -1664,7 +1669,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 logger=MagicMock(),
                 runtime=_conversation_runtime(client=initial_client, event_cache=event_cache),
             )
-            await access.get_thread_history("!test:localhost", "$thread_root:localhost")
+            await advisory_thread_read(access, "!test:localhost", "$thread_root:localhost")
             await event_cache.mark_thread_gap(
                 "!test:localhost",
                 "$thread_root:localhost",
@@ -1730,7 +1735,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access._reads.fetch_dispatch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
         with pytest.raises(RuntimeError, match="boom"):
-            await access.get_strict_thread_history("!test:localhost", "$thread:localhost")
+            await strict_thread_read(access, "!test:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
     async def test_dispatch_thread_snapshot_does_not_fall_back_to_stale_cache(self) -> None:

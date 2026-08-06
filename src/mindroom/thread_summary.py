@@ -553,11 +553,11 @@ async def _pinned_since_generation_started(
     while this process is waiting on the model, and the finished automatic
     summary would then land on top of a title the user just fixed.
 
-    Reads from source rather than through ``get_strict_thread_history``. That
-    read is strict about staleness but still accepts a valid local cache hit, so
-    it cannot observe a pin another runtime just wrote — which is the only case
-    this guard exists for. Costs one homeserver read per generated summary, so
-    once per interval rather than per turn.
+    Reads from source rather than through the projection. A projected read is
+    strict about staleness but still answers from local state, so it cannot
+    observe a pin another runtime just wrote — which is the only case this
+    guard exists for. Costs one homeserver read per generated summary, so once
+    per interval rather than per turn.
 
     Fails open, like the other background reads here: if the re-read fails the
     pass delivers, which is the same exposure the pre-generation gate already

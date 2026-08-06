@@ -2112,7 +2112,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
-            ) as mock_get_thread_history,
+            ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 prepare_memory_and_model_context=passthrough_prepare_context,
@@ -2138,7 +2138,7 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
-        mock_get_thread_history.assert_awaited_once_with(
+        mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
             caller_label="dispatch_post_lock_refresh",
@@ -2312,7 +2312,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
-            ) as mock_get_thread_history,
+            ) as mock_fetch_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
@@ -2344,9 +2344,10 @@ class TestAgentBot(AgentBotTestBase):
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert mock_get_thread_history.await_count >= 1
+        assert mock_fetch_thread_history.await_count >= 1
         assert all(
-            await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
+            await_args.args == ("!test:localhost", "$thread")
+            for await_args in mock_fetch_thread_history.await_args_list
         )
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,

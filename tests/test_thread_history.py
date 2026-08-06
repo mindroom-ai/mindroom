@@ -47,7 +47,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from mindroom.thread_utils import get_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_visible_message, test_runtime_paths
-from tests.event_cache_test_support import raw_nio_event
+from tests.event_cache_test_support import raw_nio_event, strict_thread_read
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import persist_entity_accounts
 
@@ -2254,7 +2254,7 @@ class TestThreadHistoryCache:
         try:
             readers = [
                 asyncio.create_task(
-                    conversation_cache.get_strict_thread_history("!room:localhost", "$thread_root"),
+                    strict_thread_read(conversation_cache, "!room:localhost", "$thread_root"),
                 )
                 for _ in range(20)
             ]
@@ -2672,7 +2672,8 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_strict_thread_history(
+            history = await strict_thread_read(
+                conversation_cache,
                 "!room:localhost",
                 "$thread_root",
             )
@@ -2729,7 +2730,8 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_strict_thread_history(
+            history = await strict_thread_read(
+                conversation_cache,
                 "!room:localhost",
                 "$thread_root",
             )
@@ -2786,7 +2788,8 @@ class TestThreadHistoryCache:
         )
 
         try:
-            history = await conversation_cache.get_strict_thread_history(
+            history = await strict_thread_read(
+                conversation_cache,
                 "!room:localhost",
                 "$thread_root",
             )

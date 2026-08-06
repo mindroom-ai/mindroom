@@ -62,6 +62,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.event_cache_test_support import advisory_thread_read
 from tests.threading_helpers import seed_thread_history
 
 
@@ -930,9 +931,6 @@ class TestExtractMessageContextRoomMode:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot._conversation_cache.get_thread_history = AsyncMock(
-            side_effect=AssertionError("new thread root targeting must not fetch thread history"),
-        )
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -952,7 +950,6 @@ class TestExtractMessageContextRoomMode:
         assert target.source_thread_id is None
         assert target.resolved_thread_id == "$new-root:localhost"
         assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
-        bot._conversation_cache.get_thread_history.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_message_context_uses_strict_history_after_degraded_dispatch_read(
@@ -1631,9 +1628,6 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_cache.get_strict_thread_history = AsyncMock(
-            side_effect=AssertionError("resolver read through the conversation cache"),
-        )
         empty_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
 
         with patch.object(
@@ -1703,7 +1697,8 @@ class TestExtractedModuleLoggerRebinding:
             new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ) as fetch_thread_history_mock:
             bot.client = client
-            await bot._conversation_cache.get_thread_history(
+            await advisory_thread_read(
+                bot._conversation_cache,
                 "!room:localhost",
                 "$threadroot",
             )
@@ -1765,7 +1760,8 @@ class TestExtractedModuleLoggerRebinding:
 
         bot.client = AsyncMock()
         async with bot._conversation_cache.turn_scope():
-            full_history = await bot._conversation_cache.get_thread_history(
+            full_history = await advisory_thread_read(
+                bot._conversation_cache,
                 "!room:localhost",
                 "$threadroot",
             )

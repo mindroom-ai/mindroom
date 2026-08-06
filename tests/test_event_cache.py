@@ -56,6 +56,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.event_cache_test_support import advisory_thread_read, strict_thread_read
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import entity_ids
 
@@ -388,9 +389,9 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             ),
         ):
             read_methods = {
-                "get_thread_history": conversation_cache.get_thread_history,
-                # No facade entrypoint reads this mode any more, so the table
+                # No facade entrypoint reads either mode any more, so the table
                 # drives the read policy directly to keep covering it.
+                "get_thread_history": functools.partial(advisory_thread_read, conversation_cache),
                 "get_dispatch_thread_snapshot": functools.partial(
                     conversation_cache._reads.read_thread,
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
@@ -749,7 +750,8 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
                 AsyncMock(side_effect=AssertionError("strict reads must not allow stale fallback")),
             ),
         ):
-            result = await conversation_cache.get_strict_thread_history(
+            result = await strict_thread_read(
+                conversation_cache,
                 "!room:localhost",
                 "$thread:localhost",
                 caller_label="dispatch_post_lock_refresh",
@@ -982,7 +984,8 @@ async def test_live_read_does_not_wait_for_running_startup_source_refresh(
             await asyncio.wait_for(source_call_started.wait(), timeout=1.0)
 
             live_read = asyncio.create_task(
-                conversation_cache.get_strict_thread_history(
+                strict_thread_read(
+                    conversation_cache,
                     room_id,
                     thread_id,
                     caller_label="live_dispatch",
@@ -1077,7 +1080,8 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
             ) as refresh_thread_history,
             pytest.raises(TimeoutError, match="strict wait timed out"),
         ):
-            await conversation_cache.get_strict_thread_history(
+            await strict_thread_read(
+                conversation_cache,
                 "!room:localhost",
                 "$thread:localhost",
                 caller_label="dispatch_post_lock_refresh",

@@ -27,6 +27,7 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_history_result import ThreadHistoryResult  # noqa: TC001
+from tests.event_cache_test_support import advisory_thread_read
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _conversation_runtime,
@@ -1537,7 +1538,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await asyncio.wait_for(other_thread_update_started.wait(), timeout=1.0)
 
         history = await asyncio.wait_for(
-            access.get_thread_history("!test:localhost", "$thread-a:localhost"),
+            advisory_thread_read(access, "!test:localhost", "$thread-a:localhost"),
             timeout=1.0,
         )
 
@@ -1801,7 +1802,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await asyncio.gather(cancelled_room_task, return_exceptions=True)
 
             history = await asyncio.wait_for(
-                access.get_thread_history("!test:localhost", "$thread-c:localhost"),
+                advisory_thread_read(access, "!test:localhost", "$thread-c:localhost"),
                 timeout=0.1,
             )
 

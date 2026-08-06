@@ -145,24 +145,6 @@ class ConversationCacheProtocol(Protocol):
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
 
-    async def get_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory full thread history for one conversation root."""
-
-    async def get_strict_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
-
     async def refresh_strict_thread_history_from_source(
         self,
         room_id: str,
@@ -938,36 +920,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             threads_failed=threads_failed,
         )
         return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
-
-    async def get_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory full thread history for one conversation root."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.ADVISORY_FULL,
-            caller_label=caller_label,
-        )
-
-    async def get_strict_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_FULL,
-            caller_label=caller_label,
-        )
 
     async def refresh_strict_thread_history_from_source(
         self,

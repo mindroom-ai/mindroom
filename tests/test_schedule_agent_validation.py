@@ -46,10 +46,8 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
     return room
 
 
-def _conversation_cache(thread_history: list[object] | None = None) -> MagicMock:
-    access = MagicMock()
-    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
-    return access
+def _conversation_cache() -> MagicMock:
+    return MagicMock()
 
 
 def _event_cache() -> AsyncMock:
@@ -401,7 +399,6 @@ async def test_schedule_with_no_agent_mentions() -> None:
     assert task_id is not None
     assert "✅ Scheduled" in response
     assert "New thread per fire" in response
-    conversation_cache.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [
         entity_ids(config, runtime_paths_for(config))["assistant"],

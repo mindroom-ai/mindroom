@@ -998,13 +998,7 @@ def make_conversation_cache_mock() -> AsyncMock:
     conversation_cache.get_event = AsyncMock(
         side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
     )
-    conversation_cache.get_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
     conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    conversation_cache.get_strict_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
 

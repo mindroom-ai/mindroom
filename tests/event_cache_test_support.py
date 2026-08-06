@@ -7,8 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
+
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 async def replace_thread_unconditionally(
@@ -51,3 +55,41 @@ def raw_nio_redaction(
 ) -> nio.RedactionEvent:
     """Return a typed nio redaction with one exact raw source payload."""
     return nio.RedactionEvent(event_source, redacts)
+
+
+async def advisory_thread_read(
+    cache: MatrixConversationCache,
+    room_id: str,
+    thread_id: str,
+    *,
+    caller_label: str = "unknown",
+) -> ThreadHistoryResult:
+    """Read one thread the way the advisory full mode does.
+
+    No production caller reaches this mode through the conversation cache any
+    more -- prompts read the projection. The read policy underneath is still
+    live, and these tests are what covers it, so they drive the mode directly
+    rather than through a facade kept alive only for them.
+    """
+    return await cache._reads.read_thread(
+        room_id,
+        thread_id,
+        mode=ThreadReadMode.ADVISORY_FULL,
+        caller_label=caller_label,
+    )
+
+
+async def strict_thread_read(
+    cache: MatrixConversationCache,
+    room_id: str,
+    thread_id: str,
+    *,
+    caller_label: str = "unknown",
+) -> ThreadHistoryResult:
+    """Read one thread the way the strict full mode does."""
+    return await cache._reads.read_thread(
+        room_id,
+        thread_id,
+        mode=ThreadReadMode.STRICT_FULL,
+        caller_label=caller_label,
+    )

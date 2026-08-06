@@ -74,13 +74,8 @@ def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
-def _conversation_cache(
-    thread_history: list[object] | None = None,
-    *,
-    latest_thread_event_id: str | None = None,
-) -> AsyncMock:
+def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
     access = AsyncMock()
-    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     access.notify_outbound_message = Mock()
     return access
@@ -2694,7 +2689,7 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
         config=config,
         runtime_paths=runtime_paths,
         room=room,
-        conversation_cache=_conversation_cache(thread_history=[thread_message]),
+        conversation_cache=_conversation_cache(),
         conversation_reader=conversation_reader,
     )
     parse_result = ScheduledWorkflow(

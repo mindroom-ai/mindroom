@@ -54,13 +54,8 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     return bound_config
 
 
-def _conversation_cache(
-    thread_history: list[object] | None = None,
-    *,
-    latest_thread_event_id: str | None = None,
-) -> AsyncMock:
+def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
     access = AsyncMock()
-    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     access.notify_outbound_message = Mock()
     return access

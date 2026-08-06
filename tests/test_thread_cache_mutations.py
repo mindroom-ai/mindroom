@@ -34,6 +34,7 @@ from mindroom.matrix.thread_diagnostics import (
 from tests.conftest import (
     runtime_paths_for,
 )
+from tests.event_cache_test_support import advisory_thread_read, strict_thread_read
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
     _conversation_runtime,
@@ -1256,8 +1257,8 @@ class TestMatrixConversationCacheThreadReads:
             new=AsyncMock(side_effect=[first, second]),
         ) as mock_read_thread:
             async with access.turn_scope():
-                first_history = await access.get_strict_thread_history("!test:localhost", "$thread_root")
-                second_history = await access.get_strict_thread_history("!test:localhost", "$thread_root")
+                first_history = await strict_thread_read(access, "!test:localhost", "$thread_root")
+                second_history = await strict_thread_read(access, "!test:localhost", "$thread_root")
 
         # The second read sees the newer thread, which a memo would have hidden.
         assert [message.event_id for message in first_history] == ["$thread_root"]
@@ -1318,12 +1319,12 @@ class TestMatrixConversationCacheThreadReads:
         ):
             async with access.turn_scope():
                 assert await access.get_event(room_id, event_id) is visible_event
-                assert await access.get_strict_thread_history(room_id, thread_id)
+                assert await strict_thread_read(access, room_id, thread_id)
 
                 await access.purge_rooms((room_id,))
 
                 assert await access.get_event(room_id, event_id) is departed_event
-                assert not await access.get_strict_thread_history(room_id, thread_id)
+                assert not await strict_thread_read(access, room_id, thread_id)
 
         assert mock_get_event.await_count == 2
 
@@ -1621,7 +1622,7 @@ class TestMatrixConversationCacheThreadReads:
                 runtime=_conversation_runtime(client=reader_client, event_cache=event_cache),
             )
 
-            history = await second_access.get_thread_history("!test:localhost", "$thread:localhost")
+            history = await advisory_thread_read(second_access, "!test:localhost", "$thread:localhost")
         finally:
             await event_cache.close()
 

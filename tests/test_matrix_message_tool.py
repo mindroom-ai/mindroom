@@ -1422,7 +1422,6 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
@@ -1481,7 +1480,6 @@ async def test_matrix_message_edit_includes_message_extras_on_replacement_wrappe
     thread_messages = [
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
@@ -1564,7 +1562,6 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
     thread_messages = [
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
     interactive.register_interactive_question(
         "$target",
@@ -1607,7 +1604,6 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 }
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
@@ -1677,7 +1673,6 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     thread_messages = [
         make_visible_message(event_id=f"${index}", timestamp=index, body=f"m{index}") for index in range(100)
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
@@ -1709,7 +1704,6 @@ async def test_matrix_message_read_thread_includes_edit_options() -> None:
             body="latest message",
         ),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
@@ -1750,7 +1744,6 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
         make_visible_message(event_id="$one", timestamp=1, sender="@mindroom_general:localhost", body="first"),
         make_visible_message(event_id="$two", timestamp=2, sender="@alice:localhost", body="second"),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
@@ -1789,7 +1782,6 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
             content={"body": "Compacted 12 messages", "msgtype": "m.notice"},
         ),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
@@ -2721,7 +2713,7 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
         message_filter={"types": ["m.room.message"]},
     )
     mock_extract.assert_awaited_once()
-    ctx.conversation_cache.get_thread_history.assert_not_awaited()
+    ctx.conversation_reader.read_strict.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2733,7 +2725,6 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
         make_visible_message(event_id="$one", timestamp=1, body="first"),
         make_visible_message(event_id="$two", timestamp=2, body="second"),
     ]
-    ctx.conversation_cache.get_thread_history.return_value = thread_messages
     serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
@@ -2791,7 +2782,7 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert replacement["body"] == "updated text"
     assert "m.relates_to" not in replacement
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
-    ctx.conversation_cache.get_thread_history.assert_not_awaited()
+    ctx.conversation_reader.read_strict.assert_not_awaited()
 
 
 @pytest.mark.asyncio

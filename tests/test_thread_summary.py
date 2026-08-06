@@ -3132,9 +3132,9 @@ class TestPinLandingDuringGeneration:
     async def test_pin_visible_only_at_source_discards_the_summary(self) -> None:
         """A pin another runtime wrote is not in this runtime's cache yet.
 
-        get_strict_thread_history is strict about staleness but still accepts a
-        valid local cache hit, so reading through it would miss the pin and
-        deliver the stale title anyway.
+        A projected read is strict about staleness but still answers from local
+        state, so reading through it would miss the pin and deliver the stale
+        title anyway.
         """
         unpinned = _make_thread_history(12)
         pinned_at_source = [
