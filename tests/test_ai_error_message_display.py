@@ -562,10 +562,15 @@ class TestAIErrorDisplay:
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
+                # Each iteration is a separate turn, so it needs a separate
+                # causing event. Sharing one would make the outbox treat the
+                # later answers as resends of the first and replay it.
+                index = error_messages.index(error_msg)
                 await bot._response_runner._process_and_respond(
                     _response_request(
                         prompt="Help me",
-                        existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                        reply_to_event_id=f"$user_msg_{index}",
+                        existing_event_id=f"$thinking_{index}",
                     ),
                 )
 

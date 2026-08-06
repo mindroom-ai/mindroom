@@ -228,6 +228,10 @@ class EditTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
+    # Set when this edit is a turn's final answer. Once a placeholder exists
+    # the answer reaches the room as an edit of it, so this is the delivery
+    # whose loss leaves a user looking at "Thinking..." for good.
+    delivery_turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -642,9 +646,72 @@ class DeliveryGateway:
         )
         return None
 
+    async def _edit_content(
+        self,
+        request: EditTextRequest,
+        room_id: str,
+        content: dict[str, Any],
+    ) -> DeliveredMatrixEvent | None:
+        """Apply one edit, through the outbox when it carries a turn's answer.
+
+        Once a turn has a placeholder, its answer reaches the room as an edit
+        of that message rather than a new one, so this is where the answer
+        becomes visible and where losing it leaves the user reading
+        "Thinking..." with nothing durable to recover.
+
+        Edits that are not a turn's answer -- streaming progress, cancellation
+        notices, failure updates -- take the direct path. They are transport,
+        and a durable row per streamed revision would put a claim-before-send
+        round trip inside the streaming loop.
+        """
+        client = self._client()
+        if request.delivery_turn_id is None:
+            return await edit_message_result(
+                client,
+                room_id,
+                request.event_id,
+                content,
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        delivered: DeliveredMatrixEvent | None = None
+
+        async def send(claimed: OutboxDelivery) -> str:
+            nonlocal delivered
+            edited = await edit_message_result(
+                client,
+                claimed.room_id,
+                claimed.edits_event_id or request.event_id,
+                dict(claimed.payload),
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+                transaction_id=claimed.transaction_id,
+            )
+            if edited is None:
+                msg = f"Matrix refused the final edit for turn {claimed.turn_id!r}"
+                raise _DeliveryRefusedError(msg)
+            delivered = edited
+            return edited.event_id
+
+        try:
+            event_id = await ResponseDelivery(store=self.deps.outbox, send=send).deliver(
+                turn_id=request.delivery_turn_id,
+                stage=DeliveryStage.FINAL,
+                room_id=room_id,
+                thread_id=request.target.resolved_thread_id,
+                payload=content,
+                edits_event_id=request.event_id,
+            )
+        except _DeliveryRefusedError:
+            return None
+        if delivered is not None:
+            return delivered
+        # Already acknowledged: this turn's answer reached the room on an
+        # earlier run, so nothing was sent and the callback never ran.
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
-        client = self._client()
         config = self.deps.runtime.config
         target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
@@ -658,14 +725,7 @@ class DeliveryGateway:
 
         failure_reason = "edit_message_result returned None"
         try:
-            delivered = await edit_message_result(
-                client,
-                target.room_id,
-                request.event_id,
-                content,
-                request.new_text,
-                retry_sync_recovery=request.retry_sync_recovery,
-            )
+            delivered = await self._edit_content(request, target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the edit"
@@ -818,6 +878,7 @@ class DeliveryGateway:
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
+                    delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                 ),
             )

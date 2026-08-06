@@ -746,6 +746,7 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
     edit_content = build_edit_event_content(
@@ -761,6 +762,7 @@ async def edit_message_result(
         edit_content,
         operation="edit_message",
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
 
 

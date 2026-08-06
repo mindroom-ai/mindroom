@@ -7,6 +7,7 @@ the event the homeserver already accepted rather than posting a second answer.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -278,3 +279,56 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert sorted(outbox.rows) == [("$cause", "final"), ("$cause", "initial")]
         transaction_ids = {call.kwargs["transaction_id"] for call in send.await_args_list}
         assert len(transaction_ids) == 2, "the two delivery points shared a transaction ID"
+
+    async def test_the_final_answer_is_durable_even_when_it_is_an_edit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Once a placeholder exists the answer arrives as an edit of it.
+
+        That is the normal path, not a corner: every turn that shows
+        "Thinking..." reaches its answer this way. An edit sent outside the
+        outbox leaves nothing to recover, so a crash between generating the
+        answer and editing it in leaves the user reading the placeholder for
+        good.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)) as edit:
+            outcome = await gateway.deliver_final(
+                replace(self._final_request("the answer"), existing_event_id="$placeholder"),
+            )
+
+        assert outcome.event_id == "$placeholder"
+        assert list(outbox.rows) == [("$cause", "final")]
+        assert outbox.rows["$cause", "final"].edits_event_id == "$placeholder"
+        assert edit.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+
+    async def test_a_rerun_turn_does_not_edit_the_answer_in_twice(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An acknowledged final edit replays instead of editing again.
+
+        The mirror of the durability test: without it, "always enqueue" would
+        pass while still issuing a second edit on every rerun.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
+        edit = AsyncMock(return_value=edited)
+
+        with patch("mindroom.delivery_gateway.edit_message_result", edit):
+            first = await gateway.deliver_final(
+                replace(self._final_request("the answer"), existing_event_id="$placeholder"),
+            )
+            second = await gateway.deliver_final(
+                replace(self._final_request("a different answer"), existing_event_id="$placeholder"),
+            )
+
+        assert edit.await_count == 1, "a rerun turn edited the answer in a second time"
+        assert first.event_id == second.event_id == "$placeholder"
