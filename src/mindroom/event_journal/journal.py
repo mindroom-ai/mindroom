@@ -87,6 +87,17 @@ def advance_membership_epoch(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
             (principal_id, room_id),
         )
+    # A delivery that has not reached Matrix was written for the conversation
+    # this bot was in before it left. Sending it now would answer the previous
+    # membership inside the new one. An acknowledged delivery is kept, because
+    # its row is the record that the message is already visible.
+    transaction.execute(
+        """
+        DELETE FROM response_outbox
+        WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL
+        """,
+        (principal_id, room_id),
+    )
     return epoch
 
 

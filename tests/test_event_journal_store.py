@@ -637,6 +637,49 @@ class TestMembershipEpoch:
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
+    async def test_rejoining_drops_answers_the_previous_membership_never_sent(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An unsent answer belongs to the conversation it was written for.
+
+        Delivering it after a leave and rejoin would drop a reply to the old
+        membership into the new one, where nothing asked for it.
+        """
+        await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.unacknowledged_deliveries() == ()
+        assert await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+    async def test_rejoining_keeps_an_answer_matrix_already_accepted(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """That row is the record that the message is already visible."""
+        await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$sent")
+
+        await alice.advance_membership_epoch(ROOM)
+
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$sent"
+
     async def test_context_only_events_keep_no_payload(self, alice: PrincipalStore) -> None:
         """Otherwise the journal becomes the raw-event cache it replaces.
 
