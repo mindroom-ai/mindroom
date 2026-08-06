@@ -47,36 +47,14 @@ def read_conversation(
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
         raise ValueError(msg)
-    stored_thread_id = encode_thread_id(thread_id)
-    if before is None:
-        rows = transaction.fetchall(
-            f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-            ORDER BY created_ts DESC, logical_event_id DESC
-            LIMIT ?
-            """,  # noqa: S608 - a fixed column list, not interpolated input
-            (principal_id, room_id, stored_thread_id, limit),
-        )
-    else:
-        rows = transaction.fetchall(
-            f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-              AND (created_ts < ? OR (created_ts = ? AND logical_event_id < ?))
-            ORDER BY created_ts DESC, logical_event_id DESC
-            LIMIT ?
-            """,  # noqa: S608 - a fixed column list, not interpolated input
-            (
-                principal_id,
-                room_id,
-                stored_thread_id,
-                before.created_ts,
-                before.created_ts,
-                before.logical_event_id,
-                limit,
-            ),
-        )
+    rows = _page_rows(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        limit=limit,
+        before=before,
+    )
     messages: list[VisibleMessage] = []
     refresh_pending: list[RefreshRequest] = []
     for row in rows:
@@ -97,6 +75,52 @@ def read_conversation(
         refresh_pending=tuple(refresh_pending),
         next_cursor=next_cursor,
     )
+
+
+def _page_rows(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    limit: int,
+    before: ConversationCursor | None,
+) -> tuple[Row, ...]:
+    """Return one page's rows, newest first.
+
+    A thread's root message carries no thread relation of its own — it becomes
+    a root only when someone replies to it — so it is stored in the room
+    conversation. Reading a thread therefore merges its replies with that one
+    extra row, which is a primary-key lookup rather than a scan.
+    """
+    cursor_clause = "" if before is None else " AND (created_ts < ? OR (created_ts = ? AND logical_event_id < ?))"
+    cursor_params: tuple[object, ...] = (
+        () if before is None else (before.created_ts, before.created_ts, before.logical_event_id)
+    )
+    rows = list(
+        transaction.fetchall(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ?{cursor_clause}
+            ORDER BY created_ts DESC, logical_event_id DESC
+            LIMIT ?
+            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+            (principal_id, room_id, encode_thread_id(thread_id), *cursor_params, limit),
+        ),
+    )
+    if thread_id is not None:
+        root = transaction.fetchone(
+            f"""
+            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?{cursor_clause}
+            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+            (principal_id, room_id, thread_id, *cursor_params),
+        )
+        if root is not None and all(row["logical_event_id"] != thread_id for row in rows):
+            rows.append(root)
+            rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
+            del rows[limit:]
+    return tuple(rows)
 
 
 def pending_refreshes(

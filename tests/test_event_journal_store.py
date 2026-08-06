@@ -465,6 +465,64 @@ class TestBoundedReads:
         assert await bodies(alice) == ["$room-message"]
         assert await bodies(alice, thread_id="$root") == ["$thread-message"]
 
+    async def test_a_thread_read_includes_its_root(self, alice: PrincipalStore) -> None:
+        """The root has no thread relation of its own, but the thread is about it."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await bodies(alice, thread_id="$root") == ["$root", "$reply"]
+
+    async def test_the_root_appears_once_even_when_it_is_also_a_reply(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        await admit(alice, "$root", ts=1_000, thread_id="$root")
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await bodies(alice, thread_id="$root") == ["$root", "$reply"]
+
+    async def test_a_thread_root_still_belongs_to_the_room_conversation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+
+        assert await bodies(alice) == ["$root"]
+
+    async def test_a_thread_page_respects_its_limit_with_the_root_merged(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        await admit(alice, "$root", ts=1_000)
+        for index in range(5):
+            await admit(alice, f"$reply{index}", ts=2_000 + index, thread_id="$root")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=3)
+
+        assert [m.logical_event_id for m in page.messages] == ["$reply2", "$reply3", "$reply4"]
+
+    async def test_paging_a_thread_reaches_the_root_last(self, alice: PrincipalStore) -> None:
+        await admit(alice, "$root", ts=1_000)
+        for index in range(5):
+            await admit(alice, f"$reply{index}", ts=2_000 + index, thread_id="$root")
+
+        seen: list[str] = []
+        cursor = None
+        while True:
+            page = await alice.read_conversation(
+                room_id=ROOM,
+                thread_id="$root",
+                limit=2,
+                before=cursor,
+            )
+            seen = [m.logical_event_id for m in page.messages] + seen
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert seen == ["$root", "$reply0", "$reply1", "$reply2", "$reply3", "$reply4"]
+
     async def test_ordering_agrees_with_python_for_mixed_case_ids(
         self,
         alice: PrincipalStore,

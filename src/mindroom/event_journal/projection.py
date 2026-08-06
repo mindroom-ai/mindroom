@@ -72,14 +72,21 @@ def visible_content(content: Mapping[str, object]) -> Mapping[str, object]:
     return new_content if isinstance(new_content, dict) else content
 
 
-def _is_newer(candidate: tuple[int, str], current: tuple[int, str]) -> bool:
+def is_newer_revision(candidate: tuple[int, str], current: tuple[int, str]) -> bool:
     """Order revisions by ``(origin_server_ts, event_id)``.
 
     Timestamps alone are not a total order: two edits can share a millisecond,
     and clients disagree about clocks. The event ID breaks the tie so every
     replica of this projection reaches the same visible revision.
+
+    Hydration reduces a fetched relation tree with this same rule, so a
+    conversation looks identical whether it was built from live events or
+    reconstructed from the server.
     """
     return candidate > current
+
+
+_is_newer = is_newer_revision
 
 
 def _dumps(content: Mapping[str, object]) -> str:
