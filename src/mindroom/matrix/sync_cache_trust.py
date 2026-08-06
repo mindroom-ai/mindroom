@@ -11,12 +11,12 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
-    SyncCheckpoint,
     SyncTrustState,
     certify_sync_response,
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable

@@ -13,11 +13,11 @@ import pytest
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
-    SyncCheckpoint,
     SyncTrustState,
     handle_unknown_pos,
 )
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:

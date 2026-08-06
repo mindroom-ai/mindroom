@@ -12,8 +12,9 @@ import pytest
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:

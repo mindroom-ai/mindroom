@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 
 if TYPE_CHECKING:
     from pathlib import Path

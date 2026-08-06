@@ -26,7 +26,8 @@ from mindroom.matrix.health import (
     mark_matrix_sync_success,
     reset_matrix_sync_health,
 )
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
