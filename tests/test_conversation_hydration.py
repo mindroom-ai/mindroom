@@ -468,20 +468,25 @@ class TestRoomHydration:
         assert client.history_pages == 2
         assert await bodies(alice) == ["older"]
 
-    async def test_a_token_that_does_not_move_ends_the_walk(self, alice: PrincipalStore) -> None:
-        """A homeserver at the start of its history repeats the token it was given.
+    async def test_a_repeated_token_fails_without_marking_the_room_hydrated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Neither supported server signals exhaustion by repeating the token.
 
-        So does a stalled one, and nothing in the response tells them apart.
-        Failing would be the worse guess: hydration runs once per membership,
-        so a room that hit this would never become readable, where ending the
-        walk costs a short window that live events immediately extend.
+        Tuwunel derives `end` from the last event returned and omits it for an
+        empty page; Synapse omits it explicitly. So a repeated token is a
+        stall. Completing on it would install a hydration marker, and hydration
+        runs once per membership, so one transient stall would become permanent
+        truncation. Failing leaves the conversation unhydrated, which a later
+        read can still repair.
         """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+        with pytest.raises(_HydrationError):
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
-        assert client.history_pages == 2
-        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_the_request_ceiling_is_not_the_event_ceiling(self, alice: PrincipalStore) -> None:
         """One event per page must not be mistaken for a full event budget.

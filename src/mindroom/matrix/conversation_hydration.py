@@ -312,22 +312,20 @@ class ConversationHydrator:
             if not response.end:
                 return tuple(events)
             if response.end == start:
-                # The server handed back the position it was given. That is
-                # what a homeserver at the start of its history does, and it is
-                # also what a stalled one does, and nothing in the response
-                # distinguishes them. Treating it as failure would be the worse
-                # guess by far: hydration runs once per membership, so a room
-                # that hit this would never become readable at all, where
-                # treating it as the end costs a short window that live events
-                # immediately start extending.
-                logger.info(
-                    "conversation_hydration_token_did_not_advance",
-                    room_id=room_id,
-                    token=start,
-                    fetched_events=fetched,
-                    logical_messages=logical,
-                )
-                return tuple(events)
+                # Neither server MindRoom runs signals exhaustion this way.
+                # Tuwunel derives `end` from the last event it returned and so
+                # omits it entirely for an empty page; Synapse omits it too,
+                # explicitly, when pagination found nothing. A repeated token
+                # is therefore a stall, not the start of history.
+                #
+                # Failing is right, and the earlier reasoning that it was too
+                # harsh missed why: returning here would install a hydration
+                # marker, and hydration runs once per membership, so a single
+                # transient stall would become permanent truncation. Raising
+                # leaves the conversation unhydrated, which is the only outcome
+                # a later read can still repair.
+                msg = f"Homeserver repeated pagination token {start!r} for {room_id!r} instead of advancing"
+                raise _HydrationError(msg)
             if fetched >= self.max_fetched_events or pages >= self.max_requests:
                 # Not the window being met, so it is said out loud. A room that
                 # reaches this is one where reading further costs more than the
