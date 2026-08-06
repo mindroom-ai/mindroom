@@ -1,4 +1,8 @@
-"""Public snapshot type for latest visible cached agent messages."""
+"""The latest visible message one sender has in a conversation scope.
+
+A leaf type on purpose: hooks consume it and the conversation projection
+produces it, and neither should have to import the other to name it.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,3 @@ class AgentMessageSnapshot:
 
     content: dict[str, Any]
     origin_server_ts: int
-
-
-class AgentMessageSnapshotUnavailable(RuntimeError):  # noqa: N818
-    """Raised when an existing Matrix event cache cannot be safely read."""

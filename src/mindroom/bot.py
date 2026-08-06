@@ -117,7 +117,7 @@ from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
-from .matrix.conversation_reads import ConversationReader
+from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
 from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
 from .matrix.room_member_joins import (
@@ -159,7 +159,8 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
-    from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
+    from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
+    from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
@@ -2618,24 +2619,13 @@ class AgentBot:
         room_id: str,
         thread_id: str | None,
         sender: str,
-        *,
-        runtime_started_at: float | None,
     ) -> AgentMessageSnapshot | None:
-        """Read the latest visible cached sender message for hook helpers."""
-        event_cache = self._runtime_view.event_cache
-        if event_cache is None:
-            self.logger.warning(
-                "Agent-message snapshot requested before event cache is ready",
-                room_id=room_id,
-                thread_id=thread_id,
-                sender=sender,
-            )
-            return None
-        return await event_cache.get_latest_agent_message_snapshot(
-            room_id,
-            thread_id,
-            sender,
-            runtime_started_at=runtime_started_at,
+        """Read the latest visible sender message for hook helpers."""
+        return await latest_agent_message_snapshot(
+            self._conversation_reader,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
         )
 
     async def _redact_message_event(

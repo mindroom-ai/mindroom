@@ -18,7 +18,6 @@ from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
-from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
 from .sqlite_cache_maintenance import (
     run_startup_maintenance,
     with_sqlite_storage_bytes,
@@ -34,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
     from pathlib import Path
 
-    from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
     from .thread_cache_state import ThreadCacheGap
 
@@ -986,29 +984,6 @@ class SqliteEventCache:
                 room_id=room_id,
                 original_event_id=original_event_id,
                 sender=sender,
-            ),
-        )
-
-    async def get_latest_agent_message_snapshot(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        sender: str,
-        *,
-        runtime_started_at: float | None,
-    ) -> AgentMessageSnapshot | None:
-        """Return the latest visible cached message from one sender in the given scope."""
-        return await self._read_operation(
-            room_id,
-            operation="get_latest_agent_message_snapshot",
-            disabled_result=None,
-            reader=lambda db: load_sqlite_agent_message_snapshot(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                sender=sender,
-                runtime_started_at=runtime_started_at,
             ),
         )
 

@@ -18,7 +18,6 @@ from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
-from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import (
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
 
     from psycopg import AsyncConnection
 
-    from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
     from .thread_cache_state import ThreadCacheGap
 
@@ -1418,29 +1416,6 @@ class PostgresEventCache:
                 room_id=room_id,
                 original_event_id=original_event_id,
                 sender=sender,
-            ),
-        )
-
-    async def get_latest_agent_message_snapshot(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        sender: str,
-        *,
-        runtime_started_at: float | None,
-    ) -> AgentMessageSnapshot | None:
-        """Return the latest visible cached message from one sender in the given scope."""
-        return await self._operation(
-            room_id,
-            operation="get_latest_agent_message_snapshot",
-            disabled_result=None,
-            callback=lambda db: load_postgres_agent_message_snapshot(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-                sender=sender,
-                runtime_started_at=runtime_started_at,
             ),
         )
 

@@ -151,24 +151,6 @@ async def load_latest_edit(
     return None if row is None else row.event
 
 
-async def load_latest_edit_row(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str,
-) -> CachedEventRow | None:
-    """Return the latest edit and its write time within one ownership scope."""
-    return await _load_latest_edit_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-
-
 async def _load_latest_edit_row(
     db: aiosqlite.Connection,
     *,
