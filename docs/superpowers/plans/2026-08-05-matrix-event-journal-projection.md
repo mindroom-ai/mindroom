@@ -62,8 +62,7 @@ Sliding Sync exposed recovery gaps, but most current complexity comes from MindR
 - An unrecovered room keeps the bot unready instead of silently becoming history.
 - Conversation reads are bounded and indexed after at most one successful hydration per conversation and membership epoch.
 - Intermediate edit bodies and edit chains are not retained.
-- MindRoom intentionally tombstones a logical message when its currently visible edit is redacted, even though a Matrix client may reveal the original body after that redaction.
-- This visible divergence is the accepted cost of not retaining edit history that the homeserver may also have purged.
+- Redacting a current edit restores the server-authoritative previous visible revision without retaining a local edit chain.
 - Initial and terminal response deliveries are idempotent across crashes.
 - The final implementation PR head must not leave both the old and replacement production paths active.
 - The single implementation PR must be green and must remove every active owner it replaces before merge.
@@ -116,11 +115,21 @@ Including sender in the unresolved-edit key prevents an attacker from evicting t
 
 When the original arrives, only its sender's unresolved edit may apply, and all unresolved rows for that target are deleted.
 
-Redacting the logical original or its currently visible replacement tombstones the logical message.
+Admission records every redaction target as a compact durable tombstone before projection so an original or edit arriving later cannot resurrect redacted content.
+
+Redacting the logical original tombstones the logical message.
+
+Redacting the currently visible replacement marks the logical row with a durable refresh token derived from the redaction's journal receipt order.
+
+A strict conversation read waits for one shared point refetch of the logical original and its current relations instead of serving content known to be stale.
+
+The point refetch uses the same relation traversal and reducer as initial hydration, retains no edit chain, and installs the reconstructed visible row only when both the membership epoch and exact refresh token still match.
+
+A newer edit or redaction changes the projection revision and prevents an older in-flight refetch from overwriting it.
+
+Successful conditional installation clears the refresh token, while failure or cancellation leaves it durable and makes strict reads fail closed until retry succeeds.
 
 Redacting an already superseded replacement does not change visible content.
-
-MindRoom does not reconstruct an earlier edit body after redaction because it intentionally does not retain that history and both homeserver forks may already have purged it.
 
 ### Bounded conversation reads
 
@@ -151,6 +160,8 @@ A room-scoped conversation may perform one serialized initial `/messages` traver
 Concurrent first readers share one hydration task, and hydration becomes complete only after successful pagination and an atomic membership-epoch-checked installation.
 
 Failure remains a visible readiness or request failure rather than reviving room-wide repair scans.
+
+Current-edit redaction reuses this hydrator for a logical-message point refetch rather than introducing a second history-repair implementation.
 
 ### Deterministic delivery
 
@@ -195,6 +206,9 @@ The prototype must demonstrate:
 - Principal isolation through bound store views.
 - Exact journal deduplication and pending replay on SQLite and PostgreSQL.
 - Correct ordered and shuffled edit reduction, including pre-original cross-sender edits.
+- Current-edit redaction restoring the latest remaining server revision without retaining previous bodies.
+- A durable refresh token surviving restart, strict reads waiting for it, and refetch failure serving no stale content.
+- A newer edit racing point refetch and winning through conditional installation.
 - Bounded cursor reads over a 100,000-message room conversation.
 - One indexed projection update per edit and no retained intermediate edit chain.
 - Zero SQLite lock failures under 50 concurrent Matrix conversations with an explicit `busy_timeout`.
@@ -226,6 +240,7 @@ It must prove:
 - The realistic restart case where bounded `/messages` exhaustion returns an empty chunk and omits `end` still recovers and replies once.
 - Cold history populates context and never starts a turn.
 - A root, reply, edit, and redaction relation tree reports and supplies the required recursive depth.
+- Redacting the latest edit reveals the prior unredacted edit when the server still retains it and reveals the original body after superseded edits have been purged.
 - Edit-heavy streaming leaves one latest logical message without durable intermediate bodies.
 - Deterministic retry after server acceptance creates one Matrix event.
 
@@ -311,6 +326,7 @@ The single implementation PR tracks these results as its internal checkpoints co
 | Historical turns | Zero from `HISTORY` or a cold baseline. |
 | Model reruns after durable completion | Zero. |
 | Edit storage | One visible row per logical message and at most one unresolved row per target and sender. |
+| Current-edit redaction | Strict reads return the server-authoritative prior revision after point refetch and never stale content. |
 | Conversation reads | Bounded cursor pages using the conversation index. |
 | Post-hydration room scans | Zero. |
 | SQLite lock failures | Zero in the 50-conversation stress run. |
@@ -361,6 +377,7 @@ Stop and redesign if any of these occur:
 - The prototype loses or duplicates an admitted actionable event.
 - Accepted deterministic delivery can display content different from the durable model result.
 - Correct hydration requires retaining edit chains or restoring room-wide repair scans.
+- Current-edit redaction cannot recover the server-authoritative visible revision through the shared point hydrator without serving stale content.
 - Principal isolation cannot be expressed through one bound store interface.
 - SQLite still produces lock failures with one writer and a configured `busy_timeout`.
 - A cutover needs the old and new active paths simultaneously after merge.
