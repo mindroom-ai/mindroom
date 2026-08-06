@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 1
-
 PENDING_STATE = "pending"
 SETTLED_STATE = "settled"
 

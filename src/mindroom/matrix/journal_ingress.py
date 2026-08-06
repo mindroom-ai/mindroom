@@ -9,7 +9,6 @@ inferences are what the recovery bugs were made of.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -27,7 +26,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.event_journal import JournalEvent, PrincipalStore
 
@@ -57,6 +56,19 @@ def is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == TOOL_APPROVAL_RESPONSE_EVENT_TYPE
 
 
+# Ordered: the first matching rule owns the event. Media types are checked
+# before the approval predicate because they are concrete nio classes, while an
+# approval is an `UnknownEvent` distinguished only by its type string.
+_KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
+    (lambda event: isinstance(event, nio.RoomMessageText), EventKind.MESSAGE),
+    (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
+    (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
+    (lambda event: isinstance(event, MATRIX_MEDIA_EVENT_TYPES), EventKind.MEDIA),
+    (is_tool_approval_response, EventKind.APPROVAL),
+    (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
+)
+
+
 def event_kind(event: nio.Event) -> EventKind | None:
     """Return the single semantic purpose one timeline event carries.
 
@@ -64,18 +76,9 @@ def event_kind(event: nio.Event) -> EventKind | None:
     more than one semantic turn" a property of the data rather than a rule
     every call site has to remember.
     """
-    if isinstance(event, nio.RoomMessageText):
-        return EventKind.MESSAGE
-    if isinstance(event, nio.RedactionEvent):
-        return EventKind.REDACTION
-    if isinstance(event, nio.ReactionEvent):
-        return EventKind.REACTION
-    if isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
-        return EventKind.MEDIA
-    if is_tool_approval_response(event):
-        return EventKind.APPROVAL
-    if isinstance(event, nio.MegolmEvent):
-        return EventKind.DECRYPTION_FAILURE
+    for matches, kind in _KIND_RULES:
+        if matches(event):
+            return kind
     return None
 
 
@@ -161,11 +164,7 @@ def parse_journal_event(stored: JournalEvent) -> nio.Event:
     """Rebuild one typed nio event from its stored replay payload."""
     source = dict(stored.source)
     security_metadata = source.pop(_SECURITY_METADATA_KEY, None)
-    event = (
-        parse_matrix_media_event_source(source)
-        if stored.kind is EventKind.MEDIA
-        else nio.Event.parse_event(source)
-    )
+    event = parse_matrix_media_event_source(source) if stored.kind is EventKind.MEDIA else nio.Event.parse_event(source)
     if not isinstance(event, nio.Event) or event.event_id != stored.event_id:
         msg = f"Journal event {stored.event_id!r} does not replay as itself"
         raise JournalCorruptionError(msg)
@@ -187,11 +186,12 @@ def _restore_security_metadata(
     if not isinstance(metadata, dict):
         msg = f"Journal event {event_id!r} has corrupt security metadata"
         raise JournalCorruptionError(msg)
-    verified = metadata.get("verified")
-    sender_key = metadata.get("sender_key")
-    session_id = metadata.get("session_id")
+    fields = cast("Mapping[str, object]", metadata)
+    verified = fields.get("verified")
+    sender_key = fields.get("sender_key")
+    session_id = fields.get("session_id")
     if (
-        metadata.get("decrypted") is not True
+        fields.get("decrypted") is not True
         or not isinstance(verified, bool)
         or (sender_key is not None and not isinstance(sender_key, str))
         or (session_id is not None and not isinstance(session_id, str))
@@ -202,7 +202,7 @@ def _restore_security_metadata(
     event.verified = verified
     event.sender_key = sender_key
     event.session_id = session_id
-    cast("_RoomIdEvent", event).room_id = room_id  # noqa: TC006
+    cast("_RoomIdEvent", event).room_id = room_id
 
 
 @dataclass(slots=True)
@@ -237,14 +237,3 @@ class JournalIngress:
             raise nio.CallbackNotAcceptedError(str(error)) from error
         if event_class is EventClass.ACTIONABLE:
             self.on_admitted()
-
-
-def journal_event_json(event: MatrixEvent) -> str:
-    """Return the canonical serialization used for durable comparison."""
-    return json.dumps(event_source(event), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-
-
-type AdmissionCallback = Callable[
-    [nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance],
-    Awaitable[None],
-]

@@ -48,7 +48,7 @@ from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Sequence
 
     from mindroom.event_journal import PrincipalStore
 
@@ -115,7 +115,7 @@ async def _register(homeserver: str) -> tuple[nio.AsyncClient, str]:
     response = await client.register(username, password)
     if not isinstance(response, nio.RegisterResponse):
         msg = f"registration failed: {response}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
     client.user_id = response.user_id
     client.access_token = response.access_token
     client.device_id = response.device_id
@@ -138,7 +138,7 @@ async def _send(
     )
     if not isinstance(response, nio.RoomSendResponse):
         msg = f"send failed: {response}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
     return response.event_id
 
 
@@ -292,13 +292,11 @@ async def prove_edit_redaction(
     redaction = await client.room_redact(room_id, second_edit, reason="live proof")
     if not isinstance(redaction, nio.RoomRedactResponse):
         msg = f"redaction failed: {redaction}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
     await _admit_from_server(client, store, room_id, redaction.event_id)
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)
-    hidden = all(
-        message.content.get("body") != "redaction second edit" for message in page.messages
-    )
+    hidden = all(message.content.get("body") != "redaction second edit" for message in page.messages)
     findings.record("the redacted revision is not readable before refetch", hidden)
     findings.record(
         "the message is reported as owing a refetch",
@@ -413,7 +411,7 @@ async def prove_history_exhaustion(
     room = await client.room_create(preset=nio.RoomPreset.public_chat)
     if not isinstance(room, nio.RoomCreateResponse):
         msg = f"room creation failed: {room}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
     room_id = room.room_id
     await _send(client, room_id, _text("only message"))
 
@@ -451,7 +449,7 @@ async def _admit_from_server(
     fetched = await client.room_get_event(room_id, event_id)
     if not isinstance(fetched, nio.RoomGetEventResponse):
         msg = f"could not fetch {event_id}: {fetched}"
-        raise RuntimeError(msg)
+        raise TypeError(msg)
     event = fetched.event
     kind = EventKind.REDACTION if isinstance(event, nio.RedactionEvent) else EventKind.MESSAGE
     await store.admit(
@@ -472,7 +470,7 @@ async def run_proof(homeserver: str) -> Findings:
             room = await client.room_create(preset=nio.RoomPreset.public_chat)
             if not isinstance(room, nio.RoomCreateResponse):
                 msg = f"room creation failed: {room}"
-                raise RuntimeError(msg)
+                raise TypeError(msg)
             room_id = room.room_id
             hydrator = ConversationHydrator(store=store, client=client)
 

@@ -153,9 +153,3 @@ class PendingEventWorker:
                 return
             await self.store.settle(event.event_id, outcome)
         self._failed_rooms.discard(room_id)
-
-
-async def ignore_event(event: JournalEvent) -> SettlementOutcome:
-    """Settle an event without doing anything, for tests and disabled paths."""
-    del event
-    return SettlementOutcome.INTENTIONALLY_IGNORED

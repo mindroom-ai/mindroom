@@ -97,6 +97,7 @@ class TestProvenanceMapping:
         provenance: nio.TimelineEventProvenance,
         expected: EventClass,
     ) -> None:
+        """Provenance decides whether work may start."""
         assert event_class_for(provenance) is expected
 
     async def test_every_provenance_is_mapped(self) -> None:
@@ -109,12 +110,15 @@ class TestEventKinds:
     """One event carries at most one semantic purpose."""
 
     async def test_a_text_message_is_a_message(self) -> None:
+        """A text message is a message."""
         assert event_kind(text_event("$m")) is EventKind.MESSAGE
 
     async def test_a_redaction_is_a_redaction(self) -> None:
+        """A redaction is a redaction."""
         assert event_kind(redaction_event("$r", "$m")) is EventKind.REDACTION
 
     async def test_an_unrelated_event_has_no_kind(self) -> None:
+        """An unrelated event has no kind."""
         event = nio.Event.parse_event(
             {
                 "event_id": "$topic",
@@ -133,6 +137,7 @@ class TestAdmissionAdapter:
     """The translation from a nio event to a durable row."""
 
     async def test_a_threaded_message_lands_in_its_thread(self) -> None:
+        """A threaded message lands in its thread."""
         inbound = inbound_event(
             ROOM,
             text_event("$m", thread_id="$root"),
@@ -142,10 +147,12 @@ class TestAdmissionAdapter:
         assert inbound.thread_id == "$root"
 
     async def test_an_unthreaded_message_has_no_thread(self) -> None:
+        """An unthreaded message has no thread."""
         inbound = inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
         assert inbound.thread_id is None
 
     async def test_a_reaction_does_not_touch_the_projection(self) -> None:
+        """A reaction does not touch the projection."""
         event = nio.Event.parse_event(
             {
                 "event_id": "$reaction",
@@ -159,12 +166,13 @@ class TestAdmissionAdapter:
         assert projected_event(ROOM, event, EventKind.REACTION) is None
 
     async def test_a_redaction_projects_onto_its_target(self) -> None:
+        """A redaction projects onto its target."""
         projected = projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION)
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
     async def test_a_redaction_without_a_target_never_reaches_the_journal(self) -> None:
-        """nio's schema requires the target, so such an event is never parsed.
+        """Nio's schema requires the target, so such an event is never parsed.
 
         Worth pinning: the projection reads the typed ``redacts`` attribute
         rather than probing the source, and that is only safe while nio refuses
@@ -187,6 +195,7 @@ class TestReplayFidelity:
     """A recovered event must be the same event that was admitted."""
 
     async def test_a_message_replays_as_itself(self, alice: PrincipalStore) -> None:
+        """A message replays as itself."""
         original = text_event("$m", "hello")
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
@@ -201,7 +210,7 @@ class TestReplayFidelity:
         assert replayed.body == "hello"
 
     async def test_decryption_results_survive_replay(self, alice: PrincipalStore) -> None:
-        """nio attaches these after parsing, so they are not in the source.
+        """Nio attaches these after parsing, so they are not in the source.
 
         Losing them would replay a decrypted event as an untrusted one, which
         changes what the authorization layer is allowed to do with it.
@@ -224,6 +233,7 @@ class TestReplayFidelity:
         assert replayed.session_id == "session"
 
     async def test_a_corrupt_payload_is_refused_not_guessed(self, alice: PrincipalStore) -> None:
+        """A corrupt payload is refused not guessed."""
         original = text_event("$m")
         await alice.admit(
             inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
@@ -240,6 +250,7 @@ class TestDurableAdmission:
     """nio hears "accepted" only after the transaction commits."""
 
     async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
+        """An admitted event becomes pending work."""
         ingress = JournalIngress(store=alice)
 
         await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
@@ -250,6 +261,7 @@ class TestDurableAdmission:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Cold history populates context without work."""
         ingress = JournalIngress(store=alice)
 
         await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
@@ -258,7 +270,7 @@ class TestDurableAdmission:
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [m.content["body"] for m in page.messages] == ["old"]
 
-    async def test_a_failed_admission_refuses_the_callback(self, alice: PrincipalStore) -> None:
+    async def test_a_failed_admission_refuses_the_callback(self) -> None:
         """Refusing is what keeps the event for redelivery instead of losing it."""
 
         class Failing:
@@ -277,7 +289,7 @@ class TestDurableAdmission:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """nio redelivers what it was never told was accepted."""
+        """Nio redelivers what it was never told was accepted."""
         ingress = JournalIngress(store=alice)
         event = text_event("$m")
 
@@ -290,6 +302,7 @@ class TestDurableAdmission:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """An unowned event is neither admitted nor rejected."""
         ingress = JournalIngress(store=alice)
         topic = nio.Event.parse_event(
             {
@@ -319,6 +332,7 @@ class TestPendingEventWorker:
         )
 
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
+        """A rooms events run in receipt order."""
         handled: list[str] = []
 
         async def handle(event: JournalEvent) -> SettlementOutcome:
@@ -333,6 +347,7 @@ class TestPendingEventWorker:
         assert handled == ["$second", "$first"]
 
     async def test_a_settled_event_never_runs_again(self, alice: PrincipalStore) -> None:
+        """A settled event never runs again."""
         runs = 0
 
         async def handle(event: JournalEvent) -> SettlementOutcome:
@@ -350,6 +365,8 @@ class TestPendingEventWorker:
         assert runs == 1
 
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
+        """A failed event stays pending."""
+
         async def handle(event: JournalEvent) -> SettlementOutcome:
             del event
             msg = "model unavailable"
@@ -387,6 +404,7 @@ class TestPendingEventWorker:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """One stalled room does not block another."""
         other_room = "!other:example.org"
         released = asyncio.Event()
         fast_finished = asyncio.Event()
@@ -441,6 +459,7 @@ class TestPendingEventWorker:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A restart resumes what the previous process left."""
         handled: list[str] = []
 
         async def never(event: JournalEvent) -> SettlementOutcome:

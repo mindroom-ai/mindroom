@@ -163,7 +163,7 @@ def _delivery(row: Row) -> OutboxDelivery:
     payload = json.loads(row["payload_json"])
     if not isinstance(payload, dict):
         msg = f"Outbox payload for turn {row['turn_id']!r} is not an object"
-        raise ValueError(msg)
+        raise TypeError(msg)
     return OutboxDelivery(
         turn_id=row["turn_id"],
         stage=DeliveryStage(row["stage"]),

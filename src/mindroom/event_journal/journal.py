@@ -24,12 +24,10 @@ from .models import (
     JournalEvent,
     SettlementOutcome,
 )
-from .projection import ProjectedEvent, project, replacement_target
+from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from .backend import Row, Transaction
     from .models import InboundEvent
 
@@ -191,7 +189,7 @@ def _journal_event(row: Row) -> JournalEvent:
     source = json.loads(row["source_json"]) if row["source_json"] else {}
     if not isinstance(source, dict):
         msg = f"Journal event {row['event_id']!r} has a non-object source"
-        raise ValueError(msg)
+        raise TypeError(msg)
     return JournalEvent(
         event_id=row["event_id"],
         room_id=row["room_id"],
@@ -203,27 +201,4 @@ def _journal_event(row: Row) -> JournalEvent:
         source=source,
         receipt_order=int(row["receipt_order"]),
         membership_epoch=int(row["membership_epoch"]),
-    )
-
-
-def projected_event_from_source(
-    *,
-    event_id: str,
-    room_id: str,
-    thread_id: str | None,
-    sender: str,
-    origin_server_ts: int,
-    content: Mapping[str, object],
-    redacts_event_id: str | None,
-) -> ProjectedEvent:
-    """Build the projection view of one event."""
-    return ProjectedEvent(
-        event_id=event_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        sender=sender,
-        origin_server_ts=origin_server_ts,
-        content=content,
-        replaces_event_id=replacement_target(content),
-        redacts_event_id=redacts_event_id,
     )

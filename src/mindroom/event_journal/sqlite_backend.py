@@ -12,7 +12,7 @@ import asyncio
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
     from .backend import Operation, Row
 
-T = TypeVar("T")
 
 logger = get_logger(__name__)
 
@@ -140,7 +139,7 @@ class SqliteBackend:
                 if not queued.future.done():
                     queued.future.cancel()
                 raise
-            except BaseException as error:  # noqa: BLE001 - relayed to the caller
+            except BaseException as error:
                 if not queued.future.done():
                     queued.future.set_exception(error)
             else:
@@ -149,7 +148,7 @@ class SqliteBackend:
             finally:
                 self._queue.task_done()
 
-    def _apply(self, operation: Operation[T]) -> T:
+    def _apply[T](self, operation: Operation[T]) -> T:
         self._writer.execute("BEGIN IMMEDIATE")
         try:
             result = operation(_SqliteTransaction(self._writer))
@@ -159,7 +158,7 @@ class SqliteBackend:
         self._writer.execute("COMMIT")
         return result
 
-    async def write(self, operation: Operation[T]) -> T:
+    async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit."""
         if self._closed:
             msg = "The event-journal store is closed"
@@ -168,14 +167,18 @@ class SqliteBackend:
         await self._queue.put(_QueuedWrite(operation=operation, future=future))
         return await future
 
-    async def read(self, operation: Operation[T]) -> T:
+    async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
         if self._closed:
             msg = "The event-journal store is closed"
             raise RuntimeError(msg)
-        return await asyncio.to_thread(self._apply_read, operation)
 
-    def _apply_read(self, operation: Operation[T]) -> T:
+        def apply() -> T:
+            return self._apply_read(operation)
+
+        return await asyncio.to_thread(apply)
+
+    def _apply_read[T](self, operation: Operation[T]) -> T:
         return operation(_SqliteTransaction(self._reader()))
 
     async def close(self) -> None:

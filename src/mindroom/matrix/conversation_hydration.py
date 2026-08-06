@@ -165,9 +165,7 @@ class ConversationHydrator:
     async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
         epoch = await self.store.membership_epoch(room_id)
         events = (
-            await self._fetch_thread(room_id, thread_id)
-            if thread_id is not None
-            else await self._fetch_room(room_id)
+            await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
         )
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,

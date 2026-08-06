@@ -39,7 +39,7 @@ ALICE = "@alice:example.org"
 SOURCE = "$inbound"
 
 
-class Crash(RuntimeError):
+class CrashError(RuntimeError):
     """The process died here."""
 
 
@@ -58,12 +58,12 @@ class FakeHomeserver:
         if self.fail_next_send:
             self.fail_next_send = False
             msg = "connection reset"
-            raise Crash(msg)
+            raise CrashError(msg)
         event_id = self.events.setdefault(delivery.transaction_id, f"$sent{len(self.events)}")
         if self.lose_acknowledgement:
             self.lose_acknowledgement = False
             msg = "crashed after Matrix accepted the message"
-            raise Crash(msg)
+            raise CrashError(msg)
         return event_id
 
     @property
@@ -94,7 +94,7 @@ class TurnRuntime:
         answer = f"answer to {event.event_id}"
         if self.crash_after_model:
             msg = "crashed after the model finished"
-            raise Crash(msg)
+            raise CrashError(msg)
 
         await self.store.enqueue_delivery(
             turn_id=event.event_id,
@@ -105,12 +105,12 @@ class TurnRuntime:
         )
         if self.crash_after_enqueue:
             msg = "crashed after enqueue, before claim"
-            raise Crash(msg)
+            raise CrashError(msg)
 
         await self.delivery.flush(turn_id=event.event_id, stage=DeliveryStage.FINAL)
         if self.crash_before_settle:
             msg = "crashed after acknowledgement, before settlement"
-            raise Crash(msg)
+            raise CrashError(msg)
         return SettlementOutcome.SUCCEEDED
 
     def worker(self) -> PendingEventWorker:
@@ -153,16 +153,14 @@ async def assert_settled_once(runtime: TurnRuntime) -> None:
     assert await runtime.store.pending() == (), "the event still owes work"
     settled = await runtime.store.load_event(SOURCE)
     assert settled is not None, "the event vanished from the journal"
-    assert runtime.homeserver.visible_messages == 1, (
-        f"{runtime.homeserver.visible_messages} visible responses"
-    )
+    assert runtime.homeserver.visible_messages == 1, f"{runtime.homeserver.visible_messages} visible responses"
 
 
 class TestCrashMatrix:
     """One terminal turn and at most one visible response, at every boundary."""
 
     async def test_one_before_journal_commit(self, runtime: TurnRuntime) -> None:
-        """nio was never told the event was accepted, so it redelivers it."""
+        """Nio was never told the event was accepted, so it redelivers it."""
         # Nothing was admitted: the transaction did not commit.
         assert await runtime.store.pending() == ()
         assert runtime.homeserver.visible_messages == 0
@@ -177,7 +175,7 @@ class TestCrashMatrix:
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """nio redelivers what it was not told about; the journal deduplicates."""
+        """Nio redelivers what it was not told about; the journal deduplicates."""
         await admit(runtime.store)
         await admit(runtime.store)
 
@@ -220,6 +218,7 @@ class TestCrashMatrix:
         self,
         runtime: TurnRuntime,
     ) -> None:
+        """Five after the result is durable before enqueue."""
         await admit(runtime.store)
         runtime.crash_after_model = True
         await runtime.worker().drain_once()
@@ -233,6 +232,7 @@ class TestCrashMatrix:
         self,
         runtime: TurnRuntime,
     ) -> None:
+        """Six after enqueue before the claim commits."""
         await admit(runtime.store)
         runtime.crash_after_enqueue = True
         await runtime.worker().drain_once()
@@ -353,6 +353,7 @@ class TestModelIsNotRerun:
         self,
         runtime: TurnRuntime,
     ) -> None:
+        """Recovery after acknowledgement sends nothing."""
         await admit(runtime.store)
         await runtime.worker().drain_once()
         sends_before = runtime.homeserver.sends
@@ -365,6 +366,7 @@ class TestModelIsNotRerun:
         self,
         runtime: TurnRuntime,
     ) -> None:
+        """A send failure leaves the turn retryable."""
         await admit(runtime.store)
         runtime.homeserver.fail_next_send = True
 
@@ -384,6 +386,7 @@ class TestInitialAndFinalStages:
         self,
         runtime: TurnRuntime,
     ) -> None:
+        """The stages do not share a transaction."""
         initial = await runtime.store.enqueue_delivery(
             turn_id=SOURCE,
             stage=DeliveryStage.INITIAL,
@@ -402,6 +405,7 @@ class TestInitialAndFinalStages:
         assert initial != final
 
     async def test_recovery_resends_both_stages_once(self, runtime: TurnRuntime) -> None:
+        """Recovery resends both stages once."""
         for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "answer")):
             await runtime.store.enqueue_delivery(
                 turn_id=SOURCE,
@@ -420,4 +424,3 @@ class TestInitialAndFinalStages:
         assert await runtime.delivery.recover() == 0
         assert runtime.homeserver.sends == sends_after_recovery
         assert runtime.homeserver.visible_messages == 2
-

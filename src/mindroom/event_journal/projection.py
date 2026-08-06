@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from .identity import encode_thread_id
 
@@ -45,7 +45,7 @@ class ProjectedEvent:
 
 def _relation(content: Mapping[str, object]) -> Mapping[str, object]:
     relation = content.get(RELATES_TO)
-    return relation if isinstance(relation, dict) else {}
+    return cast("Mapping[str, object]", relation) if isinstance(relation, dict) else {}
 
 
 def replacement_target(content: Mapping[str, object]) -> str | None:
@@ -69,7 +69,7 @@ def thread_root(content: Mapping[str, object]) -> str | None:
 def visible_content(content: Mapping[str, object]) -> Mapping[str, object]:
     """Return the body an edit installs, which lives under ``m.new_content``."""
     new_content = content.get(NEW_CONTENT)
-    return new_content if isinstance(new_content, dict) else content
+    return cast("Mapping[str, object]", new_content) if isinstance(new_content, dict) else content
 
 
 def is_newer_revision(candidate: tuple[int, str], current: tuple[int, str]) -> bool:
@@ -97,8 +97,8 @@ def _loads(content_json: str) -> Mapping[str, object]:
     decoded = json.loads(content_json)
     if not isinstance(decoded, dict):
         msg = "Projected content must be a JSON object"
-        raise ValueError(msg)
-    return decoded
+        raise TypeError(msg)
+    return cast("Mapping[str, object]", decoded)
 
 
 def is_tombstoned(
@@ -489,6 +489,6 @@ def drop_refetched_message(
     return row is not None
 
 
-def decode_content(content_json: Any) -> Mapping[str, object]:
+def decode_content(content_json: str) -> Mapping[str, object]:
     """Decode one stored visible body."""
     return _loads(content_json)

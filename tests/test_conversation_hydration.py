@@ -170,6 +170,7 @@ class TestRevisionReduction:
     """Hydration must reach the same answer the live projection would."""
 
     async def test_the_original_wins_when_there_are_no_edits(self) -> None:
+        """The original wins when there are no edits."""
         original = projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
 
@@ -179,6 +180,7 @@ class TestRevisionReduction:
         assert revision.content["body"] == "first"
 
     async def test_the_newest_edit_wins(self) -> None:
+        """The newest edit wins."""
         original = projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
         relations = [
@@ -191,6 +193,7 @@ class TestRevisionReduction:
         assert revision.content["body"] == "third"
 
     async def test_an_edit_from_another_sender_is_ignored(self) -> None:
+        """An edit from another sender is ignored."""
         original = projected_from_event(ROOM, parse(raw("$m", "first")))
         assert original is not None
         forged = projected_from_event(
@@ -212,6 +215,7 @@ class TestThreadHydration:
     """A thread is built from its root plus its whole relation tree."""
 
     async def test_a_thread_is_hydrated_once(self, alice: PrincipalStore) -> None:
+        """A thread is hydrated once."""
         client = FakeClient(
             events={"$root": raw("$root", "root")},
             relations={
@@ -233,6 +237,7 @@ class TestThreadHydration:
         assert await bodies(alice, "$root") == ["root", "reply edited"]
 
     async def test_concurrent_readers_share_one_hydration(self, alice: PrincipalStore) -> None:
+        """Concurrent readers share one hydration."""
         client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": []})
         hydrate = hydrator(alice, client)
 
@@ -299,6 +304,7 @@ class TestThreadHydration:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A failed hydration is retried not cached."""
         client = FakeClient(events={}, relations={})
 
         with pytest.raises(HydrationError):
@@ -315,6 +321,7 @@ class TestRoomHydration:
     """Room history is walked once, and exhaustion is not a failure."""
 
     async def test_history_populates_the_conversation(self, alice: PrincipalStore) -> None:
+        """History populates the conversation."""
         client = FakeClient(history=[raw("$b", "second", ts=2_000), raw("$a", "first", ts=1_000)])
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -325,7 +332,10 @@ class TestRoomHydration:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """This shape used to be read as failure and left rooms unready."""
+        """An empty chunk without an end token is exhaustion.
+
+        This shape used to be read as failure and left rooms unready.
+        """
         client = FakeClient(history=[raw("$a", "first")], history_end_token=None)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -334,6 +344,7 @@ class TestRoomHydration:
         assert await bodies(alice) == ["first"]
 
     async def test_hydration_does_not_create_pending_work(self, alice: PrincipalStore) -> None:
+        """Hydration does not create pending work."""
         client = FakeClient(history=[raw("$a", "first")])
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -370,6 +381,7 @@ class TestPointRefetch:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """The prior edit is restored when the server still has it."""
         await admit_all(
             alice,
             [
@@ -425,6 +437,7 @@ class TestPointRefetch:
         assert await bodies(alice) == ["first"]
 
     async def test_a_message_the_server_lost_is_removed(self, alice: PrincipalStore) -> None:
+        """A message the server lost is removed."""
         await self._redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
@@ -439,6 +452,7 @@ class TestPointRefetch:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """An unreachable server keeps the message hidden."""
         await self._redact_current_edit(alice)
         client = FakeClient(events={}, relations={})
 
@@ -474,6 +488,7 @@ class TestReadModes:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A non strict read omits rather than waits."""
         await self._hidden_message(alice)
         client = FakeClient(events={}, relations={})
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
@@ -487,6 +502,7 @@ class TestReadModes:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A strict read repairs before returning."""
         await self._hidden_message(alice)
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
         await alice.install_hydrated_conversation(

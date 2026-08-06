@@ -108,6 +108,7 @@ class TestPrincipalIsolation:
     """One database, many bots, no way to reach across."""
 
     async def test_bound_views_cannot_see_each_other(self, journal_store: EventJournalStore) -> None:
+        """Bound views cannot see each other."""
         first = journal_store.principal("agent@one")
         second = journal_store.principal("agent@two")
 
@@ -120,6 +121,7 @@ class TestPrincipalIsolation:
         assert await second.pending() == ()
 
     async def test_settling_is_bound_to_its_principal(self, journal_store: EventJournalStore) -> None:
+        """Settling is bound to its principal."""
         first = journal_store.principal("agent@one")
         second = journal_store.principal("agent@two")
         await admit(first, "$shared-id")
@@ -135,6 +137,7 @@ class TestAdmission:
     """The journal decides exactly once what MindRoom accepted."""
 
     async def test_admitting_twice_creates_one_pending_event(self, alice: PrincipalStore) -> None:
+        """Admitting twice creates one pending event."""
         assert await admit(alice, "$one") is AdmissionResult.ADMITTED
         assert await admit(alice, "$one") is AdmissionResult.DUPLICATE
 
@@ -155,6 +158,7 @@ class TestAdmission:
         assert await bodies(alice) == ["$history"]
 
     async def test_settled_events_stay_out_of_replay(self, alice: PrincipalStore) -> None:
+        """Settled events stay out of replay."""
         await admit(alice, "$one")
         await alice.settle("$one", SettlementOutcome.SUCCEEDED)
 
@@ -172,6 +176,7 @@ class TestAdmission:
         assert settled.source == {}
 
     async def test_replay_payload_survives_until_settlement(self, alice: PrincipalStore) -> None:
+        """Replay payload survives until settlement."""
         await admit(alice, "$one")
 
         pending = await alice.pending()
@@ -182,12 +187,14 @@ class TestEditReduction:
     """One row per logical message, whatever order the events arrive in."""
 
     async def test_edit_replaces_the_visible_body(self, alice: PrincipalStore) -> None:
+        """Edit replaces the visible body."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "second"))
 
         assert await bodies(alice) == ["second"]
 
     async def test_older_edit_arriving_late_does_not_win(self, alice: PrincipalStore) -> None:
+        """Older edit arriving late does not win."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$new", ts=3_000, content=edit("$original", "newest"))
         await admit(alice, "$old", ts=2_000, content=edit("$original", "stale"))
@@ -206,6 +213,7 @@ class TestEditReduction:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Same timestamp edits resolve by event id either order."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$zzz", ts=2_000, content=edit("$original", "from-zzz"))
         await admit(alice, "$aaa", ts=2_000, content=edit("$original", "from-aaa"))
@@ -216,6 +224,7 @@ class TestEditReduction:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Edit before original applies when the original lands."""
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "second"))
         assert await bodies(alice) == []
 
@@ -239,12 +248,14 @@ class TestEditReduction:
         assert await bodies(alice) == ["authored"]
 
     async def test_an_edit_from_another_sender_never_applies(self, alice: PrincipalStore) -> None:
+        """An edit from another sender never applies."""
         await admit(alice, "$original", sender=ALICE, content=text("first"))
         await admit(alice, "$forged", sender=BOB, ts=9_000, content=edit("$original", "forged"))
 
         assert await bodies(alice) == ["first"]
 
     async def test_only_the_latest_unresolved_edit_is_kept(self, alice: PrincipalStore) -> None:
+        """Only the latest unresolved edit is kept."""
         await admit(alice, "$e1", ts=2_000, content=edit("$original", "one"))
         await admit(alice, "$e2", ts=3_000, content=edit("$original", "two"))
         await admit(alice, "$e3", ts=2_500, content=edit("$original", "middle"))
@@ -279,6 +290,7 @@ class TestRedaction:
     """Deleted content stops being readable in the transaction that admits it."""
 
     async def test_redacting_the_original_removes_the_message(self, alice: PrincipalStore) -> None:
+        """Redacting the original removes the message."""
         await admit(alice, "$original", content=text("secret"))
         await admit(alice, "$redaction", ts=2_000, redacts="$original", kind=EventKind.REDACTION)
 
@@ -294,6 +306,7 @@ class TestRedaction:
         assert await bodies(alice) == []
 
     async def test_a_redacted_edit_cannot_be_resurrected(self, alice: PrincipalStore) -> None:
+        """A redacted edit cannot be resurrected."""
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$original", content=text("first"))
@@ -301,6 +314,7 @@ class TestRedaction:
         assert await bodies(alice) == ["first"]
 
     async def test_redacting_a_superseded_edit_changes_nothing(self, alice: PrincipalStore) -> None:
+        """Redacting a superseded edit changes nothing."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit1", ts=2_000, content=edit("$original", "second"))
         await admit(alice, "$edit2", ts=3_000, content=edit("$original", "third"))
@@ -315,6 +329,7 @@ class TestRedaction:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Redacting the visible edit hides it and asks for a refetch."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "second"))
 
@@ -348,7 +363,6 @@ class TestRedaction:
     async def test_the_refresh_token_survives_a_restart(
         self,
         journal_store: EventJournalStore,
-        tmp_path,  # noqa: ANN001 - pytest fixture
     ) -> None:
         """A pending refetch is durable, so a crash cannot un-hide the content."""
         store = journal_store.principal("agent@alice")
@@ -362,6 +376,7 @@ class TestRedaction:
         assert len(page.refresh_pending) == 1
 
     async def test_a_failed_refetch_keeps_the_message_hidden(self, alice: PrincipalStore) -> None:
+        """A failed refetch keeps the message hidden."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
@@ -376,6 +391,7 @@ class TestRedaction:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A successful refetch installs the server revision."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
@@ -415,6 +431,7 @@ class TestRedaction:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A refetch can remove a message the server lost."""
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
@@ -430,6 +447,7 @@ class TestBoundedReads:
     """Reads are paged; there is no call that returns a whole room."""
 
     async def test_a_read_requires_a_positive_limit(self, alice: PrincipalStore) -> None:
+        """A read requires a positive limit."""
         with pytest.raises(ValueError, match="positive limit"):
             await alice.read_conversation(room_id=ROOM, thread_id=None, limit=0)
 
@@ -437,6 +455,7 @@ class TestBoundedReads:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Pages walk backwards without gaps or repeats."""
         for index in range(25):
             await admit(alice, f"$m{index:03d}", ts=1_000 + index)
 
@@ -452,6 +471,7 @@ class TestBoundedReads:
         assert seen == [f"$m{index:03d}" for index in range(25)]
 
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
+        """A page is chronological."""
         for index in range(5):
             await admit(alice, f"$m{index}", ts=1_000 + index)
 
@@ -459,6 +479,7 @@ class TestBoundedReads:
         assert [m.created_ts for m in page.messages] == [1_000, 1_001, 1_002, 1_003, 1_004]
 
     async def test_threads_are_separate_conversations(self, alice: PrincipalStore) -> None:
+        """Threads are separate conversations."""
         await admit(alice, "$room-message")
         await admit(alice, "$thread-message", thread_id="$root")
 
@@ -476,6 +497,7 @@ class TestBoundedReads:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """The root appears once even when it is also a reply."""
         await admit(alice, "$root", ts=1_000, thread_id="$root")
         await admit(alice, "$reply", ts=2_000, thread_id="$root")
 
@@ -485,6 +507,7 @@ class TestBoundedReads:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A thread root still belongs to the room conversation."""
         await admit(alice, "$root", ts=1_000)
         await admit(alice, "$reply", ts=2_000, thread_id="$root")
 
@@ -494,6 +517,7 @@ class TestBoundedReads:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """A thread page respects its limit with the root merged."""
         await admit(alice, "$root", ts=1_000)
         for index in range(5):
             await admit(alice, f"$reply{index}", ts=2_000 + index, thread_id="$root")
@@ -503,6 +527,7 @@ class TestBoundedReads:
         assert [m.logical_event_id for m in page.messages] == ["$reply2", "$reply3", "$reply4"]
 
     async def test_paging_a_thread_reaches_the_root_last(self, alice: PrincipalStore) -> None:
+        """Paging a thread reaches the root last."""
         await admit(alice, "$root", ts=1_000)
         for index in range(5):
             await admit(alice, f"$reply{index}", ts=2_000 + index, thread_id="$root")
@@ -544,6 +569,7 @@ class TestBoundedReads:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Cursor paging matches byte order across a timestamp tie."""
         identifiers = ["$aaa", "$BBB", "$aBc", "$Abc", "$zzz", "$ZZZ"]
         for event_id in identifiers:
             await admit(alice, event_id, ts=5_000)
@@ -564,6 +590,7 @@ class TestMembershipEpoch:
     """Leaving and rejoining invalidates what the previous membership saw."""
 
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
+        """Hydration is recorded per membership."""
         epoch = await alice.membership_epoch(ROOM)
         installed = await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -577,6 +604,7 @@ class TestMembershipEpoch:
         assert await bodies(alice) == ["$hydrated"]
 
     async def test_rejoining_invalidates_hydration(self, alice: PrincipalStore) -> None:
+        """Rejoining invalidates hydration."""
         epoch = await alice.membership_epoch(ROOM)
         await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -610,6 +638,7 @@ class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
     async def test_the_transaction_id_is_derived_not_random(self) -> None:
+        """The transaction id is derived not random."""
         first = delivery_transaction_id("agent@alice", "turn-1", "final")
         second = delivery_transaction_id("agent@alice", "turn-1", "final")
         other_stage = delivery_transaction_id("agent@alice", "turn-1", "initial")
@@ -621,6 +650,7 @@ class TestOutbox:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Enqueue returns the same transaction across restarts."""
         first = await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -639,6 +669,7 @@ class TestOutbox:
         assert first == second
 
     async def test_an_unattempted_delivery_can_still_change(self, alice: PrincipalStore) -> None:
+        """An unattempted delivery can still change."""
         await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -659,9 +690,10 @@ class TestOutbox:
         assert claimed.payload["body"] == "final"
 
     async def test_claiming_freezes_the_payload(self, alice: PrincipalStore) -> None:
-        """The case this closes: Matrix accepted the old text, and the
-        regenerated text could never become visible under the same
-        transaction ID.
+        """Claiming freezes the payload.
+
+        The case this closes: Matrix accepted the old text, and the regenerated
+        text could never become visible under the same transaction ID.
         """
         await alice.enqueue_delivery(
             turn_id="turn-1",
@@ -685,6 +717,7 @@ class TestOutbox:
         assert stored.payload["body"] == "sent"
 
     async def test_reclaiming_returns_the_identical_delivery(self, alice: PrincipalStore) -> None:
+        """Reclaiming returns the identical delivery."""
         await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -698,6 +731,7 @@ class TestOutbox:
         assert first == second
 
     async def test_unacknowledged_deliveries_are_replayable(self, alice: PrincipalStore) -> None:
+        """Unacknowledged deliveries are replayable."""
         await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -718,6 +752,7 @@ class TestOutbox:
         assert await alice.unacknowledged_deliveries() == ()
 
     async def test_acknowledgement_keeps_the_first_event_id(self, alice: PrincipalStore) -> None:
+        """Acknowledgement keeps the first event id."""
         await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -741,6 +776,8 @@ class TestConcurrency:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Fifty concurrent conversations admit cleanly."""
+
         async def conversation(index: int) -> None:
             for step in range(10):
                 inbound, projected = message(
@@ -759,6 +796,7 @@ class TestConcurrency:
         self,
         alice: PrincipalStore,
     ) -> None:
+        """Concurrent admissions of one event yield one pending."""
         inbound, projected = message("$contended")
         results = await asyncio.gather(*(alice.admit(inbound, projected) for _ in range(8)))
 
