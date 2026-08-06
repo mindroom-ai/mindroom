@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
@@ -76,6 +77,16 @@ _thread_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 class ThreadSummaryWriteError(RuntimeError):
     """Raised when a manual thread summary cannot be written."""
+
+
+class _TruncatedThreadHistoryError(RuntimeError):
+    """One thread is longer than a single projected page.
+
+    Summaries record the number of messages they were given as the size of the
+    thread, and every later pass compares against that number. A page of a
+    longer conversation is not that number, and no caller can tell by looking,
+    so the loader refuses rather than returning something countable-looking.
+    """
 
 
 @dataclass(frozen=True)
@@ -292,9 +303,19 @@ async def _load_thread_history(
     conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
-) -> list[ResolvedVisibleMessage]:
-    """Load complete thread history from the conversation projection."""
-    return list(await complete_thread_history(conversation_reader, room_id, thread_id))
+) -> ThreadHistoryResult:
+    """Load complete thread history from the conversation projection.
+
+    Returns the result rather than a plain list because summaries count what
+    they are given and write that count down as the size of the thread. A
+    bounded page of a longer conversation is not that number, and the only way
+    a caller can tell is `is_full_history`.
+    """
+    history = await complete_thread_history(conversation_reader, room_id, thread_id)
+    if not history.is_full_history:
+        msg = f"Thread {room_id}/{thread_id} is longer than one projected page"
+        raise _TruncatedThreadHistoryError(msg)
+    return history
 
 
 def _recover_last_summary_count(
@@ -874,6 +895,9 @@ async def set_manual_thread_summary(
                 room_id,
                 thread_id,
             )
+        except _TruncatedThreadHistoryError as exc:
+            msg = "Thread history is longer than one page, so its message count cannot be established."
+            raise ThreadSummaryWriteError(msg) from exc
         except Exception as exc:
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
@@ -908,6 +932,37 @@ async def set_manual_thread_summary(
         )
 
 
+async def _countable_thread_history(
+    conversation_reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+) -> ThreadHistoryResult | None:
+    """Return history an automatic pass may count, or nothing.
+
+    An automatic pass moves the durable baseline on every outcome it reaches,
+    so it must not run at all on a count it cannot trust. Both reasons it
+    cannot are handled the same way -- the history is unavailable, or it is a
+    page of a longer thread -- because both leave the pass with no number worth
+    recording.
+    """
+    try:
+        return await _load_thread_history(conversation_reader, room_id, thread_id)
+    except _TruncatedThreadHistoryError:
+        logger.info(
+            "Skipping thread summary for a thread longer than one projected page",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "Authoritative thread history load failed",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+
+
 async def maybe_generate_thread_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
@@ -924,14 +979,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     async with _thread_summary_lock(room_id, thread_id):
         # This background task inherits the response turn's ContextVars, so it
         # must bypass per-turn memoization to observe the delivered response.
-        try:
-            thread_history = await _load_thread_history(conversation_reader, room_id, thread_id)
-        except Exception:
-            logger.exception(
-                "Authoritative thread history load failed",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
+        thread_history = await _countable_thread_history(conversation_reader, room_id, thread_id)
+        if thread_history is None:
             return
         trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
         recovered_summary_count = _recover_last_summary_count(

@@ -22,6 +22,7 @@ from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -72,6 +73,16 @@ _TRUSTED_SUMMARY_SENDERS = frozenset(
         "@peer:localhost",
     },
 )
+
+
+def _full(messages: object) -> ThreadHistoryResult:
+    """Return one patched history as a complete projected read.
+
+    The loader returns a result rather than a list because summaries record
+    the count they are given as the size of the thread, so they have to be
+    able to tell a whole conversation from one page of a longer one.
+    """
+    return thread_history_result(list(messages), is_full_history=True)  # type: ignore[call-overload]
 
 
 def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
@@ -724,7 +735,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=_TRUSTED_SUMMARY_SENDERS,
             ),
-            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch("mindroom.thread_summary._generate_summary") as mock_gen,
         ):
             await self._maybe_generate(client, config, rp)
@@ -746,7 +757,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=_TRUSTED_SUMMARY_SENDERS,
             ),
-            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch("mindroom.thread_summary._generate_summary"),
         ):
             await self._maybe_generate(client, config, rp)
@@ -779,7 +790,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=_TRUSTED_SUMMARY_SENDERS,
             ),
-            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 return_value="Fresh summary",
@@ -812,7 +823,7 @@ class TestMaybeGenerateThreadSummary:
             ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(12),
+                return_value=_full(_make_thread_history(12)),
             ),
             patch(
                 "mindroom.thread_summary.get_thread_tags",
@@ -838,7 +849,7 @@ class TestMaybeGenerateThreadSummary:
             ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(12),
+                return_value=_full(_make_thread_history(12)),
             ),
             patch(
                 "mindroom.thread_summary.get_thread_tags",
@@ -867,7 +878,7 @@ class TestMaybeGenerateThreadSummary:
             ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(3),
+                return_value=_full(_make_thread_history(3)),
             ),
             patch("mindroom.thread_summary.get_thread_tags", new=get_tags),
             patch("mindroom.thread_summary._generate_summary"),
@@ -885,7 +896,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(3),
+                return_value=_full(_make_thread_history(3)),
             ) as mock_fetch,
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -905,7 +916,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(3),
+                return_value=_full(_make_thread_history(3)),
             ),
             patch(
                 "mindroom.thread_summary._timed_generate_summary",
@@ -926,7 +937,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -948,7 +959,10 @@ class TestMaybeGenerateThreadSummary:
         thread_history = _make_thread_history(2)
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as load,
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(return_value=_full(thread_history)),
+            ) as load,
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="🧵 Login failure investigation"),
@@ -997,7 +1011,7 @@ class TestMaybeGenerateThreadSummary:
         )
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch(
@@ -1053,7 +1067,7 @@ class TestMaybeGenerateThreadSummary:
         thread_history = [*_make_thread_history(4), forged_notice]
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="🧵 Login failure investigation"),
@@ -1113,7 +1127,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1156,7 +1170,7 @@ class TestMaybeGenerateThreadSummary:
         ]
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
                 new=AsyncMock(return_value=None),
@@ -1190,7 +1204,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
@@ -1242,7 +1256,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1279,7 +1293,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1312,7 +1326,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1356,7 +1370,7 @@ class TestMaybeGenerateThreadSummary:
                 new=AsyncMock(return_value=snapshot),
             ),
             patch("mindroom.thread_summary.load_tag_vocabulary_snapshot") as load_vocabulary,
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as generate,
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
         ):
@@ -1381,7 +1395,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._timed_generate_summary",
@@ -1409,7 +1423,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=thread_history,
+                return_value=_full(thread_history),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1448,7 +1462,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(message_count),
+                return_value=_full(_make_thread_history(message_count)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1479,7 +1493,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(message_count),
+                return_value=_full(_make_thread_history(message_count)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1507,7 +1521,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1549,7 +1563,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1584,7 +1598,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(10),
+                return_value=_full(_make_thread_history(10)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1605,7 +1619,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(15),
+                return_value=_full(_make_thread_history(15)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1627,7 +1641,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(1),
+                return_value=_full(_make_thread_history(1)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1651,7 +1665,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(6),
+                return_value=_full(_make_thread_history(6)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1664,7 +1678,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(7),
+                return_value=_full(_make_thread_history(7)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1688,7 +1702,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1701,7 +1715,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(12),
+                return_value=_full(_make_thread_history(12)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1714,7 +1728,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(13),
+                return_value=_full(_make_thread_history(13)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1741,7 +1755,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=thread_history,
+                return_value=_full(thread_history),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1761,7 +1775,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1789,7 +1803,10 @@ class TestMaybeGenerateThreadSummary:
         )
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(side_effect=histories)),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                new=AsyncMock(side_effect=[_full(entry) for entry in histories]),
+            ),
             patch("mindroom.thread_summary._generate_summary", new=generate),
             patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
         ):
@@ -1820,7 +1837,7 @@ class TestMaybeGenerateThreadSummary:
             pytest.raises(asyncio.CancelledError),
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                new=AsyncMock(return_value=_make_due_second_summary_history()),
+                new=AsyncMock(return_value=_full(_make_due_second_summary_history())),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1851,7 +1868,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1874,7 +1891,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1901,7 +1918,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=thread_history,
+                return_value=_full(thread_history),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1926,7 +1943,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=thread_history,
+                return_value=_full(thread_history),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -1967,7 +1984,7 @@ class TestMaybeGenerateThreadSummary:
         )
 
         with (
-            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+            patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
             patch(
                 "mindroom.thread_summary.set_thread_tags_if_empty",
@@ -2006,7 +2023,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch(
                 "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
+                return_value=_full(_make_thread_history(5)),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -2031,12 +2048,12 @@ class TestMaybeGenerateThreadSummary:
         release_fetch = asyncio.Event()
         fetch_calls = 0
 
-        async def _blocked_fetch(*_args: object, **_kwargs: object) -> list[ResolvedVisibleMessage]:
+        async def _blocked_fetch(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
             nonlocal fetch_calls
             fetch_calls += 1
             fetch_started.set()
             await release_fetch.wait()
-            return _make_thread_history(5)
+            return _full(_make_thread_history(5))
 
         with (
             patch(
@@ -3108,7 +3125,10 @@ class TestPinLandingDuringGeneration:
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=_TRUSTED_SUMMARY_SENDERS,
             ),
-            patch("mindroom.thread_summary._load_thread_history", side_effect=histories),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                side_effect=[_full(entry) for entry in histories],
+            ),
             patch(
                 "mindroom.thread_summary._generate_summary",
                 return_value="Freshly generated title",
@@ -3169,3 +3189,73 @@ class TestPinLandingDuringGeneration:
         deliver = await self._run(conversation_cache, [unpinned, unpinned])
 
         deliver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+class TestTruncatedHistoryIsNotCounted:
+    """A page of a longer thread must not become the thread's recorded size."""
+
+    async def _generate(self, history: ThreadHistoryResult, generate: AsyncMock, send: AsyncMock) -> None:
+        """Run one automatic pass over the given history."""
+        with (
+            patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
+            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            # Patched below the loader on purpose: the guard being tested is
+            # inside it, so a test that replaced the loader would never reach
+            # the code it claims to cover.
+            patch(
+                "mindroom.thread_summary.complete_thread_history",
+                new=AsyncMock(return_value=history),
+            ),
+            patch("mindroom.thread_summary._generate_summary", new=generate),
+            patch("mindroom.thread_summary.send_thread_summary_event", new=send),
+        ):
+            await maybe_generate_thread_summary(
+                _mock_client(),
+                "!room:x",
+                "$thread1",
+                _mock_config(),
+                _mock_runtime_paths(),
+                conversation_cache=MagicMock(
+                    get_latest_thread_event_id_if_needed=AsyncMock(return_value="$thread1"),
+                    notify_outbound_message=Mock(),
+                    refresh_strict_thread_history_from_source=AsyncMock(return_value=[]),
+                ),
+                conversation_reader=make_conversation_reader_mock(),
+            )
+
+    async def test_an_automatic_summary_is_skipped_for_a_truncated_history(self) -> None:
+        """The count an automatic pass writes becomes the durable baseline.
+
+        Every outcome of a generated pass updates it, so the length of a page
+        of a longer conversation would move the baseline to the wrong number
+        and every later pass would compare against that.
+        """
+        generate = AsyncMock(return_value="a title")
+        send = AsyncMock(return_value="$s")
+
+        await self._generate(
+            thread_history_result(_make_thread_history(12), is_full_history=False),
+            generate,
+            send,
+        )
+
+        generate.assert_not_awaited()
+        send.assert_not_awaited()
+
+    async def test_a_complete_history_still_summarizes(self) -> None:
+        """The mirror, so "never summarize" cannot pass the test above."""
+        generate = AsyncMock(return_value="a title")
+        send = AsyncMock(return_value="$s")
+
+        await self._generate(
+            thread_history_result(_make_thread_history(12), is_full_history=True),
+            generate,
+            send,
+        )
+
+        generate.assert_awaited()
