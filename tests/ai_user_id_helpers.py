@@ -51,6 +51,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
+    make_conversation_reader_mock,
     make_event_cache_mock,
     request_envelope,
 )
@@ -346,6 +347,7 @@ def _build_response_runner(
             notify_outbound_event=MagicMock(),
             notify_outbound_redaction=MagicMock(),
         ),
+        conversation_reader=make_conversation_reader_mock(),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(
@@ -453,6 +455,7 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
         conversation_cache=bot._conversation_resolver.deps.conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
@@ -542,5 +545,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             runtime_paths=support.runtime_paths,
             delivery_gateway=support.delivery_gateway,
             conversation_cache=support.conversation_cache,
+            conversation_reader=support.conversation_reader,
         ),
     )

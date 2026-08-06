@@ -14,7 +14,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -66,6 +72,7 @@ def _scheduling_runtime(
         runtime_paths=runtime_paths_for(config),
         room=room,
         conversation_cache=_conversation_cache(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=_event_cache(),
     )
 
@@ -245,6 +252,7 @@ async def test_schedule_allows_agents_in_room() -> None:
                 runtime_paths=runtime_paths_for(config),
                 room=room,
                 conversation_cache=conversation_cache,
+                conversation_reader=make_conversation_reader_mock(),
                 event_cache=_event_cache(),
             ),
             room_id="test_room",
@@ -380,6 +388,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
                 runtime_paths=runtime_paths_for(config),
                 room=room,
                 conversation_cache=conversation_cache,
+                conversation_reader=make_conversation_reader_mock(),
                 event_cache=_event_cache(),
             ),
             room_id="test_room",

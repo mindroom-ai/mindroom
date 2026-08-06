@@ -112,6 +112,7 @@ class ThreadSummaryTools(Toolkit):
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 conversation_cache=conversation_cache,
+                conversation_reader=context.conversation_reader,
                 pin=pin,
             )
         except ThreadSummaryWriteError as exc:

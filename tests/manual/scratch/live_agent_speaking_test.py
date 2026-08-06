@@ -51,6 +51,8 @@ import certifi
 import httpx
 import nio
 
+from tests.conftest import make_conversation_reader_mock
+
 SRC = str(Path(__file__).resolve().parents[3] / "src")
 sys.path.insert(0, SRC)
 
@@ -563,6 +565,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                         runtime_paths=paths,
                         event_cache=SimpleNamespace(),
                         conversation_cache=SimpleNamespace(),
+                        conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,
                     )
 

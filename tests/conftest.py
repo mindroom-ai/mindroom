@@ -25,6 +25,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,6 +52,7 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -76,6 +78,7 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -944,6 +947,49 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.store_mxc_text.return_value = True
     event_cache.replace_thread.return_value = True
     return event_cache
+
+
+def serve_conversation_reader(
+    reader: ConversationReader,
+    messages: Sequence[ResolvedVisibleMessage],
+    *,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+) -> None:
+    """Point one stub reader at these messages, as the projection would serve them."""
+    page = ConversationPage(
+        messages=tuple(
+            VisibleMessage(
+                logical_event_id=message.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=message.sender,
+                # `or ordinal` would rewrite a real timestamp of 0.
+                created_ts=ordinal if message.timestamp is None else message.timestamp,
+                revision_event_id=message.event_id,
+                revision_ts=ordinal if message.timestamp is None else message.timestamp,
+                content=dict(message.content),
+            )
+            for ordinal, message in enumerate(messages, start=1)
+        ),
+        refresh_pending=(),
+        next_cursor=None,
+    )
+    reader.read.return_value = page
+    reader.read_strict.return_value = page
+
+
+def make_conversation_reader_mock() -> ConversationReader:
+    """Return a reader shaped like the projection one, serving an empty conversation."""
+    page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            read=AsyncMock(return_value=page),
+            read_strict=AsyncMock(return_value=page),
+        ),
+    )
 
 
 def make_conversation_cache_mock() -> AsyncMock:

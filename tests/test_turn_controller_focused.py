@@ -75,6 +75,7 @@ from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLi
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
@@ -473,6 +474,7 @@ def _build_harness(
             agent_name=agent_name,
             normalizer=normalizer,
             conversation_cache=conversation_cache,
+            conversation_reader=make_conversation_reader_mock(),
             turn_policy=cast("TurnPolicy", policy),
             turn_store=turn_store,
             visible_responses=visible_responses,

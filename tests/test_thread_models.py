@@ -28,7 +28,13 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 THREAD_ID = "$thread-root:localhost"
 ROOM_ID = "!room:localhost"
@@ -475,6 +481,7 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=None,
         storage_path=None,

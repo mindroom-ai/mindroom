@@ -24,6 +24,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_event_cache_mock,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -75,6 +76,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=resolved_conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=None,
         storage_path=runtime_root,

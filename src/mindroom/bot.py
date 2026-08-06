@@ -507,6 +507,13 @@ class AgentBot:
                 agent_name=self.agent_name,
             ),
         )
+        self._conversation_reader = ConversationReader(
+            store=self._journal_store.principal(self._journal_principal_id),
+            hydrator=ConversationHydrator(
+                store=self._journal_store.principal(self._journal_principal_id),
+                runtime=self._runtime_view,
+            ),
+        )
         self._conversation_resolver = ConversationResolver(
             ConversationResolverDeps(
                 runtime=self._runtime_view,
@@ -515,13 +522,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
                 conversation_cache=self._conversation_cache,
-                conversation_reader=ConversationReader(
-                    store=self._journal_store.principal(self._journal_principal_id),
-                    hydrator=ConversationHydrator(
-                        store=self._journal_store.principal(self._journal_principal_id),
-                        runtime=self._runtime_view,
-                    ),
-                ),
+                conversation_reader=self._conversation_reader,
             ),
         )
         self._inbound_turn_normalizer = InboundTurnNormalizer(
@@ -596,6 +597,7 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
+            conversation_reader=self._conversation_reader,
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,
@@ -697,6 +699,7 @@ class AgentBot:
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 visible_responses=self._visible_responses,
+                conversation_reader=self._conversation_reader,
                 event_cache=lambda: self.event_cache,
                 recover_config_confirmation_setup=self._recover_config_confirmation_setup,
             ),

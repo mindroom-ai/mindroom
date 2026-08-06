@@ -60,7 +60,7 @@ from mindroom.thread_tags import (
     ThreadTagsError,
     ThreadTagsState,
 )
-from tests.conftest import make_matrix_client_mock
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -675,6 +675,7 @@ class TestMaybeGenerateThreadSummary:
     def _conversation_cache(self) -> Iterator[None]:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_cache = MagicMock()
+        self.conversation_reader = make_conversation_reader_mock()
         self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
         self.conversation_cache.notify_outbound_message = Mock()
         # The pre-delivery pin guard reads from source; default it to "no pin".
@@ -705,6 +706,7 @@ class TestMaybeGenerateThreadSummary:
             config,
             rp,
             conversation_cache=self.conversation_cache,
+            conversation_reader=self.conversation_reader,
         )
 
     async def test_pinned_thread_skips_generation(self) -> None:
@@ -956,7 +958,7 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp)
 
-        load.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
+        load.assert_awaited_once_with(self.conversation_reader, "!room:x", "$thread1")
         generate.assert_awaited_once_with(
             thread_history,
             config,
@@ -2223,7 +2225,8 @@ class TestSetManualThreadSummary:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_strict_thread_history.return_value = [
+        conversation_reader = make_conversation_reader_mock()
+        seeded_history = [
             *_make_thread_history(3),
             _make_summary_notice_message("$root1", message_count=2),
             _make_summary_notice_message(
@@ -2232,6 +2235,7 @@ class TestSetManualThreadSummary:
                 sender="@attacker:localhost",
             ),
         ]
+        serve_conversation_reader(conversation_reader, seeded_history)
 
         with patch(
             "mindroom.thread_summary.send_thread_summary_event",
@@ -2245,12 +2249,13 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_cache=conversation_cache,
+                conversation_reader=conversation_reader,
             )
 
         assert result.event_id == "$summary1"
         assert result.summary == "Fix ISSUE-116"
         assert result.message_count == _count_non_summary_thread_messages(
-            conversation_cache.get_strict_thread_history.return_value,
+            seeded_history,
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
         mock_send.assert_awaited_once_with(
@@ -2269,7 +2274,8 @@ class TestSetManualThreadSummary:
         """A failed manual summary send should not advance the cached threshold baseline."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_strict_thread_history.return_value = _make_thread_history(5)
+        conversation_reader = make_conversation_reader_mock()
+        serve_conversation_reader(conversation_reader, _make_thread_history(5))
         update_last_summary_count("!room:x", "$root1", 2)
 
         with (
@@ -2287,6 +2293,7 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_cache=conversation_cache,
+                conversation_reader=conversation_reader,
             )
 
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 2
@@ -2295,7 +2302,8 @@ class TestSetManualThreadSummary:
         """A failed history fetch should raise the shared manual-summary fetch error."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_strict_thread_history.side_effect = TimeoutError("timed out")
+        conversation_reader = make_conversation_reader_mock()
+        conversation_reader.read_strict.side_effect = TimeoutError("timed out")
 
         with pytest.raises(ThreadSummaryWriteError, match=r"Failed to fetch thread history for the target thread\."):
             await set_manual_thread_summary(
@@ -2306,6 +2314,7 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_cache=conversation_cache,
+                conversation_reader=conversation_reader,
             )
 
 
@@ -3116,6 +3125,7 @@ class TestPinLandingDuringGeneration:
                 _mock_config(),
                 _mock_runtime_paths(),
                 conversation_cache=conversation_cache,
+                conversation_reader=make_conversation_reader_mock(),
             )
         return deliver
 

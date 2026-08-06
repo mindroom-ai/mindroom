@@ -313,9 +313,13 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 # The conversation projection and delivery outbox, which are complete and
 # tested but not yet wired into `bot.py`. Each entry disappears as its call
 # site replaces the owner it supersedes.
-_ConversationReader  # unused class (src/mindroom/matrix/conversation_reads.py)
-read_strict  # unused method (src/mindroom/matrix/conversation_reads.py)
 ingress_admission_kind  # unused method (src/mindroom/journal_dispatch.py)
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 load_delivery  # unused method (src/mindroom/event_journal/store.py)
 recover  # unused method (src/mindroom/response_delivery.py)
+
+# The reverse case: conversation-cache read methods that production no longer
+# calls, kept only because `matrix/cache/` still exists and its own tests still
+# exercise its read policy through them. Both entries go with the package.
+get_thread_history  # unused method (src/mindroom/matrix/conversation_cache.py)
+get_strict_thread_history  # unused method (src/mindroom/matrix/conversation_cache.py)

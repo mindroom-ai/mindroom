@@ -15,7 +15,13 @@ from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -39,6 +45,7 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=MagicMock(),
         storage_path=None,
@@ -108,6 +115,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         event_cache=context.event_cache,
         matrix_admin=matrix_admin,
     )
@@ -191,6 +199,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         event_cache=context.event_cache,
     )
     assert mock_edit.await_count == 2

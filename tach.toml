@@ -179,7 +179,17 @@ depends_on = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.thread_history_result",
 ]
-visibility = ["mindroom.bot", "mindroom.conversation_resolver"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.command_turn_executor",
+    "mindroom.commands.handler",
+    "mindroom.conversation_resolver",
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.post_response_effects",
+    "mindroom.scheduling",
+    "mindroom.thread_summary",
+    "mindroom.tool_system.runtime_context",
+]
 
 [[modules]]
 path = "mindroom.response_delivery"
@@ -1040,6 +1050,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.conversation_reads",
     "mindroom.matrix.mentions",
 ]
 visibility = [
@@ -3246,6 +3257,7 @@ path = "mindroom.scheduling"
 depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
+    "mindroom.matrix.conversation_reads",
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
 ]
@@ -3458,6 +3470,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.conversation_reads",
     "mindroom.model_instance_checks",
     "mindroom.model_loading",
     "mindroom.thread_tag_vocabulary",

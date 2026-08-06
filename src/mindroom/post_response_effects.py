@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -73,6 +74,7 @@ class PostResponseEffectsSupport:
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
     conversation_cache: ConversationCacheProtocol
+    conversation_reader: ConversationReader
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -146,6 +148,7 @@ class PostResponseEffectsSupport:
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             conversation_cache=self.conversation_cache,
+            conversation_reader=self.conversation_reader,
             entity_name=entity_name,
         )
         create_background_task(

@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,6 +79,7 @@ def _tool_context(
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )

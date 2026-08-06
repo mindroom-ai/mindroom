@@ -18,7 +18,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _make_context(
@@ -44,6 +50,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=None,
         storage_path=None,
@@ -137,6 +144,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         pin=True,
     )
 
@@ -170,6 +178,7 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         pin=True,
     )
 
@@ -223,6 +232,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         pin=True,
     )
 

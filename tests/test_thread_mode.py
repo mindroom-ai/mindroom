@@ -55,6 +55,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     install_send_response_mock,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -621,6 +622,7 @@ class TestCreateSessionIdWithNoneThread:
             runtime_paths=runtime_paths_for(config),
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
+            conversation_reader=make_conversation_reader_mock(),
         )
 
         target = runtime_context.target

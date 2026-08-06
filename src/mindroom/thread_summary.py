@@ -19,6 +19,7 @@ from mindroom.ai_runtime import cached_agent_run
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
@@ -287,18 +289,12 @@ def should_queue_thread_summary(
 
 
 async def _load_thread_history(
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
 ) -> list[ResolvedVisibleMessage]:
-    """Load fresh authoritative history without inherited turn memoization."""
-    return list(
-        await conversation_cache.get_strict_thread_history(
-            room_id,
-            thread_id,
-            caller_label="thread_summary_background",
-        ),
-    )
+    """Load complete thread history from the conversation projection."""
+    return list(await complete_thread_history(conversation_reader, room_id, thread_id))
 
 
 def _recover_last_summary_count(
@@ -850,6 +846,7 @@ async def set_manual_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
     """Write one validated manual summary for a canonical thread root.
@@ -873,7 +870,7 @@ async def set_manual_thread_summary(
     async with _thread_summary_lock(room_id, thread_id):
         try:
             thread_history = await _load_thread_history(
-                conversation_cache,
+                conversation_reader,
                 room_id,
                 thread_id,
             )
@@ -919,6 +916,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
     *,
     conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
     entity_name: str | None = None,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
@@ -927,7 +925,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
         # This background task inherits the response turn's ContextVars, so it
         # must bypass per-turn memoization to observe the delivered response.
         try:
-            thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
+            thread_history = await _load_thread_history(conversation_reader, room_id, thread_id)
         except Exception:
             logger.exception(
                 "Authoritative thread history load failed",

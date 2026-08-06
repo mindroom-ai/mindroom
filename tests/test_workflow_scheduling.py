@@ -32,7 +32,13 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.scheduling_executor import execute_scheduled_workflow, send_scheduled_failure_notice
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 
@@ -992,6 +998,7 @@ class TestIntegrationWithScheduling:
                     runtime_paths=runtime_paths_for(config),
                     room=room,
                     conversation_cache=_conversation_cache(),
+                    conversation_reader=make_conversation_reader_mock(),
                     event_cache=_event_cache(),
                 ),
                 room_id="!room:server",
@@ -1077,6 +1084,7 @@ class TestIntegrationWithScheduling:
                 runtime_paths=runtime_paths_for(config),
                 room=room,
                 conversation_cache=_conversation_cache(),
+                conversation_reader=make_conversation_reader_mock(),
                 event_cache=_event_cache(),
             ),
             room_id="!room:server",
@@ -1173,6 +1181,7 @@ class TestIntegrationWithScheduling:
                 runtime_paths=runtime_paths_for(config),
                 room=room,
                 conversation_cache=_conversation_cache(),
+                conversation_reader=make_conversation_reader_mock(),
                 event_cache=_event_cache(),
             ),
             room_id="!room:server",

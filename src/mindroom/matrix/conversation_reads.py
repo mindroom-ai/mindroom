@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
@@ -156,3 +157,22 @@ class ConversationReader:
             )
             raise _StaleConversationError(msg)
         return page
+
+
+async def complete_thread_history(
+    reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+) -> ThreadHistoryResult:
+    """Return one thread's complete history for a caller outside the turn path.
+
+    Summaries, schedulers, and Matrix tools all want the same thing the prompt
+    path wants -- a conversation with nothing missing from it -- without also
+    wanting the resolver's thread-identity machinery.
+    """
+    page = await reader.read_strict(
+        room_id=room_id,
+        thread_id=thread_id,
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
+    )
+    return projected_thread_history(page, complete=True)

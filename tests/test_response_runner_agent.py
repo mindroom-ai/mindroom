@@ -2355,6 +2355,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
+            conversation_reader=bot._conversation_reader,
             entity_name=bot.agent_name,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -2469,6 +2470,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_cache=bot._conversation_cache,
+            conversation_reader=bot._conversation_reader,
             entity_name=bot.agent_name,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()

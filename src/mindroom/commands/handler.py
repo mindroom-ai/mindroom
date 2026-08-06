@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
@@ -69,6 +70,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         runtime_paths=context.runtime_paths,
         room=room,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         event_cache=context.event_cache,
         matrix_admin=context.matrix_admin,
     )
@@ -104,6 +106,7 @@ class CommandHandlerContext:
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     conversation_cache: ConversationCacheProtocol
+    conversation_reader: ConversationReader
     event_cache: ConversationEventCache
     stable_target: MessageTarget
     record_handled_turn: Callable[[TurnRecord], None]

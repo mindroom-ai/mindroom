@@ -38,7 +38,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -149,6 +155,7 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=None,
         storage_path=None,
@@ -186,6 +193,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         room=room,
         storage_path=None,

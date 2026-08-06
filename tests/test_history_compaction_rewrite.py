@@ -60,6 +60,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     FakeModel,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_event_cache_mock,
     prepare_history_for_run_for_test,
 )
@@ -1081,6 +1082,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         hook_registry=registry,
         correlation_id="corr-compaction",
         matrix_admin=build_hook_matrix_admin(client, runtime_paths),

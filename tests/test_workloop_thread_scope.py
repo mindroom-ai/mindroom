@@ -58,6 +58,7 @@ from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skil
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_event_cache_mock,
     message_origin,
     runtime_paths_for,
@@ -232,6 +233,7 @@ def _tool_context(
         runtime_paths=loaded.runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),
         storage_path=None,
     )

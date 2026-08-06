@@ -35,7 +35,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -102,6 +102,7 @@ def _runtime_context(
         runtime_paths=runtime_paths,  # type: ignore[arg-type]
         event_cache=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         hook_registry=hook_registry or MagicMock(),  # type: ignore[arg-type]
         orchestrator=orchestrator,  # type: ignore[arg-type]
     )
@@ -444,6 +445,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
                 runtime_paths=runtime_paths,
                 event_cache=MagicMock(),
                 conversation_cache=MagicMock(),
+                conversation_reader=make_conversation_reader_mock(),
                 hook_registry=MagicMock(),
                 orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
                 active_model_name=active_model_name,
@@ -687,6 +689,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 runtime_paths=runtime_paths,
                 event_cache=MagicMock(),
                 conversation_cache=MagicMock(),
+                conversation_reader=make_conversation_reader_mock(),
                 hook_registry=MagicMock(),
                 active_model_name=active_model_name,
             )

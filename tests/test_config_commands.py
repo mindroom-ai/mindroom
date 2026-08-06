@@ -43,7 +43,7 @@ from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
-from tests.conftest import make_event_cache_mock, write_config_yaml
+from tests.conftest import make_conversation_reader_mock, make_event_cache_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -427,6 +427,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -470,6 +471,7 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -514,6 +516,7 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -553,6 +556,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -603,6 +607,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -660,6 +665,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -697,6 +703,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -734,6 +741,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
@@ -806,6 +814,7 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),

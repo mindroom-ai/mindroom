@@ -31,7 +31,13 @@ from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
-from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
+from tests.conftest import (
+    load_config_yaml,
+    make_conversation_cache_mock,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    write_config_yaml,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 
@@ -72,6 +78,7 @@ def _caller_context(
         runtime_paths=config_manager.runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
 
@@ -532,6 +539,7 @@ class TestConsolidatedConfigManager:
             runtime_paths=cm.runtime_paths,
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
+            conversation_reader=make_conversation_reader_mock(),
             room=room,
         )
 

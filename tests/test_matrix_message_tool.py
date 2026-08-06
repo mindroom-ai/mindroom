@@ -24,6 +24,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.message_target import MessageTarget
@@ -35,10 +36,12 @@ from tests.conftest import (
     delivered_matrix_event,
     delivered_matrix_side_effect,
     make_conversation_cache_mock,
+    make_conversation_reader_mock,
     make_event_cache_mock,
     make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
+    serve_conversation_reader,
     test_runtime_paths,
 )
 
@@ -132,6 +135,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
         event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
         storage_path=storage_path,
@@ -1419,6 +1423,7 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
         patch(
@@ -1477,6 +1482,7 @@ async def test_matrix_message_edit_includes_message_extras_on_replacement_wrappe
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
         patch(
@@ -1559,6 +1565,7 @@ async def test_matrix_message_edit_plain_text_clears_existing_interactive_questi
         make_visible_message(event_id="$latest", timestamp=1, sender="@alice:localhost", body="latest"),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
     interactive.register_interactive_question(
         "$target",
         ctx.room_id,
@@ -1601,6 +1608,7 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
 ```"""
     formatted_text = parse_and_format_interactive(interactive_message, extract_mapping=False).formatted_text
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with (
         patch(
@@ -1670,6 +1678,7 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
         make_visible_message(event_id=f"${index}", timestamp=index, body=f"m{index}") for index in range(100)
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", limit=999))
@@ -1678,10 +1687,10 @@ async def test_matrix_message_read_thread_enforces_max_limit() -> None:
     assert payload["limit"] == MatrixMessageTools._MAX_READ_LIMIT
     assert len(payload["messages"]) == MatrixMessageTools._MAX_READ_LIMIT
     assert "edit_options" in payload
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(
-        ctx.room_id,
-        ctx.thread_id,
-        caller_label="matrix_message_tool",
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id=ctx.thread_id,
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
 
 
@@ -1701,6 +1710,7 @@ async def test_matrix_message_read_thread_includes_edit_options() -> None:
         ),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read"))
@@ -1741,6 +1751,7 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
         make_visible_message(event_id="$two", timestamp=2, sender="@alice:localhost", body="second"),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1756,10 +1767,10 @@ async def test_matrix_message_thread_list_returns_thread_messages() -> None:
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
     assert payload["edit_options"][0]["event_id"] == "$two"
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(
-        ctx.room_id,
-        "$thread-other:localhost",
-        caller_label="matrix_message_tool",
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id="$thread-other:localhost",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
 
 
@@ -1779,6 +1790,7 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
         ),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -1792,10 +1804,10 @@ async def test_matrix_message_thread_list_preserves_notice_messages() -> None:
     assert payload["status"] == "ok"
     assert payload["messages"] == [message.to_dict() for message in thread_messages]
     assert payload["messages"][1]["msgtype"] == "m.notice"
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(
-        ctx.room_id,
-        "$thread-other:localhost",
-        caller_label="matrix_message_tool",
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id="$thread-other:localhost",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
 
 
@@ -2722,6 +2734,7 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
         make_visible_message(event_id="$two", timestamp=2, body="second"),
     ]
     ctx.conversation_cache.get_thread_history.return_value = thread_messages
+    serve_conversation_reader(ctx.conversation_reader, thread_messages)
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -2732,10 +2745,10 @@ async def test_matrix_message_read_explicit_thread_id_still_reads_that_thread() 
     assert payload["action"] == "read"
     assert payload["thread_id"] == "$thread-other:localhost"
     assert payload["messages"] == [thread_messages[-1].to_dict()]
-    ctx.conversation_cache.get_thread_history.assert_awaited_once_with(
-        ctx.room_id,
-        "$thread-other:localhost",
-        caller_label="matrix_message_tool",
+    ctx.conversation_reader.read_strict.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id="$thread-other:localhost",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
     ctx.client.room_messages.assert_not_awaited()
 

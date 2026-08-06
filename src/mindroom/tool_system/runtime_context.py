@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
@@ -71,6 +72,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     event_cache: ConversationEventCache
     conversation_cache: ConversationCacheProtocol
+    conversation_reader: ConversationReader
     transport_agent_name: str | None = None
     active_model_name: str | None = None
     room: nio.MatrixRoom | None = None
@@ -238,6 +240,7 @@ class ToolRuntimeSupport:
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
             conversation_cache=self.resolver.deps.conversation_cache,
+            conversation_reader=self.resolver.deps.conversation_reader,
             event_cache=event_cache,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
@@ -432,6 +435,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_cache=context.conversation_cache,
+        conversation_reader=context.conversation_reader,
         event_cache=context.event_cache,
         matrix_admin=context.matrix_admin,
     )

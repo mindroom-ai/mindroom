@@ -13,6 +13,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_primary_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
+from tests.conftest import make_conversation_reader_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,6 +33,7 @@ def _context(config: Config, agent_name: str, tmp_path: Path) -> ToolRuntimeCont
         runtime_paths=resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml"),
         event_cache=AsyncMock(),
         conversation_cache=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
 

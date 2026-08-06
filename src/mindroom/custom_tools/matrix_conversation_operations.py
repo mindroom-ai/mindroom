@@ -33,6 +33,7 @@ from mindroom.matrix.client_visible_messages import (
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
+from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
@@ -587,11 +588,7 @@ class MatrixMessageOperations:
         thread_id: str,
         read_limit: int,
     ) -> MatrixMessageOperationResult:
-        thread_messages = await context.conversation_cache.get_thread_history(
-            room_id,
-            thread_id,
-            caller_label="matrix_message_tool",
-        )
+        thread_messages = await complete_thread_history(context.conversation_reader, room_id, thread_id)
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",

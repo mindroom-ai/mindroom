@@ -43,11 +43,19 @@ from mindroom.scheduling import (
     scheduled_task_read_sort_key,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
-from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.bot_helpers import _visible_message
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_event_cache_mock,
+    serve_conversation_reader,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 
 def _runtime_paths() -> object:
@@ -98,6 +106,7 @@ def _scheduling_runtime(
     runtime_paths: object | None = None,
     room: object | None = None,
     conversation_cache: AsyncMock | None = None,
+    conversation_reader: ConversationReader | None = None,
     event_cache: AsyncMock | None = None,
     matrix_admin: object | None = None,
 ) -> SchedulingRuntime:
@@ -107,6 +116,7 @@ def _scheduling_runtime(
         runtime_paths=runtime_paths or _runtime_paths(),
         room=room or MagicMock(),
         conversation_cache=conversation_cache or _conversation_cache(),
+        conversation_reader=conversation_reader or make_conversation_reader_mock(),
         event_cache=event_cache or _event_cache(),
         matrix_admin=matrix_admin,
     )
@@ -2671,14 +2681,21 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
         runtime_paths,
         usernames={"assistant": "actual_assistant", "writer": "actual_writer"},
     )
-    thread_message = MagicMock()
-    thread_message.sender = ids["assistant"].full_id
+    thread_message = _visible_message(
+        sender=ids["assistant"].full_id,
+        body="earlier",
+        event_id="$earlier:localhost",
+        timestamp=1,
+    )
+    conversation_reader = make_conversation_reader_mock()
+    serve_conversation_reader(conversation_reader, [thread_message])
     runtime = _scheduling_runtime(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         room=room,
         conversation_cache=_conversation_cache(thread_history=[thread_message]),
+        conversation_reader=conversation_reader,
     )
     parse_result = ScheduledWorkflow(
         schedule_type="once",
