@@ -590,6 +590,10 @@ just cluster-helm-lint            # Lint platform chart
 - **DO NOT** manually edit the CLI help messages in `README.md`. They are auto-generated.
 - **NEVER** use `git add .`.
 - **NEVER** claim a task is done without passing all `pytest` tests.
+- **NEVER** run `sleep <guessed duration>` in a Bash tool call to wait for something.
+  This rule is about how you drive your own terminal, not about MindRoom's runtime code: `asyncio.sleep` in `src/` is unaffected.
+  A guessed duration is always wrong: too short and you read a half-written result, too long and you burn wall-clock doing nothing.
+  Poll the real condition instead (process exit, a line in the output file, an HTTP health check, a file appearing), or start the command in the background and react to its completion notification.
 
 ## 4. Interacting with MindRoom Agents via Matty CLI
 
