@@ -654,7 +654,6 @@ async def journal_database(
         opened.append(store)
         return store
 
-
     try:
         yield opener
     finally:
@@ -662,9 +661,14 @@ async def journal_database(
             await store.close()
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "EventJournalStore":
-    """Return one open event-journal store per supported backend."""
+    """Return one open event-journal store per supported backend.
+
+    Opening is synchronous and closing belongs to ``journal_database``, so this
+    is a plain fixture. The store is still parametrized over both backends,
+    because that comes from the fixture it asks for.
+    """
     return journal_database()
 
 
