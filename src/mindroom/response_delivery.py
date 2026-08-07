@@ -154,16 +154,25 @@ class ResponseDelivery:
         homeserver has never seen from *this* device, so the resend is accepted
         as a new message and the room gets the answer twice.
 
-        Both devices have to be known before this says no, and an unknown one
-        covers three situations at once. A row nobody has attempted has no
-        device because only the claim writes one, and it is trivially safe --
-        there is no earlier event to collide with. A row from before the
-        column existed, and a process that has not completed a login, are
-        genuinely unknown, and they get the behaviour that shipped before this
-        guard: resend, and let the transaction ID do whatever it can. Treating
-        unknown as changed would be safer in the abstract, but it puts a
-        backward room scan in front of every ordinary recovery to rule out a
-        device change nobody has evidence of.
+        What separates the safe rows from the rest is whether anyone has
+        *attempted* this one, not whether a device is recorded. An unattempted
+        row has no device for the uninteresting reason that nothing has sent
+        it, and there is no earlier event for a resend to collide with, so it
+        is exempt and no first delivery pays for this guard.
+
+        Once a row is attempted, an unrecorded device is not "unchanged" -- it
+        is a device nobody can name, which is the case the resend cannot be
+        proven safe in. That covers a row written before the column existed,
+        and a process that cannot name the device it is about to send from.
+        An earlier version of this returned True for both, reasoning that
+        reconciling would put a backward scan in front of every ordinary
+        recovery. That reasoning was wrong twice over: ordinary recovery
+        records its device before sending, so those rows compare equal and
+        scan nothing, and the rows that do reach here are the rare ones --
+        attempted, unacknowledged, and older than the column or sent by a
+        process mid-login. Reconciling them costs one scan and cannot lose an
+        answer, because a lookup that finds nothing still sends and a lookup
+        that cannot run at all sends too.
 
         An edit is exempt. A second ``m.replace`` carrying identical content
         resolves to the same visible message as the first, so the duplicate a
@@ -171,8 +180,10 @@ class ResponseDelivery:
         """
         if claimed.edits_event_id is not None:
             return True
-        if claimed.sending_device_id is None or self.sending_device_id is None:
+        if not claimed.attempted:
             return True
+        if claimed.sending_device_id is None or self.sending_device_id is None:
+            return False
         return claimed.sending_device_id == self.sending_device_id
 
     async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:

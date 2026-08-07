@@ -904,18 +904,20 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert runtime.homeserver.room_scans == 0
         assert runtime.homeserver.visible_messages == 1
 
-    async def test_a_row_with_no_recorded_device_is_resent_as_it_always_was(
+    async def test_an_attempted_row_with_no_recorded_device_is_reconciled(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """Unknown is not changed, and is deliberately not treated as one.
+        """Unknown is not "unchanged", and reading it that way duplicates.
 
-        Rows written before the column existed carry no device. Reading that
-        as "the device changed" would put a backward room pagination in front
-        of every one of them to rule out a re-login that probably never
-        happened. They get what they got before this guard: a resend under the
-        frozen transaction ID, which still collapses if the device is in fact
-        unchanged.
+        A row written before the column existed is attempted by a device
+        nobody recorded. An earlier version of this guard called that safe and
+        resent blind, which is only correct if the device happens not to have
+        changed. Here it has: the answer is already in the room under the old
+        device, the frozen transaction ID means nothing to the new one, and a
+        blind resend posts it twice.
+
+        The room is what settles it, exactly as for a known device change.
         """
         await admit(runtime.store)
         runtime.homeserver.lose_acknowledgement = True
@@ -926,22 +928,48 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert stored is not None
         assert stored.attempted
         assert stored.sending_device_id is None
+        assert runtime.homeserver.visible_messages == 1
+        delivered_event_id = runtime.homeserver.room_events[0][1]
 
+        runtime.homeserver.device_id = "DEVICE2"
         outcome = await runtime.delivery.recover()
 
         assert outcome.failed == 0
+        assert runtime.homeserver.visible_messages == 1, "the answer was posted twice"
+        assert runtime.homeserver.room_scans == 1, "an unprovable device has to read the room"
+        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert settled is not None
+        assert settled.acknowledged_event_id == delivered_event_id
+
+    async def test_a_delivery_nobody_has_attempted_never_scans(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """What bounds the cost of treating unknown as changed.
+
+        An unattempted row has no recorded device for the uninteresting
+        reason that nothing has sent it yet, so there is no earlier event for
+        a resend to collide with. Folding that into "unknown" would put a
+        backward pagination in front of every first delivery, which is the
+        common case rather than the rare one.
+        """
+        await admit(runtime.store)
+
+        await runtime.worker().drain_once()
+
         assert runtime.homeserver.room_scans == 0
         assert runtime.homeserver.visible_messages == 1
 
-    async def test_a_process_that_has_not_logged_in_resends_rather_than_scans(
+    async def test_a_process_that_cannot_name_its_own_device_reconciles(
         self,
         runtime: TurnRuntime,
     ) -> None:
         """The other unknown: this side of the comparison, not the row's.
 
-        A delivery built before login has no device to compare against, so it
-        cannot tell a changed one from an unchanged one and must not pretend
-        otherwise by scanning every room it recovers into.
+        A delivery that cannot name the device it is about to send from cannot
+        prove the row's device is the same one, so it is in exactly the
+        position the row-side unknown is in. Reconciling costs a scan; the
+        alternative asserts an identity nothing established.
         """
         await admit(runtime.store)
         runtime.homeserver.lose_acknowledgement = True
@@ -950,7 +978,7 @@ class TestARelogInCannotDuplicateTheAnswer:
         outcome = await replace(runtime.delivery, sending_device_id=None).recover()
 
         assert outcome.failed == 0
-        assert runtime.homeserver.room_scans == 0
+        assert runtime.homeserver.room_scans == 1
         assert runtime.homeserver.visible_messages == 1
 
     async def test_an_edit_is_resent_across_a_relogin_without_a_scan(
