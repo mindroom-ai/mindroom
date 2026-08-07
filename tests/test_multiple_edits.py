@@ -122,7 +122,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Verify bot responded
     assert bot.client.room_send.call_count == 2  # thinking + final
-    bot._turn_store.record_turn(
+    await bot._turn_store.record_turn(
         TurnRecord.create(["$original123"], response_event_id="$response123"),
     )
 

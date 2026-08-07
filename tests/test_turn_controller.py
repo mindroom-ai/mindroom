@@ -406,7 +406,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
     )
-    bot._turn_controller.deps.turn_store.record_turn = MagicMock()
+    bot._turn_controller.deps.turn_store.record_turn = AsyncMock()
     generate_response_mock = AsyncMock(return_value=None)
     install_generate_response_mock(bot, generate_response_mock)
 

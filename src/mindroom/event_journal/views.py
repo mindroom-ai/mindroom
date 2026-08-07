@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         SettlementOutcome,
+        TerminalTurnWrite,
         VisibleMessage,
     )
     from .projection import ProjectedEvent
@@ -301,8 +302,15 @@ class OutboxView(Protocol):
         """Return one delivery without claiming it."""
         ...
 
-    async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
-        """Record the Matrix event one claimed delivery produced."""
+    async def acknowledge_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> None:
+        """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         ...
 
     async def unacknowledged_deliveries(

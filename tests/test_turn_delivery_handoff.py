@@ -105,9 +105,9 @@ async def pending_ids(bot: AgentBot) -> list[str]:
     return [event.event_id for event in await journal(bot).pending()]
 
 
-def adopt(bot: AgentBot, source_event_ids: list[str]) -> None:
+async def adopt(bot: AgentBot, source_event_ids: list[str]) -> None:
     """Durably adopt one turn, as ingress does before starting a response."""
-    bot._turn_store.record_pending_turn(
+    await bot._turn_store.record_pending_turn(
         canonicalize_turn_record(
             TurnRecord.create(source_event_ids, completed=False),
             response_owner=bot.agent_name,
@@ -206,7 +206,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         bot = _make_bot(tmp_path)
         sources = [text_event("$one", ts=1_000), text_event("$two", ts=1_001), text_event("$caption", ts=1_002)]
         await admit(journal(bot), *sources)
-        adopt(bot, ["$one", "$two", "$caption"])
+        await adopt(bot, ["$one", "$two", "$caption"])
 
         await deliver_answer(bot, "$caption")
 
@@ -223,7 +223,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
 
         await deliver_answer(bot, "$cause", body="Thinking...", stage=DeliveryStage.INITIAL)
 
@@ -238,7 +238,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         pending_at_send: list[list[str]] = []
 
         async def send(claimed: OutboxDelivery) -> str:
@@ -277,7 +277,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         await journal(bot).advance_membership_epoch(ROOM)
         sends: list[str] = []
 
@@ -330,7 +330,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         # The response task is never created: this is the crash.
 
         assert await pending_ids(bot) == ["$cause"]
@@ -345,7 +345,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$one", ts=1_000), text_event("$two", ts=1_001))
-        adopt(bot, ["$one", "$two"])
+        await adopt(bot, ["$one", "$two"])
         await deliver_answer(bot, "$two")
 
         assert await self._replayed_sources(bot) == []
@@ -362,7 +362,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         outbox = bot._delivery_gateway.deps.outbox
 
         async def crash(_claimed: OutboxDelivery) -> str:
@@ -406,7 +406,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         transactions: list[str] = []
 
         first = await deliver_answer(bot, "$cause", body="first answer", sends=transactions)
@@ -449,7 +449,7 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         await dispatcher.drain_once()
         assert dispatched == ["$cause"]
 
-        bot._turn_store.record_turn(TurnRecord.create(["$cause"], response_event_id="$response"))
+        await bot._turn_store.record_turn(TurnRecord.create(["$cause"], response_event_id="$response"))
         await dispatcher.drain_once()
 
         assert bot._turn_store.is_handled("$cause")
@@ -499,7 +499,7 @@ class TestTheHandoffCarriesTheWholeTurn:
         bot = _make_bot(tmp_path)
         batch = ["$one", "$two", "$three", "$caption"]
         await admit(journal(bot), *(text_event(event_id, ts=1_000 + index) for index, event_id in enumerate(batch)))
-        adopt(bot, batch)
+        await adopt(bot, batch)
         replayed: list[str] = []
 
         async def handle(event: JournalEvent) -> SettlementOutcome | None:
@@ -535,7 +535,7 @@ class TestTheHandoffIsOneCommit:
         bot = _make_bot(tmp_path)
         batch = ["$one", "$two", "$caption"]
         await admit(journal(bot), *(text_event(event_id, ts=1_000 + index) for index, event_id in enumerate(batch)))
-        adopt(bot, batch)
+        await adopt(bot, batch)
         backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
         crashing = EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id)
         sends: list[str] = []
@@ -580,7 +580,7 @@ class TestTheHandoffIsOneCommit:
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
         handoff = bot._delivery_gateway.deps.turn_handoff
         commits_when_released: list[int] = []
@@ -616,7 +616,7 @@ class TestTheGatewayWiresTheHandoff:
         """`send_text` is where a turn with no placeholder writes its answer."""
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         delivered = MagicMock(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
@@ -678,7 +678,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         """The state a restart finds is terminal, so the model does not run again."""
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         await journal(bot).advance_membership_epoch(ROOM)
         sends: list[str] = []
 
@@ -724,24 +724,30 @@ async def final_row(bot: AgentBot, turn_id: str) -> OutboxDelivery | None:
 
 
 class TestAFailedFinalEditLeavesOneOwner:
-    """A failure notice nobody could edit in must not also be owed by the outbox.
+    """A failure notice the outbox can still deliver must not also be sent directly.
 
     Turning a dispatch setup failure into a visible message goes through the
     turn's FINAL row, so the notice is recoverable like any other answer. When
-    Matrix refuses that edit, the notice is sent as a plain message instead --
-    and until that send is bound to the row, the room has two owners for one
-    answer: the message just sent, and an attempted-but-unacknowledged FINAL
-    row that the next recovery pass resends as the same text a second time.
+    that edit does not land, the row is attempted and unacknowledged, which is
+    the outbox saying it still owes this turn an answer -- and the next
+    recovery pass resends the frozen envelope. Sending the notice directly as
+    well races that pass, with no crash required, and acknowledgement is
+    first-writer-wins, so the room keeps both messages while durable state
+    names only one.
+
+    Refusal is the other half. Only the membership fence refuses an enqueue,
+    and it surfaces as the same false return, so a direct send there puts an
+    old turn's error in front of whoever is in the room now.
     """
 
-    async def test_a_fallback_after_a_refused_final_edit_survives_recovery(
+    async def test_a_refused_final_edit_sends_nothing_and_leaves_the_row_owning_it(
         self,
         tmp_path: Path,
     ) -> None:
-        """One refused edit, one fallback, one recovery pass, one visible message."""
+        """The notice stays the outbox's to deliver, and recovery delivers it once."""
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
+        await adopt(bot, ["$cause"])
         homeserver = _RefusesTheFirstAttempts()
 
         with patch("mindroom.delivery_gateway.send_message_result", homeserver):
@@ -751,69 +757,38 @@ class TestAFailedFinalEditLeavesOneOwner:
                 existing_event_id="$placeholder",
                 delivery_turn_id="$cause",
             )
-            assert resolution == "$visible0", "the fallback send is the visible failure notice"
+            assert resolution is None, "a turn-owned notice must not be sent outside the outbox"
+            assert homeserver.delivered == [], "the failed edit was followed by a direct send"
 
             outcome = await bot._delivery_gateway.recover_deliveries()
 
         assert outcome.complete, "recovery left work behind"
-        assert homeserver.delivered == ["$visible0"], "recovery sent the failure notice a second time"
-
-    async def test_the_row_names_the_message_that_actually_reached_the_room(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Not merely resolved: resolved onto the event a reader would find.
-
-        The startup repair that recovers a lost response event ID reads the
-        acknowledged FINAL rows, so a row closed against the wrong event would
-        point the turn's later edits at a message that is not its answer.
-        Silencing recovery is only half of what this has to get right.
-        """
-        bot = _make_bot(tmp_path)
-        await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
-
-        with patch("mindroom.delivery_gateway.send_message_result", _RefusesTheFirstAttempts()):
-            await bot._turn_controller._finalize_dispatch_failure(
-                target=MessageTarget.resolve(ROOM, None, "$cause"),
-                error=RuntimeError("boom"),
-                existing_event_id="$placeholder",
-                delivery_turn_id="$cause",
-            )
-
+        assert homeserver.delivered == ["$visible0"], "recovery owed the notice and had to deliver it"
         row = await final_row(bot, "$cause")
-        assert row is not None, "the refused edit left no row to resolve"
-        assert row.acknowledged_event_id == "$visible0"
+        assert row is not None
+        assert row.acknowledged_event_id == "$visible0", "the row that delivered it must name it"
 
-    async def test_a_fallback_that_never_landed_leaves_the_answer_to_recovery(
+    async def test_a_notice_with_no_durable_owner_is_still_sent(
         self,
         tmp_path: Path,
     ) -> None:
-        """The row is given away only once there is something to give it to.
+        """The rule is about not racing an owner, not about staying silent.
 
-        This is the ordering the fix turns on. Nothing reached the room here,
-        so the outbox is still the only thing that can answer this turn: the
-        FINAL enqueue already took the source off the journal, and resolving
-        the row anyway would leave the user with a placeholder, no error, and
-        nothing durable that owes them either.
+        An edit that never carried a turn has no row behind it, so nothing else
+        will ever put this notice in the room. Refusing to send here would drop
+        the error entirely.
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
-        adopt(bot, ["$cause"])
-        homeserver = _RefusesTheFirstAttempts(refusals=2)
+        homeserver = _RefusesTheFirstAttempts(refusals=0)
 
         with patch("mindroom.delivery_gateway.send_message_result", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
                 target=MessageTarget.resolve(ROOM, None, "$cause"),
                 error=RuntimeError("boom"),
-                existing_event_id="$placeholder",
-                delivery_turn_id="$cause",
+                existing_event_id=None,
+                delivery_turn_id=None,
             )
-            assert resolution is None, "nothing reached the room"
-            unresolved = await final_row(bot, "$cause")
-            assert unresolved is not None
-            assert unresolved.acknowledged_event_id is None, "the row was closed with nothing to close it onto"
 
-            await bot._delivery_gateway.recover_deliveries()
-
-        assert homeserver.delivered == ["$visible0"], "the failure notice never reached the room"
+        assert resolution == "$visible0"
+        assert homeserver.delivered == ["$visible0"]

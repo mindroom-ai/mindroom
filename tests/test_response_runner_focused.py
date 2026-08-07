@@ -9,9 +9,8 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -77,7 +76,7 @@ from tests.response_runner_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
     from typing import Literal
 
@@ -339,6 +338,20 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
     assert prepare_history_by_turn[2] is refreshed[1]
 
 
+def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, Coroutine[Any, Any, None]]:
+    """Adapt a recording callback to the awaitable outcome-callback contract."""
+
+    async def invoke(*args: Args.args, **kwargs: Args.kwargs) -> None:
+        callback(*args, **kwargs)
+
+    return invoke
+
+
+async def _suppress_source_turn() -> bool:
+    """Report the source terminal, the way a redaction tombstone does under the lock."""
+    return True
+
+
 @pytest.mark.asyncio
 async def test_begin_locked_turn_suppresses_source_redacted_before_response_registration(tmp_path: Path) -> None:
     """A durable tombstone observed under the lock must prevent every persistence side effect."""
@@ -356,12 +369,12 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
             request_preparer=request_preparer,
         ),
     )
-    response_thread_id = threading.get_ident()
-    preparation_thread_ids: list[int] = []
+    preparations = 0
     on_source_turn_suppressed = AsyncMock()
 
-    def prepare_source_turn() -> bool:
-        preparation_thread_ids.append(threading.get_ident())
+    async def prepare_source_turn() -> bool:
+        nonlocal preparations
+        preparations += 1
         return True
 
     request = ResponseRequest(
@@ -386,8 +399,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
 
     assert prepared_request is None
-    assert len(preparation_thread_ids) == 1
-    assert preparation_thread_ids[0] != response_thread_id
+    assert preparations == 1
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
     on_source_turn_suppressed.assert_awaited_once_with()
@@ -399,13 +411,13 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     bot = _bot(tmp_path)
     target = _target(thread_id="$thread", reply_to_event_id="$event")
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    preparation_started = threading.Event()
-    allow_preparation_finish = threading.Event()
+    preparation_started = asyncio.Event()
+    allow_preparation_finish = asyncio.Event()
     retries: list[str] = []
 
-    def prepare_source_turn() -> bool:
+    async def prepare_source_turn() -> bool:
         preparation_started.set()
-        allow_preparation_finish.wait(timeout=2)
+        await allow_preparation_finish.wait()
         return False
 
     request = ResponseRequest(
@@ -427,7 +439,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
             ),
         ),
     )
-    await asyncio.wait_for(asyncio.to_thread(preparation_started.wait, 1), timeout=2)
+    await asyncio.wait_for(preparation_started.wait(), timeout=2)
 
     request_task_cancel(preparation_task, cancel_source="sync_restart")
     await asyncio.sleep(0)
@@ -551,7 +563,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
         response_envelope=envelope,
         existing_event_id="$ack",
         existing_event_is_placeholder=True,
-        prepare_source_turn=lambda: True,
+        prepare_source_turn=_suppress_source_turn,
         on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
@@ -1515,7 +1527,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: order.append("retry"),
-        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     delivery_outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
@@ -1571,7 +1583,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: order.append("retry"),
-        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     progress = response_runner._DeliveryProgress()
     progress.note_delivery_started("$response")
@@ -1622,7 +1634,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
-        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -1676,7 +1688,7 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     request = replace(
         _plain_request(target),
         on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
-        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     streaming = StreamingResponse(
         target=target,
@@ -1763,7 +1775,7 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
     request = replace(
         _plain_request(target),
         on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
-        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+        on_deferred_outcome_handled=_async_callback(lambda _event_id: callbacks.append("handled")),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -1829,7 +1841,9 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
-        on_user_stop_handled=lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
+        on_user_stop_handled=_async_callback(
+            lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
+        ),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -1897,7 +1911,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     request = replace(
         _plain_request(_target()),
         on_interrupted_response_recoverable=lambda: order.append("retry"),
-        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
     )
     progress = response_runner._DeliveryProgress()
     progress.note_delivery_started("$response")

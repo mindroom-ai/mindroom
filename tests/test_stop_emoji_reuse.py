@@ -59,9 +59,9 @@ def _stop_test_agent_user(config: Config) -> AgentMatrixUser:
     )
 
 
-def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
+async def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
     """Mirror the durable response intent that owns every real stop button."""
-    bot._turn_store.record_pending_turn(
+    await bot._turn_store.record_pending_turn(
         TurnRecord.create(
             [f"{message_id}-source"],
             response_event_id=message_id,
@@ -140,7 +140,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
             target=target,
             task=task,
         )
-        _record_pending_response(bot, "$message:example.com", target)
+        await _record_pending_response(bot, "$message:example.com", target)
 
         # A second physical reaction reaches the same STOP target.
         active_reaction_event = nio.ReactionEvent.from_dict(
@@ -210,7 +210,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
         task=task,
         run_id="run-123",
     )
-    _record_pending_response(bot, "$message:example.com", target)
+    await _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await dispatch_reaction_durably(bot, room, reaction_event)
@@ -267,7 +267,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
         task=task,
         run_id="run-123",
     )
-    _record_pending_response(bot, "$message:example.com", target)
+    await _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await dispatch_reaction_durably(bot, room, reaction_event)

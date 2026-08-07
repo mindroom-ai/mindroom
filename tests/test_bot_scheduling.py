@@ -110,7 +110,7 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -1294,7 +1294,7 @@ class TestCommandHandling:
                 },
             )
 
-            result = bot._turn_controller._precheck_dispatch_event(room, event)
+            result = await bot._turn_controller._precheck_dispatch_event(room, event)
 
         assert result is not None
         assert result.requester_user_id == "@mindroom_router:localhost"

@@ -1070,7 +1070,7 @@ class TestAgentBot(AgentBotTestBase):
             assert media_events is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
-            bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
+            await bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
@@ -2473,19 +2473,20 @@ class TestAgentBot(AgentBotTestBase):
         assert edited.delivery_turn_id == "$turn"
 
     @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_fallback_send_stays_off_the_outbox(
+    async def test_finalize_dispatch_failure_leaves_a_turn_owning_edit_to_the_outbox(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """The send after a failed edit must not reuse the edit's frozen row.
+        """A failed edit that carried a turn must not be followed by a direct send.
 
-        By the time this runs, the edit has been attempted, so a row for this
-        turn and stage already exists holding an edit envelope. A second
-        delivery under that pair does not refuse -- it resends what is frozen,
-        which would put an ``m.replace`` payload into the room as a new
-        message. Sending the right bytes without a durable row is the better
-        failure.
+        By the time this runs the edit has been offered to the outbox, so
+        either the enqueue was refused by the membership fence -- and the room
+        is one the bot has left -- or the row exists unacknowledged and the
+        next recovery pass resends the frozen replacement, turning the
+        placeholder into this notice. Sending as well races that pass with no
+        crash involved, and acknowledgement is first-writer-wins, so the room
+        would keep two notices while durable state names one.
         """
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -2501,6 +2502,31 @@ class TestAgentBot(AgentBotTestBase):
             error=RuntimeError("boom"),
             existing_event_id="$placeholder",
             delivery_turn_id="$turn",
+        )
+
+        assert resolution is None
+        bot._delivery_gateway.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_sends_directly_when_no_turn_owns_the_edit(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Without a durable owner there is no row to race, and nothing else will deliver."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+            error=RuntimeError("boom"),
+            existing_event_id="$placeholder",
         )
 
         assert resolution == "$error"

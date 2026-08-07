@@ -546,7 +546,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -752,7 +752,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
@@ -806,8 +806,8 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_pending_turn = MagicMock(wraps=turn_store.record_pending_turn)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_pending_turn = AsyncMock(wraps=turn_store.record_pending_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
@@ -1224,8 +1224,8 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    bot._turn_store.record_finalized_visible_echo(
+    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
         is_fallback=False,
@@ -1271,8 +1271,8 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    bot._turn_store.record_finalized_visible_echo(
+    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
         is_fallback=False,
@@ -1781,7 +1781,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()

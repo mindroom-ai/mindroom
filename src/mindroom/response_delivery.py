@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.event_journal import OutboxDelivery, OutboxView
+    from mindroom.event_journal.models import TerminalTurnWrite
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,11 @@ type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
 # the answer is already in the room, or ``None`` if it never arrived.
 type ResolveDelivered = Callable[[OutboxDelivery], Awaitable[str | None]]
+
+# The terminal turn record one delivered answer completes, given ``(turn_id,
+# response_event_id)``. Returns ``None`` when there is nothing to write --
+# no record for the turn, or one that already knows its response event.
+type _TerminalTurnFor = Callable[[str, str], "TerminalTurnWrite | None"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +92,12 @@ class ResponseDelivery:
     # finished with nothing pending to replay and "Thinking..." in the room
     # forever.
     handoff: TurnHandoff | None = None
+    # The turn record this delivery completes, asked for only once the event ID
+    # exists and written in the acknowledgement's own transaction. The
+    # acknowledgement is the proof that an answer is visible and what its event
+    # ID is; the record is the thing that needs to know it. Committing them
+    # apart leaves a delivered answer whose record cannot be edited.
+    terminal_turn_for: _TerminalTurnFor | None = None
 
     async def deliver(
         self,
@@ -208,7 +220,12 @@ class ResponseDelivery:
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
-                await self.store.acknowledge_delivery(turn_id=turn_id, stage=stage, event_id=already_delivered)
+                await self.store.acknowledge_delivery(
+                    turn_id=turn_id,
+                    stage=stage,
+                    event_id=already_delivered,
+                    terminal_turn=self._terminal_turn(turn_id, stage, already_delivered),
+                )
                 return already_delivered
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
@@ -221,8 +238,20 @@ class ResponseDelivery:
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
+            terminal_turn=self._terminal_turn(turn_id, stage, event_id),
         )
         return event_id
+
+    def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
+        """Return the turn record this acknowledgement should also commit.
+
+        Only for ``FINAL``. An ``INITIAL`` row is a placeholder, and binding a
+        turn's terminal record to one would call a turn finished while the
+        model is still running.
+        """
+        if stage is not DeliveryStage.FINAL or self.terminal_turn_for is None:
+            return None
+        return self.terminal_turn_for(turn_id, event_id)
 
     async def _delivered_before_device_changed(self, claimed: OutboxDelivery) -> str | None:
         """Return the event a previous device's attempt left in the room, if any.

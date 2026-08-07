@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -133,8 +132,8 @@ class CommandTurnExecutor:
                 command_result_text=response_text,
             )
 
-        def record_command_turn(outcome: TurnRecord) -> None:
-            self.deps.turn_store.record_responded_turn(
+        async def record_command_turn(outcome: TurnRecord) -> None:
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(active_command_turn, response_event_id=outcome.response_event_id),
             )
 
@@ -191,7 +190,7 @@ class CommandTurnExecutor:
             response_event_id,
         ):
             return False
-        self.deps.turn_store.record_responded_turn(
+        await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
         return True
@@ -203,8 +202,7 @@ class CommandTurnExecutor:
         command_execution_started: bool | None = None,
         command_result_text: str | None = None,
     ) -> TurnRecord:
-        persisted_turn = await asyncio.to_thread(
-            self.deps.turn_store.record_pending_turn,
+        persisted_turn = await self.deps.turn_store.record_pending_turn(
             canonicalize_turn_record(
                 command_turn,
                 command_execution_started=(
@@ -241,7 +239,7 @@ class CommandTurnExecutor:
             # for recovery to send it again.
             through_outbox=True,
         )
-        self.deps.turn_store.record_responded_turn(
+        await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
 

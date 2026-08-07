@@ -682,35 +682,6 @@ class DeliveryGateway:
             resolve_delivered=self._delivered_under_a_previous_device,
         ).recover()
 
-    async def adopt_final_delivery(self, *, turn_id: str, event_id: str) -> None:
-        """Make an answer that reached the room off the outbox this turn's FINAL outcome.
-
-        A FINAL row that was attempted and never acknowledged is an answer the
-        outbox still owes, and recovery will resend it. That is exactly right
-        while the row is the only thing that can produce a visible answer, and
-        exactly wrong once something else already has: the turn would then have
-        two owners, and the user would read the same answer twice.
-
-        Only the caller that put the other message in the room knows that
-        happened, so binding the row to it has to be an explicit step rather
-        than something the outbox infers. It must also come *after* that send,
-        never before. Resolving the row first and crashing before the send
-        loses the answer outright -- the FINAL enqueue already settled the
-        journal sources, so nothing replays the turn and nothing recovers the
-        row. Sending first and crashing before this call leaves the row
-        unacknowledged and costs a duplicate, which is the failure a user can
-        see and act on rather than the one nobody ever learns about.
-
-        A turn with no row is not an error. The edit this covers can also fail
-        because a membership fence refused the enqueue outright, and in that
-        case there was never anything for recovery to resend.
-        """
-        await self.deps.outbox.acknowledge_delivery(
-            turn_id=turn_id,
-            stage=DeliveryStage.FINAL,
-            event_id=event_id,
-        )
-
     async def _send_content(
         self,
         request: SendTextRequest,

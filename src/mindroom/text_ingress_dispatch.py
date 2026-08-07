@@ -433,7 +433,7 @@ async def _apply_turn_plan(
         if plan.ignore_reason == "router":
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
-                controller.deps.turn_store.record_responded_turn(router_outcome)
+                await controller.deps.turn_store.record_responded_turn(router_outcome)
             else:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
@@ -472,10 +472,7 @@ async def _apply_turn_plan(
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
-    pending_turn = await asyncio.to_thread(
-        controller.deps.turn_store.record_pending_turn,
-        handled_turn,
-    )
+    pending_turn = await controller.deps.turn_store.record_pending_turn(handled_turn)
     if pending_turn is None or pending_turn.completed:
         return
     if pending_turn.redacted_source_event_ids:

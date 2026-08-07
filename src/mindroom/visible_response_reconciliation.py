@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -132,8 +131,7 @@ class VisibleResponseReconciler:
 
     async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
         """Durably bind one visible response to its incomplete turn before generation."""
-        await asyncio.to_thread(
-            self.deps.turn_store.record_pending_turn,
+        await self.deps.turn_store.record_pending_turn(
             canonicalize_turn_record(handled_turn, response_event_id=response_event_id, completed=False),
         )
 
@@ -223,7 +221,7 @@ class VisibleResponseReconciler:
             history_scope=None,
             conversation_target=target,
         )
-        pending_turn = await asyncio.to_thread(self.deps.turn_store.record_pending_turn, tracked_turn)
+        pending_turn = await self.deps.turn_store.record_pending_turn(tracked_turn)
         if pending_turn is None or pending_turn.completed:
             return None, None
         if pending_turn.redacted_source_event_ids:

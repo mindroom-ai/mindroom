@@ -61,7 +61,7 @@ class _RecordingTurnStore:
 
     recorded: list[TurnRecord] = field(default_factory=list)
 
-    def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord:
+    async def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord:
         """Bind one visible response to its turn."""
         self.recorded.append(turn_record)
         return turn_record

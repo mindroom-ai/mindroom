@@ -41,6 +41,7 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.bot  # noqa: F401
+import mindroom.handled_turns as handled_turns_module
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
@@ -60,9 +61,11 @@ from mindroom.event_journal import (
     OutboxView,
     PendingTurnView,
     RelationView,
+    TerminalTurnWrite,
     VisibleMessage,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
     ScopeSessionContext,
     _resolve_history_scope,
@@ -918,6 +921,9 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        # What each acknowledgement carried alongside it, so a test can
+        # assert the terminal record and the acknowledgement are one write.
+        self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
@@ -1023,10 +1029,23 @@ class FakeOutbox:
         """Return one delivery without claiming it."""
         return self.rows.get((turn_id, stage.value))
 
-    async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
-        """Record the Matrix event one claimed delivery produced."""
+    async def acknowledge_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> None:
+        """Record the Matrix event one claimed delivery produced, and the turn it completes.
+
+        The terminal record is kept rather than discarded so a test can assert
+        it travelled *with* the acknowledgement. Dropping it here would let the
+        two drift apart again without anything noticing.
+        """
         key = (turn_id, stage.value)
         self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
+        self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
 
     async def unacknowledged_deliveries(
         self,
@@ -1155,9 +1174,21 @@ class DiesAfterAcknowledgement:
         """Return one delivery without claiming it."""
         return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
 
-    async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
+    async def acknowledge_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> None:
         """Record the Matrix outcome, then die before anything else can run."""
-        await self.inner.acknowledge_delivery(turn_id=turn_id, stage=stage, event_id=event_id)
+        await self.inner.acknowledge_delivery(
+            turn_id=turn_id,
+            stage=stage,
+            event_id=event_id,
+            terminal_turn=terminal_turn,
+        )
         msg = "crashed the instant the outcome was recorded"
         raise CrashError(msg)
 
@@ -2176,6 +2207,55 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+_LEDGER_LOADING_TEST_MODULES = frozenset(
+    {
+        "test_handled_turns.py",
+        "test_turn_store.py",
+        "test_user_stop_convergence.py",
+    },
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_handled_turn_ledger_state(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Give every test a cold handled-turn map, pre-warmed where startup is skipped.
+
+    The map is process-global and ``load`` fills it once per process. Left over
+    from a previous test it would satisfy that check, so a ledger opened onto a
+    fresh database would answer from the previous test's records and never read
+    its own.
+
+    Production warms the ledger during startup and every read refuses until it
+    has. Most tests build a bot and drive its callbacks directly without ever
+    reaching startup, and their database is empty, so starting the map loaded
+    is exactly the state warming it would produce.
+
+    A test whose database is *not* empty must opt out, with the
+    ``ledger_loads_from_disk`` marker or by living in one of the modules
+    below, and warm for real -- pre-warming would leave it answering from an
+    empty map while the rows it cares about sit unread.
+    """
+    _reset_handled_turn_ledger_runtime()
+    loads_from_disk = (
+        request.node.path.name in _LEDGER_LOADING_TEST_MODULES
+        or request.node.get_closest_marker("ledger_loads_from_disk") is not None
+    )
+    if not loads_from_disk:
+        shared_ledger_state = handled_turns_module._shared_ledger_state
+
+        def pre_warmed_ledger_state(*state_key: str) -> handled_turns_module._LedgerState:
+            state = shared_ledger_state(*state_key)
+            state.loaded = True
+            return state
+
+        monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
+    yield
+    _reset_handled_turn_ledger_runtime()
 
 
 @pytest.fixture(autouse=True)

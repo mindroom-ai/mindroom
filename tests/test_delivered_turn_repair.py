@@ -29,13 +29,13 @@ class _Deliveries:
 @dataclasses.dataclass
 class _Turns:
     records: dict[str, TurnRecord]
-    durable_writes: int = 0
+    writes: int = 0
 
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         return self.records.get(source_event_id)
 
-    def record_turn_durably(self, turn_record: TurnRecord) -> None:
-        self.durable_writes += 1
+    async def record_turn(self, turn_record: TurnRecord) -> None:
+        self.writes += 1
         for source in turn_record.source_event_ids:
             self.records[source] = turn_record
 
@@ -59,8 +59,7 @@ async def test_a_delivered_answer_whose_ledger_write_was_lost_is_repaired() -> N
     repaired = turns.records["$src"]
     assert repaired.response_event_id == "$answer"
     assert repaired.completed
-    # Durable, because the write this repairs was the deferred one.
-    assert turns.durable_writes == 1
+    assert turns.writes == 1
 
 
 async def test_a_ledger_that_already_knows_its_answer_is_left_alone() -> None:
@@ -70,7 +69,7 @@ async def test_a_ledger_that_already_knows_its_answer_is_left_alone() -> None:
 
     assert await repair_delivered_turns(deliveries, turns) == 0
     assert turns.records["$src"].response_event_id == "$better"
-    assert turns.durable_writes == 0
+    assert turns.writes == 0
 
 
 async def test_every_page_is_walked_not_just_the_first() -> None:

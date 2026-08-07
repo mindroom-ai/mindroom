@@ -256,14 +256,10 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     tracker.get_turn_record.return_value = None
     tracker.has_responded.return_value = False
 
-    def update_handled_turn(
+    async def update_handled_turn(
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
-        *,
-        wait_for_persist: bool = False,
-        on_persisted: Callable[[TurnRecord], None] | None = None,
     ) -> TurnRecord:
-        del wait_for_persist  # The fake applies updates synchronously.
         existing_records = {
             source_event_id: turn_record
             for source_event_id in lookup_event_ids
@@ -280,8 +276,6 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
             tracker.record_handled_turn(turn_record)
         else:
             tracker.record_pending_turn(turn_record)
-        if on_persisted is not None:
-            on_persisted(turn_record)
         return turn_record
 
     tracker.update_handled_turn.side_effect = update_handled_turn

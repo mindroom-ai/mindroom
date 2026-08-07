@@ -2477,7 +2477,7 @@ async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_pa
 
         generate_response.assert_awaited_once()
         assert generate_response.await_args.kwargs["prompt"] == f"{mention}: ping"
-        assert bot._turn_store.is_durably_handled(gap_mention.event_id)
+        assert bot._turn_store.is_handled(gap_mention.event_id)
         await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
     finally:
@@ -3926,56 +3926,39 @@ async def test_shutdown_keeps_raw_checkpoint_when_terminal_interruption_note_did
 
 
 @pytest.mark.asyncio
-async def test_orderly_shutdown_keeps_raw_checkpoint_for_write_behind_handled_response_without_handoff(
+async def test_orderly_shutdown_keeps_raw_checkpoint_for_handled_response_without_handoff(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Write-behind handled state alone cannot preserve source continuity."""
+    """Durably handled state alone cannot preserve source continuity."""
     bot = _certified_shutdown_bot(tmp_path)
     source_event_id = "$orderly-source"
     response_started = asyncio.Event()
-    persist_started = threading.Event()
-    release_persist = threading.Event()
-    real_persist = bot._turn_store._ledger._persist_records
 
-    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
-        persist_started.set()
-        if not release_persist.wait(timeout=5):
-            msg = "test did not release terminal-turn persistence"
-            raise TimeoutError(msg)
-        real_persist(turn_records)
-
-    monkeypatch.setattr(bot._turn_store._ledger, "_persist_records", persist_with_barrier)
-
-    async def write_behind_handled_cancellation() -> None:
+    async def handled_cancellation() -> None:
         response_started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            bot._turn_store.record_turn(
+            await bot._turn_store.record_turn(
                 TurnRecord.create([source_event_id], response_event_id="$interrupted-response"),
             )
 
     response_task = bot._response_runner.track_inbox_response(
-        write_behind_handled_cancellation(),
-        name="test_write_behind_handled_orderly_cancellation",
+        handled_cancellation(),
+        name="test_handled_orderly_cancellation",
         recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
     )
     await response_started.wait()
     _install_fast_response_drain(bot)
 
-    try:
-        await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
-        assert await asyncio.to_thread(persist_started.wait, 5)
-        assert response_task.done()
-        assert not response_task.cancelled()
-        assert bot._turn_store.is_handled(source_event_id)
-        assert bot._response_runner.incomplete_inbox_responses_recoverable is False
-        assert bot._sync_checkpoint_trust.state is SyncTrustState.CERTIFIED
-        assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
-    finally:
-        release_persist.set()
-        await asyncio.to_thread(bot._turn_store._ledger.flush)
+    await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert response_task.done()
+    assert not response_task.cancelled()
+    assert bot._turn_store.is_handled(source_event_id)
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+    assert bot._sync_checkpoint_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio

@@ -167,7 +167,7 @@ def _response_event_id(bot: AgentBot | TeamBot, source_event_id: str) -> str | N
     return turn_record.response_event_id
 
 
-def _record_handled_turn(
+async def _record_handled_turn(
     turn_store: object,
     source_event_ids: list[str],
     *,
@@ -180,7 +180,7 @@ def _record_handled_turn(
     conversation_target: MessageTarget | None = None,
 ) -> None:
     """Record one handled turn through the turn-store API."""
-    turn_store.record_turn(
+    await turn_store.record_turn(
         TurnRecord.create(
             source_event_ids,
             response_event_id=response_event_id,
@@ -383,7 +383,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         thread_id=None,
         reply_to_event_id=original_event.event_id,
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         [original_event.event_id],
         response_event_id=response_event_id,
@@ -517,7 +517,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -627,7 +627,7 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
+    await _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
 
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -704,7 +704,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         thread_id="$original:example.com",
         reply_to_event_id="$router-echo:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -950,7 +950,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         thread_id=None,
         reply_to_event_id="$original:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id=response_event_id,
@@ -1202,7 +1202,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
     # Simulate that the bot has responded to some message
-    _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
+    await _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
 
     # Test 1: Bot's own edit
     own_edit_event = nio.RoomMessageText.from_dict(
@@ -1410,7 +1410,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         reply_to_event_id="$primary:example.com",
     )
     replace_edit_regenerator_deps(bot)
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
@@ -1573,7 +1573,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         thread_id=None,
         reply_to_event_id="$original:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -1685,7 +1685,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         thread_id=None,
         reply_to_event_id="$original:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -1694,7 +1694,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         conversation_target=stored_target,
     )
     turn_store = _turn_store(bot)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -1796,7 +1796,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         thread_id=None,
         reply_to_event_id="$original:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -1805,7 +1805,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         conversation_target=stored_target,
     )
     turn_store = _turn_store(bot)
-    turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
+    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -1913,7 +1913,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         thread_id=None,
         reply_to_event_id="$primary:example.com",
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
@@ -2069,7 +2069,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         )
 
 
-def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
     """TurnStore should prefer the newest persisted matching run metadata."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -2128,7 +2129,7 @@ def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
         "create_storage",
         return_value=storage,
     ):
-        loaded_turn = bot._turn_store.load_turn(
+        loaded_turn = await bot._turn_store.load_turn(
             room=room,
             thread_id=None,
             original_event_id="$first:example.com",
@@ -2143,7 +2144,8 @@ def test_load_turn_prefers_newest_matching_run(tmp_path: Path) -> None:
     }
 
 
-def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path) -> None:
     """Selection-triggered run metadata must not override a present ledger identity or outcome."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -2160,7 +2162,7 @@ def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path)
         rooms=["!test:example.com"],
     )
 
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$selection:example.com"],
         response_event_id="$response-ledger:example.com",
@@ -2191,7 +2193,7 @@ def test_load_turn_keeps_ledger_anchor_for_interactive_selection(tmp_path: Path)
         "create_storage",
         return_value=storage,
     ):
-        loaded_turn = bot._turn_store.load_turn(
+        loaded_turn = await bot._turn_store.load_turn(
             room=room,
             thread_id=None,
             original_event_id="$selection:example.com",
@@ -2363,7 +2365,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$first:example.com", "$anchor:example.com"],
         response_event_id="$partial-response:example.com",
@@ -2535,7 +2537,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         config=config,
         runtime_paths=runtime_paths,
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$team-partial-response:example.com",
@@ -2663,7 +2665,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$selection:example.com"],
         response_event_id="$response:example.com",
@@ -2804,7 +2806,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$selection:example.com"],
         response_event_id="$response:example.com",
@@ -2907,7 +2909,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
             requester_user_id=edit_event.sender,
         )
 
-        loaded_turn = bot._turn_store.load_turn(
+        loaded_turn = await bot._turn_store.load_turn(
             room=room,
             thread_id=None,
             original_event_id="$selection:example.com",
@@ -2920,7 +2922,8 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
     assert loaded_turn.response_event_id == "$response:example.com"
 
 
-def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path: Path) -> None:
     """TurnStore should compare matching persisted runs across thread and room scopes."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -2990,7 +2993,7 @@ def test_load_turn_prefers_newest_match_across_thread_and_room_sessions(tmp_path
         "create_storage",
         side_effect=[threaded_storage, room_storage],
     ):
-        loaded_turn = bot._turn_store.load_turn(
+        loaded_turn = await bot._turn_store.load_turn(
             room=room,
             thread_id="$thread:example.com",
             original_event_id="$first:example.com",
@@ -3029,7 +3032,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -3415,7 +3418,7 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         ),
     )
     room_storage = _FakeAgentStorage(session=None)
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$first:example.com", "$primary:example.com"],
         response_event_id="$response:example.com",
@@ -3506,7 +3509,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
     )
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response:example.com",
@@ -3610,6 +3613,7 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
 
 
+@pytest.mark.ledger_loads_from_disk
 @pytest.mark.asyncio
 async def test_handle_message_edit_recovers_newer_run_response_event_id_after_restart(
     tmp_path: Path,
@@ -3632,6 +3636,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
+    await bot._turn_store.warm()
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     replace_edit_regenerator_deps(bot)
@@ -3643,7 +3648,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
         room_mode=True,
     )
     assert stored_target.session_id == "!test:example.com"
-    _record_handled_turn(
+    await _record_handled_turn(
         bot._turn_store,
         ["$original:example.com"],
         response_event_id="$response-old:example.com",
@@ -3741,6 +3746,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
+    await restarted_bot._turn_store.warm()
     restarted_bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(restarted_bot)
     restarted_bot.logger = MagicMock()
@@ -4671,7 +4677,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     original_event.source = {"event_id": "$original:example.com"}
 
     # Store that we responded to the original
-    _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
+    await _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
 
     # Edit from unauthorized user (trying to regenerate)
     edit_event = Mock(spec=nio.RoomMessageText)

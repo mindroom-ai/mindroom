@@ -620,7 +620,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
@@ -1136,7 +1136,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     )
     bot._command_turn_executor.execute_if_owned = AsyncMock(return_value=True)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -1174,7 +1174,7 @@ async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_b
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
     settle_ignored = AsyncMock()
     replace_turn_controller_deps(bot, settle_ignored_sources=settle_ignored)
 
@@ -1651,7 +1651,7 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
         options={"1": "first"},
         creator_agent=bot.agent_name,
     )
-    bot._turn_controller._precheck_dispatch_event = MagicMock(
+    bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
@@ -1695,7 +1695,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
         options={"1": "first"},
         creator_agent=bot.agent_name,
     )
-    bot._turn_controller._precheck_dispatch_event = MagicMock(
+    bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
@@ -2049,7 +2049,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
         ),
     )
 
-    prechecked = bot._turn_controller._precheck_dispatch_event(room, event)
+    prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is not None
     assert prechecked.requester_user_id == "@mindroom_router:localhost"
@@ -2074,7 +2074,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     bot = _hook_bot(tmp_path)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
     event = nio.RoomMessageText.from_dict(
@@ -2093,7 +2093,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     )
 
     with patch("mindroom.ingress_validation.is_authorized_sender", side_effect=real_is_authorized_sender):
-        prechecked = bot._turn_controller._precheck_dispatch_event(room, event)
+        prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None
     turn_store.record_turn.assert_called_once_with(

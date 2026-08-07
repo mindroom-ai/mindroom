@@ -65,13 +65,13 @@ class _EchoTurnStore:
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
 
-    def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+    async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         self.visible_event_ids[source_event_id] = echo_event_id
 
     def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
         return None
 
-    def record_finalized_visible_echo(
+    async def record_finalized_visible_echo(
         self,
         source_event_id: str,  # noqa: ARG002
         echo_event_id: str,  # noqa: ARG002

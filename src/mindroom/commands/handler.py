@@ -104,7 +104,7 @@ class CommandHandlerContext:
     logger: structlog.stdlib.BoundLogger
     conversation_reader: ConversationReader
     stable_target: MessageTarget
-    record_handled_turn: Callable[[TurnRecord], None]
+    record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: Callable[[str], Awaitable[None]]
     send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
@@ -432,7 +432,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     requester=resolved_requester_user_id,
                 )
 
-                context.record_handled_turn(handled_turn)
+                await context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
@@ -482,7 +482,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             skip_mentions=True,
         )
         response_event_id = _require_response_event_id(raw_response_event_id)
-        context.record_handled_turn(
+        await context.record_handled_turn(
             TurnRecord.create(
                 [event.event_id],
                 response_event_id=response_event_id,

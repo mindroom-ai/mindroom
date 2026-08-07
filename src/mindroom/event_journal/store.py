@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from .backend import Backend
+    from .backend import Backend, Transaction
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         OutboxDelivery,
         RefreshRequest,
         SemanticConsumer,
+        TerminalTurnWrite,
         VisibleMessage,
     )
     from .projection import ProjectedEvent
@@ -519,17 +520,42 @@ class PrincipalStore:
         turn_id: str,
         stage: DeliveryStage,
         event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
     ) -> None:
-        """Record the Matrix event one claimed delivery produced."""
-        await self._backend.write(
-            lambda transaction: outbox.acknowledge(
+        """Record the Matrix event one claimed delivery produced.
+
+        ``terminal_turn`` is the turn record this acknowledgement completes,
+        written in the same transaction. The acknowledgement is the durable
+        proof that a visible answer exists and what its event ID is, and that
+        is precisely the fact the record is missing until it is told. Two
+        commits leave a window in which the answer is delivered and the record
+        does not know it, and an edit of that message arriving in that state is
+        dropped with nothing to edit -- permanently, because nothing
+        re-delivers a consumed edit.
+
+        The two rows are scoped differently, one to this principal and one to
+        an agent, and they still share a transaction because they share a
+        database. That is the whole reason turn records were moved here.
+        """
+
+        def acknowledge(transaction: Transaction) -> None:
+            outbox.acknowledge(
                 transaction,
                 self._principal_id,
                 turn_id=turn_id,
                 stage=stage,
                 event_id=event_id,
-            ),
-        )
+            )
+            if terminal_turn is not None:
+                turn_records.upsert(
+                    transaction,
+                    terminal_turn.agent_name,
+                    index_event_ids=terminal_turn.index_event_ids,
+                    anchor_event_id=terminal_turn.anchor_event_id,
+                    record_json=terminal_turn.record_json,
+                )
+
+        await self._backend.write(acknowledge)
 
     async def unacknowledged_deliveries(
         self,
@@ -873,6 +899,22 @@ class TurnRecordStore:
 
     _backend: Backend
     _agent_name: str
+
+    @property
+    def state_key(self) -> str:
+        """Identify the physical database these records live in.
+
+        Callers that cache records in memory need to know when two views are
+        the same store and when they are different ones. Two stores over
+        different databases must not share a cache, or the second answers from
+        rows it does not have.
+
+        The backend object is the identity. One backend owns one database and
+        every view of that database is handed the same instance, so this is
+        stable where it must be and distinct where it must be, without a
+        connection string that would put a password in a cache key.
+        """
+        return f"{id(self._backend):x}"
 
     async def upsert(
         self,

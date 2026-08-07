@@ -1324,7 +1324,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
+        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
 
         # Create mock room and event
         mock_room = MagicMock()

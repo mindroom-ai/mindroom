@@ -160,7 +160,7 @@ class TestStreamingEdits:
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
-        bot._turn_store.record_turn(
+        await bot._turn_store.record_turn(
             TurnRecord.create(["$initial123"], response_event_id="$response123"),
         )
 
@@ -251,7 +251,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
+        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

@@ -1193,6 +1193,7 @@ class TestAgentBot(AgentBotTestBase):
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
+    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_interrupted_stop_reaction_replay_cannot_become_hook_input(
         self,
@@ -1203,6 +1204,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await bot._turn_store.warm()
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
         pending_turn = TurnRecord.create(
@@ -1213,7 +1215,7 @@ class TestAgentBot(AgentBotTestBase):
             requester_id="@user:localhost",
             conversation_target=target,
         )
-        bot._turn_store.record_pending_turn(pending_turn)
+        await bot._turn_store.record_pending_turn(pending_turn)
         failure = RuntimeError("crash after stop reaction side effect")
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
@@ -1238,6 +1240,7 @@ class TestAgentBot(AgentBotTestBase):
         stop_receipt_order = pending[0].receipt_order
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
 
@@ -1249,12 +1252,13 @@ class TestAgentBot(AgentBotTestBase):
 
         finalize_stopped_response.assert_awaited_once_with(target, "$response")
         assert unexpected_hooks == []
-        assert restarted._turn_store.is_durably_handled("$source") is True
+        assert restarted._turn_store.is_handled("$source") is True
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_receipt_order == stop_receipt_order
         assert await restarted._journal_dispatcher.store.pending() == ()
 
+    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_interrupted_stop_claim_suppresses_preceding_edit_after_restart(
         self,
@@ -1265,9 +1269,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await bot._turn_store.warm()
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
-        bot._turn_store.record_turn(
+        await bot._turn_store.record_turn(
             TurnRecord.create(
                 ["$source"],
                 response_event_id="$response",
@@ -1299,6 +1304,7 @@ class TestAgentBot(AgentBotTestBase):
         stop_receipt_order = pending[0].receipt_order
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
@@ -1314,6 +1320,7 @@ class TestAgentBot(AgentBotTestBase):
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
+    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_stop_replay_preserves_visible_partial_finalized_by_live_cancellation(
         self,
@@ -1324,6 +1331,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await bot._turn_store.warm()
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
         pending_turn = TurnRecord.create(
@@ -1334,7 +1342,7 @@ class TestAgentBot(AgentBotTestBase):
             requester_id="@user:localhost",
             conversation_target=target,
         )
-        bot._turn_store.record_pending_turn(pending_turn)
+        await bot._turn_store.record_pending_turn(pending_turn)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
 
@@ -1355,7 +1363,7 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
         pending = await bot._journal_dispatcher.store.pending()
         stop_receipt_order = pending[0].receipt_order
-        bot._turn_store.record_turn_durably(
+        await bot._turn_store.record_turn(
             with_user_stop(
                 pending_turn,
                 "$response",
@@ -1365,6 +1373,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         with patch(
             "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
@@ -1379,6 +1388,7 @@ class TestAgentBot(AgentBotTestBase):
         assert stopped_record.user_stop_settled_receipt_order == stopped_record.user_stop_receipt_order
         assert await restarted._journal_dispatcher.store.pending() == ()
 
+    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_failed_stop_delivery_suppresses_model_recovery_and_retries_after_restart(
         self,
@@ -1389,9 +1399,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await bot._turn_store.warm()
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
-        bot._turn_store.record_pending_turn(
+        await bot._turn_store.record_pending_turn(
             TurnRecord.create(
                 ["$source"],
                 response_event_id="$response",
@@ -1426,7 +1437,7 @@ class TestAgentBot(AgentBotTestBase):
         assert stopped_record.completed is True
         assert stopped_record.user_stop_receipt_order == stop_receipt_order
         assert stopped_record.user_stop_settled_receipt_order is None
-        assert bot._turn_store.prepare_pending_response_source(
+        assert await bot._turn_store.prepare_pending_response_source(
             target=target,
             source_event_ids=("$source",),
             terminal_source_event_ids=("$source",),
@@ -1435,6 +1446,7 @@ class TestAgentBot(AgentBotTestBase):
         assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
@@ -1462,7 +1474,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
-        bot._turn_store.record_pending_turn(
+        await bot._turn_store.record_pending_turn(
             TurnRecord.create(
                 ["$source"],
                 response_event_id="$response",
@@ -1472,7 +1484,7 @@ class TestAgentBot(AgentBotTestBase):
                 conversation_target=target,
             ),
         )
-        assert not bot._turn_store.prepare_edit_response_source(
+        assert not await bot._turn_store.prepare_edit_response_source(
             target=target,
             source_event_ids=("$source",),
             response_event_id="$response",
@@ -1538,7 +1550,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$second")
-        bot._turn_store.record_pending_turn(
+        await bot._turn_store.record_pending_turn(
             TurnRecord.create(
                 ["$first", "$second"],
                 redacted_source_event_ids=["$first"],
@@ -1565,7 +1577,7 @@ class TestAgentBot(AgentBotTestBase):
             nonlocal alias_claimed
             if not alias_claimed:
                 alias_claimed = True
-                turn_store.record_turn(
+                await turn_store.record_turn(
                     TurnRecord.create(
                         ["$first", "$other"],
                         response_event_id="$response-b",

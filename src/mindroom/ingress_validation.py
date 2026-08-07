@@ -266,7 +266,7 @@ class IngressValidator:
             )
         return self.is_trusted_internal_relay_event(event)
 
-    def precheck_event(
+    async def precheck_event(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
@@ -295,11 +295,11 @@ class IngressValidator:
             room.room_id,
             self.deps.runtime_paths,
         ):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
-            self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id

@@ -28,6 +28,7 @@ from .models import (
     RefreshRequest,
     SemanticConsumer,
     SettlementOutcome,
+    TerminalTurnWrite,
     VisibleMessage,
 )
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
@@ -85,6 +86,7 @@ __all__ = [
     "SemanticConsumer",
     "SettlementOutcome",
     "StoredApprovalCard",
+    "TerminalTurnWrite",
     "TurnRecordStore",
     "VisibleMessage",
     "decode_thread_id",

@@ -24,9 +24,9 @@ from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconc
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import EventJournalStore
     from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
@@ -88,22 +88,25 @@ def _reconciler(store: TurnStore, runner: _SerializingRunner, gateway: _Counting
     )
 
 
-def _store(tmp_path: Path) -> TurnStore:
+async def _store(journal_store: EventJournalStore) -> TurnStore:
     _reset_handled_turn_ledger_runtime()
-    return TurnStore(
+    store = TurnStore(
         TurnStoreDeps(
             agent_name="agent",
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records("agent"),
+            legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
         ),
     )
+    await store.warm()
+    return store
 
 
-def _record_answered_turn(store: TurnStore) -> None:
+async def _record_answered_turn(store: TurnStore) -> None:
     """Record the turn a stop reaction can arrive for: answered, not terminal."""
-    store.record_turn_durably(
+    await store.record_turn(
         TurnRecord.create(
             (_SOURCE_EVENT_ID,),
             response_event_id=_RESPONSE_EVENT_ID,
@@ -113,10 +116,10 @@ def _record_answered_turn(store: TurnStore) -> None:
     )
 
 
-async def test_one_stop_makes_the_turn_terminal_and_commits_one_cancellation(tmp_path: Path) -> None:
+async def test_one_stop_makes_the_turn_terminal_and_commits_one_cancellation(journal_store: EventJournalStore) -> None:
     """The two sides of a stop have to agree, and there is only one of each."""
-    store = _store(tmp_path)
-    _record_answered_turn(store)
+    store = await _store(journal_store)
+    await _record_answered_turn(store)
     runner, gateway = _SerializingRunner(), _CountingGateway()
 
     finalized = await _reconciler(store, runner, gateway).finalize(
@@ -134,10 +137,10 @@ async def test_one_stop_makes_the_turn_terminal_and_commits_one_cancellation(tmp
     assert stopped.user_stop_settled_receipt_order == _STOP_RECEIPT_ORDER
 
 
-async def test_the_same_stop_delivered_twice_cancels_once(tmp_path: Path) -> None:
+async def test_the_same_stop_delivered_twice_cancels_once(journal_store: EventJournalStore) -> None:
     """A reaction can be redelivered, and the room must not say so twice."""
-    store = _store(tmp_path)
-    _record_answered_turn(store)
+    store = await _store(journal_store)
+    await _record_answered_turn(store)
     runner, gateway = _SerializingRunner(), _CountingGateway()
     reconciler = _reconciler(store, runner, gateway)
 
@@ -147,7 +150,7 @@ async def test_the_same_stop_delivered_twice_cancels_once(tmp_path: Path) -> Non
     assert gateway.finalized == [_RESPONSE_EVENT_ID]
 
 
-async def test_one_stop_delivered_concurrently_cancels_once(tmp_path: Path) -> None:
+async def test_one_stop_delivered_concurrently_cancels_once(journal_store: EventJournalStore) -> None:
     """The same stop arriving twice at once is one intent, not two.
 
     Same receipt order deliberately: that is what a redelivery of one
@@ -155,8 +158,8 @@ async def test_one_stop_delivered_concurrently_cancels_once(tmp_path: Path) -> N
     stop intents and each is entitled to settle, so racing those would
     assert nothing about convergence.
     """
-    store = _store(tmp_path)
-    _record_answered_turn(store)
+    store = await _store(journal_store)
+    await _record_answered_turn(store)
     runner, gateway = _SerializingRunner(), _CountingGateway()
     reconciler = _reconciler(store, runner, gateway)
 

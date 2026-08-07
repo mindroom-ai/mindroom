@@ -32,7 +32,6 @@ from mindroom.cli.config import _format_config_search_locations, activate_cli_ru
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
-from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
@@ -2528,10 +2527,6 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            assert (
-                HandledTurnLedger("agent", base_path=runtime_storage.resolve() / "tracking").base_path
-                == runtime_storage.resolve() / "tracking"
-            )
             MatrixState().save(runtime_paths=runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 

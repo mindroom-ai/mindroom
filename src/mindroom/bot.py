@@ -603,7 +603,8 @@ class AgentBot:
         self._turn_store = TurnStore(
             TurnStoreDeps(
                 agent_name=self.agent_name,
-                tracking_base_path=self.storage_path / "tracking",
+                turn_records=self._journal_store.turn_records(self.agent_name),
+                legacy_responses_file=self.storage_path / "tracking" / f"{self.agent_name}_responded.json",
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
@@ -1809,7 +1810,7 @@ class AgentBot:
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
-            await asyncio.to_thread(self._turn_store.warm)
+            await self._turn_store.warm()
             # Immediately after the ledger is readable and before a single sync
             # callback is registered. A crash between the outbox acknowledgement
             # and the ledger write leaves a delivered answer whose record does
@@ -1872,8 +1873,7 @@ class AgentBot:
         """Release fleet-dependent turn replay after the responder startup pass."""
         self._journal_dispatcher.release_turn_replay()
         await self._journal_dispatcher.drain_once()
-        await asyncio.to_thread(
-            self._turn_store.cleanup,
+        await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
@@ -2269,7 +2269,7 @@ class AgentBot:
         unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
-        await asyncio.to_thread(self._turn_store.mark_source_redacted, event.redacts)
+        await self._turn_store.mark_source_redacted(event.redacts)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

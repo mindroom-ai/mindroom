@@ -16,7 +16,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.background_tasks import create_background_task, run_blocking_until_complete
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -312,14 +312,14 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: Callable[[], bool] | None = None
+    prepare_source_turn: Callable[[], Coroutine[Any, Any, bool]] | None = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
-    on_deferred_outcome_handled: Callable[[str], None] | None = None
-    on_user_stop_handled: Callable[[str, int], None] | None = None
+    on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
+    on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
     @property
@@ -1248,9 +1248,7 @@ class ResponseRunner:
         if not stop_receipt_orders:
             return
         stop_receipt_order = max(stop_receipt_orders)
-        await run_blocking_until_complete(
-            lambda: on_user_stop_handled(response_event_id, stop_receipt_order),
-        )
+        await on_user_stop_handled(response_event_id, stop_receipt_order)
 
     async def _begin_locked_turn(
         self,
@@ -1273,8 +1271,8 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await run_blocking_until_complete(
-            request.prepare_source_turn,
+        if request.prepare_source_turn is not None and await run_coroutine_until_complete(
+            request.prepare_source_turn(),
         ):
             self.deps.logger.info(
                 "response_suppressed_for_terminal_source",
@@ -1593,7 +1591,7 @@ class ResponseRunner:
             if source_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id
                 assert response_event_id is not None
-                request.on_deferred_outcome_handled(response_event_id)
+                await request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
         return final_outcome.final_visible_event_id if source_handled else None
 

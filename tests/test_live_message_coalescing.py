@@ -592,7 +592,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_awaited_once()
     else:
         plan_turn.assert_not_awaited()
-    assert not bot._turn_store.is_durably_handled(event.event_id)
+    assert not bot._turn_store.is_handled(event.event_id)
     assert not await dispatcher.store.is_pending(event.event_id)
 
 
@@ -4659,10 +4659,10 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
     room = _make_room()
     conflicting_event_id = "$already-owned"
     retained_event_id = "$retained"
-    bot._turn_store.record_turn(
+    await bot._turn_store.record_turn(
         TurnRecord.create([conflicting_event_id], response_event_id="$existing-response"),
     )
-    projected = bot._turn_store.record_pending_turn(
+    projected = await bot._turn_store.record_pending_turn(
         TurnRecord.create(
             [conflicting_event_id, retained_event_id],
             redacted_source_event_ids=[conflicting_event_id],

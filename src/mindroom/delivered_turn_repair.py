@@ -1,10 +1,11 @@
 """Rejoin answers Matrix accepted to the ledger that records who owns them.
 
 Delivery settles the journal source and acknowledges the outbox row in one
-transaction. The handled-turn ledger is a different store, written afterwards
-and, by default, not waited on -- so a crash in between leaves a durable
-acknowledged answer beside a ledger record that still says the turn is
-unfinished and knows no response event.
+transaction. The ledger write is a second transaction that follows it, so a
+crash in between leaves a durable acknowledged answer beside a ledger record
+that still says the turn is unfinished and knows no response event. Awaiting
+the ledger write narrows that window but cannot close it: two transactions can
+always be interrupted between.
 
 Nothing else repairs that. Outbox recovery walks unacknowledged rows, so it
 steps over this one; the journal has no pending source, so the turn engine
@@ -54,8 +55,8 @@ class _TerminalTurns(Protocol):
         """Return the durable record for one source event, if any."""
         ...
 
-    def record_turn_durably(self, turn_record: TurnRecord) -> None:
-        """Persist one terminal turn and wait until its exact ledger write lands."""
+    async def record_turn(self, turn_record: TurnRecord) -> None:
+        """Persist one terminal turn, durable once it returns."""
         ...
 
 
@@ -71,11 +72,6 @@ async def repair_delivered_turns(deliveries: _AcknowledgedFinals, turns: _Termin
     authoritative when it has the fact; this only supplies one it is missing,
     and overwriting could replace a later, better answer with the first one
     ever sent.
-
-    The write is the durable variant deliberately. The ordinary terminal write
-    defers its persist, which is what opened this window in the first place; a
-    repair that could itself be lost to the next crash would leave the same
-    state it was called to fix.
     """
     repaired = 0
     cursor: tuple[int, str] | None = None
@@ -89,7 +85,7 @@ async def repair_delivered_turns(deliveries: _AcknowledgedFinals, turns: _Termin
             record = turns.get_turn_record(turn_id)
             if record is None or record.response_event_id is not None:
                 continue
-            turns.record_turn_durably(
+            await turns.record_turn(
                 dataclasses.replace(record, response_event_id=response_event_id, completed=True),
             )
             repaired += 1

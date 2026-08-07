@@ -485,7 +485,7 @@ class TurnController:
             ),
         )
 
-    def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
+    async def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
         self,
         room: nio.MatrixRoom,
         event: T,
@@ -493,7 +493,7 @@ class TurnController:
         is_edit: bool = False,
     ) -> _PrecheckedEvent[T] | None:
         """Return a typed prechecked event for turn dispatch."""
-        requester_user_id = self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
+        requester_user_id = await self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
@@ -951,7 +951,7 @@ class TurnController:
                 # One notice, then the turn is terminal.
                 through_outbox=True,
             )
-            self.deps.turn_store.record_responded_turn(
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(pending_turn, response_event_id=response_event_id),
             )
             return True
@@ -1326,10 +1326,7 @@ class TurnController:
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
-        pending_turn = await asyncio.to_thread(
-            self.deps.turn_store.record_pending_turn,
-            selection_handled_turn,
-        )
+        pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
         if pending_turn is None:
             await self._require_durable_interactive_selection(
                 selection.question_event_id,
@@ -1401,7 +1398,7 @@ class TurnController:
                 delivery_turn_id=selection_handled_turn.anchor_event_id,
             )
             if response_event_id is not None:
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
                 )
                 await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
@@ -1456,7 +1453,7 @@ class TurnController:
             ),
         )
         if response_event_id is not None:
-            self.deps.turn_store.record_responded_turn(
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(selection_handled_turn, response_event_id=response_event_id),
             )
             await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
@@ -1472,14 +1469,7 @@ class TurnController:
         source_event_id: str,
     ) -> bool:
         """Return whether the question or exact selection source is durably terminal."""
-        return any(
-            await asyncio.gather(
-                *(
-                    asyncio.to_thread(self.deps.turn_store.is_durably_handled, event_id)
-                    for event_id in {question_event_id, source_event_id}
-                ),
-            ),
-        )
+        return any(self.deps.turn_store.is_handled(event_id) for event_id in {question_event_id, source_event_id})
 
     async def _require_durable_interactive_selection(
         self,
@@ -1693,7 +1683,7 @@ class TurnController:
         if tracked_handled_turn is None:
             return
         if recovered_response_event_id is not None:
-            self.deps.turn_store.record_responded_turn(
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
             )
             return
@@ -1712,7 +1702,7 @@ class TurnController:
             if event_id:
                 self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
                 await self.deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
                 )
             else:
@@ -1751,23 +1741,31 @@ class TurnController:
         caller writes next cannot land while the journal still calls this turn
         unfinished.
 
-        The fallback send below deliberately does not. It runs only when the
-        edit failed, and by then an attempted row already holds the edit's
-        frozen envelope -- a second delivery under the same turn and stage does
-        not refuse, it resends what is frozen, which would put an edit-shaped
-        payload into the room as a new message. A degraded path that sends the
-        right bytes without a durable row beats one that sends the wrong bytes
-        with one.
+        A failed durable edit is not followed by a direct send, and that is the
+        whole of the ownership rule here. Once the edit has been offered to the
+        outbox, exactly one of two things is true and neither wants another
+        message in the room.
 
-        Staying off the row is not the same as leaving it behind, though. The
-        failed edit left it attempted and unacknowledged, which is the outbox
-        saying it still owes this turn an answer, and the next recovery pass
-        would resend that frozen envelope as a second visible message beside
-        the fallback. So the fallback is adopted as the row's outcome once it
-        has landed, which is the moment the turn goes back to having exactly
-        one owner. Adopting before the send would invert the risk: the FINAL
-        enqueue already handed the journal sources over, so a crash in that
-        window would leave nobody owing the answer at all.
+        Either the enqueue was refused, which only the membership fence does,
+        and the conversation this notice belongs to is one the bot has left.
+        Sending anyway puts an old turn's error in front of whoever is in that
+        room now. Or the row exists, attempted and unacknowledged, and the
+        outbox still owes this turn an answer: the next recovery pass resends
+        the frozen envelope and the placeholder becomes the error notice, which
+        is the outcome this method wanted. Sending as well races that pass --
+        no crash required -- and the loser is invisible, because
+        acknowledgement is first-writer-wins, so the room keeps both notices
+        while durable state names only one.
+
+        An earlier version sent anyway and then tried to adopt the message as
+        the row's outcome. Adoption cannot win that race, and it could not tell
+        a fence refusal from a Matrix failure either, because both surface as a
+        false return.
+
+        The remaining direct send is for the case with no durable owner at all:
+        no placeholder to edit, or an edit that never belonged to a turn. There
+        is no row to race and nothing else will ever put this notice in the
+        room.
         """
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
@@ -1783,6 +1781,13 @@ class TurnController:
             )
             if edited:
                 return existing_event_id
+            if delivery_turn_id is not None:
+                self.deps.logger.info(
+                    "dispatch_failure_notice_left_to_the_outbox",
+                    turn_id=delivery_turn_id,
+                    existing_event_id=existing_event_id,
+                )
+                return None
         response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
@@ -1791,17 +1796,7 @@ class TurnController:
             ),
         )
         if response_event_id is None:
-            # Nothing reached the room, so the row is still the only thing that
-            # can answer this turn and recovery has to keep trying it.
             return None
-        if existing_event_id is not None and delivery_turn_id is not None:
-            # Exactly the condition under which the edit above could have left
-            # a row: no placeholder means no durable edit was attempted, and
-            # nothing this call is answerable for is waiting in the outbox.
-            await self.deps.delivery_gateway.adopt_final_delivery(
-                turn_id=delivery_turn_id,
-                event_id=response_event_id,
-            )
         if on_visible_response is not None:
             await on_visible_response(response_event_id)
         return response_event_id
@@ -1812,19 +1807,23 @@ class TurnController:
         *,
         source_event_id: str,
         handled_turn: TurnRecord,
-    ) -> tuple[Callable[[], None], Callable[[str], None], Callable[[str, int], None]]:
+    ) -> tuple[
+        Callable[[], None],
+        Callable[[str], Awaitable[None]],
+        Callable[[str, int], Awaitable[None]],
+    ]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
         def record_interrupted_turn() -> None:
             self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
 
-        def record_deferred_outcome(response_event_id: str) -> None:
-            self.deps.turn_store.record_responded_turn(
+        async def record_deferred_outcome(response_event_id: str) -> None:
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
             )
 
-        def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
-            self.deps.turn_store.record_turn_durably(
+        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
+            await self.deps.turn_store.record_turn(
                 with_user_stop(
                     handled_turn,
                     response_event_id,
@@ -1887,7 +1886,7 @@ class TurnController:
                     # One rejection, then the turn is terminal.
                     through_outbox=True,
                 )
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
                 if dispatch_timing is not None and response_event_id is not None:
@@ -2012,12 +2011,12 @@ class TurnController:
                     on_visible_response=record_visible_response,
                     delivery_turn_id=handled_turn.anchor_event_id,
                 )
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
                 return
             if response_event_id is not None:
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
                 )
 
@@ -2113,7 +2112,7 @@ class TurnController:
         if lane_reservation is not None:
             await lane_reservation.release()
         await self.deps.turn_store.wait_for_turn_settled(turn_claim.indexed_event_ids)
-        if await asyncio.to_thread(self.deps.turn_store.is_durably_handled, source_event_id):
+        if self.deps.turn_store.is_handled(source_event_id):
             return TurnDispatchOutcome.DEFERRED
         if self.deps.turn_store.try_claim_turn(turn_claim):
             if lane_reservation is not None:
@@ -2157,7 +2156,7 @@ class TurnController:
         }
         if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
+        prechecked_event = await self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if is_nonterminal_stream:
@@ -2321,7 +2320,7 @@ class TurnController:
         receipt_time: float | None = None,
     ) -> TurnDispatchOutcome:
         """Handle one media event inside the per-turn conversation lookup scope."""
-        prechecked_event = self._precheck_dispatch_event(room, event)
+        prechecked_event = await self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         dispatch_timing = create_dispatch_pipeline_timing(

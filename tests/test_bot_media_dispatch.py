@@ -218,7 +218,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
@@ -281,7 +281,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_stt.wait()
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
-        bot._turn_controller._precheck_dispatch_event = MagicMock(
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(
             return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
         )
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
@@ -369,7 +369,7 @@ class TestAgentBot(AgentBotTestBase):
         redelivery = asyncio.create_task(controller._handle_media_message_inner(room, event))
         await asyncio.sleep(0)
 
-        controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+        await controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
         controller.deps.turn_store.release_pending_turn_claim(active_claim)
 
         assert await redelivery is TurnDispatchOutcome.DEFERRED
@@ -422,7 +422,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
 
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._resolve_ready_voice_target = AsyncMock(side_effect=asyncio.CancelledError)
 
