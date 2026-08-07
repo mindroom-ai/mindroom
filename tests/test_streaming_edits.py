@@ -19,7 +19,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     replace_edit_regenerator_deps,
     runtime_paths_for,
@@ -74,7 +74,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = _make_matrix_client_mock()
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )

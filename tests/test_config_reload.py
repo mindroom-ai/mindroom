@@ -47,8 +47,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_send_response_mock,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     orchestrator_runtime_paths,
     request_envelope,
     runtime_paths_for,
@@ -92,8 +90,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
-    bot.event_cache = make_event_cache_mock()
-    bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:

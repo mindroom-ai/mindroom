@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
+from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -181,7 +181,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock logger
     bot.logger = MagicMock()

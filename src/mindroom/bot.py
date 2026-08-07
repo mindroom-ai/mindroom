@@ -37,7 +37,6 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
-from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import (
@@ -52,12 +51,12 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
     SyncRecoveryOutcome,
     SyncTrustState,
 )
+from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
@@ -162,7 +161,6 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
-    from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
@@ -343,7 +341,6 @@ class AgentBot:
     _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
     _conversation_state_writer: ConversationStateWriter
-    _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
     _turn_store: TurnStore
@@ -364,7 +361,7 @@ class AgentBot:
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
     _sync_continuity_store: SyncContinuityStore
-    _sync_cache_trust: SyncCacheTrust
+    _sync_checkpoint_trust: SyncCheckpointTrust
 
     def __init__(
         self,
@@ -404,13 +401,10 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             enable_streaming=enable_streaming,
             orchestrator=None,
-            event_cache=None,
-            event_cache_write_coordinator=None,
         )
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
-        self._sync_cache_trust = SyncCacheTrust(
+        self._sync_checkpoint_trust = SyncCheckpointTrust(
             continuity_store=self._sync_continuity_store,
-            runtime=self._runtime_view,
             logger=self.logger,
             # Resolved on first use rather than now: the journal store is built
             # further down, and trusting a saved token means asserting that
@@ -464,7 +458,7 @@ class AgentBot:
         own principal-bound view.
         """
         return open_event_journal_store(
-            self.config.cache,
+            self.config.event_journal,
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
         )
@@ -505,11 +499,6 @@ class AgentBot:
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
         )
-        self._conversation_cache = MatrixConversationCache(
-            logger=self.logger,
-            runtime=self._runtime_view,
-            store=self._journal_store.principal(self._journal_principal_id),
-        )
         self._conversation_state_writer = ConversationStateWriter(
             ConversationStateWriterDeps(
                 runtime=self._runtime_view,
@@ -540,7 +529,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_cache=self._conversation_cache,
                 conversation_reader=self._conversation_reader,
                 relations=self._relations,
             ),
@@ -607,7 +595,6 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             on_persist_failure=self._record_dispatch_persist_failure,
-            background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
                 self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
             ),
@@ -617,7 +604,6 @@ class AgentBot:
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
-            conversation_cache=self._conversation_cache,
             conversation_reader=self._conversation_reader,
         )
         self._ingress_hook_runner = IngressHookRunner(
@@ -710,7 +696,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 normalizer=self._inbound_turn_normalizer,
-                conversation_cache=self._conversation_cache,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 visible_responses=self._visible_responses,
@@ -732,7 +717,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
-                conversation_cache=self._conversation_cache,
                 relations=self._relations,
                 pending_turns=self._journal_store.principal(self._journal_principal_id),
                 resolver=self._conversation_resolver,
@@ -763,7 +747,6 @@ class AgentBot:
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 stop_manager=self.stop_manager,
-                conversation_cache=self._conversation_cache,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
@@ -817,7 +800,6 @@ class AgentBot:
 
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
-        self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
 
     @property
@@ -869,34 +851,6 @@ class AgentBot:
     def approval_cards(self) -> ApprovalView:
         """Return this bot's durable store of approval cards awaiting a decision."""
         return self._journal_store.principal(self._journal_principal_id)
-
-    @property
-    def event_cache(self) -> ConversationEventCache:
-        """Return the configured Matrix event cache."""
-        event_cache = self._runtime_view.event_cache
-        if event_cache is None:
-            msg = "Matrix event cache is not initialized for this bot runtime"
-            raise RuntimeError(msg)
-        return event_cache
-
-    @event_cache.setter
-    def event_cache(self, value: ConversationEventCache | None) -> None:
-        """Update the configured Matrix event cache."""
-        self._runtime_view.event_cache = value
-
-    @property
-    def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator:
-        """Return the configured Matrix event-cache write coordinator."""
-        coordinator = self._runtime_view.event_cache_write_coordinator
-        if coordinator is None:
-            msg = "Matrix event-cache write coordinator is not initialized for this bot runtime"
-            raise RuntimeError(msg)
-        return coordinator
-
-    @event_cache_write_coordinator.setter
-    def event_cache_write_coordinator(self, value: EventCacheWriteCoordinator | None) -> None:
-        """Update the configured Matrix event-cache write coordinator."""
-        self._runtime_view.event_cache_write_coordinator = value
 
     @property
     def runtime_started_at(self) -> float:
@@ -1187,11 +1141,11 @@ class AgentBot:
         self._last_sync_monotonic = None
 
     async def _prepare_matrix_sync_continuity(self) -> None:
-        """Apply cache-trust startup output to the authenticated Matrix client."""
+        """Apply the certified startup position to the authenticated Matrix client."""
         client = self.client
         assert client is not None
         classic = self.config.matrix_sync.mode == "classic"
-        sync_token = await self._sync_cache_trust.prepare_startup()
+        sync_token = await self._sync_checkpoint_trust.prepare_startup()
         if classic:
             client.clear_persisted_sync_recovery()
             self._classic_sync_rebuild_pending = True
@@ -1207,7 +1161,7 @@ class AgentBot:
     ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
         client = self.client
-        applied = await self._sync_cache_trust.apply_response(
+        applied = await self._sync_checkpoint_trust.apply_response(
             decision,
             recovery=recovery,
             joined_room_ids=joined_room_ids,
@@ -1255,7 +1209,7 @@ class AgentBot:
     async def _reset_classic_sync_state(self, *, force: bool = False) -> tuple[bool, bool]:
         """Replace nio's transient Classic world with the committed checkpoint."""
         client = self.client
-        retry_token = self._sync_cache_trust.retry_token()
+        retry_token = self._sync_checkpoint_trust.retry_token()
         if client is None:
             return False, retry_token is not None
         staged = client.has_uncommitted_classic_sync_state
@@ -1277,7 +1231,7 @@ class AgentBot:
         """Settle aborted-response state and restore certified continuity."""
         if self.config.matrix_sync.mode != "classic":
             return
-        admission_failed = self._sync_cache_trust.reject_response_before_certification()
+        admission_failed = self._sync_checkpoint_trust.reject_response_before_certification()
         client = self.client
         rewound, has_retry_token = await self._reset_classic_sync_state(
             force=admission_failed or (client is not None and client.has_uncommitted_classic_sync_state),
@@ -1316,11 +1270,11 @@ class AgentBot:
 
     def _record_dispatch_persist_failure(self) -> None:
         """Let NIO retry rejected source work before replaying safe continuity."""
-        self._sync_cache_trust.record_dispatch_persist_failure()
+        self._sync_checkpoint_trust.record_dispatch_persist_failure()
 
     async def _handle_pre_certification_failure(self) -> None:
         """Reject a response whose prerequisite durable work raised."""
-        self._sync_cache_trust.reject_response_before_certification()
+        self._sync_checkpoint_trust.reject_response_before_certification()
         await self._reset_classic_sync_state(force=True)
 
     async def _apply_sync_response_after_dispatch_acceptance(
@@ -1332,8 +1286,8 @@ class AgentBot:
         response: nio.SyncResponse,
     ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
         """Apply certification only when every source callback reached durable ownership."""
-        if self._sync_cache_trust.consume_dispatch_persist_failure():
-            self._sync_cache_trust.reject_response_before_certification()
+        if self._sync_checkpoint_trust.consume_dispatch_persist_failure():
+            self._sync_checkpoint_trust.reject_response_before_certification()
             await self._rewind_sync_after_pre_certification_failure()
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
         applied = await self._apply_sync_response_decision(
@@ -1396,7 +1350,7 @@ class AgentBot:
         emit_certified_state = (
             decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
         )
-        tokenless_baseline = self._sync_cache_trust.tokenless_baseline_pending()
+        tokenless_baseline = self._sync_checkpoint_trust.tokenless_baseline_pending()
         return _RoomMemberJoinSyncHookPlan(
             arm_after_response=True,
             emit_state=emit_certified_state,
@@ -1511,19 +1465,19 @@ class AgentBot:
                 raise
             checkpoint_rebuild_response = (
                 first_sync_response or self._classic_sync_rebuild_pending
-            ) and self._sync_cache_trust.retry_token() is not None
+            ) and self._sync_checkpoint_trust.retry_token() is not None
             live_checkpoint_rebuild_response = (
                 self._classic_sync_rebuild_pending
                 and not first_sync_response
-                and self._sync_cache_trust.retry_token() is not None
+                and self._sync_checkpoint_trust.retry_token() is not None
             )
             # No await between the guarded membership apply above and this plan,
             # so there is no window in which this response could be abandoned
             # after durable work and before its verdict. The cancellation branch
             # that used to certify a fail-closed result here existed for the
             # cache write, which was the only thing awaited in that gap.
-            recovery = self._sync_cache_trust.observed_recovery(response)
-            decision = self._sync_cache_trust.plan_response(
+            recovery = self._sync_checkpoint_trust.observed_recovery(response)
+            decision = self._sync_checkpoint_trust.plan_response(
                 next_batch=response.next_batch,
                 recovery=recovery,
             )
@@ -1567,7 +1521,7 @@ class AgentBot:
 
     async def _handle_sliding_sync_response(self, response: nio.SlidingSyncResponse) -> None:
         """Apply one Sliding response through membership and transport owners."""
-        self._sync_cache_trust.acknowledge_dispatch_persist_failures()
+        self._sync_checkpoint_trust.acknowledge_dispatch_persist_failures()
         with track_matrix_sync_cache_write(self.agent_name):
             await self._apply_own_room_membership_from_sliding_sync(response)
         self._apply_transport_recovery_outcome(
@@ -1644,7 +1598,7 @@ class AgentBot:
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
         if _response.status_code == "M_UNKNOWN_POS":
-            decision = await self._sync_cache_trust.reject_unknown_pos()
+            decision = await self._sync_checkpoint_trust.reject_unknown_pos()
             await self._apply_client_rewind_decision(decision)
             self._room_member_join_hooks_armed = False
             self.logger.warning(
@@ -1678,21 +1632,6 @@ class AgentBot:
         """
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
-
-    @staticmethod
-    def _runtime_support_injection_error() -> str:
-        """Return the shared error text for missing runtime support injection."""
-        return (
-            "Runtime support services must be injected before startup; "
-            "AgentBot no longer supports standalone runtime support"
-        )
-
-    def _validate_runtime_support_injection_contract_for_startup(self) -> None:
-        """Reject startup unless the full injected runtime-support bundle is present."""
-        runtime = self._runtime_view
-        if runtime.event_cache is not None and runtime.event_cache_write_coordinator is not None:
-            return
-        raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
@@ -1776,8 +1715,6 @@ class AgentBot:
     ) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         await self._membership_fence.fence_reported_departures(departed_room_ids)
-        if departed_room_ids:
-            await self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
@@ -1816,7 +1753,6 @@ class AgentBot:
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
-        self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
         self.client = await login_agent_user(
@@ -1951,7 +1887,6 @@ class AgentBot:
         """Fence one room immediately after this bot leaves it."""
         self._local_departures_awaiting_sync.add(room_id)
         await self._membership_fence.fence_local_departure(room_id)
-        await self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
 
     async def stop(
         self,
@@ -2112,8 +2047,8 @@ class AgentBot:
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
         )
-        if self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
-            await self._sync_cache_trust.persist_current()
+        if self._sync_checkpoint_trust.state is SyncTrustState.CERTIFIED:
+            await self._sync_checkpoint_trust.persist_current()
         if (
             not background_tasks_completed
             or not drain_result.completed
@@ -2293,7 +2228,7 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
-        async with self._conversation_resolver.turn_thread_cache_scope():
+        async with self._conversation_resolver.turn_lookup_scope():
             await self._reaction_dispatcher.dispatch(room, event)
 
     async def _on_room_member(

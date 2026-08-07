@@ -10,8 +10,8 @@ from mindroom.matrix.sync_token_values import SyncCheckpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.matrix.sync_cache_trust import SyncCacheTrust
     from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncRecoveryOutcome
+    from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 
 
 def save_sync_token(
@@ -19,11 +19,11 @@ def save_sync_token(
     agent_name: str,
     token: str,
     *,
-    cache_generation: str,
+    store_generation: str,
 ) -> None:
     """Persist one checkpoint through the production continuity owner."""
     SyncContinuityStore(storage_path, agent_name).replace_checkpoint(
-        SyncCheckpoint(token=token, cache_generation=cache_generation),
+        SyncCheckpoint(token=token, store_generation=store_generation),
     )
 
 
@@ -38,7 +38,7 @@ def load_sync_checkpoint(storage_path: Path, agent_name: str) -> SyncCheckpoint 
 
 
 async def certify_response(
-    trust: SyncCacheTrust,
+    trust: SyncCheckpointTrust,
     *,
     next_batch: str | None,
     recovery: SyncRecoveryOutcome,
@@ -47,7 +47,7 @@ async def certify_response(
 
     Production keeps these two steps apart on purpose -- the durable work a
     response owes happens between them -- so this convenience lives here rather
-    than on ``SyncCacheTrust``, where it would be an API nothing ships.
+    than on ``SyncCheckpointTrust``, where it would be an API nothing ships.
     """
     decision = trust.plan_response(next_batch=next_batch, recovery=recovery)
     return await trust.apply_response(decision, recovery=recovery)

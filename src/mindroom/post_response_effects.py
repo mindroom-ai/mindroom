@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -73,7 +72,6 @@ class PostResponseEffectsSupport:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
-    conversation_cache: ConversationCacheProtocol
     conversation_reader: ConversationReader
 
     def _client(self) -> nio.AsyncClient:

@@ -73,7 +73,6 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
         config=Config(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data"),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve(ROOM_ID, None, "$event"),
         record_handled_turn=MagicMock(),

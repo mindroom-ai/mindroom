@@ -23,14 +23,14 @@ _GENERATION = "cache-generation"
 # so it is a durable format rather than an implementation detail of whichever
 # module currently declares the type.
 _PERSISTED_RECORD_BYTES = (
-    '{"checkpoint": {"cache_generation": "cache-generation", "token": "s_saved"}, '
+    '{"checkpoint": {"store_generation": "cache-generation", "token": "s_saved"}, '
     '"pending_join_decrypt_fences": ["!pending:localhost"], '
     '"revision": 2, "version": "mindroom-sync-continuity-v2"}\n'
 )
 
 
 def _checkpoint(token: str) -> SyncCheckpoint:
-    return SyncCheckpoint(token=token, cache_generation=_GENERATION)
+    return SyncCheckpoint(token=token, store_generation=_GENERATION)
 
 
 _PERSISTED_RECORD = SyncContinuityRecord(
@@ -293,7 +293,7 @@ def test_legacy_token_path_is_ignored_without_compatibility_parsing(tmp_path: Pa
     path = tmp_path / "sync_tokens" / "code.token"
     path.parent.mkdir(parents=True)
     path.write_text(
-        '{"version":"mindroom-sync-token-v2","token":"s_old","cache_generation":"old"}',
+        '{"version":"mindroom-sync-token-v2","token":"s_old","store_generation":"old"}',
         encoding="utf-8",
     )
 

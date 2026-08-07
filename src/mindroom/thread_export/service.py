@@ -309,7 +309,7 @@ async def export_threads_to_targets_once(
             ready_groups.append(group)
 
     journal_store = open_event_journal_store(
-        config.cache,
+        config.event_journal,
         runtime_paths=runtime_paths,
         storage_path=runtime_paths.storage_root,
     )

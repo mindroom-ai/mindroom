@@ -44,7 +44,6 @@ import uuid
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import certifi
@@ -563,7 +562,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                         client=bot_client,
                         config=config,
                         runtime_paths=paths,
-                        conversation_cache=SimpleNamespace(),
                         relations=make_relation_lookup(),
                         conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,

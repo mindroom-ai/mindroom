@@ -15,12 +15,12 @@ from mindroom.event_journal import EventJournalStore
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.matrix import CacheConfig
+    from mindroom.config.matrix import EventJournalConfig
     from mindroom.constants import RuntimePaths
 
 
 def open_event_journal_store(
-    cache_config: CacheConfig,
+    journal_config: EventJournalConfig,
     *,
     runtime_paths: RuntimePaths,
     storage_path: Path,
@@ -30,8 +30,8 @@ def open_event_journal_store(
     One database can hold every principal in the deployment; each caller
     receives only its own principal-bound view from it.
     """
-    if cache_config.backend == "postgres":
-        return EventJournalStore.open_postgres(cache_config.resolve_postgres_database_url(runtime_paths))
+    if journal_config.backend == "postgres":
+        return EventJournalStore.open_postgres(journal_config.resolve_postgres_database_url(runtime_paths))
     return EventJournalStore.open_sqlite(storage_path / "tracking" / "event_journal.db")
 
 

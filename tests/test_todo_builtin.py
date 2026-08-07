@@ -21,7 +21,6 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -64,7 +63,6 @@ def _tool_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),

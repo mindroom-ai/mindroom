@@ -908,7 +908,6 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             logger=get_logger("tests.post_response"),
             runtime_paths=runtime_paths_for(config),
             delivery_gateway=Mock(),
-            conversation_cache=Mock(),
             conversation_reader=make_conversation_reader_mock(),
         )
         await apply_post_response_effects(

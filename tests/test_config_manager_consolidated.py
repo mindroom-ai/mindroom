@@ -33,7 +33,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.conftest import (
     load_config_yaml,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     write_config_yaml,
@@ -76,7 +75,6 @@ def _caller_context(
         client=MagicMock(),
         config=config,
         runtime_paths=config_manager.runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
@@ -537,7 +535,6 @@ class TestConsolidatedConfigManager:
             client=MagicMock(),
             config=config,
             runtime_paths=cm.runtime_paths,
-            conversation_cache=make_conversation_cache_mock(),
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             room=room,

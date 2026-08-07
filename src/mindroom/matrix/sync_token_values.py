@@ -13,10 +13,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SyncCheckpoint:
-    """A sync token saved after its sync response was durably cached."""
+    """A sync token saved after its sync response was durably recorded."""
 
     token: str
-    cache_generation: str | None = None
+    store_generation: str | None = None
 
 
 def normalize_sync_token(value: object) -> str | None:

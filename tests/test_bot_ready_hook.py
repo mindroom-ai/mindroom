@@ -37,7 +37,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     install_call_manager_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -62,7 +62,7 @@ def _config(tmp_path: Path) -> Config:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    return install_runtime_cache_support(
+    return install_runtime_journal_support(
         AgentBot(
             agent_user=AgentMatrixUser(
                 agent_name=agent_name,

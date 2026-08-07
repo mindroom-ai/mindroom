@@ -35,7 +35,6 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     ignore_final_delivery_handoff,
-    make_event_cache_mock,
     make_outbox_mock,
     message_origin,
     runtime_paths_for,
@@ -289,7 +288,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     response_hooks = MagicMock()
     response_hooks._apply_before_response = before_hooks
     response_hooks.emit_after_response = after_hooks
-    conversation_cache = SimpleNamespace()
     conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -298,7 +296,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 config=config,
                 enable_streaming=True,
                 orchestrator=None,
-                event_cache=make_event_cache_mock(),
             ),
             runtime_paths=runtime_paths,
             agent_name="email_agent",
@@ -307,7 +304,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(
-                    conversation_cache=conversation_cache,
                     conversation_reader=conversation_reader,
                 ),
             ),

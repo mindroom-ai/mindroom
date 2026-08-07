@@ -70,7 +70,6 @@ from tests.bot_helpers import (
     _agent_response_handled_turn,
     _handled_response_event_id,
     _hook_envelope,
-    _install_runtime_cache_support,
     _make_matrix_client_mock,
     _matrix_room,
     _replace_turn_policy_deps,
@@ -88,7 +87,7 @@ from tests.conftest import (
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     message_origin,
     patch_response_runner_module,
@@ -451,7 +450,7 @@ class TestAgentBot(AgentBotTestBase):
         """Direct-thread dispatch context should read bounded full history from the projection."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -514,7 +513,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = MagicMock(spec=nio.RoomMessageText)
@@ -1294,7 +1292,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         tracker.has_responded.return_value = False
@@ -1364,7 +1361,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         tracker.has_responded.return_value = False
@@ -1505,7 +1501,6 @@ class TestAgentBot(AgentBotTestBase):
         """Human follow-ups in an active thread must keep policy while remaining coalescible."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -1627,7 +1622,6 @@ class TestAgentBot(AgentBotTestBase):
         """Trusted hook messages should keep their bypass source kind on the real text path."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -1694,7 +1688,6 @@ class TestAgentBot(AgentBotTestBase):
         """Transcribed voice follow-ups should share the active-response notice path."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -1782,7 +1775,6 @@ class TestAgentBot(AgentBotTestBase):
         """File sidecar previews should hand prepared text to the gate, not dispatch inline."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -1877,7 +1869,6 @@ class TestAgentBot(AgentBotTestBase):
         """Sidecar text follow-ups should share the active-response notice path."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _install_runtime_cache_support(bot)
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"

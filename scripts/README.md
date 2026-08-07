@@ -7,7 +7,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 ### 🧪 Testing
 - **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 - **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
-- **`testing/fuzz_matrix_event_cache.py`** - Replay deterministic randomized mutations directly against both cache backends
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
@@ -44,9 +43,8 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
 
-### Fuzz Matrix cache behavior
+### Fuzz live Matrix behavior
 ```bash
-uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation

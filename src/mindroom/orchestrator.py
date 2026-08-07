@@ -114,12 +114,6 @@ from .orchestration.runtime import (
     wait_for_matrix_homeserver,
 )
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
-from .runtime_support import (
-    OwnedRuntimeSupport,
-    build_owned_runtime_support,
-    close_owned_runtime_support,
-    sync_owned_runtime_support,
-)
 
 if TYPE_CHECKING:
     import socket
@@ -253,8 +247,6 @@ class _MultiAgentOrchestrator:
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
-    _runtime_support: OwnedRuntimeSupport = field(init=False)
-    _event_cache_write_task_owner: object = field(default_factory=object, init=False)
     plugin_watch: PluginWatchState = field(init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
@@ -268,11 +260,6 @@ class _MultiAgentOrchestrator:
         """Store canonical derived paths from the explicit runtime context."""
         self.storage_path = self.runtime_paths.storage_root
         self.config_path = self.runtime_paths.config_path
-        self._runtime_support = build_owned_runtime_support(
-            db_path=self.storage_path / "event_cache.db",
-            logger=logger,
-            background_task_owner=self._event_cache_write_task_owner,
-        )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
@@ -387,11 +374,9 @@ class _MultiAgentOrchestrator:
             reason=reason,
         )
 
-    def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
-        """Bind the current runtime support services to one managed bot."""
+    def _bind_response_admission_gate(self, bot: AgentBot | TeamBot) -> None:
+        """Share the orchestrator-owned response admission gate with one managed bot."""
         bot.admission_gate = self._response_admission_gate
-        bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
-        bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
 
     def _approval_cards(self) -> ApprovalView | None:
         """Return the router principal's approval-card store, once it exists.
@@ -405,15 +390,10 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         return None if router_bot is None else router_bot.approval_cards
 
-    def _rebind_runtime_support_services(self) -> None:
-        """Rebind the current runtime support services to every managed bot."""
-        for bot in self.agent_bots.values():
-            self._bind_runtime_support_services(bot)
-
     def _bind_started_runtime_support_services(self, bots: list[AgentBot | TeamBot]) -> None:
         """Bind current runtime support objects needed by live callbacks."""
         for bot in bots:
-            self._bind_runtime_support_services(bot)
+            self._bind_response_admission_gate(bot)
         self._configure_approval_store_transport()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
@@ -426,26 +406,9 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
 
-    async def _sync_event_cache_service(self, config: Config) -> None:
-        """Ensure the runtime has one initialized shared event-cache service."""
-        self._runtime_support = await sync_owned_runtime_support(
-            self._runtime_support,
-            cache_config=config.cache,
-            runtime_paths=self.runtime_paths,
-            logger=logger,
-            background_task_owner=self._event_cache_write_task_owner,
-            init_failure_reason_prefix="shared_runtime_init_failed",
-            log_db_path_change=True,
-        )
-        self._rebind_runtime_support_services()
-
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
         self._approval_transport.bind_approval_runtime()
-
-    async def _close_runtime_support_services(self) -> None:
-        """Close the shared runtime-owned cache services."""
-        await close_owned_runtime_support(self._runtime_support, logger=logger)
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -698,7 +661,6 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
         )
         ensure_default_agent_workspaces(config, self.storage_path)
-        await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
@@ -845,7 +807,7 @@ class _MultiAgentOrchestrator:
         )
         bot.orchestrator = self
         bot.hook_registry = self.hook_registry
-        self._bind_runtime_support_services(bot)
+        self._bind_response_admission_gate(bot)
         self.agent_bots[entity_name] = bot
         return bot
 
@@ -1035,7 +997,6 @@ class _MultiAgentOrchestrator:
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
-        await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
         for entity_name in entity_names:
             self._create_managed_bot(entity_name, config, entity_users[entity_name])
@@ -1604,7 +1565,6 @@ class _MultiAgentOrchestrator:
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
-            await self._sync_event_cache_service(new_config)
             logger.info(
                 "updating_config_authorization",
                 authorized_user_ids=new_config.authorization.global_users,
@@ -1948,7 +1908,6 @@ class _MultiAgentOrchestrator:
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
-        await self._close_runtime_support_services()
         logger.info("All agent bots stopped")
 
 

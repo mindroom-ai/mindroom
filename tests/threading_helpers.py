@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
-import mindroom.matrix.cache as matrix_cache
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
@@ -28,48 +25,25 @@ from mindroom.event_journal import (
     SettlementOutcome,
     VisibleMessage,
 )
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-)
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.runtime_support import (
-    OwnedRuntimeSupport,
-    close_owned_runtime_support,
-    sync_owned_runtime_support,
-)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    make_event_cache_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
-    from typing import Any
+    from collections.abc import AsyncGenerator, Sequence
 
-    from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
-
-
-async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:
-    await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
 
 
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
@@ -382,38 +356,6 @@ def _relations_client(
     return client
 
 
-def _runtime_event_cache() -> AsyncMock:
-    """Return a cache-shaped async mock for runtime-state tests."""
-    return make_event_cache_mock()
-
-
-def _runtime_write_coordinator() -> EventCacheWriteCoordinator:
-    """Return one real coordinator for runtime-state tests."""
-    return EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=object(),
-    )
-
-
-def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, MagicMock]:
-    """Return concrete thread cache ops backed by one async-mock event cache."""
-    logger = MagicMock()
-    event_cache = MagicMock()
-    event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.APPENDED)
-    event_cache.disable = Mock()
-    event_cache.invalidate_room_threads = AsyncMock()
-    event_cache.invalidate_thread = AsyncMock()
-    event_cache.mark_room_threads_gap = AsyncMock()
-    event_cache.mark_thread_gap = AsyncMock()
-    event_cache.redact_event = AsyncMock(return_value=True)
-    runtime = MagicMock()
-    runtime.event_cache = event_cache
-    runtime.event_cache_write_coordinator = _runtime_write_coordinator()
-    runtime.runtime_started_at = 1234567890.0
-    return ThreadMutationCacheOps(logger_getter=lambda: logger, runtime=runtime), logger, event_cache
-
-
 def _message_mutation_event_info(*, original_event_id: str = "$target:localhost") -> EventInfo:
     """Return one thread-affecting event info for direct mutation-helper tests."""
     return EventInfo.from_event(
@@ -427,15 +369,6 @@ def _message_mutation_event_info(*, original_event_id: str = "$target:localhost"
             },
         },
     )
-
-
-async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache:
-    """Close and reopen one SQLite cache against the same database file."""
-    db_path = event_cache.db_path
-    await event_cache.close()
-    reopened_cache = SqliteEventCache(db_path)
-    await reopened_cache.initialize()
-    return reopened_cache
 
 
 class EmptyProjection:
@@ -453,13 +386,8 @@ class EmptyProjection:
         return None
 
 
-def _conversation_runtime(
-    *,
-    client: nio.AsyncClient | None = None,
-    event_cache: SqliteEventCache | None = None,
-    coordinator: EventCacheWriteCoordinator | None = None,
-) -> BotRuntimeState:
-    """Build one minimal live runtime state for conversation-cache tests."""
+def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntimeState:
+    """Build one minimal live runtime state for conversation-read tests."""
     config = _conversation_runtime_config()
     return BotRuntimeState(
         client=client,
@@ -467,188 +395,16 @@ def _conversation_runtime(
         runtime_paths=runtime_paths_for(config),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=event_cache or _runtime_event_cache(),
-        event_cache_write_coordinator=coordinator or _runtime_write_coordinator(),
     )
 
 
 def _conversation_runtime_config() -> Config:
-    """Return one runtime-bound config for conversation-cache tests."""
+    """Return one runtime-bound config for conversation-read tests."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp(prefix="mindroom-threading-runtime-")))
     return bind_runtime_paths(
         Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
         runtime_paths,
     )
-
-
-async def _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(  # noqa: PLR0915
-    tmp_path: Path,
-    *,
-    read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],
-    force_refetch_reason: str,
-    expected_full_history: bool,
-) -> None:
-    """Assert a gap raised mid-fetch survives the replacement that fetch installs.
-
-    An UNKNOWN live mutation arriving while a thread fetch is in flight marks a room-scoped gap the
-    fetch cannot have seen. The read still returns its homeserver history, but the replacement must
-    not clear that gap, so the *next* read refetches. This is the detect-and-refetch half of the
-    gap-marker contract: correctness comes from the surviving marker, not from retrying in-read.
-    """
-    room_id = "!test:localhost"
-    thread_id = "$thread:localhost"
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    root_event = _text_event(
-        event_id=thread_id,
-        body="Root",
-        sender="@user:localhost",
-        server_timestamp=1000,
-        room_id=room_id,
-    )
-    old_reply = _text_event(
-        event_id="$reply-old:localhost",
-        body="Old reply",
-        sender="@agent:localhost",
-        server_timestamp=2000,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    coordinator = _runtime_write_coordinator()
-    client = _relations_client(
-        root_event=root_event,
-        thread_events=[old_reply],
-        next_batch="s_initial",
-    )
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [root_event.source, old_reply.source],
-    )
-    await event_cache.mark_thread_gap(room_id, thread_id, reason=force_refetch_reason)
-    room_messages_response = client.room_messages.return_value
-    fetch_started = asyncio.Event()
-    release_fetch = asyncio.Event()
-    room_invalidation_finished = asyncio.Event()
-    thread_result: ThreadHistoryResult | None = None
-    thread_gap: ThreadCacheGap | None = None
-    live_task: asyncio.Task[None] | None = None
-
-    async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-        fetch_started.set()
-        await release_fetch.wait()
-        return room_messages_response
-
-    client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-    access = MatrixConversationCache(
-        logger=MagicMock(),
-        runtime=_conversation_runtime(
-            client=client,
-            event_cache=event_cache,
-            coordinator=coordinator,
-        ),
-        store=EmptyProjection(),
-    )
-    real_mark_room_threads_gap = event_cache.mark_room_threads_gap
-
-    async def mark_room_threads_gap(room_id_arg: str, *, reason: str) -> None:
-        assert room_id_arg == room_id
-        assert reason == "live_thread_lookup_unavailable"
-        await real_mark_room_threads_gap(room_id_arg, reason=reason)
-        room_invalidation_finished.set()
-
-    async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
-        return MutationThreadImpact.unknown()
-
-    event_cache.mark_room_threads_gap = AsyncMock(side_effect=mark_room_threads_gap)
-    access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
-    unknown_event = _text_event(
-        event_id="$unknown-edit:localhost",
-        body="* Updated",
-        sender="@agent:localhost",
-        server_timestamp=3000,
-        room_id=room_id,
-        replacement_of="$missing:localhost",
-        new_body="Updated",
-    )
-    read_task = asyncio.create_task(read_thread(access, room_id, thread_id))
-
-    try:
-        await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-        live_task = asyncio.create_task(
-            access.append_live_event(
-                room_id,
-                unknown_event,
-                event_info=EventInfo.from_event(unknown_event.source),
-            ),
-        )
-        await asyncio.wait_for(room_invalidation_finished.wait(), timeout=1.0)
-
-        release_fetch.set()
-        thread_result = await asyncio.wait_for(read_task, timeout=1.0)
-        await asyncio.wait_for(live_task, timeout=1.0)
-        await _wait_for_room_cache_idle(coordinator)
-        thread_gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
-    finally:
-        release_fetch.set()
-        await asyncio.wait_for(
-            asyncio.gather(
-                read_task,
-                *(task for task in [live_task] if task is not None),
-                return_exceptions=True,
-            ),
-            timeout=1.0,
-        )
-        await _wait_for_room_cache_idle(coordinator)
-        await event_cache.close()
-
-    assert thread_result is not None
-    assert thread_result.is_full_history is expected_full_history
-    assert thread_result.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-    assert [message.body for message in thread_result] == ["Root", "Old reply"]
-    # The racing gap was raised after the fetch started, so the replacement that fetch installed
-    # does not cover it. The marker survives and the next read refetches.
-    assert thread_gap is not None
-    assert thread_gap.gap_reason == "live_thread_lookup_unavailable"
-    assert matrix_cache.thread_cache_rejection_reason(thread_gap) == "live_thread_lookup_unavailable"
-    # One fetch, not two: the read no longer retries in-place to re-establish trust.
-    assert client.room_messages.await_count == 1
-
-
-def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:
-    """Attach one explicit runtime write coordinator to a bot test double."""
-    coordinator = EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=bot._runtime_view,
-    )
-    bot.event_cache_write_coordinator = coordinator
-    return coordinator
-
-
-async def _bind_owned_runtime_support(
-    bot: AgentBot,
-    *,
-    db_path: Path | None = None,
-) -> OwnedRuntimeSupport:
-    """Build one real injected runtime-support bundle for a bot test."""
-    support = await sync_owned_runtime_support(
-        None,
-        db_path=bot.config.cache.resolve_db_path(bot.runtime_paths) if db_path is None else db_path,
-        logger=bot.logger,
-        background_task_owner=bot._runtime_view,
-        init_failure_reason_prefix="test_runtime_init_failed",
-        log_db_path_change=False,
-    )
-    bot.event_cache = support.event_cache
-    bot.event_cache_write_coordinator = support.event_cache_write_coordinator
-    bot._runtime_view.mark_runtime_started()
-    return support
-
-
-async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSupport) -> None:
-    """Close one test-owned runtime-support bundle."""
-    await close_owned_runtime_support(support, logger=bot.logger)
 
 
 def _save_certified_sync_token(
@@ -657,14 +413,14 @@ def _save_certified_sync_token(
 ) -> None:
     """Persist one certified sync token for bot lifecycle tests.
 
-    Certified by the event journal, not the event cache: the token has to name
-    the store that consumed the events it covers, and that is the journal now.
+    Certified by the event journal: the token has to name the store that
+    consumed the events it covers.
     """
     save_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        cache_generation=bot._sync_cache_trust.store_generation,
+        store_generation=bot._sync_checkpoint_trust.store_generation,
     )
 
 
@@ -711,12 +467,10 @@ class ThreadingBehaviorTestBase:
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
         # Sync checkpoints are certified by the event journal. Pinned so a test
         # that saves one and restarts exercises the token logic rather than the
         # first-open mint, which would rightly reject it.
-        bot._sync_cache_trust.store_generation = "test-cache-generation"
+        bot._sync_checkpoint_trust.store_generation = "test-store-generation"
 
         # Initialize components that depend on client
 

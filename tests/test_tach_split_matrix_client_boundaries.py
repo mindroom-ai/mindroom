@@ -53,7 +53,7 @@ BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.conversation_cache",
-    "mindroom.matrix.thread_bookkeeping",
+    "mindroom.matrix.thread_mutation_impact",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",

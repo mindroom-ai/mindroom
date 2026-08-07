@@ -105,7 +105,6 @@ class JournalDispatcher:
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
     _turn_replay_released: bool = field(default=False, init=False, repr=False)
-    background_task_owner: object | None = None
     _worker: PendingEventWorker = field(init=False, repr=False)
     _ingress: JournalIngress = field(init=False, repr=False)
     # The event objects nio already parsed, kept until their callback runs.

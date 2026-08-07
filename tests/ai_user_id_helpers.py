@@ -53,7 +53,6 @@ from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     make_outbox_mock,
     make_relation_lookup,
     request_envelope,
@@ -344,7 +343,6 @@ def _build_response_runner(
         return_value=thread_history_result([], is_full_history=True),
     )
     bot._conversation_resolver.deps = SimpleNamespace(
-        conversation_cache=SimpleNamespace(),
         conversation_reader=make_conversation_reader_mock(),
         relations=make_relation_lookup(),
     )
@@ -396,7 +394,6 @@ def _build_response_runner(
         config=config,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
-        event_cache=make_event_cache_mock(),
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
     )
@@ -454,7 +451,6 @@ def _build_response_runner(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
-        conversation_cache=bot._conversation_resolver.deps.conversation_cache,
         conversation_reader=make_conversation_reader_mock(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
@@ -544,7 +540,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             logger=support.logger,
             runtime_paths=support.runtime_paths,
             delivery_gateway=support.delivery_gateway,
-            conversation_cache=support.conversation_cache,
             conversation_reader=support.conversation_reader,
         ),
     )

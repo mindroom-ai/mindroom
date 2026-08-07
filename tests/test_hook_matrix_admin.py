@@ -27,7 +27,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -332,7 +332,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         runtime_paths=runtime_paths,
         rooms=[],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     left_room_ids: list[str] = []
 

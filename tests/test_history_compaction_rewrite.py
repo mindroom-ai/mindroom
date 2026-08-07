@@ -59,7 +59,6 @@ from mindroom.token_budget import estimate_compaction_input_tokens, estimate_tex
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     FakeModel,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
@@ -1080,7 +1079,6 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         hook_registry=registry,

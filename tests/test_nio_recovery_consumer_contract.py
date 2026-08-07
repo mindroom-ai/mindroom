@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, cast, get_type_hints
+from dataclasses import fields
+from typing import TYPE_CHECKING, get_type_hints
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
+from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
@@ -20,40 +20,18 @@ from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.bot_runtime_view import BotRuntimeView
 
-_CACHE_GENERATION = "nio-recovery-contract"
+_STORE_GENERATION = "nio-recovery-contract"
 _RECOVERED_ROOM = "!recovered:localhost"
 _UNRECOVERED_ROOM = "!unrecovered:localhost"
 
 
-@dataclass
-class _EventCache:
-    cache_generation: str = _CACHE_GENERATION
-
-    async def initialize(self) -> None:
-        """Match the production cache startup contract."""
-
-    async def purge_principal(self) -> None:
-        """Match cold-start principal cleanup."""
-
-    def disable(self, _reason: str) -> None:
-        """Match the production cache disable contract."""
-
-
-@dataclass
-class _Runtime:
-    event_cache: _EventCache
-
-
-def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCacheTrust:
-    runtime = _Runtime(event_cache=_EventCache())
-    return SyncCacheTrust(
+def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCheckpointTrust:
+    return SyncCheckpointTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
-        runtime=cast("BotRuntimeView", runtime),
         logger=get_logger(),
         state=state,
-        store_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
 
 
@@ -118,7 +96,7 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
         tmp_path,
         "code",
         "s_committed",
-        cache_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
     trust = _trust(tmp_path, state=SyncTrustState.PENDING)
     client.next_batch = await trust.prepare_startup() or ""
@@ -178,7 +156,7 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
     assert certified.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_replayed",
-        cache_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
 
 
@@ -477,7 +455,7 @@ async def test_restored_token_recovered_only_first_sync_certifies_after_callback
         tmp_path,
         "code",
         "s_before",
-        cache_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
     trust = _trust(tmp_path, state=SyncTrustState.PENDING)
 
@@ -502,7 +480,7 @@ async def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(
     )
     recovery = _recovery(response, admission_refused=True)
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
-    save_sync_token(tmp_path, "code", "s_before", cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", "s_before", store_generation=_STORE_GENERATION)
 
     decision = await certify_response(
         trust,
@@ -515,7 +493,7 @@ async def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(
     assert decision.reset_client_token is True
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_before",
-        cache_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
 
 

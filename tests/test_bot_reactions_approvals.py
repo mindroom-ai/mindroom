@@ -37,7 +37,6 @@ from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
-    _install_runtime_cache_support,
     _start_live_approval,
     make_mock_agent_user,
 )
@@ -186,7 +185,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        _install_runtime_cache_support(bot)
         bot.client.room_get_event = AsyncMock(
             side_effect=[
                 nio.RoomGetEventResponse.from_dict(
@@ -1833,7 +1831,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         bot.client.room_get_event = AsyncMock(
             return_value=nio.RoomGetEventResponse.from_dict(
                 {
@@ -1931,7 +1928,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None

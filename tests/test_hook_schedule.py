@@ -27,7 +27,6 @@ from mindroom.scheduling_executor import execute_scheduled_workflow, set_schedul
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -206,7 +205,6 @@ async def test_one_time_task_cancel_log_includes_workflow_thread_context(
                 workflow,
                 config,
                 runtime_paths_for(config),
-                make_event_cache_mock(),
                 _conversation_reader(),
             ),
         )

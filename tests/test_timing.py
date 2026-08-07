@@ -22,7 +22,6 @@ from mindroom.timing import (
     emit_timing_event,
     timed,
     timed_block,
-    timing_enabled,
     timing_scope,
 )
 
@@ -312,15 +311,6 @@ def test_emit_timing_event_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
         ok=True,
         timing_scope="scope-123",
     )
-
-
-def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The public timing-enabled helper should mirror the environment switch."""
-    monkeypatch.delenv("MINDROOM_TIMING", raising=False)
-    assert timing_enabled() is False
-
-    monkeypatch.setenv("MINDROOM_TIMING", "1")
-    assert timing_enabled() is True
 
 
 def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:

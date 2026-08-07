@@ -43,8 +43,6 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     turn_store = MagicMock()
     turn_store.is_handled.return_value = False

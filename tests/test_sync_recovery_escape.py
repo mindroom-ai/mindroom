@@ -9,15 +9,15 @@ stuck, so a recovery that is merely slow is never cut short.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import nio
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
+from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_recovery_escape import (
     _CLASSIC_SYNC_RECOVERY_STALL_LIMIT,
@@ -29,9 +29,8 @@ from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.bot_runtime_view import BotRuntimeView
 
-_CACHE_GENERATION = "sync-recovery-escape"
+_STORE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
 _HEALTHY_ROOM = "!healthy:localhost"
 _SKIP_LOG_EVENT = "matrix_sync_recovery_gap_skipped_after_stalled_rebuild"
@@ -40,36 +39,13 @@ _SKIPPED_TO = "s_live_now"
 _REPLAYED = "s_live_replayed"
 
 
-class _EventCache:
-    """Match the production cache startup contract used by cache trust."""
-
-    cache_generation: str = _CACHE_GENERATION
-
-    async def initialize(self) -> None:
-        """Match the production cache startup contract."""
-
-    async def purge_principal(self) -> None:
-        """Match cold-start principal cleanup."""
-
-    def disable(self, _reason: str) -> None:
-        """Match the production cache disable contract."""
-
-
-class _Runtime:
-    """Minimal runtime view exposing only the event cache trust needs."""
-
-    def __init__(self) -> None:
-        self.event_cache = _EventCache()
-
-
-def _trust(tmp_path: Path) -> SyncCacheTrust:
-    """Build one principal's real cache trust over a temporary continuity store."""
-    return SyncCacheTrust(
+def _trust(tmp_path: Path) -> SyncCheckpointTrust:
+    """Build one principal's real checkpoint trust over a temporary continuity store."""
+    return SyncCheckpointTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
-        runtime=cast("BotRuntimeView", _Runtime()),
         logger=get_logger(),
         state=SyncTrustState.PENDING,
-        store_generation=_CACHE_GENERATION,
+        store_generation=_STORE_GENERATION,
     )
 
 
@@ -100,7 +76,7 @@ def _recovery(
 
 
 async def _certify_unrecovered(
-    trust: SyncCacheTrust,
+    trust: SyncCheckpointTrust,
     *,
     next_batch: str,
     unrecovered_room_ids: frozenset[str],
@@ -200,7 +176,7 @@ def test_a_skipped_room_earns_a_full_fresh_count() -> None:
 @pytest.mark.asyncio
 async def test_an_unconvergent_rebuild_escapes_and_certifies_forward(tmp_path: Path) -> None:
     """Repeated failures from one checkpoint stop rewinding and move the cursor on."""
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
 
@@ -231,7 +207,7 @@ async def test_a_permanently_wedged_room_keeps_advancing_the_watermark(tmp_path:
     this drives many rounds and asserts the durable token advanced every time,
     by value, rather than that any single response was certified.
     """
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
 
@@ -260,7 +236,7 @@ async def test_a_permanently_wedged_room_keeps_advancing_the_watermark(tmp_path:
 @pytest.mark.asyncio
 async def test_a_checkpoint_that_advances_between_failures_never_escapes(tmp_path: Path) -> None:
     """A rebuild whose checkpoint keeps moving is progress and must never skip history."""
-    save_sync_token(tmp_path, "code", "s_start", cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", "s_start", store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == "s_start"
 
@@ -289,7 +265,7 @@ async def test_a_checkpoint_that_advances_between_failures_never_escapes(tmp_pat
 @pytest.mark.asyncio
 async def test_a_wedged_room_does_not_make_a_healthy_room_skip(tmp_path: Path) -> None:
     """The escape names only the room that stalled, never one that just failed once."""
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
     for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
@@ -321,7 +297,7 @@ async def test_a_wedged_room_does_not_make_a_healthy_room_skip(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_the_escape_logs_the_room_and_the_range_it_skipped(tmp_path: Path) -> None:
     """A silent skip is worse than the livelock, so the loss must reach operators."""
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
     for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
@@ -350,7 +326,7 @@ async def test_the_escape_logs_the_room_and_the_range_it_skipped(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_a_single_transient_failure_still_recovers_without_skipping(tmp_path: Path) -> None:
     """One unrecovered response replays and certifies normally, losing nothing."""
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
 
@@ -386,7 +362,7 @@ async def test_a_refused_admission_never_counts_toward_a_skip(
     would be invisible until a later genuine failure escaped several attempts
     early.
     """
-    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
     trust = _trust(tmp_path)
     assert await trust.prepare_startup() == _STUCK
 

@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
@@ -52,7 +51,6 @@ class CommandTurnExecutorDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     normalizer: InboundTurnNormalizer
-    conversation_cache: MatrixConversationCache
     conversation_reader: ConversationReader
     turn_policy: TurnPolicy
     turn_store: TurnStore
@@ -146,7 +144,6 @@ class CommandTurnExecutor:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
-            conversation_cache=self.deps.conversation_cache,
             conversation_reader=self.deps.conversation_reader,
             matrix_admin=self._matrix_admin(),
             stable_target=target,

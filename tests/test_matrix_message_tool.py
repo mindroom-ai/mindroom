@@ -35,7 +35,6 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_matrix_client_mock,
@@ -105,7 +104,6 @@ def _make_context(
     client.room_get_event_relations = MagicMock(
         side_effect=lambda *_args, **_kwargs: _empty_async_iterator(),
     )
-    conversation_cache = make_conversation_cache_mock()
     conversation_reader = make_conversation_reader_mock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     return ToolRuntimeContext(
@@ -124,7 +122,6 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=conversation_cache,
         relations=make_relation_lookup(),
         conversation_reader=conversation_reader,
         room=None,

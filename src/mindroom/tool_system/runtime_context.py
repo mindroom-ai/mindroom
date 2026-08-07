@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
@@ -71,7 +70,6 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
-    conversation_cache: ConversationCacheProtocol
     conversation_reader: ConversationReader
     relations: RelationLookup
     transport_agent_name: str | None = None
@@ -237,7 +235,6 @@ class ToolRuntimeSupport:
             client=client,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
-            conversation_cache=self.resolver.deps.conversation_cache,
             conversation_reader=self.resolver.deps.conversation_reader,
             relations=self.resolver.deps.relations,
             transport_agent_name=self.agent_name,

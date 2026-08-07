@@ -249,14 +249,11 @@ def measure_source_size(report: Report) -> None:
         "src/mindroom/response_delivery.py",
     )
     replaced = lines(
-        "src/mindroom/matrix/cache",
         "src/mindroom/dispatch_obligations",
         "src/mindroom/dispatch_admission.py",
         "src/mindroom/cold_history_fence.py",
         "src/mindroom/turn_settlement_retry.py",
-        "src/mindroom/matrix/client_thread_history.py",
-        "src/mindroom/matrix/conversation_cache.py",
-        "src/mindroom/matrix/sync_cache_trust.py",
+        "src/mindroom/matrix/sync_checkpoint_trust.py",
     )
     report.record("replacement_source_lines", replacement)
     report.record("replaced_owner_source_lines", replaced)

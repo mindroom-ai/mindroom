@@ -13,7 +13,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.cache.event_cache_events import event_mxc_urls
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
@@ -74,8 +73,8 @@ def _make_client() -> AsyncMock:
 class TestResolvedMessageExtraction:
     """Tests for coherent visible message extraction."""
 
-    def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
-        """Hydration and reference tracking must choose the same valid MXC URL."""
+    def test_sidecar_url_validation_prefers_the_encrypted_file_url(self) -> None:
+        """Hydration must pick the MXC URL, not the plain HTTP one beside it."""
         content = {
             "body": "Preview body",
             "msgtype": "m.file",
@@ -88,11 +87,10 @@ class TestResolvedMessageExtraction:
         }
 
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
-        assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
 
     @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
     def test_sidecar_url_validation_rejects_incomplete_mxc_uris(self, malformed_url: str) -> None:
-        """Incomplete content URIs must not enter hydration or ownership indexes."""
+        """Incomplete content URIs must not enter hydration."""
         metadata = {
             "version": 2,
             "encoding": "matrix_event_content_json",
@@ -108,8 +106,6 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
-        assert event_mxc_urls({"content": direct_content}) == frozenset()
-        assert event_mxc_urls({"content": encrypted_content}) == frozenset()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:

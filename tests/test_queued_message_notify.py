@@ -87,10 +87,8 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_conversation_reader_mock,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
@@ -160,7 +158,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -843,17 +841,13 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
     conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
         conversation_reader=conversation_reader,
     )
     deps = support.build_deps(
@@ -946,17 +940,13 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
     conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
         conversation_reader=conversation_reader,
     )
     deps = support.build_deps(

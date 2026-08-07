@@ -1,8 +1,9 @@
-"""Tests for the bulk thread-cache backfill scan."""
+"""Tests for the bulk thread backfill room scan."""
 
 from __future__ import annotations
 
 import inspect
+from typing import Any
 from unittest.mock import AsyncMock
 
 import nio
@@ -16,7 +17,16 @@ from mindroom.matrix.room_history_reads import (
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
-from tests.event_cache_test_support import raw_nio_event
+
+
+def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
+    """Return a typed nio event that preserves one exact raw source payload."""
+    event_type = event_source.get("type")
+    if not isinstance(event_type, str):
+        msg = "Test Matrix event is missing type"
+        raise TypeError(msg)
+    return nio.UnknownEvent(event_source, event_type)
+
 
 _ROOM_ID = "!room:localhost"
 

@@ -36,7 +36,6 @@ from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_envelope,
-    _install_runtime_cache_support,
     _matrix_room,
     _policy_dispatch,
     _runtime_bound_config,
@@ -1419,7 +1418,6 @@ class TestAgentBot(AgentBotTestBase):
             password=TEST_PASSWORD,
         )
         bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,

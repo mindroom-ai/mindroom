@@ -9,7 +9,7 @@ import sys
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
 import nio
@@ -86,10 +86,8 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    bind_mock_config_cache,
+    bind_mock_config_event_journal,
     bind_runtime_paths,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
     runtime_paths_for,
 )
@@ -1314,22 +1312,18 @@ class TestMultiAgentOrchestrator:
             "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
         }
         mock_config.teams = {}
-        cache_path = bind_mock_config_cache(mock_config, tmp_path)
+        bind_mock_config_event_journal(mock_config)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            try:
-                await orchestrator.initialize()
+            await orchestrator.initialize()
 
-                # Should have 3 bots: calculator, general, and router
-                assert len(orchestrator.agent_bots) == 3
-                assert "calculator" in orchestrator.agent_bots
-                assert "general" in orchestrator.agent_bots
-                assert "router" in orchestrator.agent_bots
-                assert orchestrator._runtime_support.event_cache.db_path == cache_path
-            finally:
-                await orchestrator._close_runtime_support_services()
+            # Should have 3 bots: calculator, general, and router
+            assert len(orchestrator.agent_bots) == 3
+            assert "calculator" in orchestrator.agent_bots
+            assert "general" in orchestrator.agent_bots
+            assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
     async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
@@ -1364,109 +1358,10 @@ class TestMultiAgentOrchestrator:
                     process_env={},
                 ),
             )
-            try:
-                await orchestrator.initialize()
-            finally:
-                await orchestrator._close_runtime_support_services()
+            await orchestrator.initialize()
 
         mock_load_config.assert_called_once()
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
-
-    @pytest.mark.asyncio
-    async def test_initialize_degrades_when_shared_event_cache_init_fails(self, tmp_path: Path) -> None:
-        """Initialize should keep starting bots when the shared event cache cannot open."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-
-        with (
-            patch("mindroom.orchestrator.load_config", return_value=config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
-            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch(
-                "mindroom.runtime_support.SqliteEventCache.initialize",
-                new=AsyncMock(side_effect=RuntimeError("boom")),
-            ),
-            patch.object(_MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
-        ):
-            await orchestrator.initialize()
-
-        assert orchestrator.config is config
-        assert mock_create_managed_bot.call_count == 2
-        assert orchestrator._runtime_support.event_cache.is_initialized is False
-
-    @pytest.mark.asyncio
-    async def test_sync_event_cache_service_uses_shared_runtime_support_sync(self, tmp_path: Path) -> None:
-        """Shared runtime cache lifecycle should route through the shared sync helper."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-        router_bot = _mock_managed_bot(config)
-        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
-        general_bot = _mock_managed_bot(config)
-        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
-        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
-        initial_support = orchestrator._runtime_support
-        shared_event_cache = make_event_cache_mock()
-        router_event_cache = make_event_cache_mock()
-        general_event_cache = make_event_cache_mock()
-        shared_event_cache.for_principal.side_effect = [router_event_cache, general_event_cache]
-        synced_support = SimpleNamespace(
-            event_cache=shared_event_cache,
-            event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
-        )
-
-        with patch(
-            "mindroom.orchestrator.sync_owned_runtime_support",
-            new=AsyncMock(return_value=synced_support),
-            create=True,
-        ) as sync_owned_runtime_support:
-            await orchestrator._sync_event_cache_service(config)
-
-        sync_owned_runtime_support.assert_awaited_once()
-        assert sync_owned_runtime_support.await_args.args == (initial_support,)
-        assert sync_owned_runtime_support.await_args.kwargs == {
-            "cache_config": config.cache,
-            "runtime_paths": orchestrator.runtime_paths,
-            "logger": ANY,
-            "background_task_owner": orchestrator._event_cache_write_task_owner,
-            "init_failure_reason_prefix": "shared_runtime_init_failed",
-            "log_db_path_change": True,
-        }
-        assert orchestrator._runtime_support is synced_support
-        assert router_bot.event_cache is router_event_cache
-        assert general_bot.event_cache is general_event_cache
-        assert shared_event_cache.for_principal.call_args_list == [
-            call("@mindroom_router:localhost"),
-            call("@mindroom_general:localhost"),
-        ]
-        assert router_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
-        assert general_bot.event_cache_write_coordinator is synced_support.event_cache_write_coordinator
 
     @pytest.mark.asyncio
     async def test_initialize_does_not_activate_hook_runtime_before_user_account_succeeds(
@@ -1519,36 +1414,33 @@ class TestMultiAgentOrchestrator:
         }
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_cache(mock_config, tmp_path)
+        bind_mock_config_event_journal(mock_config)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            try:
-                await orchestrator.initialize()  # Need to initialize first
+            await orchestrator.initialize()  # Need to initialize first
 
-                # Mock start for all bots to avoid actual login/setup
-                start_mocks = []
-                for bot in orchestrator.agent_bots.values():
-                    # Create a mock that tracks the call
-                    mock_start = AsyncMock()
-                    # Replace start with our mock
-                    bot.start = mock_start
-                    start_mocks.append(mock_start)
-                    bot.running = False
+            # Mock start for all bots to avoid actual login/setup
+            start_mocks = []
+            for bot in orchestrator.agent_bots.values():
+                # Create a mock that tracks the call
+                mock_start = AsyncMock()
+                # Replace start with our mock
+                bot.start = mock_start
+                start_mocks.append(mock_start)
+                bot.running = False
 
-                # Start the orchestrator but don't wait for sync_forever
-                start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
+            # Start the orchestrator but don't wait for sync_forever
+            start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
 
-                await asyncio.gather(*start_tasks)
-                orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
+            await asyncio.gather(*start_tasks)
+            orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
 
-                assert orchestrator.running
-                # Verify start was called for each bot
-                for mock_start in start_mocks:
-                    mock_start.assert_called_once()
-            finally:
-                await orchestrator._close_runtime_support_services()
+            assert orchestrator.running
+            # Verify start was called for each bot
+            for mock_start in start_mocks:
+                mock_start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_sets_up_rooms_before_auxiliary_workers(self, tmp_path: Path) -> None:
@@ -2615,7 +2507,6 @@ class TestMultiAgentOrchestrator:
         router_bot.running = True
         router_bot.client = router_client
         router_bot.approval_room_ids = frozenset({"!room:localhost"})
-        router_bot.event_cache = make_event_cache_mock()
         router_bot.stop = AsyncMock()
 
         code_bot = MagicMock()
@@ -2655,7 +2546,6 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
                 patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
                 patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock()),
-                patch.object(orchestrator, "_close_runtime_support_services", new=AsyncMock()),
             ):
                 stop_task = asyncio.create_task(orchestrator.stop())
                 await asyncio.sleep(0)
@@ -2978,7 +2868,6 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
                 return_value=set(),
             ),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
@@ -3109,7 +2998,6 @@ class TestMultiAgentOrchestrator:
                 patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
                 patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
                 patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -3139,7 +3027,6 @@ class TestMultiAgentOrchestrator:
                 with suppress(asyncio.CancelledError):
                     await task
             await _shutdown_approval_store()
-            await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_requesting_bot_room_reconcile_keeps_router_owned_approval_pending(  # noqa: PLR0915
@@ -3323,7 +3210,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
@@ -3613,7 +3499,6 @@ class TestMultiAgentOrchestrator:
                     new=AsyncMock(side_effect=mutate_plugin_after_prepare),
                 ),
                 patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             ):
@@ -3637,146 +3522,6 @@ class TestMultiAgentOrchestrator:
             for module_name in set(sys.modules) - original_modules:
                 if module_name.startswith("mindroom_plugin_"):
                     sys.modules.pop(module_name, None)
-
-    @pytest.mark.asyncio
-    async def test_update_config_initializes_shared_event_cache_for_unchanged_bots(self, tmp_path: Path) -> None:
-        """Cache service should initialize and bind when a test runtime skipped startup wiring."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-
-        old_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-        new_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-
-        orchestrator.config = old_config
-        orchestrator.running = True
-        router_bot = _mock_managed_bot(old_config)
-        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
-        general_bot = _mock_managed_bot(old_config)
-        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
-        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
-
-        with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
-        ):
-            try:
-                updated = await orchestrator.config_reload._update_config()
-                assert updated is False
-                assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
-                assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
-                assert router_bot.event_cache.db_path == orchestrator._runtime_support.event_cache.db_path
-                assert general_bot.event_cache.db_path == orchestrator._runtime_support.event_cache.db_path
-                assert (
-                    router_bot.event_cache_write_coordinator
-                    is orchestrator._runtime_support.event_cache_write_coordinator
-                )
-                assert (
-                    general_bot.event_cache_write_coordinator
-                    is orchestrator._runtime_support.event_cache_write_coordinator
-                )
-            finally:
-                await orchestrator._close_runtime_support_services()
-
-    @pytest.mark.asyncio
-    async def test_update_config_keeps_shared_event_cache_when_db_path_changes(self, tmp_path: Path) -> None:
-        """Hot reload should keep the active cache service and defer db_path changes to restart."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-
-        old_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-                cache={"db_path": "event-cache-old.db"},
-            ),
-            tmp_path,
-        )
-        new_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "test", "id": "test-model"}},
-                cache={"db_path": "event-cache-new.db"},
-            ),
-            tmp_path,
-        )
-
-        orchestrator.config = old_config
-        orchestrator.running = True
-        router_bot = _mock_managed_bot(old_config)
-        router_bot.matrix_id.full_id = "@mindroom_router:localhost"
-        general_bot = _mock_managed_bot(old_config)
-        general_bot.matrix_id.full_id = "@mindroom_general:localhost"
-        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
-        await orchestrator._sync_event_cache_service(old_config)
-        old_cache = orchestrator._runtime_support.event_cache
-        assert old_cache is not None
-
-        with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
-        ):
-            try:
-                updated = await orchestrator.config_reload._update_config()
-                assert updated is False
-                assert orchestrator._runtime_support.event_cache is old_cache
-                assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
-                assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
-                assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
-                assert router_bot.event_cache.db_path == old_cache.db_path
-                assert general_bot.event_cache.db_path == old_cache.db_path
-                assert orchestrator._runtime_support.event_cache_write_coordinator is not None
-                assert (
-                    router_bot.event_cache_write_coordinator
-                    is orchestrator._runtime_support.event_cache_write_coordinator
-                )
-                assert (
-                    general_bot.event_cache_write_coordinator
-                    is orchestrator._runtime_support.event_cache_write_coordinator
-                )
-            finally:
-                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:
@@ -3865,10 +3610,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            try:
-                updated = await orchestrator.config_reload._update_config()
-            finally:
-                await orchestrator._close_runtime_support_services()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
@@ -3962,10 +3704,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            try:
-                updated = await orchestrator.config_reload._update_config()
-            finally:
-                await orchestrator._close_runtime_support_services()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
@@ -3990,29 +3729,26 @@ class TestMultiAgentOrchestrator:
         }
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_cache(mock_config, tmp_path)
+        bind_mock_config_event_journal(mock_config)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            try:
-                await orchestrator.initialize()
+            await orchestrator.initialize()
 
-                # Mock the agent clients and ensure_user_account
-                for bot in orchestrator.agent_bots.values():
-                    bot.client = AsyncMock()
-                    bot.running = True
-                    bot.ensure_user_account = AsyncMock()
+            # Mock the agent clients and ensure_user_account
+            for bot in orchestrator.agent_bots.values():
+                bot.client = AsyncMock()
+                bot.running = True
+                bot.ensure_user_account = AsyncMock()
 
-                await orchestrator.stop()
+            await orchestrator.stop()
 
-                assert not orchestrator.running
-                for bot in orchestrator.agent_bots.values():
-                    assert not bot.running
-                    if bot.client is not None:
-                        bot.client.close.assert_called_once()
-            finally:
-                await orchestrator._close_runtime_support_services()
+            assert not orchestrator.running
+            for bot in orchestrator.agent_bots.values():
+                assert not bot.running
+                if bot.client is not None:
+                    bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
@@ -4033,17 +3769,14 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_config.defaults.enable_streaming = False
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
-        bind_mock_config_cache(mock_config, tmp_path)
+        bind_mock_config_event_journal(mock_config)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            try:
-                await orchestrator.initialize()
+            await orchestrator.initialize()
 
-                # All bots should have streaming disabled except teams (which never stream)
-                for bot in orchestrator.agent_bots.values():
-                    if hasattr(bot, "enable_streaming"):
-                        assert bot.enable_streaming is False
-            finally:
-                await orchestrator._close_runtime_support_services()
+            # All bots should have streaming disabled except teams (which never stream)
+            for bot in orchestrator.agent_bots.values():
+                if hasattr(bot, "enable_streaming"):
+                    assert bot.enable_streaming is False

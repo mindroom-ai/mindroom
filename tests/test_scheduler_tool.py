@@ -44,7 +44,6 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=MagicMock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),

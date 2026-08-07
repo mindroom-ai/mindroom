@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -74,7 +73,6 @@ from mindroom.visible_response_reconciliation import VisibleResponseReconciler, 
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     make_pending_turn_view,
@@ -85,7 +83,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
@@ -280,7 +278,6 @@ class _Harness:
     interrupted_turn_rooms: InterruptedTurnRooms
     gate: CoalescingGate
     gate_batches: list[CoalescedBatch]
-    conversation_cache: AsyncMock
     ignored_dispatch_sources: list[tuple[str, ...]]
     retried_dispatch_sources: list[tuple[str, ...]]
 
@@ -361,18 +358,8 @@ def _build_harness(
         runtime_paths=runtime_paths,
         enable_streaming=True,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
-    conversation_cache = make_conversation_cache_mock()
 
-    @asynccontextmanager
-    async def _turn_scope() -> AsyncIterator[None]:
-        yield
-
-    conversation_cache.turn_scope = _turn_scope
-    if thread_history is not None:
-        conversation_cache.get_dispatch_thread_history.return_value = thread_history
     resolver = ConversationResolver(
         ConversationResolverDeps(
             runtime=runtime,
@@ -380,7 +367,6 @@ def _build_harness(
             runtime_paths=runtime_paths,
             agent_name=agent_name,
             matrix_id=matrix_id,
-            conversation_cache=conversation_cache,
             relations=make_relation_lookup(),
             conversation_reader=_conversation_reader(thread_history),
         ),
@@ -477,7 +463,6 @@ def _build_harness(
             runtime_paths=runtime_paths,
             agent_name=agent_name,
             normalizer=normalizer,
-            conversation_cache=conversation_cache,
             conversation_reader=make_conversation_reader_mock(),
             turn_policy=cast("TurnPolicy", policy),
             turn_store=turn_store,
@@ -507,7 +492,6 @@ def _build_harness(
             runtime_paths=runtime_paths,
             agent_name=agent_name,
             matrix_id=matrix_id,
-            conversation_cache=conversation_cache,
             relations=make_relation_lookup(),
             pending_turns=make_pending_turn_view(),
             resolver=resolver,
@@ -547,7 +531,6 @@ def _build_harness(
         interrupted_turn_rooms=interrupted_turn_rooms,
         gate=gate,
         gate_batches=gate_batches,
-        conversation_cache=conversation_cache,
         ignored_dispatch_sources=ignored_dispatch_sources,
         retried_dispatch_sources=retried_dispatch_sources,
     )

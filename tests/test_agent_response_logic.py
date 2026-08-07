@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, THREAD_HISTORY_ERROR_DIAGNOSTIC
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
@@ -329,7 +329,6 @@ class TestAgentResponseLogic:
                 is_full_history=False,
                 diagnostics={
                     THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-                    THREAD_HISTORY_ERROR_DIAGNOSTIC: "dispatch_read_timeout",
                 },
             ),
             mentioned_agents=[],

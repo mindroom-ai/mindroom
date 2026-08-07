@@ -25,7 +25,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_ru
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -564,7 +563,6 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=make_conversation_cache_mock(),
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             correlation_id="corr-parent",
@@ -654,7 +652,6 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=make_conversation_cache_mock(),
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             active_model_name="default",

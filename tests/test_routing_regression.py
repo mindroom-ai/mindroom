@@ -46,7 +46,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
@@ -151,7 +151,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    return install_runtime_cache_support(bot)
+    return install_runtime_journal_support(bot)
 
 
 def _router_readiness_runtime(
@@ -619,10 +619,10 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-        router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
+        router_bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+        router_bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
+        assert router_bot._sync_checkpoint_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

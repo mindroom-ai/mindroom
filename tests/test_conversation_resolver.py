@@ -27,7 +27,6 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.relation_lookup import RelationLookup
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_matrix_client_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -155,7 +154,6 @@ def _resolver(
             runtime_paths=runtime_paths,
             agent_name="general",
             matrix_id=registry.current_id("general"),
-            conversation_cache=make_conversation_cache_mock(),
             relations=relations or make_relation_lookup(),
             conversation_reader=conversation_reader or _empty_conversation_reader(),
         ),
@@ -362,7 +360,7 @@ async def test_the_turn_scope_makes_one_turn_pay_for_one_lookup(config: Config) 
     client = _ClientCountingLookups()
     resolver = _resolver(config, relations=make_relation_lookup(client=client))
 
-    async with resolver.turn_thread_cache_scope():
+    async with resolver.turn_lookup_scope():
         await resolver.extract_dispatch_context(_room(), _reply_event())
         await resolver.extract_dispatch_context(_room(), _reply_event())
     scoped = client.lookups

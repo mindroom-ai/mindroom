@@ -29,11 +29,9 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
-from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.conversation_reads import ConversationReader, ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -52,9 +50,8 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     dispatch_context_result,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -100,7 +97,7 @@ def _agent_bot(
         runtime_paths=runtime_paths_for(config),
         rooms=[] if rooms is None else rooms,
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -122,7 +119,6 @@ def _matrix_room(
 
 def _install_static_logger_deps(bot: AgentBot, logger: MagicMock) -> None:
     """Rebuild extracted collaborators with one fixed logger dependency."""
-    bot._conversation_cache.logger = logger
     resolver = replace(
         unwrap_extracted_collaborator(bot._conversation_resolver),
         deps=replace(unwrap_extracted_collaborator(bot._conversation_resolver).deps, logger=logger),
@@ -620,7 +616,6 @@ class TestCreateSessionIdWithNoneThread:
             client=AsyncMock(),
             config=config,
             runtime_paths=runtime_paths_for(config),
-            conversation_cache=make_conversation_cache_mock(),
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
         )
@@ -1541,74 +1536,6 @@ class TestExtractedModuleLoggerRebinding:
         rebound_logger.error.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_conversation_state_writer_uses_rebound_bot_logger(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """State-writer cache warnings should keep the logger captured in its deps."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        original_logger = MagicMock()
-        rebound_logger = MagicMock()
-        _install_static_logger_deps(bot, original_logger)
-        bot.logger = original_logger
-        bot.logger = rebound_logger
-
-        event_cache = AsyncMock()
-        event_cache.apply_thread_mutation_append.side_effect = RuntimeError("cache write failed")
-        bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
-        )
-
-        event = nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event123",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "hello",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$threadroot",
-                        "is_falling_back": True,
-                    },
-                },
-            },
-        )
-
-        await bot._conversation_cache.append_live_event(
-            "!room:localhost",
-            event,
-            event_info=EventInfo.from_event(event.source),
-        )
-        await bot.event_cache_write_coordinator.close()
-
-        original_logger.warning.assert_any_call(
-            "Failed to append thread event to cache",
-            room_id="!room:localhost",
-            thread_id="$threadroot",
-            event_id="$event123",
-            context="live",
-            error="cache write failed",
-        )
-        # Background repair is gone, so the append failure is the only warning left to rebind.
-        assert original_logger.warning.call_count == 1
-        rebound_logger.warning.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_explicit_thread_id_inherits_known_thread_for_plain_reply_target(
         self,
         assistant_user: AgentMatrixUser,
@@ -1646,9 +1573,6 @@ class TestExtractedModuleLoggerRebinding:
             },
         )
 
-        bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
-            side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
-        )
         bot.client.room_get_event = AsyncMock(
             return_value=nio.RoomGetEventResponse.from_dict(
                 {

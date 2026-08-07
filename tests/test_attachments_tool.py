@@ -56,7 +56,6 @@ def _tool_context(
         ),
         runtime_paths,
     )
-    conversation_cache = AsyncMock()
     conversation_reader = AsyncMock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     return ToolRuntimeContext(
@@ -70,7 +69,6 @@ def _tool_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
         relations=make_relation_lookup(),
         conversation_reader=conversation_reader,
         storage_path=tmp_path,

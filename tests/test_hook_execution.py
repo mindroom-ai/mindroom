@@ -39,7 +39,6 @@ from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_relation_lookup,
     message_origin,
@@ -564,7 +563,6 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         hook_registry=registry,

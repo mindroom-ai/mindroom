@@ -33,7 +33,7 @@ from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_N
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -77,7 +77,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True
     bot.orchestrator = None
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )

@@ -35,7 +35,6 @@ from mindroom.scheduling_executor import execute_scheduled_workflow, send_schedu
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -58,10 +57,6 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
     reader = AsyncMock()
     reader.latest_thread_event_id = AsyncMock(return_value=latest_thread_event_id)
     return reader
-
-
-def _event_cache() -> AsyncMock:
-    return make_event_cache_mock()
 
 
 def test_existing_task_parse_context_serializes_authoritative_state() -> None:

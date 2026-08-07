@@ -26,11 +26,9 @@ from tests.conftest import (
 )
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _install_runtime_write_coordinator,
     _make_client_mock,
     _matrix_room,
     _runtime_bound_config,
-    _runtime_event_cache,
     seed_hydrated_conversation,
     thread_history_result,
 )
@@ -76,9 +74,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize the bot (to set up components it needs)
 
@@ -153,9 +149,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking
 
@@ -223,8 +217,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         # Initialize components that depend on client
 
@@ -330,8 +322,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         # Initialize components that depend on client
 
@@ -436,8 +426,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -511,8 +499,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         room = _matrix_room(name="Test Room")
 
@@ -614,9 +600,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking
 

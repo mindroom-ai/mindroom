@@ -25,10 +25,10 @@ from mindroom.teams import TeamMode
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
-    bind_mock_config_cache,
+    bind_mock_config_event_journal,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     patch_response_runner_module,
     runtime_paths_for,
@@ -122,7 +122,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.running = True
 
         # Create a message mentioning the calculator agent
@@ -225,7 +225,7 @@ async def test_agent_ignores_other_agents(
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         await bot.start()
 
         # Create a message from another agent
@@ -305,7 +305,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             rooms=[test_room_id],
             enable_streaming=False,
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -572,7 +572,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
         }
         mock_config.teams = {}
-        cache_path = bind_mock_config_cache(mock_config, tmp_path)
+        bind_mock_config_event_journal(mock_config)
         mock_from_yaml.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
@@ -585,7 +585,6 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
                 assert "calculator" in orchestrator.agent_bots
                 assert "general" in orchestrator.agent_bots
                 assert "router" in orchestrator.agent_bots
-                assert orchestrator._runtime_support.event_cache.db_path == cache_path
 
                 # Test that agents can be started
                 with (
@@ -628,7 +627,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[initial_room])
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         await bot.start()
 
         # Create invite event for a different room

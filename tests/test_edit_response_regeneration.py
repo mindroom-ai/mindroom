@@ -55,7 +55,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     patch_response_runner_module,
     replace_edit_regenerator_deps,
@@ -4029,7 +4029,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner", "_turn_policy")

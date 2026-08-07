@@ -1,6 +1,6 @@
 """Replay concurrent Matrix mutations against disposable Tuwunel and MindRoom.
 
-Unlike ``fuzz_matrix_event_cache.py``, this runner crosses the real Matrix
+Unlike the in-process fuzzers, this runner crosses the real Matrix
 transport and the complete MindRoom sync/dispatch/cache path. It starts an
 isolated Tuwunel, a deterministic OpenAI-compatible stub, and the current
 worktree's MindRoom process. Every run uses disposable Matrix accounts and
@@ -1426,33 +1426,34 @@ class ManagedTuwunelStack:
         staged_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
         staged_path.replace(self.config_path)
 
-    def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
-        """Count exact principal/event pairs cached for the restart room."""
-        row = self._event_cache_row(
-            "SELECT COUNT(*) FROM events WHERE principal_id IN (?, ?) AND room_id = ? AND event_id IN (?, ?)",
-            (self.agent_id, self.router_id, room_id, *event_ids),
+    def projected_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+        """Count exact principal/event pairs the journal projected for the restart room."""
+        rows = self._journal_query(
+            """
+            SELECT COUNT(*) FROM visible_messages
+            WHERE principal_id IN (?, ?) AND room_id = ? AND logical_event_id IN (?, ?)
+            """,
+            (
+                self._journal_principal_id(self.agent_id),
+                self._journal_principal_id(self.router_id, agent_name=ROUTER_NAME),
+                room_id,
+                *event_ids,
+            ),
         )
-        return cast("int", row[0]) if row is not None else 0
+        return cast("int", rows[0][0]) if rows else 0
 
-    def _restart_event_cached_for_agent(self, room_id: str, event_id: str) -> bool:
-        """Return whether the managed agent durably cached one exact event."""
-        row = self._event_cache_row(
-            "SELECT 1 FROM events WHERE principal_id = ? AND room_id = ? AND event_id = ?",
-            (self.agent_id, room_id, event_id),
+    def _restart_event_projected_for_agent(self, room_id: str, event_id: str) -> bool:
+        """Return whether the managed agent durably projected one exact event."""
+        rows = self._journal_query(
+            "SELECT 1 FROM visible_messages WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?",
+            (self._journal_principal_id(self.agent_id), room_id, event_id),
         )
-        return row is not None
+        return bool(rows)
 
-    def _event_cache_row(
-        self,
-        query: str,
-        parameters: tuple[object, ...],
-    ) -> tuple[object, ...] | None:
-        """Read one row from the managed runtime event cache if it exists."""
-        database_path = self.storage_path / "event_cache.db"
-        if not database_path.is_file():
-            return None
-        with closing(sqlite3.connect(database_path)) as database:
-            return cast("tuple[object, ...] | None", database.execute(query, parameters).fetchone())
+    @staticmethod
+    def _journal_principal_id(matrix_id: str, *, agent_name: str = AGENT_NAME) -> str:
+        """Return the journal's composite principal identity for one managed bot."""
+        return f"{agent_name}@{matrix_id}"
 
     def _restart_sync_checkpoint_token(self) -> str | None:
         """Read the managed agent's exact durable Classic sync token."""
@@ -1465,19 +1466,19 @@ class ManagedTuwunelStack:
         return token if isinstance(token, str) and token else None
 
     def wait_for_restart_event_checkpoint(self, room_id: str, event_id: str, *, timeout: float) -> bool:
-        """Wait for a checkpoint strictly later than durable caching of one event."""
+        """Wait for a checkpoint strictly later than durable projection of one event."""
         deadline = time.monotonic() + timeout
-        event_cached = _wait_until(
-            lambda: self._restart_event_cached_for_agent(room_id, event_id),
+        event_projected = _wait_until(
+            lambda: self._restart_event_projected_for_agent(room_id, event_id),
             timeout=max(deadline - time.monotonic(), 0),
         )
-        if not event_cached:
+        if not event_projected:
             return False
-        checkpoint_at_cache_observation = self._restart_sync_checkpoint_token()
+        checkpoint_at_projection_observation = self._restart_sync_checkpoint_token()
         return _wait_until(
             lambda: (
                 (current := self._restart_sync_checkpoint_token()) is not None
-                and current != checkpoint_at_cache_observation
+                and current != checkpoint_at_projection_observation
             ),
             timeout=max(deadline - time.monotonic(), 0),
         )
@@ -1612,7 +1613,7 @@ class ManagedTuwunelStack:
             timeout=timeout,
         )
 
-    def wait_for_cached_restart_event_pairs(
+    def wait_for_projected_restart_event_pairs(
         self,
         room_id: str,
         event_ids: tuple[str, str],
@@ -1620,9 +1621,9 @@ class ManagedTuwunelStack:
         minimum: int,
         timeout: float,
     ) -> bool:
-        """Wait until both replacement principals durably cache historical events."""
+        """Wait until both replacement principals durably project historical events."""
         return _wait_until(
-            lambda: self.cached_restart_event_pair_count(room_id, event_ids) >= minimum,
+            lambda: self.projected_restart_event_pair_count(room_id, event_ids) >= minimum,
             timeout=timeout,
         )
 
@@ -2252,13 +2253,13 @@ class LiveFuzzRunner:
         )
         historical_event_ids = (historical_text, historical_media)
         historical_cache_ready = await asyncio.to_thread(
-            self.stack.wait_for_cached_restart_event_pairs,
+            self.stack.wait_for_projected_restart_event_pairs,
             dormant.room_id,
             historical_event_ids,
             minimum=4,
             timeout=self.reply_timeout,
         )
-        historical_event_pair_count = self.stack.cached_restart_event_pair_count(
+        historical_event_pair_count = self.stack.projected_restart_event_pair_count(
             dormant.room_id,
             historical_event_ids,
         )
@@ -2422,7 +2423,7 @@ class LiveFuzzRunner:
                 f"event_id={historical_media_id}",
             ),
         )
-        cached_event_pair_count = self.stack.cached_restart_event_pair_count(
+        cached_event_pair_count = self.stack.projected_restart_event_pair_count(
             dormant.room_id,
             historical_event_ids,
         )

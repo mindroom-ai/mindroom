@@ -25,7 +25,7 @@ def is_opaque_encrypted_event_source(event_source: Mapping[str, Any]) -> bool:
     return event_source.get("type") == _OPAQUE_ENCRYPTED_EVENT_TYPE
 
 
-def normalize_event_source_for_cache(
+def _normalize_event_source(
     event_source: Mapping[str, Any],
     *,
     event_id: str | None = None,
@@ -55,7 +55,7 @@ def normalize_nio_event_for_cache(
     """Normalize one nio event for persistent cache storage."""
     event_source = event.source if isinstance(event.source, dict) else {}
     server_timestamp = event.server_timestamp
-    return normalize_event_source_for_cache(
+    return _normalize_event_source(
         event_source,
         event_id=event.event_id if isinstance(event.event_id, str) else event_id,
         sender=event.sender if isinstance(event.sender, str) else None,

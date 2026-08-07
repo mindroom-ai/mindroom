@@ -16,7 +16,7 @@ from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import send_room_event_result
-from mindroom.matrix.thread_bookkeeping import (
+from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
@@ -685,7 +685,7 @@ class MatrixApiTools(Toolkit):
             )
             return "Failed to resolve redaction target thread mapping."
 
-        if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+        if thread_impact is MutationThreadImpactState.UNKNOWN:
             logger.warning(
                 "Failed to resolve redaction target thread mapping for matrix_api redact",
                 room_id=room_id,
@@ -740,7 +740,7 @@ class MatrixApiTools(Toolkit):
                 content=normalized_content,
                 relations=context.relations,
             )
-            if thread_impact.state is MutationThreadImpactState.UNKNOWN:
+            if thread_impact is MutationThreadImpactState.UNKNOWN:
                 return self._error_payload(
                     action="send_event",
                     room_id=room_id,

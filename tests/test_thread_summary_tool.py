@@ -49,7 +49,6 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=None,

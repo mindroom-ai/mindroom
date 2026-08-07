@@ -4,7 +4,7 @@ Ownership map:
 - canonical thread identity: this module (pure domain rules, no client or cache transport)
 - client- and cache-backed membership accessors: `mindroom.matrix.thread_room_scan`
 - scanned-event ordering and latest-thread-tail helpers: `mindroom.matrix.thread_projection`
-- mutation/bookkeeping impact: `mindroom.matrix.thread_bookkeeping`
+- mutation/bookkeeping impact: `mindroom.matrix.thread_mutation_impact`
 - tool-facing normalization: `mindroom.custom_tools.attachment_helpers`
 
 Invariants enforced here (every resolver in the repo must go through this module):
@@ -58,7 +58,7 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
 type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
-type _ThreadRootProofLookup = Callable[[str, str], Awaitable["ThreadRootProof"]]
+type __ThreadRootProofLookup = Callable[[str, str], Awaitable["_ThreadRootProof"]]
 type _ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
@@ -72,7 +72,7 @@ class _SupportsEventId(Protocol):
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
 
 
-class _ThreadRootProofState(Enum):
+class __ThreadRootProofState(Enum):
     """Outcome of proving whether one candidate event is a real thread root."""
 
     PROVEN = auto()
@@ -81,31 +81,31 @@ class _ThreadRootProofState(Enum):
 
 
 @dataclass(frozen=True)
-class ThreadRootProof:
+class _ThreadRootProof:
     """Result of one thread-root proof attempt."""
 
-    state: _ThreadRootProofState
+    state: __ThreadRootProofState
     error: Exception | None = None
     thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def proven(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
+    def proven(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> _ThreadRootProof:
         """Return a successful root proof."""
-        return cls(_ThreadRootProofState.PROVEN, thread_history=thread_history)
+        return cls(__ThreadRootProofState.PROVEN, thread_history=thread_history)
 
     @classmethod
-    def not_a_thread_root(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
+    def not_a_thread_root(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> _ThreadRootProof:
         """Return a definite non-thread-root result."""
-        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
+        return cls(__ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
 
     @classmethod
     def proof_unavailable(
         cls,
         error: Exception,
         thread_history: Sequence[_SupportsEventId] | None = None,
-    ) -> ThreadRootProof:
+    ) -> _ThreadRootProof:
         """Return one failed proof attempt without weakening caller policy."""
-        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
+        return cls(__ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
 
 
 class ThreadResolutionState(Enum):
@@ -127,7 +127,7 @@ class ThreadResolution:
     thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def threaded(
+    def _threaded(
         cls,
         thread_id: str,
         thread_history: Sequence[_SupportsEventId] | None = None,
@@ -184,10 +184,10 @@ class ThreadMembershipAccess:
 
     lookup_thread_id: _ThreadIdLookup
     fetch_event_info: _EventInfoLookup
-    prove_thread_root: _ThreadRootProofLookup
+    prove_thread_root: __ThreadRootProofLookup
 
 
-def conversation_relation_thread_membership_access(
+def _conversation_relation_thread_membership_access(
     access: ThreadMembershipAccess,
 ) -> ThreadMembershipAccess:
     """Reject non-message ancestors and stale indexes from conversation relation walks."""
@@ -218,12 +218,12 @@ def conversation_relation_thread_membership_access(
 
 def _resolution_from_root_proof(
     thread_root_id: str,
-    proof: ThreadRootProof,
+    proof: _ThreadRootProof,
 ) -> ThreadResolution:
     """Convert one root proof result into canonical thread membership."""
-    if proof.state is _ThreadRootProofState.PROVEN:
-        return ThreadResolution.threaded(thread_root_id, thread_history=proof.thread_history)
-    if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
+    if proof.state is __ThreadRootProofState.PROVEN:
+        return ThreadResolution._threaded(thread_root_id, thread_history=proof.thread_history)
+    if proof.state is __ThreadRootProofState.NOT_A_THREAD_ROOT:
         return ThreadResolution.room_level(thread_history=proof.thread_history)
     assert proof.error is not None
     return ThreadResolution._indeterminate(
@@ -244,7 +244,7 @@ async def resolve_event_thread_membership(
     """Return canonical thread membership for one event."""
     explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
     if explicit_thread_id is not None:
-        return ThreadResolution.threaded(explicit_thread_id)
+        return ThreadResolution._threaded(explicit_thread_id)
     related_event_id = event_info.next_related_event_id("")
     if related_event_id is not None:
         return await resolve_related_event_thread_membership(
@@ -278,7 +278,7 @@ async def resolve_related_event_thread_membership(
 
         thread_id = await access.lookup_thread_id(room_id, current_event_id)
         if thread_id is not None:
-            resolution = ThreadResolution.threaded(thread_id)
+            resolution = ThreadResolution._threaded(thread_id)
             break
 
         try:
@@ -297,7 +297,7 @@ async def resolve_related_event_thread_membership(
 
         thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
         if thread_id is not None:
-            resolution = ThreadResolution.threaded(thread_id)
+            resolution = ThreadResolution._threaded(thread_id)
             break
 
         next_target = _next_related_event_target(
@@ -346,18 +346,18 @@ def map_backed_thread_membership_access(
     async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
         return event_infos.get(event_id)
 
-    async def prove_thread_root(_room_id: str, thread_root_id: str) -> ThreadRootProof:
+    async def prove_thread_root(_room_id: str, thread_root_id: str) -> _ThreadRootProof:
         has_children = any(
-            page_event_info_counts_as_thread_child_proof(
+            _page_event_info_counts_as_thread_child_proof(
                 thread_root_id,
                 event_id=event_id,
                 event_info=event_info,
             )
             for event_id, event_info in event_infos.items()
         )
-        return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
+        return _ThreadRootProof.proven() if has_children else _ThreadRootProof.not_a_thread_root()
 
-    return conversation_relation_thread_membership_access(
+    return _conversation_relation_thread_membership_access(
         ThreadMembershipAccess(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
@@ -366,7 +366,7 @@ def map_backed_thread_membership_access(
     )
 
 
-def page_event_info_counts_as_thread_child_proof(
+def _page_event_info_counts_as_thread_child_proof(
     thread_root_id: str,
     *,
     event_id: str,
@@ -394,22 +394,22 @@ async def _thread_messages_root_proof(
     thread_root_id: str,
     *,
     fetch_thread_messages: _ThreadMessagesLookup,
-) -> ThreadRootProof:
+) -> _ThreadRootProof:
     """Return one root-proof result from authoritative thread messages."""
     try:
         thread_messages = await fetch_thread_messages(room_id, thread_root_id)
     except Exception as exc:
         if _is_thread_root_not_found_error(exc):
-            return ThreadRootProof.not_a_thread_root()
-        return ThreadRootProof.proof_unavailable(exc)
+            return _ThreadRootProof.not_a_thread_root()
+        return _ThreadRootProof.proof_unavailable(exc)
     if is_thread_history_source_degraded(thread_messages):
         msg = "Thread root proof unavailable from degraded thread history"
-        return ThreadRootProof.proof_unavailable(RuntimeError(msg), thread_history=thread_messages)
+        return _ThreadRootProof.proof_unavailable(RuntimeError(msg), thread_history=thread_messages)
     has_children = any(message.event_id != thread_root_id for message in thread_messages)
     return (
-        ThreadRootProof.proven(thread_history=thread_messages)
+        _ThreadRootProof.proven(thread_history=thread_messages)
         if has_children
-        else ThreadRootProof.not_a_thread_root(thread_history=thread_messages)
+        else _ThreadRootProof.not_a_thread_root(thread_history=thread_messages)
     )
 
 
@@ -418,16 +418,16 @@ async def _room_scan_thread_root_proof(
     thread_root_id: str,
     *,
     fetch_thread_event_sources: _ThreadEventSourcesLookup,
-) -> ThreadRootProof:
+) -> _ThreadRootProof:
     """Return one room-scan-backed root-proof result."""
     try:
         event_sources, root_found = await fetch_thread_event_sources(room_id, thread_root_id)
     except Exception as exc:
         if _is_thread_root_not_found_error(exc):
-            return ThreadRootProof.not_a_thread_root()
-        return ThreadRootProof.proof_unavailable(exc)
+            return _ThreadRootProof.not_a_thread_root()
+        return _ThreadRootProof.proof_unavailable(exc)
     if not root_found:
-        return ThreadRootProof.not_a_thread_root()
+        return _ThreadRootProof.not_a_thread_root()
     has_children = any(
         _room_scan_event_source_counts_as_thread_child_proof(
             thread_root_id,
@@ -435,7 +435,7 @@ async def _room_scan_thread_root_proof(
         )
         for event_source in event_sources
     )
-    return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
+    return _ThreadRootProof.proven() if has_children else _ThreadRootProof.not_a_thread_root()
 
 
 def _room_scan_event_source_counts_as_thread_child_proof(
@@ -463,14 +463,14 @@ def thread_messages_thread_membership_access(
 ) -> ThreadMembershipAccess:
     """Build shared membership access backed by authoritative thread messages."""
 
-    async def prove_thread_root(room_id: str, thread_root_id: str) -> ThreadRootProof:
+    async def prove_thread_root(room_id: str, thread_root_id: str) -> _ThreadRootProof:
         return await _thread_messages_root_proof(
             room_id,
             thread_root_id,
             fetch_thread_messages=fetch_thread_messages,
         )
 
-    return conversation_relation_thread_membership_access(
+    return _conversation_relation_thread_membership_access(
         ThreadMembershipAccess(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
@@ -487,14 +487,14 @@ def room_scan_thread_membership_access(
 ) -> ThreadMembershipAccess:
     """Build shared membership access backed by authoritative room scans."""
 
-    async def prove_thread_root(room_id: str, thread_root_id: str) -> ThreadRootProof:
+    async def prove_thread_root(room_id: str, thread_root_id: str) -> _ThreadRootProof:
         return await _room_scan_thread_root_proof(
             room_id,
             thread_root_id,
             fetch_thread_event_sources=fetch_thread_event_sources,
         )
 
-    return conversation_relation_thread_membership_access(
+    return _conversation_relation_thread_membership_access(
         ThreadMembershipAccess(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,

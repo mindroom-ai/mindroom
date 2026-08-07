@@ -10,16 +10,13 @@ import nio
 import pytest
 
 from mindroom.event_journal import ConversationPage, VisibleMessage
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -517,86 +514,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         assert {c.args[1] for c in bot.client.room_get_event.await_args_list} == {"$plain_reply_1:localhost"}
-
-    @pytest.mark.asyncio
-    async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
-        """Edits of a thread root should stay threaded once any child reply taught the cache that thread."""
-        room = _matrix_room(name="Test Room")
-
-        real_event_cache = SqliteEventCache(bot.storage_path / "root-edit-thread-cache.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-
-        reply_event_source = {
-            "content": {
-                "body": "Reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
-            },
-            "event_id": "$reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234567896,
-            "room_id": "!test:localhost",
-            "type": "m.room.message",
-        }
-        try:
-            await bot.event_cache.store_events_batch(
-                [("$reply:localhost", room.room_id, reply_event_source)],
-            )
-
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "* updated root",
-                        "msgtype": "m.text",
-                        "m.new_content": {
-                            "body": "updated root",
-                            "msgtype": "m.text",
-                        },
-                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_root:localhost"},
-                    },
-                    "event_id": "$edit_event:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567897,
-                    "room_id": room.room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-            bot.client.room_get_event = AsyncMock(
-                return_value=nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "Root message",
-                            "msgtype": "m.text",
-                        },
-                        "event_id": "$thread_root:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1234567895,
-                        "room_id": room.room_id,
-                        "type": "m.room.message",
-                    },
-                ),
-            )
-
-            expected_history = [
-                _message(event_id="$thread_root:localhost", body="Root message", thread_id="$thread_root:localhost"),
-                _message(event_id="$reply:localhost", body="Reply", thread_id="$thread_root:localhost"),
-            ]
-            await seed_thread_history(
-                bot,
-                room_id=room.room_id,
-                thread_id="$thread_root:localhost",
-                messages=expected_history,
-            )
-            context = await bot._conversation_resolver.extract_message_context(room, event)
-
-            assert context.is_thread is True
-            assert context.thread_id == "$thread_root:localhost"
-            assert context.thread_history == expected_history
-            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        finally:
-            await real_event_cache.close()
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_refetches_when_thread_lookup_cache_is_cold(
@@ -1731,27 +1648,23 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     def test_thread_history_degraded_helper_honors_explicit_diagnostic_flag(
         self,
     ) -> None:
-        """Stale fallback history is degraded for planning even when its source is stale_cache."""
-        stale_degraded_history = ThreadHistoryResult(
+        """The explicit flag alone marks a read degraded, whatever its content says."""
+        flagged_history = ThreadHistoryResult(
             [
                 _message(event_id="$thread_root:localhost", body="Root"),
                 _message(event_id="$reply:localhost", body="Reply"),
             ],
             is_full_history=True,
-            diagnostics={
-                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
-                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-                THREAD_HISTORY_ERROR_DIAGNOSTIC: "homeserver unavailable",
-            },
+            diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
         )
 
-        assert is_thread_history_degraded(stale_degraded_history) is True
+        assert is_thread_history_degraded(flagged_history) is True
 
     @pytest.mark.asyncio
-    async def test_thread_root_proof_accepts_stale_cache_fallback_with_children(
+    async def test_thread_root_proof_accepts_partial_history_with_children(
         self,
     ) -> None:
-        """Stale fallback history is degraded but still usable proof when it has children."""
+        """A page that is not the whole thread still proves the root has children."""
         room_id = "!test:localhost"
         thread_root_id = "$thread_root:localhost"
         thread_history = ThreadHistoryResult(
@@ -1760,11 +1673,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 _message(event_id="$reply:localhost", body="Reply"),
             ],
             is_full_history=False,
-            diagnostics={
-                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
-                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-                THREAD_HISTORY_ERROR_DIAGNOSTIC: "homeserver unavailable",
-            },
         )
 
         async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:

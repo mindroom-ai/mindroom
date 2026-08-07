@@ -79,9 +79,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_call_manager_mock,
-    install_runtime_cache_support,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -1285,8 +1283,6 @@ async def test_full_state_only_after_successful_first_sync() -> None:
         runtime_paths=MagicMock(),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
 
     # Call the real sync_forever method
@@ -1658,7 +1654,7 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
@@ -1746,7 +1742,7 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     bot._membership_fence.store = BlockingStore()
 
     with patch.object(
-        bot._sync_cache_trust,
+        bot._sync_checkpoint_trust,
         "invalidate_for_cache_scope_cleanup",
         new=invalidate,
     ):
@@ -1771,12 +1767,12 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
 ) -> None:
     """Routine sliding connection expiry must not run classic sync-token rejection."""
     bot = _sliding_response_bot(tmp_path)
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_classic")
+    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_classic")
     bot._sync_continuity_store.replace_checkpoint(
         SyncCheckpoint(
             "s_classic",
-            cache_generation=bot.event_cache.cache_generation,
+            store_generation=bot.event_cache.store_generation,
         ),
     )
     error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
@@ -1926,8 +1922,6 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
         runtime_paths=_fake_runtime_paths(),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     # This bot is hand-built with object.__new__, so it only has what the test
     # sets. stop() releases the journal lane, which a real bot always has.

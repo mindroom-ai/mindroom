@@ -32,7 +32,7 @@ from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -109,7 +109,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock the client
     mock_client = AsyncMock()
@@ -163,7 +163,7 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     mock_client = AsyncMock()
     mock_client.rooms = {"!room1:localhost": MagicMock()}
@@ -199,7 +199,7 @@ async def test_join_configured_rooms_retries_when_membership_inventory_is_unavai
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=None))
@@ -236,7 +236,7 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
         runtime_paths=runtime_paths_for(config),
         rooms=[room_id],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {room_id: MagicMock()}
     join_room = AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE)
@@ -286,7 +286,7 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     mock_client = AsyncMock()
     bot.client = mock_client
@@ -317,7 +317,7 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -354,7 +354,7 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(restarted_bot)
+    install_runtime_journal_support(restarted_bot)
     restarted_bot.client = AsyncMock()
     restarted_bot.client.rooms = {}
     join_room.reset_mock()
@@ -382,7 +382,7 @@ async def test_invite_join_failure_propagates_to_sync_boundary(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
@@ -415,7 +415,7 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("bad state", "M_BAD_STATE"))
@@ -457,7 +457,7 @@ async def test_initial_sync_invite_is_current_membership_work(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
@@ -498,7 +498,7 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     join_started = asyncio.Event()
     release_join = asyncio.Event()
@@ -554,7 +554,7 @@ async def test_invite_persistence_failure_propagates_to_sync_boundary(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
@@ -588,7 +588,7 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -639,7 +639,7 @@ async def test_router_invite_keeps_memory_after_transient_persistence_failure(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -694,7 +694,7 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -753,7 +753,7 @@ async def test_router_departure_allows_fresh_reinvite(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     room_id = "!router-reinvited:localhost"
@@ -921,7 +921,7 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.room_messages = AsyncMock(
@@ -969,7 +969,7 @@ async def test_redelivered_invite_retries_a_failed_welcome(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.room_messages = AsyncMock(
@@ -1235,7 +1235,7 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.joined_members = AsyncMock(
@@ -1325,7 +1325,7 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
 
     left_room_ids: list[str] = []
@@ -1441,7 +1441,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
         return response
 
     mock_client.room_leave = mock_room_leave
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     recorder = FencedRoomRecorder()
     bot._membership_fence.store = recorder
     fenced_room_ids = recorder.fenced_room_ids
@@ -1475,7 +1475,7 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     mock_client = AsyncMock()
     bot.client = mock_client
@@ -1530,7 +1530,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     # Mock the client
     mock_client = AsyncMock()
@@ -1743,7 +1743,7 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
@@ -1791,7 +1791,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         config=config,
         runtime_paths=runtime_paths,
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_agent1:localhost")
 
     router_bot = AgentBot(
@@ -1868,7 +1868,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
 
     left_room_ids: list[str] = []

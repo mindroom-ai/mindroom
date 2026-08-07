@@ -44,8 +44,7 @@ from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     delivered_matrix_side_effect,
-    install_runtime_cache_support,
-    make_conversation_cache_mock,
+    install_runtime_journal_support,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
@@ -496,7 +495,7 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
         rooms=["!room:localhost"],
     )
     bot.client = AsyncMock()
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     outcome = CompactionOutcome(
         mode="auto",
         session_id="session-1",
@@ -879,7 +878,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         active_model_name="large",
@@ -965,7 +963,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         active_model_name=None,
@@ -1047,7 +1044,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         client=SimpleNamespace(),
         config=config,
         runtime_paths=runtime_paths,
-        conversation_cache=make_conversation_cache_mock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         active_model_name=None,

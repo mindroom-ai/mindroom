@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.stop import StopManager
@@ -45,7 +44,6 @@ class ReactionDispatcherDeps:
     turn_policy: TurnPolicy
     turn_store: TurnStore
     stop_manager: StopManager
-    conversation_cache: MatrixConversationCache
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]

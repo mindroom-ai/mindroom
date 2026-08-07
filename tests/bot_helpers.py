@@ -63,8 +63,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
     message_origin,
     replace_turn_controller_deps,
@@ -235,12 +233,6 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
         state_writer=wrapped_bot._conversation_state_writer,
     )
     return wrapped_bot
-
-
-def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
-    """Attach the full injected runtime-support bundle to a bot test instance."""
-    bot.event_cache = make_event_cache_mock()
-    bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
 
 
 def _empty_full_thread_history() -> ThreadHistoryResult:
@@ -527,8 +519,6 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     bot = MagicMock()
     bot.config = config
     bot.enable_streaming = config.defaults.enable_streaming
-    bot.event_cache = None
-    bot.event_cache_write_coordinator = None
     bot._set_presence_with_model_info = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot

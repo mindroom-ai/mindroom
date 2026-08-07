@@ -20,7 +20,6 @@ import pytest
 import yaml
 
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
-from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from scripts.testing import fuzz_live_matrix
@@ -114,7 +113,7 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
             self.order.append("durable-callback")
         return True
 
-    def wait_for_cached_restart_event_pairs(
+    def wait_for_projected_restart_event_pairs(
         self,
         room_id: str,
         event_ids: tuple[str, str],
@@ -128,7 +127,7 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         assert timeout == 1
         return True
 
-    def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+    def projected_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         assert room_id == "!restart:example"
         assert event_ids == ("$restart-old-text", "$restart-old-media")
         return 4
@@ -273,7 +272,7 @@ def seeded_restart_observation_stack(
     stack = ManagedTuwunelStack()
     stop_calls: list[float] = []
     stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-    monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+    monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
     monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
 
     def record_stop(*, timeout: float = 20) -> bool:
@@ -642,7 +641,7 @@ async def test_restart_regression_does_not_send_fresh_event_before_historical_ca
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         monkeypatch.setattr(stack, "apply_replacement_config", lambda _room_id: None)
         monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda *_args, **_kwargs: 3)
+        monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda *_args, **_kwargs: 3)
         dormant = _RecordingDormantClient()
         runner = LiveFuzzRunner(
             stack,
@@ -686,46 +685,49 @@ def test_restart_log_wait_handles_ansi_and_multiple_markers() -> None:
         stack.close()
 
 
-def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
+def test_restart_regression_projection_evidence_uses_production_schema_and_exact_filters() -> None:
     """Principal, room, and event filters must reject plausible distractor rows."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.storage_path.mkdir()
-        database_path = stack.storage_path / "event_cache.db"
-        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
-        asyncio.run(database.close())
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        store = EventJournalStore.open_sqlite(database_path)
+        asyncio.run(store.close())
         rows = (
-            ("@agent:example", "$old-text", "!target:example"),
-            ("@agent:example", "$old-media", "!target:example"),
-            ("@router:example", "$old-text", "!target:example"),
-            ("@router:example", "$old-media", "!target:example"),
-            ("@wrong:example", "$old-text", "!target:example"),
-            ("@wrong:example", "$old-media", "!target:example"),
-            ("@agent:example", "$wrong-event", "!target:example"),
-            ("@router:example", "$wrong-event", "!target:example"),
-            ("@agent:example", "$old-text", "!wrong:example"),
+            ("general@@agent:example", "!target:example", "$old-text"),
+            ("general@@agent:example", "!target:example", "$old-media"),
+            ("router@@router:example", "!target:example", "$old-text"),
+            ("router@@router:example", "!target:example", "$old-media"),
+            ("general@@wrong:example", "!target:example", "$old-text"),
+            ("general@@wrong:example", "!target:example", "$old-media"),
+            ("general@@agent:example", "!target:example", "$wrong-event"),
+            ("router@@router:example", "!target:example", "$wrong-event"),
+            ("general@@agent:example", "!wrong:example", "$old-text"),
         )
         with closing(sqlite3.connect(database_path)) as fixture_database:
             fixture_database.executemany(
                 """
-                INSERT INTO events(
+                INSERT INTO visible_messages(
                     principal_id,
-                    event_id,
                     room_id,
-                    origin_server_ts,
-                    event_json,
+                    logical_event_id,
+                    thread_id,
                     sender,
-                    cached_at,
-                    write_seq
-                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, ?)
+                    created_ts,
+                    revision_event_id,
+                    revision_ts,
+                    content_json,
+                    membership_epoch
+                ) VALUES (?, ?, ?, '', '@sender:example', 1, ?, 1, '{}', 0)
                 """,
-                ((*row, write_seq) for write_seq, row in enumerate(rows, start=1)),
+                ((*row, row[2]) for row in rows),
             )
             fixture_database.commit()
 
         event_ids = ("$old-text", "$old-media")
-        assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 4
+        assert stack.projected_restart_event_pair_count("!target:example", event_ids) == 4
     finally:
         stack.close()
 
@@ -759,54 +761,57 @@ def test_combined_response_count_includes_every_configured_sender() -> None:
     )
 
 
-def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> None:
-    """Missing runtime cache state must not be converted into an empty SQLite database."""
+def test_restart_regression_projection_probe_does_not_create_an_empty_database() -> None:
+    """Missing runtime journal state must not be converted into an empty SQLite database."""
     stack = ManagedTuwunelStack()
     try:
-        database_path = stack.storage_path / "event_cache.db"
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
 
-        assert stack.cached_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
+        assert stack.projected_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
         assert not database_path.exists()
     finally:
         stack.close()
 
 
 def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> None:
-    """The hard-restart boundary must be beyond the fresh event's cached response."""
+    """The hard-restart boundary must be beyond the fresh event's projected response."""
     stack = ManagedTuwunelStack()
     writer: threading.Thread | None = None
     try:
         stack.agent_id = "@agent:example"
         stack.storage_path.mkdir()
-        database_path = stack.storage_path / "event_cache.db"
-        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
-        asyncio.run(database.close())
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        store = EventJournalStore.open_sqlite(database_path)
+        asyncio.run(store.close())
         with closing(sqlite3.connect(database_path)) as fixture_database:
             fixture_database.execute(
                 """
-                INSERT INTO events(
+                INSERT INTO visible_messages(
                     principal_id,
-                    event_id,
                     room_id,
-                    origin_server_ts,
-                    event_json,
+                    logical_event_id,
+                    thread_id,
                     sender,
-                    cached_at,
-                    write_seq
-                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, 1)
+                    created_ts,
+                    revision_event_id,
+                    revision_ts,
+                    content_json,
+                    membership_epoch
+                ) VALUES (?, ?, ?, '', '@sender:example', 1, ?, 1, '{}', 0)
                 """,
-                (stack.agent_id, "$fresh", "!target:example"),
+                (f"general@{stack.agent_id}", "!target:example", "$fresh", "$fresh"),
             )
             fixture_database.commit()
         continuity_store = SyncContinuityStore(stack.storage_path, "general")
         continuity_store.replace_checkpoint(
-            SyncCheckpoint("s_before", cache_generation="generation"),
+            SyncCheckpoint("s_before", store_generation="generation"),
         )
 
         def advance_checkpoint() -> None:
             time.sleep(0.1)
             continuity_store.replace_checkpoint(
-                SyncCheckpoint("s_after", cache_generation="generation"),
+                SyncCheckpoint("s_after", store_generation="generation"),
             )
 
         writer = threading.Thread(target=advance_checkpoint)
@@ -1518,7 +1523,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
         monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
         dormant = DormantClient()
 

@@ -29,7 +29,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     test_runtime_paths,
 )
@@ -129,7 +129,7 @@ def _router_bot(
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
     bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
@@ -146,7 +146,7 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return install_runtime_cache_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+    return install_runtime_journal_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:
@@ -411,8 +411,8 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_marker_failure"
     if retry_token is not None:
-        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-        bot._sync_cache_trust.checkpoint = SyncCheckpoint(retry_token)
+        bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+        bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint(retry_token)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     def failing_write(
@@ -455,8 +455,8 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
     room = _room()
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_failure"
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_failure")
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     async def fail_create(*_args: object, **_kwargs: object) -> object:
@@ -610,8 +610,8 @@ def _restored_token_router_bot(
     bot = _router_bot(tmp_path)
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_restored")
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_restored")
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -786,8 +786,8 @@ async def test_router_replays_failed_live_join_admission_after_classic_reset(
     room = _room()
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_join")
+    bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_join")
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_after_join"
     bot.client.has_uncommitted_classic_sync_state = True
@@ -842,7 +842,7 @@ async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    assert await bot._sync_cache_trust.prepare_startup() is None
+    assert await bot._sync_checkpoint_trust.prepare_startup() is None
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = None
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -890,7 +890,7 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -929,7 +929,7 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -1223,7 +1223,7 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
-    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
@@ -1232,7 +1232,7 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     # cache that happened not to write in this fixture. A refused admission is
     # the durable-ownership failure that used to be reported as an incomplete
     # cache write, and it is consumed by this response, so the next one is clean.
-    bot._sync_cache_trust.record_dispatch_persist_failure()
+    bot._sync_checkpoint_trust.record_dispatch_persist_failure()
 
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     assert bot.client.next_batch == ""

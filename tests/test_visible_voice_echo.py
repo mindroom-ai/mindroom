@@ -136,8 +136,6 @@ def _echo_harness(
         runtime_paths=runtime_paths,
         enable_streaming=True,
         orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     router_user_id = entity_identity_registry(config, runtime_paths).current_id(ROUTER_AGENT_NAME).full_id
     ingress = _RouterIngress(router_user_id)

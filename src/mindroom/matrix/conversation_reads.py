@@ -9,6 +9,7 @@ revision, because the store never returns it to anyone.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -33,6 +34,28 @@ logger = get_logger(__name__)
 # a long time would turn a status probe into a history read, so the answer is
 # "nothing recent" rather than a page-by-page search.
 _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES = 50
+
+
+class ThreadReadMode(Enum):
+    """Why one caller is reading a conversation, in the caller's own terms.
+
+    What this names is the caller's *contract*, not a storage policy: whether a
+    read is on the live dispatch path and so must fail open rather than block.
+    """
+
+    ADVISORY_FULL = auto()
+    DISPATCH_SNAPSHOT = auto()
+    DISPATCH_FULL = auto()
+    STRICT_FULL = auto()
+
+    @property
+    def dispatch_safe(self) -> bool:
+        """Return whether this mode is on the live dispatch fail-open path."""
+        # STRICT_FULL intentionally stays false: it may block for authoritative post-lock model context.
+        return self in {
+            ThreadReadMode.DISPATCH_SNAPSHOT,
+            ThreadReadMode.DISPATCH_FULL,
+        }
 
 
 def projected_visible_messages(page: ConversationPage) -> list[ResolvedVisibleMessage]:

@@ -80,7 +80,7 @@ from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     ignore_final_delivery_handoff,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     make_outbox_mock,
     message_origin,
@@ -160,7 +160,7 @@ def _make_bot_with_shared_knowledge(
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = _make_matrix_client_mock()
     return bot
 
@@ -332,7 +332,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        install_runtime_cache_support(helper_bot)
+        install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -351,7 +351,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        install_runtime_cache_support(calc_bot)
+        install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -472,7 +472,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        install_runtime_cache_support(calc_bot)
+        install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -1972,7 +1972,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.client = MagicMock(rooms={})
         bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
         replace_response_runner_deps(

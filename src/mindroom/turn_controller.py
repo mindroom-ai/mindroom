@@ -76,7 +76,7 @@ from mindroom.inbound_turn_normalizer import (
     VoiceNormalizationRequest,
 )
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.cache.thread_reads import ThreadReadMode
+from mindroom.matrix.conversation_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -136,7 +136,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PendingTurnView
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.message_target import MessageTarget
@@ -436,7 +435,6 @@ class TurnControllerDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    conversation_cache: MatrixConversationCache
     relations: RelationLookup
     pending_turns: PendingTurnView
     resolver: ConversationResolver
@@ -1986,7 +1984,7 @@ class TurnController:
         dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
-        async with self.deps.resolver.turn_thread_cache_scope():
+        async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
             source_metadata = dict(handoff.source_event_metadata)
             routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
@@ -2080,7 +2078,7 @@ class TurnController:
         reservation_owner: _PromptIngressReservationOwner | None = None,
     ) -> TurnDispatchOutcome:
         """Handle one inbound text event."""
-        async with self.deps.resolver.turn_thread_cache_scope():
+        async with self.deps.resolver.turn_lookup_scope():
             return await self._handle_message_inner(
                 room,
                 event,
@@ -2258,7 +2256,7 @@ class TurnController:
         receipt_time: float | None = None,
     ) -> TurnDispatchOutcome:
         """Handle one inbound media event."""
-        async with self.deps.resolver.turn_thread_cache_scope():
+        async with self.deps.resolver.turn_lookup_scope():
             return await self._handle_media_message_inner(room, event, receipt_time=receipt_time)
 
     async def _handle_media_message_inner(

@@ -81,7 +81,6 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import inbound_event
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
@@ -4748,7 +4747,6 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4810,7 +4808,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -4870,7 +4867,6 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5051,7 +5047,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5114,7 +5109,6 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5185,7 +5179,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5244,7 +5237,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5309,7 +5301,6 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False
@@ -5372,7 +5363,6 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
         diagnostics={
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
         },
     )
     dispatch.context.am_i_mentioned = False

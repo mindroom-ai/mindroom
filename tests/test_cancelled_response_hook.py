@@ -50,7 +50,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     ignore_final_delivery_handoff,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     make_outbox_mock,
     message_origin,
@@ -159,7 +159,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
     return bot
 

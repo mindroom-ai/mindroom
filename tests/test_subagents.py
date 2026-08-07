@@ -112,7 +112,6 @@ def _make_context(
     effective_config = config or _make_config()
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
-    conversation_cache = AsyncMock()
     return ToolRuntimeContext(
         agent_name=agent_name,
         target=MessageTarget.resolve(
@@ -124,7 +123,6 @@ def _make_context(
         client=MagicMock(),
         config=effective_config,
         runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=room,

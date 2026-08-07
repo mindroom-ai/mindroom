@@ -81,17 +81,12 @@ from mindroom.history.types import (
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
-from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher
@@ -124,14 +119,11 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.event_journal.schema import Dialect
-    from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
-_POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
-_POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
 _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 
 # The event journal orders text in SQL, in SQLite, and in Python, and those
@@ -183,7 +175,7 @@ __all__ = [
     "FakeCredentialsManager",
     "agent_response_should_respond",
     "aioresponse",
-    "bind_mock_config_cache",
+    "bind_mock_config_event_journal",
     "bind_runtime_paths",
     "build_private_template_dir",
     "bypass_authorization",
@@ -192,25 +184,19 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
-    "event_cache",
-    "event_cache_factory",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
-    "install_runtime_cache_support",
+    "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
     "load_config_yaml",
-    "make_conversation_cache_mock",
-    "make_event_cache_mock",
-    "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
     "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
-    "postgres_event_cache_url",
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
@@ -511,7 +497,7 @@ def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
     raise RuntimeError(msg)
 
 
-def _postgres_container_name(run_id: str, prefix: str = _POSTGRES_CONTAINER_PREFIX) -> str:
+def _postgres_container_name(run_id: str, prefix: str) -> str:
     """Return the deterministic disposable Postgres container name for one test run."""
     return f"{prefix}{run_id}"
 
@@ -531,9 +517,8 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
 
 
 def pytest_configure_node(node: "WorkerController") -> None:
-    """Remember the shared Postgres container names in the xdist controller."""
+    """Remember the shared Postgres container name in the xdist controller."""
     run_id = node.workerinput["testrunuid"]
-    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(run_id)
     node.config.stash[_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
         run_id,
         _POSTGRES_JOURNAL_CONTAINER_PREFIX,
@@ -541,94 +526,20 @@ def pytest_configure_node(node: "WorkerController") -> None:
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Remove the shared Postgres containers after every xdist worker has finished."""
+    """Remove the shared Postgres container after every xdist worker has finished."""
     if hasattr(session.config, "workerinput"):
         return
     docker = shutil.which("docker")
     if docker is None:
         return
-    for stash_key in (
-        _POSTGRES_CONTAINER_NAME_STASH_KEY,
-        _POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY,
-    ):
-        container_name = session.config.stash.get(stash_key, None)
-        if container_name is None:
-            continue
-        try:
-            _remove_postgres_container(docker, container_name)
-        except RuntimeError as exc:
-            warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
-            session.exitstatus = pytest.ExitCode.TESTS_FAILED
-
-
-@pytest.fixture(scope="session")
-def postgres_event_cache_url(
-    worker_id: str,
-    testrun_uid: str,
-) -> Iterator[str]:
-    """Start or reuse one disposable Postgres server for the current test run."""
-    docker = shutil.which("docker")
-    if docker is None:
-        pytest.skip("Docker is required for Postgres event-cache integration tests")
-
-    info_result = subprocess.run(
-        [docker, "info"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if info_result.returncode != 0:
-        pytest.skip("Docker daemon is unavailable for Postgres event-cache integration tests")
-
-    shared_across_workers = worker_id != "master"
-    run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
-    container_name = _postgres_container_name(run_id)
-    run_result = subprocess.run(
-        [
-            docker,
-            "run",
-            "--rm",
-            "-d",
-            "--name",
-            container_name,
-            "--label",
-            f"mindroom.pytest.run={run_id}",
-            "-e",
-            "POSTGRES_USER=cache",
-            "-e",
-            "POSTGRES_PASSWORD=test",
-            "-e",
-            "POSTGRES_DB=mindroom",
-            "-p",
-            "127.0.0.1::5432",
-            "postgres:15-alpine",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if run_result.returncode != 0:
-        inspect_result = subprocess.run(
-            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if not shared_across_workers or inspect_result.returncode != 0:
-            pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
-        if inspect_result.stdout.strip() in {"dead", "exited"}:
-            msg = f"Shared Postgres test container is {inspect_result.stdout.strip()}"
-            raise RuntimeError(msg)
-
+    container_name = session.config.stash.get(_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY, None)
+    if container_name is None:
+        return
     try:
-        database_url = _wait_for_postgres_container_port(docker, container_name)
-        _wait_for_postgres_container(database_url)
-        if shared_across_workers:
-            database_url = _create_postgres_worker_database(database_url, worker_id)
-        yield database_url
-    finally:
-        if not shared_across_workers:
-            _remove_postgres_container(docker, container_name)
+        _remove_postgres_container(docker, container_name)
+    except RuntimeError as exc:
+        warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(scope="session")
@@ -774,39 +685,6 @@ async def legacy_journal_store(
         yield store
     finally:
         await store.close()
-
-
-@pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-def event_cache_factory(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-) -> Callable[[], "ConversationEventCache"]:
-    """Return a cache factory for backend-neutral event-cache contract tests."""
-    backend = str(request.param)
-    if backend == "sqlite":
-        db_path = tmp_path / "event_cache.db"
-        return lambda: SqliteEventCache(db_path)
-    if backend == "postgres":
-        from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache  # noqa: PLC0415
-
-        database_url = request.getfixturevalue("postgres_event_cache_url")
-        namespace = f"test_{uuid.uuid4().hex}"
-        return lambda: PostgresEventCache(database_url=database_url, namespace=namespace)
-    msg = f"Unsupported event cache backend fixture: {backend}"
-    raise AssertionError(msg)
-
-
-@pytest_asyncio.fixture
-async def event_cache(
-    event_cache_factory: Callable[[], "ConversationEventCache"],
-) -> AsyncGenerator["ConversationEventCache", None]:
-    """Return one initialized event cache backend for backend-neutral contract tests."""
-    cache = event_cache_factory()
-    await cache.initialize()
-    try:
-        yield cache
-    finally:
-        await cache.close()
 
 
 async def _empty_async_iterator() -> AsyncGenerator[object, None]:
@@ -977,38 +855,6 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
         return delivered_matrix_event(event_id, content_mapping)
 
     return _deliver
-
-
-def make_event_cache_mock() -> AsyncMock:
-    """Return an async mock shaped like the event cache protocol."""
-    event_cache = AsyncMock(spec=SqliteEventCache)
-    event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.cache_generation = "test-cache-generation"
-    event_cache.durable_writes_available = True
-    event_cache.get_event.return_value = None
-    event_cache.get_latest_edit.return_value = None
-    event_cache.get_mxc_text.return_value = None
-    event_cache.get_mxc_texts.return_value = {}
-    event_cache.get_thread_events.return_value = None
-    event_cache.get_thread_cache_gap.return_value = None
-    event_cache.get_thread_id_for_event.return_value = None
-    event_cache.pending_durable_write_room_ids.return_value = ()
-    event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
-    departure_epochs: dict[str, int] = {}
-
-    def mark_room_departed(room_id: str) -> int:
-        epoch = departure_epochs.get(room_id, 0) + 1
-        departure_epochs[room_id] = epoch
-        return epoch
-
-    event_cache.mark_room_departed.side_effect = mark_room_departed
-    event_cache.room_departure_epoch.side_effect = lambda room_id: departure_epochs.get(room_id, 0)
-    event_cache.room_membership_epoch.return_value = 0
-    event_cache.apply_thread_mutation_append.return_value = ThreadAppendOutcome.APPENDED
-    event_cache.redact_event.return_value = False
-    event_cache.store_mxc_text.return_value = True
-    event_cache.replace_thread.return_value = True
-    return event_cache
 
 
 def serve_conversation_reader(
@@ -1426,40 +1272,14 @@ def make_conversation_reader_mock() -> ConversationReader:
     )
 
 
-def make_conversation_cache_mock() -> AsyncMock:
-    """Return an async mock shaped like the conversation cache protocol."""
-    conversation_cache = AsyncMock(spec=ConversationCacheProtocol)
-    conversation_cache.get_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
-    )
-    conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
+def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
+    """Pin the journal identity a test bot certifies its sync checkpoints against.
 
-    conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-    conversation_cache.append_live_event = AsyncMock()
-    return conversation_cache
-
-
-def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> EventCacheWriteCoordinator:
-    """Return a coordinator-shaped runtime helper with the real synchronous queue contract."""
-    return EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=object() if owner is None else owner,
-    )
-
-
-def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
-    """Attach required cache runtime support to one test bot."""
-    if bot._runtime_view.event_cache is None:
-        bot.event_cache = make_event_cache_mock()
-    if bot._runtime_view.event_cache_write_coordinator is None:
-        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
-    # Sync checkpoints are certified by the event journal, whose real generation
-    # is a fresh UUID per database. Pinned to the same constant the cache mock
-    # reports so a test that saves a checkpoint and restarts exercises the token
-    # logic, rather than the first-open mint that would rightly reject it.
-    bot._sync_cache_trust.store_generation = "test-cache-generation"
+    The real generation is a fresh UUID per database, so a test that saves a
+    checkpoint and restarts would exercise the first-open mint rejecting it
+    rather than the token logic it means to test.
+    """
+    bot._sync_checkpoint_trust.store_generation = "test-store-generation"
     sync_bot_runtime_state(bot)
     return bot
 
@@ -1668,12 +1488,9 @@ def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) 
     persist_entity_accounts(config, runtime_paths)
 
 
-def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:
-    """Give a config mock the cache path contract used by orchestrator init."""
-    cache_path = runtime_root / "event_cache.db"
-    mock_config.cache.backend = "sqlite"
-    mock_config.cache.resolve_db_path.return_value = cache_path
-    return cache_path
+def bind_mock_config_event_journal(mock_config: MagicMock) -> None:
+    """Give a config mock the durable-store contract the bot runtime reads."""
+    mock_config.event_journal.backend = "sqlite"
 
 
 def runtime_paths_for(config: Config) -> RuntimePaths:
@@ -1905,7 +1722,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {
@@ -1947,7 +1764,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
     default_collaborators = {
-        "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
         "command_executor": "_command_turn_executor",
@@ -2025,7 +1841,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             "runtime_paths",
             "agent_name",
             "normalizer",
-            "conversation_cache",
             "turn_policy",
             "turn_store",
             "visible_responses",
@@ -2039,7 +1854,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
             agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
             normalizer=rebuilt_changes["normalizer"],
-            conversation_cache=rebuilt_changes["conversation_cache"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
             visible_responses=rebuilt_changes["visible_responses"],
@@ -2069,7 +1883,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         agent_name=rebuilt.deps.agent_name,
         turn_policy=rebuilt.deps.turn_policy,
         turn_store=rebuilt.deps.turn_store,
-        conversation_cache=rebuilt.deps.conversation_cache,
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=rebuilt.deps.ingress,
         stop_manager=bot.stop_manager,

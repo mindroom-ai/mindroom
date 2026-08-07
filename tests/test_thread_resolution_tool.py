@@ -43,7 +43,6 @@ def _context(tmp_path: Path, *, thread_id: str | None = THREAD_ID) -> ToolRuntim
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )

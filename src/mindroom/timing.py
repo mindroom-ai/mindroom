@@ -50,11 +50,6 @@ def _debug_enabled(bound_logger: object) -> bool:
         return True
 
 
-def timing_enabled() -> bool:
-    """Return whether structured timing diagnostics should be emitted."""
-    return _is_enabled()
-
-
 def elapsed_ms_between(start: float, end: float, *, ndigits: int = 1) -> float:
     """Return elapsed milliseconds rounded to the shared precision policy."""
     return round((end - start) * 1000, ndigits)

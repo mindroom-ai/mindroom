@@ -20,7 +20,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_relation_lookup,
@@ -77,7 +76,6 @@ def _context(
     thread_id: str | None = "$thread-root",
 ) -> ToolRuntimeContext:
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-    conversation_cache = make_conversation_cache_mock()
     conversation_reader = make_conversation_reader_mock()
     conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock("$latest")
     return ToolRuntimeContext(
@@ -91,7 +89,6 @@ def _context(
         client=_mock_client(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=conversation_cache,
         relations=make_relation_lookup(),
         conversation_reader=conversation_reader,
     )

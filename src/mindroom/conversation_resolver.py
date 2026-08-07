@@ -24,10 +24,13 @@ from mindroom.dispatch_thread_context import (
     planning_history_unavailable_for,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
-from mindroom.matrix.conversation_reads import ConversationReader, projected_thread_history
+from mindroom.matrix.conversation_reads import (
+    ConversationReader,
+    ThreadReadMode,
+    projected_thread_history,
+)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -55,7 +58,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
 
@@ -140,7 +142,7 @@ class _ThreadIdLookup:
 
     thread_id: str | None
     candidate_thread_root_id: str | None = None
-    thread_history: ThreadReadResult | None = None
+    thread_history: ThreadHistoryResult | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +204,7 @@ class _ThreadContextLookup:
     def proven_thread(
         cls,
         thread_id: str,
-        history: ThreadReadResult,
+        history: ThreadHistoryResult,
     ) -> _ThreadContextLookup:
         """Return a proven thread context with model and replay history."""
         return cls(
@@ -232,10 +234,6 @@ class ConversationResolverDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    # Not read here any more. It survives only because advisory outbound
-    # bookkeeping still reaches it through `resolver.deps`, and that goes with
-    # phase 8e.
-    conversation_cache: MatrixConversationCache
     conversation_reader: ConversationReader
     relations: RelationLookup
 
@@ -631,7 +629,7 @@ class ConversationResolver:
         mode: ThreadReadMode,
         caller_label: str,
         requires_complete_history: bool = True,
-    ) -> ThreadReadResult:
+    ) -> ThreadHistoryResult:
         """Resolve one thread read against the conversation projection.
 
         Four cache entrypoints collapse to two, because there were only ever
@@ -963,8 +961,8 @@ class ConversationResolver:
         return matrix_cached_room(client, room_id)
 
     @asynccontextmanager
-    async def turn_thread_cache_scope(self) -> AsyncIterator[None]:
-        """Initialize per-turn conversation lookup memoization."""
+    async def turn_lookup_scope(self) -> AsyncIterator[None]:
+        """Memoize related-event lookups for the lifetime of one inbound turn."""
         async with self.deps.relations.turn_scope():
             yield
 
@@ -974,7 +972,7 @@ class ConversationResolver:
         thread_id: str,
         *,
         caller_label: str = "unknown",
-    ) -> ThreadReadResult:
+    ) -> ThreadHistoryResult:
         """Read one thread without waiting for the homeserver.
 
         For callers that run before a turn is accepted and must not block on
@@ -993,7 +991,7 @@ class ConversationResolver:
         thread_id: str,
         *,
         caller_label: str = "unknown",
-    ) -> ThreadReadResult:
+    ) -> ThreadHistoryResult:
         """Fetch complete thread history from the conversation projection."""
         return await self._read_thread_messages(
             room_id,

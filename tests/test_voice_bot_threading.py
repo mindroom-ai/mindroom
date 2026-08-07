@@ -40,7 +40,7 @@ from tests.conftest import (
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return install_runtime_cache_support(
+    return install_runtime_journal_support(
         AgentBot(
             agent_user=agent_user,
             storage_path=storage_path,
