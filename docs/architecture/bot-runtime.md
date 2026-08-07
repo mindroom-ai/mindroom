@@ -101,15 +101,12 @@ Classic startup clears legacy nio cursor, recovery, and Sliding window rows so a
 Sliding Sync retains its own persisted recovery lane but does not become a Classic cursor authority.
 Already-admitted events remain recoverable from the journal, and Matrix replay is idempotent because admission is keyed by event ID.
 `SyncCheckpointTrust` certifies only locally complete responses and requests a transient nio reset for every rejected Classic response.
-Rewinding cannot shrink a gap measured from a fixed checkpoint to an advancing live position, so a room that stays unrecovered across repeated attempts from one unchanging checkpoint would otherwise never converge.
-`SyncRecoveryStallTracker` counts those failures per room against the checkpoint they were measured from, and a checkpoint that advances between attempts is forward progress that restarts the count.
-After three failures from one unchanging checkpoint, that room's gap is skipped: the response certifies its own `next_batch` and logs `matrix_sync_recovery_gap_skipped_after_stalled_rebuild` with the room and the token range it moved past.
-Three failures is a policy threshold rather than proof that recovery is impossible, so skipping does not accept the loss; it defers it.
-Before the skipping checkpoint is persisted, and inside the same lock, the room's outstanding history is written down as a `room_history_debt` row naming the newest message the projection held, and a failure to record it fails certification closed.
-A room with an outstanding debt reads as unhydrated for every conversation in it, so the next read walks `/messages` for that room and the debt is settled against how far back the walk actually reached.
-Reaching the recorded timestamp repays the debt; a walk that finishes without reaching it sets `history_lost`, which stops the retrying and makes `conversation_is_complete` and `conversation_hydration_was_truncated` answer for the hole from then on.
-A rejoin drops the debt with the projection it describes, because the membership epoch invalidates both halves of the statement it makes.
-A skipping checkpoint also resets the client, because nio may still hold recovery state for the room the checkpoint moved past and would refuse to acknowledge the response in place.
+A room whose limited timeline nio has not finished rebuilding is not one of those rejections.
+nio fences that gap to its own room, holds later same-room events behind it, retries it across pumps, and persists it, so the checkpoint stays a true statement about every other room and is acknowledged in place.
+Both transports therefore run with `persist_recovery=True`, and that is load-bearing rather than tidy: nio only lets an acknowledgement past an open gap once the gap row will outlive the process, since otherwise advancing the cursor would move the watermark past history nothing is left to ask for.
+Withholding the checkpoint instead is what used to make the next attempt measure the same gap against a live position that had moved on, so the gap grew on every retry and a room that stopped converging froze its whole principal.
+The two remaining fail-closed conditions are about the response rather than about a room: `missing_next_batch` names no position to resume from, and `admission_refused` means an event in the response has no durable owner.
+`unrecovered_room_ids` is sticky until the application acknowledges the loss, so it also names rooms on later windows that carry no limited timeline at all; `matrix_sync_recovery_incomplete` reports them as operator telemetry rather than as a certification input.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 A complete tokenless initial snapshot may establish the first MindRoom checkpoint even when its timeline is limited.
 An event that never crossed MindRoom admission and later falls outside Matrix replay is the explicit pre-admission loss boundary.

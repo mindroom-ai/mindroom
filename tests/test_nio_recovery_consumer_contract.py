@@ -15,7 +15,7 @@ from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustSta
 from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,7 +32,6 @@ def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCheckpointTrust:
         logger=get_logger(),
         state=state,
         store_generation=_STORE_GENERATION,
-        history_debt_provider=RecordedHistoryDebts,
     )
 
 
@@ -79,20 +78,37 @@ def _sync_response(
 
 
 @pytest.mark.asyncio
-async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
+async def test_real_nio_unrecovered_gap_advances_the_mindroom_checkpoint(
     tmp_path: Path,
 ) -> None:
-    """Rejected Classic staging is rebuilt from MindRoom's committed cursor."""
+    """A real nio gap fences its own room while the checkpoint keeps moving.
+
+    Driven through `nio.AsyncClient.receive_response` rather than a synthetic
+    outcome, so the room labels are the ones nio actually publishes, and nio's
+    own acknowledgement gate is the thing being exercised rather than a mock of
+    it. Both are pinned: the checkpoint advances past the open gap, and the
+    later walk still delivers the room it owed.
+
+    Configured the way `AgentBot` configures it -- ``backfill_persist_recovery``
+    on, against a real store. That combination is load-bearing rather than
+    incidental: nio only lets an acknowledgement past an open gap once the gap
+    row will outlive the process, because otherwise advancing the cursor would
+    drop history nothing is left to ask for.
+    """
     room_id = "!replay:localhost"
     client = nio.AsyncClient(
         "https://localhost",
         "@code:localhost",
+        store_path=str(tmp_path / "nio_store"),
         config=nio.AsyncClientConfig(
+            encryption_enabled=True,
             store_sync_tokens=False,
             backfill_limited_timelines=True,
-            backfill_persist_recovery=False,
+            backfill_persist_recovery=True,
         ),
     )
+    (tmp_path / "nio_store").mkdir()
+    client.restore_login("@code:localhost", "DEVICEID", "token")
     save_sync_token(
         tmp_path,
         "code",
@@ -107,8 +123,12 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
         unrecovered_room_ids=frozenset(),
         next_batch="s_uncommitted",
     )
+    # Deliberately not limited. A second limited window would plan a fresh gap
+    # in the same room, and the pump would close the old one while opening the
+    # new one -- leaving the room unrecovered for a reason that has nothing to
+    # do with the walk under test.
     replay_response = _sync_response(
-        limited_room_ids=(room_id,),
+        limited_room_ids=(),
         recovered_room_ids=frozenset(),
         unrecovered_room_ids=frozenset(),
         next_batch="s_replayed",
@@ -133,11 +153,15 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
             recovery=_recovery(failed_response),
         )
 
-        assert failed.reset_client_token is True
+        assert failed.state is SyncTrustState.CERTIFIED
+        assert failed.reset_client_token is False
         assert failed_response.unrecovered_room_ids == frozenset({room_id})
-        await client.reset_classic_sync_state()
-        client.next_batch = trust.retry_token() or ""
-        assert client.next_batch == "s_committed"
+        # The cursor moved past the gap instead of rewinding onto "s_committed",
+        # so the walk nio still owes is measured from where it was planned.
+        assert trust.retry_token() == "s_uncommitted"
+        # nio's own gate, not MindRoom's: a durable gap no longer refuses the
+        # acknowledgement of a position that is correct for every other room.
+        client.acknowledge_classic_sync("s_uncommitted")
 
         with patch.object(
             client,
@@ -154,6 +178,7 @@ async def test_real_nio_unrecovered_gap_replays_from_mindroom_checkpoint(
         await client.close()
 
     assert replay_response.recovered_room_ids == frozenset({room_id})
+    assert replay_response.unrecovered_room_ids == frozenset()
     assert certified.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_replayed",
@@ -380,8 +405,8 @@ async def test_cold_limited_initial_snapshot_certifies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_position_baseline_advances_then_unrecovered_gap_blocks_checkpoint(tmp_path: Path) -> None:
-    """Unknown-position replay may advance live sync but not persist past an unrecovered gap."""
+async def test_unknown_position_baseline_advances_then_unrecovered_gap_certifies(tmp_path: Path) -> None:
+    """Unknown position still fails closed; a later unrecovered gap does not."""
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
     unknown = await trust.reject_unknown_pos()
     baseline_response = _sync_response(
@@ -409,8 +434,8 @@ async def test_unknown_position_baseline_advances_then_unrecovered_gap_blocks_ch
     assert unknown.reset_client_token is True
     assert baseline.state is SyncTrustState.CERTIFIED
     assert baseline.reset_client_token is False
-    assert positioned.state is SyncTrustState.UNCERTAIN
-    assert positioned.reset_client_token is True
+    assert positioned.state is SyncTrustState.CERTIFIED
+    assert positioned.reset_client_token is False
 
 
 @pytest.mark.asyncio
@@ -543,8 +568,8 @@ async def test_recovered_gap_fails_closed_when_admission_refused_an_event(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_mixed_recovered_and_unrecovered_rooms_withhold_continuity(tmp_path: Path) -> None:
-    """One authoritative unrecovered room must outweigh another room's recovery."""
+async def test_mixed_recovered_and_unrecovered_rooms_still_certify(tmp_path: Path) -> None:
+    """One room's open gap must not withhold the position another room recovered at."""
     limited_room_ids = (_RECOVERED_ROOM, _UNRECOVERED_ROOM)
     response = _sync_response(
         limited_room_ids=limited_room_ids,
@@ -560,14 +585,20 @@ async def test_mixed_recovered_and_unrecovered_rooms_withhold_continuity(tmp_pat
         recovery=recovery,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint(response.next_batch)
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.asyncio
-async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tmp_path: Path) -> None:
-    """An abandoned earlier gap must fail closed even when this wire window is not limited."""
+async def test_a_sticky_unrecovered_room_does_not_stall_a_healthy_window(tmp_path: Path) -> None:
+    """An abandoned room is reported forever, and that must stay cheap.
+
+    ``unrecovered_room_ids`` is sticky until the application acknowledges the
+    loss, so it names the room on windows that carry no limited timeline at
+    all. Treating that standing report as a reason to withhold the checkpoint
+    would stall the cursor permanently rather than once.
+    """
     response = _sync_response(
         limited_room_ids=(),
         recovered_room_ids=frozenset(),
@@ -582,9 +613,9 @@ async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tm
         recovery=recovery,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save == SyncCheckpoint(response.next_batch)
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.asyncio

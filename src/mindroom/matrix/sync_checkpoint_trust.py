@@ -22,7 +22,6 @@ from mindroom.matrix.sync_certification import (
     handle_unknown_pos,
     sync_recovery_diagnostics,
 )
-from mindroom.matrix.sync_recovery_escape import SkippedRecoveryGap, SyncRecoveryStallTracker
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 
 if TYPE_CHECKING:
@@ -31,7 +30,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.event_journal import HistoryDebtRecordView
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 
 
@@ -41,12 +39,6 @@ class SyncCheckpointTrust:
 
     continuity_store: SyncContinuityStore
     logger: structlog.stdlib.BoundLogger
-    # Where a skipped gap's history is written down. A provider rather than a
-    # value for the same reason the generation is one: the journal store is
-    # built after this trust is, and it must not be optional -- a trust that
-    # could not record a debt would certify past a gap and lose it silently,
-    # which is exactly the outcome the debt exists to prevent.
-    history_debt_provider: Callable[[], HistoryDebtRecordView]
     # Resolves the event journal's identity.
     #
     # A provider rather than a value, resolved on demand and memoized. Reading
@@ -60,11 +52,6 @@ class SyncCheckpointTrust:
     _tokenless_baseline_pending: bool = field(default=False, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _recovery_stalls: SyncRecoveryStallTracker = field(
-        default_factory=SyncRecoveryStallTracker,
-        init=False,
-        repr=False,
-    )
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
@@ -237,64 +224,7 @@ class SyncCheckpointTrust:
         recovery: SyncRecoveryOutcome,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
-        skipped = self._observe_recovery_stalls(recovery)
-        decision = certify_sync_response(
-            next_batch=next_batch,
-            recovery=recovery,
-            skipped_recovery_room_ids=frozenset(gap.room_id for gap in skipped),
-        )
-        if skipped and decision.checkpoint_to_save is not None:
-            self._report_skipped_recovery_gaps(skipped, skipped_to_token=decision.checkpoint_to_save.token)
-        return decision
-
-    def _observe_recovery_stalls(self, recovery: SyncRecoveryOutcome) -> tuple[SkippedRecoveryGap, ...]:
-        """Return rooms whose rebuild has stopped converging from this checkpoint."""
-        if not recovery.recovery_conclusive:
-            return ()
-        return self._recovery_stalls.observe(
-            unrecovered_room_ids=recovery.unrecovered_room_ids,
-            checkpoint_token=self.retry_token(),
-        )
-
-    def _report_skipped_recovery_gaps(
-        self,
-        skipped: tuple[SkippedRecoveryGap, ...],
-        *,
-        skipped_to_token: str,
-    ) -> None:
-        """Announce every gap this principal gave up on, loudly and by name."""
-        for gap in skipped:
-            self.logger.error(
-                "matrix_sync_recovery_gap_skipped_after_stalled_rebuild",
-                room_id=gap.room_id,
-                failed_attempts=gap.failed_attempts,
-                skipped_from_token=gap.skipped_from_token,
-                skipped_to_token=skipped_to_token,
-            )
-
-    async def _record_skipped_history_debt(self, decision: SyncCertificationDecision) -> None:
-        """Make a skipped room's missing history durable before certifying past it.
-
-        Ordered before the checkpoint write and inside the same lock, because
-        the two orderings are not equally safe. A crash after this and before
-        the checkpoint leaves a debt for a gap the rewound cursor will simply
-        re-sync, which costs one redundant walk. A crash the other way round
-        moves the watermark past history nothing is left to ask for, which is
-        the silent loss this whole mechanism exists to refuse.
-
-        A failure propagates for the same reason: certification then fails
-        closed, the cursor rewinds, and the stall has to prove itself again.
-        """
-        recorder = self.history_debt_provider()
-        for room_id in sorted(decision.skipped_recovery_room_ids):
-            debt = await recorder.record_room_history_debt(room_id)
-            self.logger.error(
-                "matrix_sync_recovery_gap_recorded_as_history_debt",
-                room_id=room_id,
-                # Nothing means the room's projection was empty, so the skip
-                # left no hole between stored history and what arrives next.
-                owed_through_ts=None if debt is None else debt.owed_through_ts,
-            )
+        return certify_sync_response(next_batch=next_batch, recovery=recovery)
 
     async def apply_response(
         self,
@@ -353,8 +283,6 @@ class SyncCheckpointTrust:
         # generation, which reads as "refuse this checkpoint" rather than as
         # the wiring mistake it is.
         await self._resolve_store_generation()
-        if decision.skipped_recovery_room_ids:
-            await self._record_skipped_history_debt(decision)
         if decision.checkpoint_to_save is not None:
             record = await self._persist_checkpoint_locked(
                 decision.checkpoint_to_save,

@@ -11,14 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from . import approvals, history_debt, journal, outbox, reads, turn_records
+from . import approvals, journal, outbox, reads, turn_records
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
-)
-from .history_debt import (
-    HistoryDebtOutcome,
-    RoomHistoryDebt,
 )
 from .models import SettlementOutcome
 from .projection import drop_refetched_message, install_refetched_revision
@@ -342,47 +338,6 @@ class PrincipalStore:
                 thread_id=thread_id,
                 events=events,
                 complete=complete,
-                expected_membership_epoch=expected_membership_epoch,
-            ),
-        )
-
-    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Write down the history a skipped sync gap left this room owing."""
-        return await self._backend.write(
-            lambda transaction: history_debt.record(transaction, self._principal_id, room_id),
-        )
-
-    async def room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Return the history this room still owes a walk, or nothing."""
-        return await self._backend.read(
-            lambda transaction: history_debt.outstanding(transaction, self._principal_id, room_id),
-        )
-
-    async def repay_room_history_debt(
-        self,
-        debt: RoomHistoryDebt,
-        *,
-        events: tuple[ProjectedEvent, ...],
-        complete: bool,
-        reached_ts: int | None,
-        expected_membership_epoch: int,
-    ) -> HistoryDebtOutcome:
-        """Install one room walk and settle the debt it was run for, together.
-
-        Two facts that must not be able to disagree: the events the walk found
-        and whether the hole they were fetched for is closed. Settling in a
-        second transaction would leave a crash between them owing history the
-        projection already holds, or -- far worse the other way round -- holding
-        a repaired room that still reads as indebted forever.
-        """
-        return await self._backend.write(
-            lambda transaction: _repay_history_debt(
-                transaction,
-                self._principal_id,
-                debt,
-                events=events,
-                complete=complete,
-                reached_ts=reached_ts,
                 expected_membership_epoch=expected_membership_epoch,
             ),
         )
@@ -736,54 +691,6 @@ def _enqueue_delivery(
     )
     journal.settle_many(transaction, principal_id, settle_source_event_ids, SettlementOutcome.SUCCEEDED)
     return transaction_id
-
-
-def _repay_history_debt(
-    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
-    principal_id: str,
-    debt: RoomHistoryDebt,
-    *,
-    events: tuple[ProjectedEvent, ...],
-    complete: bool,
-    reached_ts: int | None,
-    expected_membership_epoch: int,
-) -> HistoryDebtOutcome:
-    """Install a repayment walk as the room conversation's hydration, and settle.
-
-    Both effects are gated on the debt this walk was launched with still being
-    the outstanding one, checked here in the same transaction that applies them.
-    Concurrent readers of an indebted room can each end up carrying a snapshot:
-    one reads the debt, a second reads it before the first settles, and the
-    shared-task map cannot join a walk that has already finished. The loser then
-    arrives with an answer to a question nobody is asking, and neither effect is
-    harmless -- its shorter walk would replace a room conversation the winner
-    just installed in full, and `settle` would stamp permanent, sticky loss on a
-    room that was repaid seconds earlier.
-
-    The check is a compare-and-set on the exact anchor rather than a presence
-    test, so a *later* gap recorded over the top is superseding too: its debt is
-    a different question, and this walk did not answer it.
-    """
-    current = history_debt.outstanding(transaction, principal_id, debt.room_id)
-    if current is None or current.owed_through_ts != debt.owed_through_ts:
-        return HistoryDebtOutcome.SUPERSEDED
-    if not _install_hydration(
-        transaction,
-        principal_id,
-        room_id=debt.room_id,
-        thread_id=None,
-        events=events,
-        complete=complete,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return HistoryDebtOutcome.SUPERSEDED
-    return history_debt.settle(
-        transaction,
-        principal_id,
-        debt,
-        reached_ts=reached_ts,
-        walk_exhausted_server=complete,
-    )
 
 
 def _install_hydration(

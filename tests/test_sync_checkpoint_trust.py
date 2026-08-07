@@ -17,7 +17,7 @@ from mindroom.matrix.sync_certification import (
 from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,7 +36,6 @@ def _trust(
         logger=MagicMock(),
         # The event journal's identity, which the bot resolves at startup.
         store_generation=store_generation,
-        history_debt_provider=RecordedHistoryDebts,
     )
 
 
@@ -271,8 +270,14 @@ async def test_a_refused_response_resets_live_cursor_and_preserves_checkpoint(tm
 
 
 @pytest.mark.asyncio
-async def test_unrecovered_outcome_rewinds_before_clean_replay(tmp_path: Path) -> None:
-    """An unrecovered in-memory gap never advances the durable checkpoint."""
+async def test_unrecovered_outcome_advances_the_durable_checkpoint(tmp_path: Path) -> None:
+    """An open per-room gap advances the durable checkpoint like any other response.
+
+    The gap is nio's to finish and it survives a restart, so the checkpoint is
+    a true statement about every other room. Pinning the durable value after
+    the unrecovered response, not only after the clean one, is what separates
+    this from a cursor that stalled and then caught up.
+    """
     trust = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", store_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -284,12 +289,18 @@ async def test_unrecovered_outcome_rewinds_before_clean_replay(tmp_path: Path) -
             unrecovered_room_ids=frozenset({"!room:localhost"}),
         ),
     )
+    assert unrecovered.reset_client_token is False
+    assert trust.retry_token() == "s_unrecovered"
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_unrecovered",
+        store_generation=_GENERATION,
+    )
+
     replayed = await certify_response(
         trust,
         next_batch="s_unclassified",
         recovery=SyncRecoveryOutcome(),
     )
-    assert unrecovered.reset_client_token is True
     assert replayed.reset_client_token is False
     assert trust.retry_token() == "s_unclassified"
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
@@ -299,10 +310,16 @@ async def test_unrecovered_outcome_rewinds_before_clean_replay(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_repeated_unrecovered_gap_keeps_rewinding(
+async def test_a_persistently_unrecovered_gap_never_stalls_the_cursor(
     tmp_path: Path,
 ) -> None:
-    """Every failed transient recovery retries from the same safe continuity."""
+    """A room that stays unrecovered must not cost forward progress each response.
+
+    This is the wedge in its original form: the same room reported unrecovered
+    on every response. Each step is pinned by value rather than only the last,
+    because a cursor that rewound twice and then jumped would satisfy an
+    end-state assertion just as well.
+    """
     trust = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", store_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
@@ -310,28 +327,16 @@ async def test_repeated_unrecovered_gap_keeps_rewinding(
         unrecovered_room_ids=frozenset({"!room:localhost"}),
     )
 
-    first = await certify_response(
-        trust,
-        next_batch="s_after_gap_1",
-        recovery=gap_result,
-    )
-    second = await certify_response(
-        trust,
-        next_batch="s_after_gap_2",
-        recovery=gap_result,
-    )
-    clean = await certify_response(
-        trust,
-        next_batch="s_after_clean_delta",
-        recovery=SyncRecoveryOutcome(),
-    )
+    tokens = []
+    for token in ("s_after_gap_1", "s_after_gap_2", "s_after_clean_delta"):
+        recovery = SyncRecoveryOutcome() if token.endswith("clean_delta") else gap_result
+        decision = await certify_response(trust, next_batch=token, recovery=recovery)
+        assert decision.state is SyncTrustState.CERTIFIED
+        assert decision.reset_client_token is False
+        assert decision.reason is None
+        tokens.append(trust.retry_token())
 
-    assert first.reset_client_token is True
-    assert second.reset_client_token is True
-    assert clean.reset_client_token is False
-    assert clean.state is SyncTrustState.CERTIFIED
-    assert clean.reason is None
-    assert trust.retry_token() == "s_after_clean_delta"
+    assert tokens == ["s_after_gap_1", "s_after_gap_2", "s_after_clean_delta"]
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
         "s_after_clean_delta",
         store_generation=_GENERATION,

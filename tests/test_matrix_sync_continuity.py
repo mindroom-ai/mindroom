@@ -37,7 +37,6 @@ from mindroom.matrix.client_session import MatrixSyncStorage
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
-from mindroom.matrix.sync_recovery_escape import _CLASSIC_SYNC_RECOVERY_STALL_LIMIT
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -353,28 +352,36 @@ async def test_sliding_response_skips_continuity_write_without_join_fences(
 
 
 @pytest.mark.asyncio
-async def test_classic_unrecovered_gap_resets_transient_sync_state(
+async def test_classic_unrecovered_gap_keeps_its_transient_sync_state(
     tmp_path: Path,
 ) -> None:
-    """Classic cannot advance past an in-memory gap it failed to recover."""
+    """Classic advances past a gap nio owns durably instead of rewinding onto it.
+
+    nio persists the gap and keeps fetching it per room, so the response is a
+    true statement about every other room. Rewinding here is what discarded a
+    position the next attempt then had to re-measure against a larger window.
+    """
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_with_gap"
+    bot.client.has_uncommitted_classic_sync_state = True
     bot._first_sync_done = True
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_with_gap"
+    response.recovered_room_ids = frozenset()
     response.unrecovered_room_ids = frozenset({"!gap:localhost"})
     response.rooms = MagicMock(join={}, leave={})
 
-    response.unrecovered_room_ids = frozenset({"!gap:localhost"})
-
     await bot._on_sync_response(response)
 
-    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-    assert bot.client.next_batch == ""
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) == SyncCheckpoint(
+        "s_with_gap",
+        store_generation=_STORE_GENERATION,
+    )
+    assert bot.client.next_batch == "s_with_gap"
     assert bot._first_sync_done is True
-    assert bot._classic_sync_rebuild_pending is True
-    bot.client.reset_classic_sync_state.assert_awaited_once()
+    bot.client.acknowledge_classic_sync.assert_called_once_with("s_with_gap")
+    bot.client.reset_classic_sync_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -860,13 +867,17 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("mode", "persist_recovery"), [("classic", False), ("sliding", True)])
+@pytest.mark.parametrize("mode", ["classic", "sliding"])
 async def test_bot_start_gives_mindroom_sync_cursor_ownership(
     tmp_path: Path,
     mode: Literal["classic", "sliding"],
-    persist_recovery: bool,
 ) -> None:
-    """Every bot disables nio token storage while Sliding retains its recovery lane."""
+    """Every bot owns the cursor and leaves nio owning its recovery lane durably.
+
+    The two are separate questions, and coupling them is what forced Classic to
+    choose between a checkpoint it owned and gaps that survived a restart. It
+    now keeps both, so the parametrization pins one answer for both transports.
+    """
     bot = _agent_bot(tmp_path)
     bot.config.matrix_sync = MatrixSyncConfig(mode=mode)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -883,7 +894,7 @@ async def test_bot_start_gives_mindroom_sync_cursor_ownership(
 
     assert login.await_args.kwargs["sync_storage"] == MatrixSyncStorage(
         store_tokens=False,
-        persist_recovery=persist_recovery,
+        persist_recovery=True,
     )
 
 
@@ -1653,83 +1664,72 @@ def test_classic_checkpoint_publication_skips_ack_for_clean_duplicate(tmp_path: 
         SyncCheckpoint("s_same", store_generation=_STORE_GENERATION),
     )
 
-    bot._publish_classic_sync_commit(bot.client, record, acknowledge=True)
+    bot._publish_classic_sync_commit(bot.client, record)
 
     bot.client.acknowledge_classic_sync.assert_not_called()
     assert bot._room_lifecycle._applied_continuity_revision == record.revision
 
 
 @pytest.mark.asyncio
-async def test_gap_skipping_checkpoint_rewinds_instead_of_acknowledging(tmp_path: Path) -> None:
-    """A checkpoint past an abandoned gap restarts nio rather than acknowledging it.
+async def test_unrecovered_room_certifies_and_acknowledges_in_place(tmp_path: Path) -> None:
+    """A room nio is still rebuilding is acknowledged, not escaped around.
 
-    nio may still hold recovery state for the room the checkpoint moved past and
-    would refuse the acknowledgement, so the escape resets the client onto its
-    newly certified position instead.
+    nio fences that gap to its own room and carries it across restarts, so the
+    checkpoint is a true statement about every other room. Acknowledging it in
+    place is what keeps the cursor moving; rewinding is what used to ask the
+    homeserver for a strictly larger gap on each retry.
     """
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.has_uncommitted_classic_sync_state = True
-    recovery = SyncRecoveryOutcome(unrecovered_room_ids=frozenset({"!wedged:localhost"}))
-    for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT):
-        decision = bot._sync_checkpoint_trust.plan_response(
-            next_batch="s_past_the_gap",
-            recovery=recovery,
-        )
+    recovery = SyncRecoveryOutcome(unrecovered_room_ids=frozenset({"!rebuilding:localhost"}))
+
+    decision = bot._sync_checkpoint_trust.plan_response(
+        next_batch="s_past_the_gap",
+        recovery=recovery,
+    )
     assert decision.state is SyncTrustState.CERTIFIED
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
 
     applied = await bot._apply_sync_response_decision(decision, recovery=recovery)
 
     assert applied.state is SyncTrustState.CERTIFIED
-    bot.client.acknowledge_classic_sync.assert_not_called()
-    bot.client.reset_classic_sync_state.assert_awaited_once()
-    assert bot.client.next_batch == "s_past_the_gap"
+    bot.client.acknowledge_classic_sync.assert_called_once_with("s_past_the_gap")
+    bot.client.reset_classic_sync_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_a_never_recoverable_room_never_freezes_the_sync_watermark(tmp_path: Path) -> None:
     """A room nio can never rebuild must not pin the transport on one position.
 
-    The escape certifies past the gap and then resets the client, and the reset
-    installs whichever cursor cache trust currently calls safe. If that were the
-    checkpoint the escape just moved past, every window would rewind onto the
-    same position and the principal would re-sync it forever. So this drives
-    several full stall windows through the real response path and pins the
-    cursor and the durable checkpoint by value after each one.
+    This used to cost a three-attempt stall window per escape, so the cursor
+    rewound twice for every step it took. It now advances on every response,
+    and the durable checkpoint follows it. Both are pinned by value: asserting
+    only the last one would pass just as well for a cursor that froze on
+    "s_stuck" and jumped at the end.
     """
-    wedged = frozenset({"!wedged:localhost"})
+    rebuilding = frozenset({"!rebuilding:localhost"})
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
     save_sync_token(tmp_path, bot.agent_name, "s_stuck", store_generation=_STORE_GENERATION)
     assert await bot._sync_checkpoint_trust.prepare_startup() == "s_stuck"
 
-    windows = 3
+    attempts = 9
     cursors: list[str] = []
-    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT * windows):
+    for attempt in range(attempts):
         response = MagicMock(spec=nio.SyncResponse)
         response.next_batch = f"s_live_{attempt}"
         response.recovered_room_ids = frozenset()
-        response.unrecovered_room_ids = wedged
+        response.unrecovered_room_ids = rebuilding
         response.rooms = MagicMock(join={}, leave={})
         bot.client.next_batch = response.next_batch
         bot.client.has_uncommitted_classic_sync_state = True
         await bot._on_sync_response(response)
         cursors.append(bot.client.next_batch)
 
-    # Each window rewinds onto the checkpoint it is measured from until the
-    # escape certifies past the gap, and that escape is what the next window
-    # rewinds to. A frozen watermark would repeat "s_stuck" to the end.
-    limit = _CLASSIC_SYNC_RECOVERY_STALL_LIMIT
-    escapes = [f"s_live_{window * limit + limit - 1}" for window in range(windows)]
-    measured_from = ["s_stuck", *escapes[:-1]]
-    assert cursors == [
-        token
-        for rewind, escape in zip(measured_from, escapes, strict=True)
-        for token in [*[rewind] * (limit - 1), escape]
-    ]
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == escapes[-1]
+    assert cursors == [f"s_live_{attempt}" for attempt in range(attempts)]
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == f"s_live_{attempts - 1}"
 
 
 @pytest.mark.asyncio

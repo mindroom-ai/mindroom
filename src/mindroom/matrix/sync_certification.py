@@ -54,16 +54,6 @@ class SyncRecoveryOutcome:
             admission_refused=admission_refused,
         )
 
-    @property
-    def recovery_conclusive(self) -> bool:
-        """Return whether this response settles whether nio closed every gap.
-
-        A response that refused an event never reached its recovery verdict, so
-        it may neither prove nor disprove that a room's rebuild has stopped
-        converging.
-        """
-        return not self.admission_refused
-
 
 @dataclass(frozen=True)
 class SyncCertificationDecision:
@@ -74,11 +64,6 @@ class SyncCertificationDecision:
     clear_saved_token: bool = False
     reset_client_token: bool = False
     reason: str | None = None
-    # Rooms this checkpoint is about to move past without their history. The
-    # decision carries them from planning to application because the durable
-    # record of what was skipped has to be written before the checkpoint that
-    # skips it, and only the applying side is allowed to write anything.
-    skipped_recovery_room_ids: frozenset[str] = frozenset()
 
 
 def _uncertain_decision(
@@ -96,58 +81,44 @@ def _uncertain_decision(
     )
 
 
-def _uncertain_reason(
-    recovery: SyncRecoveryOutcome,
-    *,
-    token: str | None,
-    skipped_recovery_room_ids: frozenset[str],
-) -> str | None:
-    """Return why one sync response cannot certify a checkpoint."""
+def _uncertain_reason(recovery: SyncRecoveryOutcome, *, token: str | None) -> str | None:
+    """Return why one sync response cannot certify a checkpoint.
+
+    An unrecovered room is deliberately absent from this list. nio fences its
+    own limited-timeline gaps per room and carries them across restarts, so a
+    room it has not finished rebuilding holds back only its own events; the
+    checkpoint is a statement about every other room, and withholding it over
+    one room's gap is what used to ask for a strictly larger gap on each retry.
+
+    Both remaining reasons are about this response rather than about a room. A
+    response with no ``next_batch`` names no position to resume from, and a
+    refused admission means some event in it has no durable owner, so resuming
+    past it would skip work nobody is holding.
+    """
     if token is None:
-        reason = "missing_next_batch"
-    elif recovery.admission_refused:
-        reason = "admission_refused"
-    elif recovery.unrecovered_room_ids - skipped_recovery_room_ids:
-        reason = "sync_recovery_incomplete"
-    else:
-        reason = None
-    return reason
+        return "missing_next_batch"
+    if recovery.admission_refused:
+        return "admission_refused"
+    return None
 
 
 def certify_sync_response(
     *,
     next_batch: str | None,
     recovery: SyncRecoveryOutcome,
-    skipped_recovery_room_ids: frozenset[str] = frozenset(),
 ) -> SyncCertificationDecision:
-    """Return the certifier decision for one sync response.
-
-    ``skipped_recovery_room_ids`` names rooms whose unrecovered gap the caller
-    has decided to give up on, trading that room's missed history for the
-    forward progress a permanently rewinding cursor can never make.
-    """
+    """Return the certifier decision for one sync response."""
     token = normalize_sync_token(next_batch)
-    reason = _uncertain_reason(
-        recovery,
-        token=token,
-        skipped_recovery_room_ids=skipped_recovery_room_ids,
-    )
+    reason = _uncertain_reason(recovery, token=token)
     if reason is not None:
         return _uncertain_decision(
             reason=reason,
             reset_client_token=True,
         )
 
-    checkpoint = SyncCheckpoint(token=cast("str", token))
     return SyncCertificationDecision(
         state=SyncTrustState.CERTIFIED,
-        checkpoint_to_save=checkpoint,
-        # Skipping a gap leaves nio holding recovery state for a room this
-        # checkpoint has already moved past, and that state can block the
-        # response from ever being acknowledged. Restart the client from the
-        # newly certified position instead of acknowledging in place.
-        reset_client_token=bool(skipped_recovery_room_ids),
-        skipped_recovery_room_ids=skipped_recovery_room_ids,
+        checkpoint_to_save=SyncCheckpoint(token=cast("str", token)),
     )
 
 

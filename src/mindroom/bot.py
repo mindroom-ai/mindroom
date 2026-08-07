@@ -104,7 +104,6 @@ from .event_journal import (
     EventJournalStore,
     EventKind,
     MembershipFence,
-    PrincipalStore,
     SemanticConsumer,
 )
 from .event_journal_open import open_event_journal_store
@@ -431,7 +430,6 @@ class AgentBot:
             # further down, and trusting a saved token means asserting that
             # store already holds every event the token covers.
             store_generation_provider=self._resolve_journal_generation,
-            history_debt_provider=self._journal_principal,
         )
         self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
@@ -472,10 +470,6 @@ class AgentBot:
     async def _resolve_journal_generation(self) -> str | None:
         """Return the event journal's durable identity, minting it on first open."""
         return await self._journal_store.generation(new_generation=uuid.uuid4().hex)
-
-    def _journal_principal(self) -> PrincipalStore:
-        """Return this bot's principal-bound store, once the journal is open."""
-        return self._journal_store.principal(self._journal_principal_id)
 
     def _open_journal_store(self) -> EventJournalStore:
         """Open the durable store this bot's journal, projection, and outbox share.
@@ -1201,11 +1195,7 @@ class AgentBot:
             decision,
             recovery=recovery,
             joined_room_ids=joined_room_ids,
-            publish_record=partial(
-                self._publish_classic_sync_commit,
-                client,
-                acknowledge=not decision.reset_client_token,
-            ),
+            publish_record=partial(self._publish_classic_sync_commit, client),
         )
         await self._apply_client_rewind_decision(applied)
         return applied
@@ -1214,23 +1204,16 @@ class AgentBot:
         self,
         client: nio.AsyncClient | None,
         record: SyncContinuityRecord,
-        *,
-        acknowledge: bool,
     ) -> None:
         """Publish one durable continuity record and acknowledge its exact nio state.
 
-        A checkpoint that skips an unrecoverable gap is certified together with
-        a client reset, because nio may still hold recovery state for the room
-        the checkpoint moved past and would refuse to acknowledge it. The reset
-        discards that state, so acknowledgement is skipped rather than raised.
+        Every certified checkpoint is acknowledged in place. nio fences its
+        limited-timeline gaps per room and keeps them across restarts, so an
+        unfinished rebuild no longer refuses the acknowledgement of a position
+        that is correct for every other room.
         """
         self._room_lifecycle.apply_continuity_record(record)
-        if (
-            acknowledge
-            and client is not None
-            and record.checkpoint is not None
-            and client.has_uncommitted_classic_sync_state
-        ):
+        if client is not None and record.checkpoint is not None and client.has_uncommitted_classic_sync_state:
             client.acknowledge_classic_sync(record.checkpoint.token)
 
     async def _apply_client_rewind_decision(
@@ -1797,7 +1780,15 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             sync_storage=MatrixSyncStorage(
                 store_tokens=False,
-                persist_recovery=self.config.matrix_sync.mode == "sliding",
+                # Both transports persist their recovery gaps, and Classic sync
+                # needs it most. A checkpoint may only advance past a room nio
+                # has not finished rebuilding while the gap outlives the
+                # process: nothing in a replay from the committed cursor asks
+                # for those events again, so the persisted gap row is the only
+                # record that they are still owed. Without it nio fences the
+                # checkpoint on that room, which is correct but is the wedge
+                # this configuration exists to avoid.
+                persist_recovery=True,
             ),
         )
         self.client = client

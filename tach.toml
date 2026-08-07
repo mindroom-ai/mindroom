@@ -1940,15 +1940,9 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.event_journal",
     "mindroom.matrix.sync_certification",
-    "mindroom.matrix.sync_recovery_escape",
     "mindroom.matrix.sync_token_values",
 ]
 visibility = ["mindroom.bot"]
-
-[[modules]]
-path = "mindroom.matrix.sync_recovery_escape"
-depends_on = []
-visibility = ["mindroom.matrix.sync_checkpoint_trust"]
 
 [[modules]]
 path = "mindroom.matrix.sync_certification"
