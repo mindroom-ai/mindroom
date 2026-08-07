@@ -22,7 +22,9 @@ from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
     _MAX_MESSAGES_REQUESTS,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
+    ConversationHydrator,
 )
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
@@ -198,6 +200,39 @@ def reader_for(store: PrincipalStore, homeserver: FakeHomeserver) -> ProjectedTh
         config=Config(),
         store=store,
         self_sender=ROUTER,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BotRuntime:
+    """The client-and-config view a running bot hands its hydrator."""
+
+    client: FakeHomeserver
+    config: Config
+
+
+def prompt_reader_for(
+    store: PrincipalStore,
+    homeserver: FakeHomeserver,
+    *,
+    window_messages: int,
+) -> ConversationReader:
+    """Return the conversation reader a running bot builds for the same account.
+
+    Wired the way ``bot.py`` wires it: the prompt path's own hydration bounds
+    over *the same journal principal* an export of that account reads. That
+    sharing is deliberate -- it is what makes a warm export cost no Matrix
+    calls -- so a test about the two callers meeting has to reproduce it rather
+    than give each its own store.
+    """
+    return ConversationReader(
+        store=store,
+        hydrator=ConversationHydrator(
+            store=store,
+            runtime=_BotRuntime(client=homeserver, config=Config()),  # type: ignore[arg-type]
+            self_sender=ROUTER,
+            prompt_window_messages=window_messages,
+        ),
     )
 
 
@@ -604,6 +639,51 @@ async def test_a_thread_that_fits_the_window_is_complete_and_exports(router: Pri
     messages = await export(projection)
 
     assert bodies(messages) == ["root", "message-0", "message-1", "message-2", "message-3", "message-4"]
+
+
+async def test_a_thread_the_prompt_path_already_hydrated_still_exports_whole(
+    router: PrincipalStore,
+) -> None:
+    """Export's larger bounds must survive the prompt path getting there first.
+
+    Export reads the running bot's own principal, so by the time anyone exports
+    a thread the bot has been answering in, a hydration marker already exists --
+    one left by a walk bounded for a *prompt*. A marker that vouches only for a
+    suffix must not satisfy a caller that needs the whole thread, or export's
+    larger bounds are dead code for every warm thread and the only threads that
+    export are the ones nobody has used.
+
+    The second pass is asserted too. A deeper walk that did not record its
+    better coverage would leave every later export paying for the same walk
+    again.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "message-00", ts=1_000),
+        [
+            raw(f"$reply-{index:02d}:example.org", f"message-{index:02d}", ts=1_000 + index, thread_id=ROOT)
+            for index in range(1, 6)
+        ],
+    )
+    # The running bot reads the thread first. Its walk stops at the prompt
+    # window and leaves a perfectly warm marker over a partial conversation.
+    await prompt_reader_for(router, homeserver, window_messages=2).read_strict(
+        room_id=ROOM,
+        thread_id=ROOT,
+        limit=50,
+    )
+    assert await router.conversation_hydration_was_truncated(room_id=ROOM, thread_id=ROOT)
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == [f"message-{index:02d}" for index in range(6)]
+
+    homeserver.reset_counts()
+    again = await export(reader_for(router, homeserver))
+
+    assert bodies(again) == [f"message-{index:02d}" for index in range(6)]
+    assert homeserver.history_calls == 0
 
 
 async def test_export_does_not_inherit_the_prompt_window(router: PrincipalStore) -> None:

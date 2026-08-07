@@ -17,6 +17,14 @@ indebted room precisely so the next read comes back here. Repaying happens on
 that read and nowhere else, for the same reason nothing else here is a
 background pass: an unreachable homeserver should degrade a read that someone
 is waiting for, not accumulate retry state nobody is watching.
+
+"Once per membership" is a statement about what a marker discharges, and a
+marker only discharges the question its walk answered. A bounded walk answers
+"is this conversation recent", which is all a prompt asks. A caller whose
+correctness is completeness rather than recency asks a strictly harder
+question, reads the same principal's projection, and always arrives second --
+so `require_complete` lets it walk past a marker earned under smaller bounds
+rather than inherit an answer to a question it did not ask.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 import nio
@@ -228,6 +237,17 @@ class ConversationHydrator:
     prompt_window_messages: int = HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
     max_requests: int = _MAX_MESSAGES_REQUESTS
+    # Whether a marker left by a walk that stopped at a ceiling is good enough.
+    #
+    # It is for a prompt, and saying so is the whole reason the short-circuit
+    # can stay cheap. It is not for a caller whose correctness is completeness,
+    # and that caller shares this projection: the principal an export reads is
+    # the one the running bot writes, deliberately, because that sharing is what
+    # makes a warm export cost no Matrix calls. The consequence was that the
+    # prompt path always got there first, so a hydrator configured with larger
+    # bounds never once used them and every thread the bot had answered in was
+    # unexportable until a rejoin moved the membership epoch.
+    require_complete: bool = False
     _in_flight: dict[tuple[str, str | None], asyncio.Task[None]] = field(
         default_factory=dict,
         init=False,
@@ -273,9 +293,23 @@ class ConversationHydrator:
         because membership that keeps moving is a room the bot cannot get a
         stable view of, and failing closed there is the safe direction -- a
         strict caller gets an error instead of a page it cannot vouch for.
+
+        ``require_complete`` adds the one other reason to walk a conversation
+        that already has a marker: the marker vouches for a bounded walk and
+        this caller cannot use a suffix. That is owed exactly once. A second
+        pass would re-read the same ceiling and reinstall the same marker, and
+        the two cases it cannot tell apart -- a thread past even the larger
+        bounds, and a room whose history a skipped sync gap lost for good --
+        are both permanent. Whether the deeper walk reached the start is then a
+        fact for the caller to judge, not a reason to walk again.
         """
+        complete_required = self.require_complete
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
-            if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
+            if await self._hydration_stands(
+                room_id=room_id,
+                thread_id=thread_id,
+                complete_required=complete_required,
+            ):
                 return
             debt = await self.store.room_history_debt(room_id)
             if debt is not None:
@@ -289,20 +323,55 @@ class ConversationHydrator:
                 )
                 if thread_id is None:
                     # The repayment walked the room conversation and installed
-                    # it. Walking it again here would fetch the same pages a
-                    # second time to reach the same rows. The loop still
-                    # verifies the marker landed.
+                    # it, under this hydrator's own bounds, so it is also the
+                    # deeper walk a strict caller was owed. Walking it again
+                    # here would fetch the same pages a second time to reach the
+                    # same rows. The loop still verifies the marker landed.
+                    complete_required = False
                     continue
             await self._shared(
                 self._in_flight,
                 (room_id, thread_id),
-                lambda: self._hydrate(room_id=room_id, thread_id=thread_id),
+                # Bound eagerly rather than closed over: the requirement is
+                # cleared below, and a lambda would read the cleared value.
+                partial(
+                    self._hydrate,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    complete_required=complete_required,
+                ),
                 name=f"hydrate_conversation_{room_id}",
             )
+            complete_required = False
         if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
             return
         msg = f"Conversation hydration kept losing its membership epoch for {room_id} thread {thread_id}"
         raise _HydrationError(msg)
+
+    async def _hydration_stands(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        complete_required: bool,
+    ) -> bool:
+        """Return whether the stored marker already answers what this caller asked.
+
+        A prompt asks for recency, and any marker for the current membership
+        answers it. A caller that needs the whole conversation asks whether the
+        walk behind that marker ran out of conversation rather than out of
+        allowance. Either way it is one store read.
+
+        The strict question is the walk's own outcome and deliberately not
+        `conversation_is_complete`, which also answers no when a skipped sync
+        gap lost history behind the walk. That loss is real and export must
+        still refuse on it, but it is not something walking again can repair --
+        asking the stronger question here would re-walk the whole conversation
+        on every read of such a room and reach the same answer every time.
+        """
+        if complete_required:
+            return await self.store.conversation_hydration_reached_its_end(room_id=room_id, thread_id=thread_id)
+        return await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id)
 
     async def _shared[Key](
         self,
@@ -323,8 +392,12 @@ class ConversationHydrator:
             if running.get(key) is task and task.done():
                 del running[key]
 
-    async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
-        if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
+    async def _hydrate(self, *, room_id: str, thread_id: str | None, complete_required: bool = False) -> None:
+        if await self._hydration_stands(
+            room_id=room_id,
+            thread_id=thread_id,
+            complete_required=complete_required,
+        ):
             # A concurrent reader finished this walk while this one was still on
             # its way here. `ensure_hydrated` checks the marker before it awaits
             # anything, but it awaits twice afterwards, and `_shared` can only
@@ -333,6 +406,10 @@ class ConversationHydrator:
             # last word, rather than trusting arrival order to a walk that costs
             # server requests. This is the contract, not an optimization: a
             # conversation is hydrated at most once per membership epoch.
+            #
+            # Rechecked against the same question the caller asked, because a
+            # marker that only vouches for a bounded walk does not discharge a
+            # strict caller's walk any more than it discharged its short-circuit.
             return
         epoch = await self.store.membership_epoch(room_id)
         walk = (

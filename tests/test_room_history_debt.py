@@ -156,12 +156,19 @@ class FakeClient:
             yield parse(source)
 
 
-def hydrator(store: PrincipalStore, client: FakeClient, **bounds: int) -> ConversationHydrator:
+def hydrator(
+    store: PrincipalStore,
+    client: FakeClient,
+    *,
+    require_complete: bool = False,
+    **bounds: int,
+) -> ConversationHydrator:
     """Return a hydrator wired to a fake homeserver."""
     return ConversationHydrator(
         store=store,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
         self_sender=BOT,
+        require_complete=require_complete,
         **bounds,
     )
 
@@ -643,6 +650,35 @@ async def test_a_walk_that_runs_out_of_server_history_still_owns_up_to_the_hole(
     ]
     assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
     assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
+
+
+async def test_lost_history_does_not_make_a_strict_caller_walk_the_room_forever(
+    alice: PrincipalStore,
+) -> None:
+    """A caller that needs completeness must still stop asking for the impossible.
+
+    Lost history is the one truncation no further walk can repair: the hole is
+    behind what the server still holds, so the room answers "not complete"
+    forever. A strict caller re-walking on that answer would spend its whole
+    epoch-retry budget on full room walks and then fail with the wrong error.
+    One walk, then the honest record, and the caller refuses on that.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(pages=[[raw("$six", "six", ts=6_000), raw("$five", "five", ts=5_000)]])
+    strict = hydrator(alice, client, require_complete=True)
+
+    await strict.ensure_hydrated(room_id=ROOM, thread_id=None)
+    walked = client.calls
+    await strict.ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    assert client.calls == walked
+    assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    # The two questions that must not be conflated. The walk did reach the end
+    # of what the server still holds, which is why walking again is pointless;
+    # the room is still not whole, which is why a strict caller still refuses.
+    assert await alice.conversation_hydration_reached_its_end(room_id=ROOM, thread_id=None)
+    assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
 # --- Ordering against the checkpoint ----------------------------------------

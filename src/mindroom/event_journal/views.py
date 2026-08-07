@@ -219,6 +219,10 @@ class HydrationView(Protocol):
         """Return whether this conversation was hydrated under current membership."""
         ...
 
+    async def conversation_hydration_reached_its_end(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation's hydration walk ran out of conversation."""
+        ...
+
     async def install_hydrated_conversation(
         self,
         *,

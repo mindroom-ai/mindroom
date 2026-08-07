@@ -277,6 +277,7 @@ def hydrator(
     client: FakeClient,
     *,
     self_sender: str = BOT,
+    require_complete: bool = False,
     **bounds: int,
 ) -> ConversationHydrator:
     """Return a hydrator wired to a fake homeserver."""
@@ -284,8 +285,23 @@ def hydrator(
         store=store,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
         self_sender=self_sender,
+        require_complete=require_complete,
         **bounds,
     )
+
+
+def edited_thread(answers: int, edits: int) -> FakeClient:
+    """Return a thread of streamed answers, each ending at its newest edit."""
+    relations: list[dict[str, Any]] = []
+    for index in range(answers):
+        ts = 1_000 + index * 100
+        original = f"$answer{index}"
+        relations.append(raw(original, f"answer {index}", ts=ts, thread_id="$root"))
+        relations.extend(
+            raw(f"{original}-edit{edit}", f"answer {index} v{edit}", ts=ts + 1 + edit, replaces=original)
+            for edit in range(edits)
+        )
+    return FakeClient(events={"$root": raw("$root", "root", ts=500)}, relations={"$root": relations})
 
 
 async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) -> None:
@@ -602,20 +618,6 @@ class TestThreadHydrationBounds:
     streamed answer is one message and a long run of ``m.replace`` edits.
     """
 
-    @staticmethod
-    def _edited_thread(answers: int, edits: int) -> FakeClient:
-        """Return a thread of streamed answers, each ending at its newest edit."""
-        relations: list[dict[str, Any]] = []
-        for index in range(answers):
-            ts = 1_000 + index * 100
-            original = f"$answer{index}"
-            relations.append(raw(original, f"answer {index}", ts=ts, thread_id="$root"))
-            relations.extend(
-                raw(f"{original}-edit{edit}", f"answer {index} v{edit}", ts=ts + 1 + edit, replaces=original)
-                for edit in range(edits)
-            )
-        return FakeClient(events={"$root": raw("$root", "root", ts=500)}, relations={"$root": relations})
-
     async def test_the_window_counts_messages_a_prompt_can_read_not_events(
         self,
         alice: PrincipalStore,
@@ -653,7 +655,7 @@ class TestThreadHydrationBounds:
         just finished delivering a message -- which, newest first, is the moment
         an original arrives, because every edit of it is newer and already read.
         """
-        client = self._edited_thread(answers=4, edits=3)
+        client = edited_thread(answers=4, edits=3)
 
         await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -717,7 +719,7 @@ class TestThreadHydrationBounds:
         by looking at the projection, so the walk records why it stopped
         instead of leaving it to be inferred.
         """
-        client = self._edited_thread(answers=4, edits=1)
+        client = edited_thread(answers=4, edits=1)
 
         await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -729,7 +731,7 @@ class TestThreadHydrationBounds:
         alice: PrincipalStore,
     ) -> None:
         """Running out of relations is completeness, and it is recorded as such."""
-        client = self._edited_thread(answers=4, edits=1)
+        client = edited_thread(answers=4, edits=1)
 
         await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -747,7 +749,7 @@ class TestThreadHydrationBounds:
         Reporting it truncated would mark every brand-new room's first turn as
         partial history, so the question is asked the other way round.
         """
-        client = self._edited_thread(answers=4, edits=1)
+        client = edited_thread(answers=4, edits=1)
 
         assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
 
@@ -760,11 +762,108 @@ class TestThreadHydrationBounds:
         alice: PrincipalStore,
     ) -> None:
         """The other direction: a whole thread must not be reported as a suffix."""
-        client = self._edited_thread(answers=4, edits=1)
+        client = edited_thread(answers=4, edits=1)
 
         await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
+
+class TestCompletenessRequirement:
+    """Who a hydration marker is good enough for.
+
+    One projection serves both kinds of caller, on purpose and under the same
+    principal, so the marker a bounded walk leaves is read by a caller that can
+    use a suffix and by one that cannot. The bounds a strict caller is built
+    with are worth nothing if the short-circuit hands it someone else's walk.
+    """
+
+    async def test_a_prompt_keeps_its_warm_marker_and_never_rewalks(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The short-circuit is why startup prewarm could be deleted; it stays cheap.
+
+        A prompt read of a thread whose walk stopped at the window must cost
+        nothing at all. Making every warm read re-walk would trade the export
+        defect for a far worse one, on the hot path rather than a batch job.
+        """
+        client = edited_thread(answers=4, edits=1)
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+        walked = client.relation_calls
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls == walked
+
+    async def test_a_strict_caller_walks_past_a_marker_left_by_a_bounded_walk(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The defect itself, at the seam that owns it.
+
+        The prompt path gets to every thread first, so a strict caller that
+        accepted its marker would never once use the larger bounds it was
+        built with.
+        """
+        client = edited_thread(answers=4, edits=1)
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        await hydrator(
+            alice,
+            client,
+            prompt_window_messages=50,
+            require_complete=True,
+        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert await bodies(alice, "$root") == [
+            "root",
+            "answer 0 v0",
+            "answer 1 v0",
+            "answer 2 v0",
+            "answer 3 v0",
+        ]
+
+    async def test_a_strict_caller_accepts_a_walk_that_already_reached_the_end(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The mirror: completeness is satisfiable, not a standing order to re-walk.
+
+        Without this the fix above would also pass if a strict caller simply
+        walked on every read, which is the mistake this shape is most likely to
+        make.
+        """
+        client = edited_thread(answers=4, edits=1)
+        strict = hydrator(alice, client, prompt_window_messages=50, require_complete=True)
+        await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        walked = client.relation_calls
+
+        await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls == walked
+
+    async def test_a_strict_caller_owes_the_deeper_walk_only_once(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A thread past even the strict caller's own bounds must not be re-walked.
+
+        The deeper walk answers the question once. Repeating it would re-read
+        the same ceiling for the same marker, and the epoch-retry budget would
+        turn one unexportable thread into three full walks of it. The record
+        stays honestly truncated, which is what lets the caller refuse.
+        """
+        client = edited_thread(answers=4, edits=1)
+        strict = hydrator(alice, client, prompt_window_messages=2, require_complete=True)
+
+        await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls == 1
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
 
 class TestRoomHydration:

@@ -328,6 +328,31 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and not bool(row["history_lost"])
 
 
+def conversation_hydration_reached_its_end(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> bool:
+    """Return whether the walk that hydrated this conversation ran out of conversation.
+
+    The walk's own account of why it stopped, and nothing else.
+    `conversation_is_complete` is this *and* the absence of history lost to a
+    skipped sync gap, which is the right question for a reader deciding whether
+    a conversation is whole and the wrong one for deciding whether to walk it
+    again. The two differ exactly where it matters: lost history sits behind
+    what the server still holds, so no further walk can recover it, and a
+    hydrator that re-walked on that answer would pay for a whole walk on every
+    read and change nothing.
+
+    Asked only by a caller that needs completeness. A prompt is served by the
+    hydration marker alone, which is what keeps its warm reads free.
+    """
+    row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    return row is not None and bool(row["complete"])
+
+
 def conversation_hydration_was_truncated(
     transaction: Transaction,
     principal_id: str,

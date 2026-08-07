@@ -33,6 +33,15 @@ thread past even these is reported as too large to write honestly rather than
 silently truncated. The two callers still differ in how they react to hitting a
 bound -- a prompt accepts a shorter conversation, export refuses -- which is the
 part that was right all along.
+
+Owning the bounds was not enough on its own, because the two callers share a
+principal as well as a walk. Hydration runs once per membership and stops at the
+first marker, so the prompt path -- which reaches every thread the bot has
+answered in, long before anyone exports it -- installed a marker for its own
+window and the larger bounds here were never once used. Every warm thread past
+the prompt window was unexportable until a rejoin moved the epoch. The hydrator
+is therefore told that this caller needs the whole conversation, and a marker
+left by a walk that gave up early no longer satisfies it.
 """
 
 from __future__ import annotations
@@ -157,6 +166,14 @@ def export_conversation_reader(
                 prompt_window_messages=EXPORT_WINDOW_MESSAGES,
                 max_fetched_events=EXPORT_MAX_FETCHED_EVENTS,
                 max_requests=EXPORT_MAX_MESSAGES_REQUESTS,
+                # Larger bounds alone were not enough, because hydration runs
+                # once per membership and this reader shares the running bot's
+                # principal. The prompt path reaches every thread the bot has
+                # answered in first, and its marker satisfied the short-circuit,
+                # so the bounds above were dead code for exactly the warm
+                # threads an export is for. A marker that vouches for a walk
+                # which gave up early does not vouch for a whole thread.
+                require_complete=True,
             ),
         ),
         completeness=store,
@@ -172,19 +189,22 @@ async def fetch_projected_thread_history(
 ) -> list[ResolvedVisibleMessage]:
     """Return one thread's complete current history, oldest first.
 
-    Every page is a strict read: the conversation is hydrated once if it has
-    never been built under this membership, and any message owing a point
-    refetch is repaired before the page is returned.
+    Every page is a strict read: the conversation is built from the server if
+    no walk has yet read it to its end under this membership, and any message
+    owing a point refetch is repaired before the page is returned.
 
     Completeness is asked once, after that first read, and it is a different
-    question from freshness. Hydration is bounded, so a thread longer than the
-    window leaves a perfectly warm marker over a partial conversation, and
-    nothing in a page distinguishes "this is all of it" from "this is the end
-    of it". A prompt is right to accept the suffix. An export is not: a file
-    that says ``message_count`` and means "the last few hundred" is worse than
-    a failure, so the thread fails and the pass records it. There is no deeper
-    walk to ask for -- hydration runs once per membership -- which makes this
-    terminal for that membership rather than something a retry fixes.
+    question from freshness. Hydration is bounded, so a thread longer than a
+    walk's allowance leaves a perfectly warm marker over a partial
+    conversation, and nothing in a page distinguishes "this is all of it" from
+    "this is the end of it". A prompt is right to accept the suffix. An export
+    is not: a file that says ``message_count`` and means "the last few hundred"
+    is worse than a failure, so the thread fails and the pass records it.
+
+    Reaching here means the deeper walk was already asked for and still did not
+    reach the start, so the two cases left are both permanent: a thread past
+    even the export bounds, and a room whose history a skipped sync gap lost
+    for good. Neither is something a retry fixes, and neither is re-walked.
 
     After that, paging runs backwards, because that is the direction the
     projection is indexed in, and each page is prepended so the result stays in

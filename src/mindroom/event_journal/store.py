@@ -304,6 +304,17 @@ class PrincipalStore:
             ),
         )
 
+    async def conversation_hydration_reached_its_end(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation's hydration walk ran out of conversation."""
+        return await self._backend.read(
+            lambda transaction: reads.conversation_hydration_reached_its_end(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
     async def conversation_hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether a walk ran for this conversation and stopped at a ceiling."""
         return await self._backend.read(
