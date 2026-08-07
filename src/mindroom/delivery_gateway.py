@@ -41,6 +41,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.response_delivery import (
     DeliveryStage,
     RecoveryOutcome,
@@ -598,8 +599,49 @@ class DeliveryGateway:
         return ResponseDelivery(
             store=self.deps.outbox,
             send=send,
+            sending_device_id=self._client().device_id,
+            resolve_delivered=self._delivered_under_a_previous_device,
             handoff=self.deps.turn_handoff,
         )
+
+    async def _delivered_under_a_previous_device(self, claimed: OutboxDelivery) -> str | None:
+        """Return the answer an earlier device already put in the room, if it did.
+
+        Reached only when the frozen transaction ID has stopped being proof,
+        which is a re-login between the attempt and the retry. The room itself
+        is then the only witness, so it is read the same way replayed turns
+        read it: find a message from this bot replying to the sources this turn
+        answers.
+
+        The turn's sources come from the durable ledger rather than from
+        anything this process remembers, because the process that made the
+        first attempt is gone. A turn the ledger has never heard of resolves to
+        its own anchor event, which is the right question for the uncoalesced
+        case and the only one available for the rest.
+        """
+        client = self._client()
+        response_sender = client.user_id
+        if not response_sender:
+            return None
+        source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.turn_id)
+        delivered = await find_response_event_ids_via_room_messages(
+            client,
+            claimed.room_id,
+            response_sender=response_sender,
+            source_event_ids=source_event_ids,
+        )
+        if len(delivered) > 1:
+            # Two visible answers to the same sources is the duplicate this
+            # lookup exists to prevent, already committed. Adopting one at
+            # random would bind every later edit to a coin flip, so the row
+            # stays unacknowledged and a human-visible error is raised rather
+            # than a third answer sent.
+            msg = (
+                f"Turn {claimed.turn_id!r} has {len(delivered)} visible answers in {claimed.room_id}, "
+                f"so no single one can be adopted after the sending device changed"
+            )
+            raise RuntimeError(msg)
+        return next(iter(delivered), None)
 
     async def recover_deliveries(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome this process cannot know.
@@ -608,6 +650,9 @@ class DeliveryGateway:
         transaction ID and collapses back onto the same event, so recovery
         cannot duplicate a visible answer -- which is what makes resending
         unconditionally the safe choice over trying to work out what happened.
+        That holds for as long as the device holding the transaction ID's
+        namespace is the one retrying, so this pass carries the current device
+        and the room lookup that covers the case where it is not.
 
         A send that fails again leaves its row unacknowledged and is counted in
         the returned outcome, which is how the caller knows to come back.
@@ -618,7 +663,12 @@ class DeliveryGateway:
             delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
             return delivered.event_id
 
-        return await ResponseDelivery(store=self.deps.outbox, send=send).recover()
+        return await ResponseDelivery(
+            store=self.deps.outbox,
+            send=send,
+            sending_device_id=self._client().device_id,
+            resolve_delivered=self._delivered_under_a_previous_device,
+        ).recover()
 
     async def _send_content(
         self,

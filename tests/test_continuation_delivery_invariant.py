@@ -107,10 +107,16 @@ class _WatchedOutbox:
             settle_source_event_ids=settle_source_event_ids,
         )
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None = None,
+    ) -> OutboxDelivery | None:
         """Freeze one delivery, noting the claim on the timeline first."""
         self.timeline.append(f"claim:{stage.value}")
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage, device_id=device_id)
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Answer the membership check from the real store, off the timeline.

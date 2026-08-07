@@ -775,6 +775,9 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = user_id
+    # A logged-in client always has one, and delivery records it on every claim
+    # so a resend can tell whether its frozen transaction ID still deduplicates.
+    client.device_id = "TESTDEVICE"
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
@@ -970,12 +973,26 @@ class FakeOutbox:
         )
         return transaction_id
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
-        """Freeze one delivery before any network call."""
+    async def claim_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None = None,
+    ) -> OutboxDelivery | None:
+        """Freeze one delivery before any network call, returning its prior state.
+
+        The pre-claim row is what comes back, exactly as the real outbox does:
+        a caller has to be able to see whether *someone else* attempted this
+        and from which device, and reading after the mark would report this
+        attempt back to itself.
+        """
         key = (turn_id, stage.value)
         row = self.rows.get(key)
-        if row is not None:
-            self.attempted.add(key)
+        if row is None:
+            return None
+        self.attempted.add(key)
+        self.rows[key] = replace(row, attempted=True, sending_device_id=device_id)
         return row
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
@@ -1096,9 +1113,15 @@ class DiesAfterAcknowledgement:
         """Return whether a turn still speaks for the room's current membership."""
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None = None,
+    ) -> OutboxDelivery | None:
         """Freeze one delivery before network I/O and return what to send."""
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage, device_id=device_id)
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Return one delivery without claiming it."""

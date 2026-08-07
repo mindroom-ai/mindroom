@@ -473,7 +473,13 @@ class PrincipalStore:
             ),
         )
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None = None,
+    ) -> OutboxDelivery | None:
         """Freeze one delivery before network I/O and return what to send."""
         return await self._backend.write(
             lambda transaction: outbox.claim(
@@ -481,6 +487,7 @@ class PrincipalStore:
                 self._principal_id,
                 turn_id=turn_id,
                 stage=stage,
+                device_id=device_id,
             ),
         )
 

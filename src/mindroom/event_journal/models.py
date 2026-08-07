@@ -228,3 +228,13 @@ class OutboxDelivery:
     # The scan key recovery pages on. Without it a pass that fails a whole page
     # re-reads the same page forever and never reaches what is behind it.
     created_at_ns: int
+    # Whether this row has already been offered to the homeserver. Together
+    # with the device below it answers the only question a resend needs: can
+    # the frozen transaction ID still collapse onto the event a previous
+    # attempt produced?
+    attempted: bool = False
+    # The device that offered it, or None when none is recorded. A Matrix
+    # transaction ID deduplicates within one device, so a row attempted by a
+    # device this process is no longer logged in as carries an ID the
+    # homeserver would accept as new.
+    sending_device_id: str | None = None

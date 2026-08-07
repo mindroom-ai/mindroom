@@ -172,6 +172,11 @@ _TABLES = (
         payload_json TEXT NOT NULL,
         edits_event_id TEXT,
         attempted INTEGER NOT NULL DEFAULT 0,
+        -- The device whose transaction ID the homeserver may already hold. A
+        -- transaction ID deduplicates within one device, so a row attempted by
+        -- a device this process is no longer logged in as carries an ID that
+        -- would be accepted as new -- and post the answer twice.
+        sending_device_id TEXT,
         acknowledged_event_id TEXT,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, turn_id, stage)
@@ -286,6 +291,13 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # answer. Claiming completeness for a conversation nobody measured is the
     # one direction that silently serves a truncated read.
     ("conversation_hydration", "complete", "INTEGER NOT NULL DEFAULT 0"),
+    # NULL means "no device is recorded", which for an already-attempted row is
+    # not the same as "no device sent it" -- it is a row from before this column
+    # existed, whose sending device is simply unknown. Recovery treats unknown
+    # as changed and reconciles, because the alternative is posting an answer
+    # twice; the cost is one room scan for a row that is simultaneously
+    # unacknowledged, attempted, and older than this column.
+    ("response_outbox", "sending_device_id", "TEXT"),
 )
 
 

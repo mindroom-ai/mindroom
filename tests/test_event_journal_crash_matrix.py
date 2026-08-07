@@ -54,10 +54,26 @@ PRINCIPAL = "agent@alice"
 
 @dataclass
 class FakeHomeserver:
-    """A Matrix server that deduplicates by transaction ID, like a real one."""
+    """A Matrix server that deduplicates by transaction ID, like a real one.
 
-    events: dict[str, str] = field(default_factory=dict)
+    Like a real one means the idempotency key includes the *device*. A Matrix
+    transaction ID is unique per device rather than per user, so the same ID
+    replayed after a re-login is one this server has never seen and it accepts
+    the message again. A fake that deduplicated on the ID alone would be kinder
+    than any homeserver, and would pass a resend that duplicates an answer in
+    production.
+    """
+
+    # (device, transaction id) -> the event that pair produced.
+    events: dict[tuple[str, str], str] = field(default_factory=dict)
+    # What the room holds, as (turn, event). This is what a history scan reads,
+    # and the only place a duplicated answer is visible.
+    room_events: list[tuple[str, str]] = field(default_factory=list)
+    # Changing this is a re-login: a new device, and an empty transaction-ID
+    # namespace to go with it.
+    device_id: str = "DEVICE1"
     sends: int = 0
+    room_scans: int = 0
     fail_next_send: bool = False
     # Fail every send until this many attempts have been made, so a test can
     # exhaust a whole recovery page rather than one row.
@@ -65,7 +81,7 @@ class FakeHomeserver:
     lose_acknowledgement: bool = False
 
     async def send(self, delivery: OutboxDelivery) -> str:
-        """Accept one delivery, collapsing a repeated transaction ID."""
+        """Accept one delivery, collapsing a transaction ID this device reused."""
         self.sends += 1
         if self.sends <= self.fail_sends_until:
             msg = "connection reset"
@@ -74,17 +90,36 @@ class FakeHomeserver:
             self.fail_next_send = False
             msg = "connection reset"
             raise CrashError(msg)
-        event_id = self.events.setdefault(delivery.transaction_id, f"$sent{len(self.events)}")
+        key = (self.device_id, delivery.transaction_id)
+        event_id = self.events.get(key)
+        if event_id is None:
+            event_id = f"$sent{len(self.room_events)}"
+            self.events[key] = event_id
+            self.room_events.append((delivery.turn_id, event_id))
         if self.lose_acknowledgement:
             self.lose_acknowledgement = False
             msg = "crashed after Matrix accepted the message"
             raise CrashError(msg)
         return event_id
 
+    async def find_delivered(self, delivery: OutboxDelivery) -> str | None:
+        """Return the answer this turn already has in the room, by scanning for it.
+
+        Stands in for the backward room-history scan the gateway runs, and
+        counts itself so a test can assert that the ordinary path never pays
+        for one.
+        """
+        self.room_scans += 1
+        found = [event_id for turn_id, event_id in self.room_events if turn_id == delivery.turn_id]
+        if len(found) > 1:
+            msg = f"turn {delivery.turn_id!r} already has {len(found)} visible answers"
+            raise AssertionError(msg)
+        return next(iter(found), None)
+
     @property
     def visible_messages(self) -> int:
         """Return how many distinct events this server actually holds."""
-        return len(self.events)
+        return len(self.room_events)
 
 
 # A turn here answers exactly one source, and hands over exactly that one.
@@ -105,8 +140,18 @@ class TurnRuntime:
 
     @property
     def delivery(self) -> ResponseDelivery:
-        """Return a fresh delivery view, as a restart would."""
-        return ResponseDelivery(store=self.store, send=self.homeserver.send)
+        """Return a fresh delivery view, as a restart would.
+
+        The device is read from the homeserver each time rather than held, so
+        a test that re-logs in gets a delivery bound to the new device exactly
+        as a restarted process would.
+        """
+        return ResponseDelivery(
+            store=self.store,
+            send=self.homeserver.send,
+            sending_device_id=self.homeserver.device_id,
+            resolve_delivered=self.homeserver.find_delivered,
+        )
 
     def _outbox(self) -> OutboxView:
         """Return the outbox this attempt writes through, crashes and all.
@@ -138,6 +183,8 @@ class TurnRuntime:
         await ResponseDelivery(
             store=self._outbox(),
             send=self.homeserver.send,
+            sending_device_id=self.homeserver.device_id,
+            resolve_delivered=self.homeserver.find_delivered,
             handoff=_SETTLE_THE_SOURCE,
         ).deliver(
             turn_id=event.event_id,
@@ -186,6 +233,20 @@ async def admit(store: PrincipalStore, event: nio.Event | None = None) -> None:
     await store.admit(
         inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
         projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+    )
+
+
+async def _forget_the_sending_device(runtime: TurnRuntime) -> None:
+    """Blank the recorded device, as a database predating the column holds it.
+
+    Written as a real UPDATE rather than a patched read, because the thing
+    under test is how the delivery path reads a column that is NULL on disk.
+    """
+    await runtime.crashing_backend.inner.write(
+        lambda transaction: transaction.execute(
+            "UPDATE response_outbox SET sending_device_id = NULL WHERE principal_id = ?",
+            (PRINCIPAL,),
+        ),
     )
 
 
@@ -707,3 +768,230 @@ class TestInitialAndFinalStages:
         assert (await runtime.delivery.recover()).recovered == 0
         assert runtime.homeserver.sends == sends_after_recovery
         assert runtime.homeserver.visible_messages == 1
+
+
+class TestARelogInCannotDuplicateTheAnswer:
+    """The transaction ID's guarantee ends at the device that holds it.
+
+    Everything else in this file rests on one sentence: a resend under the
+    frozen transaction ID collapses onto the event the first attempt produced.
+    That sentence has a scope, and it is the device. Between the attempt and
+    the retry a process can restart into a fresh login -- cleared state, a
+    rotated credential, a re-provisioned account -- and the ID it kept is then
+    one the homeserver has never seen from the device now using it.
+    """
+
+    async def test_the_transaction_id_stops_deduplicating_across_a_relogin(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The premise, asserted against the fake rather than assumed of it.
+
+        If this ever fails the rest of the class proves nothing, because the
+        duplicate those tests prevent would not be reachable in the first
+        place.
+        """
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert claimed is not None
+
+        first = await runtime.homeserver.send(claimed)
+        same_device = await runtime.homeserver.send(claimed)
+        assert same_device == first
+        assert runtime.homeserver.visible_messages == 1
+
+        runtime.homeserver.device_id = "DEVICE2"
+        after_relogin = await runtime.homeserver.send(claimed)
+
+        assert after_relogin != first
+        assert runtime.homeserver.visible_messages == 2
+
+    async def test_a_resend_after_a_relogin_adopts_the_answer_already_sent(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The bug this closes: the answer is in the room, and stays one answer.
+
+        Matrix accepted the message and the process died before recording the
+        event ID, so the row is unacknowledged and looks exactly like one that
+        never arrived. Recovery then runs under a different device, where the
+        frozen transaction ID buys nothing. Resending blind would post the
+        answer a second time.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id is None
+        assert stored.sending_device_id == "DEVICE1"
+        assert runtime.homeserver.visible_messages == 1
+        delivered_event_id = runtime.homeserver.room_events[0][1]
+
+        runtime.homeserver.device_id = "DEVICE2"
+        sends_before = runtime.homeserver.sends
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.failed == 0
+        assert runtime.homeserver.visible_messages == 1, "the answer was posted twice"
+        assert runtime.homeserver.sends == sends_before, "recovery sent again instead of adopting"
+        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert settled is not None
+        assert settled.acknowledged_event_id == delivered_event_id
+
+    async def test_a_resend_after_a_relogin_still_sends_what_never_arrived(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The other half: refusing to resend would silently drop the answer.
+
+        The device changed, but nothing was ever delivered -- the send failed
+        before the homeserver saw it. A guard that treats "cannot prove it
+        arrived" as "it arrived" would leave a user waiting forever, which is
+        strictly worse than the duplicate it is avoiding.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.fail_next_send = True
+        await runtime.worker().drain_once()
+
+        assert runtime.homeserver.visible_messages == 0
+
+        runtime.homeserver.device_id = "DEVICE2"
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.recovered == 1
+        assert outcome.failed == 0
+        assert runtime.homeserver.visible_messages == 1
+        assert runtime.homeserver.room_scans == 1, "the room is what decides, so it has to be read"
+
+    async def test_the_ordinary_restart_never_scans_the_room(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A restart that keeps its device pays nothing for this guard.
+
+        The overwhelmingly common recovery is the same process's own device
+        coming back. Its transaction ID is still good, so the resend collapses
+        on the homeserver and no history scan happens at all. A guard that
+        scanned unconditionally would put a backward pagination in front of
+        every recovered answer.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.failed == 0
+        assert runtime.homeserver.room_scans == 0
+        assert runtime.homeserver.visible_messages == 1
+
+    async def test_a_row_written_before_the_device_was_recorded_is_reconciled(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """An attempted row with no device is unknown, not unattempted.
+
+        Databases created before the column exists carry rows that were
+        genuinely sent by some device nobody wrote down. Reading that absence
+        as "nothing has attempted this" would resend every one of them blind,
+        which is the whole bug, so unknown has to resolve the same way changed
+        does.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+        delivered_event_id = runtime.homeserver.room_events[0][1]
+
+        await _forget_the_sending_device(runtime)
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.attempted, "the row was attempted; only its device is unknown"
+        assert stored.sending_device_id is None
+
+        sends_before = runtime.homeserver.sends
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.failed == 0
+        assert runtime.homeserver.room_scans == 1
+        assert runtime.homeserver.sends == sends_before
+        assert runtime.homeserver.visible_messages == 1
+        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert settled is not None
+        assert settled.acknowledged_event_id == delivered_event_id
+
+    async def test_an_edit_is_resent_across_a_relogin_without_a_scan(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """An edit cannot duplicate a visible message, so it does not pay to check.
+
+        A second `m.replace` carrying the same content resolves to the same
+        message as the first. The stale transaction ID does admit a duplicate
+        event, but not one anybody can see, and a room scan to avoid it would
+        buy nothing.
+        """
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+            edits_event_id="$placeholder",
+        )
+        claimed = await runtime.store.claim_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            device_id="DEVICE1",
+        )
+        assert claimed is not None
+
+        runtime.homeserver.device_id = "DEVICE2"
+        outcome = await runtime.delivery.recover()
+
+        assert outcome.recovered == 1
+        assert runtime.homeserver.room_scans == 0
+
+    async def test_the_claim_records_the_device_that_is_about_to_send(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """Recorded before the network call, for the reason `attempted` is.
+
+        A crash during the send has to leave behind the fact that *this*
+        device may already hold the transaction ID. Writing the device only
+        after a successful send would lose exactly the case the row exists to
+        survive.
+        """
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+        before = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert before is not None
+        assert not before.attempted
+        assert before.sending_device_id is None
+
+        claimed = await runtime.store.claim_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            device_id="DEVICE1",
+        )
+        assert claimed is not None
+        assert not claimed.attempted, "a claim reports the state it took over, not the one it wrote"
+        assert claimed.sending_device_id is None
+
+        after = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert after is not None
+        assert after.attempted
+        assert after.sending_device_id == "DEVICE1"

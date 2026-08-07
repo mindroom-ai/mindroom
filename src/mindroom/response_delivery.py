@@ -28,6 +28,11 @@ logger = get_logger(__name__)
 
 type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
 
+# Finding the Matrix event a previous attempt already produced, when the frozen
+# transaction ID can no longer prove there wasn't one. Returns the event ID if
+# the answer is already in the room, or ``None`` if it never arrived.
+type ResolveDelivered = Callable[[OutboxDelivery], Awaitable[str | None]]
+
 
 @dataclass(frozen=True, slots=True)
 class TurnHandoff:
@@ -66,6 +71,15 @@ class ResponseDelivery:
 
     store: OutboxView
     send: SendDelivery
+    # The device this process is logged in as, recorded on every claim. A
+    # Matrix transaction ID is idempotent within one device and meaningless
+    # across a change of one, so the row has to remember which device's
+    # namespace its frozen ID belongs to.
+    sending_device_id: str | None = None
+    # How to find out whether an answer this process cannot vouch for is
+    # already in the room. Only consulted when the transaction ID has stopped
+    # being proof, which is the one case where resending blind duplicates.
+    resolve_delivered: ResolveDelivered | None = None
     # Where a turn stops being the journal's work and becomes the outbox's.
     # Deliberately unused for `INITIAL`: a placeholder is not an answer, and
     # handing the turn over on one would leave a crash before the model
@@ -127,18 +141,60 @@ class ResponseDelivery:
             handoff.released(handed_over)
         return await self.flush(turn_id=turn_id, stage=stage)
 
+    def _transaction_id_still_deduplicates(self, claimed: OutboxDelivery) -> bool:
+        """Return whether resending this row can only collapse onto its own event.
+
+        True in the ordinary case, and the reason recovery can resend without
+        thinking: the homeserver remembers the transaction ID and returns the
+        event the first attempt produced.
+
+        It stops being true when the sending device changes, because a Matrix
+        transaction ID is scoped to the device that used it. A row attempted by
+        a device this process is no longer logged in as carries an ID the
+        homeserver has never seen from *this* device, so the resend is accepted
+        as a new message and the room gets the answer twice.
+
+        A row nobody has attempted is trivially safe -- there is no earlier
+        event to collide with. An attempted row with no device recorded is not:
+        that is a row from before the column existed, whose device is unknown
+        rather than absent, and unknown has to be treated as changed.
+
+        An edit is exempt. A second ``m.replace`` carrying identical content
+        resolves to the same visible message as the first, so the duplicate a
+        stale transaction ID admits is not one anybody can see.
+        """
+        if not claimed.attempted or claimed.edits_event_id is not None:
+            return True
+        return claimed.sending_device_id is not None and claimed.sending_device_id == self.sending_device_id
+
     async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
         """Send one enqueued delivery, or resend the identical one.
 
         Nothing means the row is gone, which only a membership fence does, and
         only to a delivery nothing outside this process has seen.
+
+        Between the claim and the send sits the one question the outbox cannot
+        answer from its own state: is the frozen transaction ID still proof
+        that a resend cannot duplicate? When it is not -- when the device that
+        attempted this row is not the device about to retry it -- the room is
+        asked directly, and an answer already there is adopted instead of sent
+        again.
         """
-        claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
+        claimed = await self.store.claim_delivery(
+            turn_id=turn_id,
+            stage=stage,
+            device_id=self.sending_device_id,
+        )
         if claimed is None:
             logger.info("response_delivery_row_withdrawn", turn_id=turn_id, stage=stage.value)
             return None
         if claimed.acknowledged_event_id is not None:
             return claimed.acknowledged_event_id
+        if not self._transaction_id_still_deduplicates(claimed):
+            already_delivered = await self._delivered_before_device_changed(claimed)
+            if already_delivered is not None:
+                await self.store.acknowledge_delivery(turn_id=turn_id, stage=stage, event_id=already_delivered)
+                return already_delivered
         event_id = await self.send(claimed)
         await self.store.acknowledge_delivery(
             turn_id=turn_id,
@@ -146,6 +202,36 @@ class ResponseDelivery:
             event_id=event_id,
         )
         return event_id
+
+    async def _delivered_before_device_changed(self, claimed: OutboxDelivery) -> str | None:
+        """Return the event a previous device's attempt left in the room, if any.
+
+        Failing to find one is not the same as there not being one, and the
+        difference decides between a duplicate and a lost answer. Both are bad;
+        a duplicate is the one the user can act on, so a lookup that cannot run
+        sends anyway.
+        """
+        if self.resolve_delivered is None:
+            logger.warning(
+                "response_delivery_resend_unverified",
+                turn_id=claimed.turn_id,
+                stage=claimed.stage.value,
+                room_id=claimed.room_id,
+                claimed_by_device=claimed.sending_device_id,
+                sending_device=self.sending_device_id,
+            )
+            return None
+        already_delivered = await self.resolve_delivered(claimed)
+        logger.info(
+            "response_delivery_device_changed",
+            turn_id=claimed.turn_id,
+            stage=claimed.stage.value,
+            room_id=claimed.room_id,
+            claimed_by_device=claimed.sending_device_id,
+            sending_device=self.sending_device_id,
+            adopted_event_id=already_delivered,
+        )
+        return already_delivered
 
     async def _superseded_placeholder(self, delivery: OutboxDelivery) -> bool:
         """Return whether this delivery is a placeholder the answer overtook.
@@ -176,7 +262,9 @@ class ResponseDelivery:
 
         A delivery the homeserver already accepted is resent under the same
         transaction ID and collapses back to the same event, so recovery
-        cannot duplicate a visible message.
+        cannot duplicate a visible message -- as long as the device that made
+        the first attempt is the one retrying. When it is not, ``flush`` asks
+        the room before it sends; see ``_transaction_id_still_deduplicates``.
 
         Every unacknowledged delivery is walked, not one page of them. The
         store reads in bounded batches, but stopping after the first would
@@ -222,4 +310,11 @@ class ResponseDelivery:
                 recovered += 1
 
 
-__all__ = ["DeliveryStage", "RecoveryOutcome", "ResponseDelivery", "SendDelivery", "TurnHandoff"]
+__all__ = [
+    "DeliveryStage",
+    "RecoveryOutcome",
+    "ResolveDelivered",
+    "ResponseDelivery",
+    "SendDelivery",
+    "TurnHandoff",
+]

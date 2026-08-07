@@ -7,6 +7,14 @@ transaction ID, which makes a resend a no-op on the homeserver. The second is
 handled by claiming: the row's payload becomes immutable at the moment it is
 first attempted.
 
+That first guarantee has a boundary, and the row records where it ends. A
+Matrix transaction ID is idempotent within the device that used it, so a row
+attempted before a re-login carries an ID the homeserver has never seen from
+the device now retrying, and the "no-op" resend posts a second answer. The
+claim therefore stores the sending device alongside the attempt, which is what
+lets delivery notice that the guarantee no longer holds and go and look
+instead.
+
 Claiming is what closes the dangerous case. Without it, a restarted turn could
 regenerate different content, send it under the transaction ID the homeserver
 already accepted, and have it silently discarded — leaving the durable result
@@ -29,7 +37,8 @@ if TYPE_CHECKING:
 
 _OUTBOX_COLUMNS = """
     turn_id, stage, room_id, thread_id, transaction_id,
-    payload_json, edits_event_id, acknowledged_event_id, created_at_ns
+    payload_json, edits_event_id, acknowledged_event_id, created_at_ns,
+    attempted, sending_device_id
 """
 
 
@@ -104,20 +113,27 @@ def claim(
     *,
     turn_id: str,
     stage: DeliveryStage,
+    device_id: str | None = None,
 ) -> OutboxDelivery | None:
-    """Freeze one delivery's content and return exactly what to send.
+    """Freeze one delivery's content and return the row as it stood.
 
     Committed before any network I/O, so a delivery that may have reached the
     homeserver can only ever be retried with the identical payload and
     transaction ID.
+
+    The row is read *before* it is marked, and that pre-claim view is what
+    comes back. Every other column is immutable once attempted, so the only
+    difference is the two this write touches -- and those two are exactly what
+    the caller needs to see the state it is taking over from: whether anyone
+    has sent this before, and from which device. Reading them after the update
+    would report this attempt back to itself and make every resend look like a
+    first one.
+
+    ``device_id`` is the device about to do the sending. It is recorded now
+    rather than after a successful send, for the same reason ``attempted`` is:
+    a crash mid-send has to leave behind the fact that this device may already
+    have used the transaction ID.
     """
-    transaction.execute(
-        """
-        UPDATE response_outbox SET attempted = 1
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
-        """,
-        (principal_id, turn_id, stage.value),
-    )
     row = transaction.fetchone(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM response_outbox
@@ -125,7 +141,16 @@ def claim(
         """,  # noqa: S608 - a fixed column list, not interpolated input
         (principal_id, turn_id, stage.value),
     )
-    return None if row is None else _delivery(row)
+    if row is None:
+        return None
+    transaction.execute(
+        """
+        UPDATE response_outbox SET attempted = 1, sending_device_id = ?
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        """,
+        (device_id, principal_id, turn_id, stage.value),
+    )
+    return _delivery(row)
 
 
 def acknowledge(
@@ -253,4 +278,6 @@ def _delivery(row: Row) -> OutboxDelivery:
         edits_event_id=row["edits_event_id"],
         acknowledged_event_id=row["acknowledged_event_id"],
         created_at_ns=int(row["created_at_ns"]),
+        attempted=bool(row["attempted"]),
+        sending_device_id=row["sending_device_id"],
     )
