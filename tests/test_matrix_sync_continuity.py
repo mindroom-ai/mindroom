@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -71,9 +72,10 @@ from tests.conftest import (
 from tests.sync_continuity_helpers import certify_response, clear_sync_token, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from pathlib import Path
 
+    from mindroom.cancellation import TaskCancelSource
     from mindroom.coalescing import LaneSlot, _GateEntry
     from mindroom.event_journal.models import DepartureOutcome, DepartureSource
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -122,15 +124,61 @@ def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tm
     assert bot._room_for_journal_event("!missing:localhost").room_id == "!missing:localhost"
 
 
-def _install_fast_response_drain(bot: AgentBot) -> None:
-    """Keep real response draining while shortening its bounded waits."""
+@contextmanager
+def _cleanup_window_closed_only_by_the_cleanup() -> Iterator[None]:
+    """Stop the loop clock when the drain cancels, so its cleanup window cannot expire.
+
+    A bounded drain gives cancelled work one wall-clock window to finish
+    cleaning up. A test that asserts what a *finished* cleanup did must not
+    depend on that cleanup outrunning a real clock: any loaded machine can
+    stall the loop past any bound, and then the assertion reports which
+    process the kernel happened to schedule rather than what the drain did.
+    Freezing `loop.time` at the instant the drain requests cancellation makes
+    the window's deadline unreachable, because `asyncio.wait` derives it from
+    that same clock. The drain then returns exactly when the cleanup finishes,
+    which is the fact under test.
+    """
+    loop = asyncio.get_running_loop()
+    monotonic = loop.time
+    frozen_at: float | None = None
+
+    def frozen_loop_time() -> float:
+        return monotonic() if frozen_at is None else frozen_at
+
+    def freeze_then_cancel(task: asyncio.Task[Any], *, cancel_source: TaskCancelSource | None = None) -> None:
+        nonlocal frozen_at
+        frozen_at = monotonic()
+        request_task_cancel(task, cancel_source=cancel_source)
+
+    loop.time = frozen_loop_time  # type: ignore[method-assign]
+    try:
+        with patch("mindroom.response_runner.request_task_cancel", freeze_then_cancel):
+            yield
+    finally:
+        del loop.time  # type: ignore[method-assign]
+
+
+def _install_bounded_response_drain(bot: AgentBot, *, cleanup_finishes: bool = True) -> None:
+    """Keep the real bounded drain while making both of its windows deterministic.
+
+    The drain waits one window for tracked responses to finish on their own and
+    a second window for the ones it cancelled to clean up. The first window can
+    only expire here, because every tracked response is parked on an event
+    nobody sets, so shortening it just saves wall clock. The second window is
+    the one that used to race the machine: `cleanup_finishes` says which
+    outcome the test is pinning, and each is then reached without a wall clock
+    deciding it -- a cleanup that runs is protected by a frozen clock, and a
+    cleanup that parks forever cannot end the window whatever the clock does.
+    """
     drain_inbox_responses = bot._response_runner.drain_inbox_responses
 
-    async def fast_drain(*, cancel_after_seconds: float | None, shutdown_intent: RuntimeShutdownIntent) -> bool:
+    async def bounded_drain(*, cancel_after_seconds: float | None, shutdown_intent: RuntimeShutdownIntent) -> bool:
         assert cancel_after_seconds == 5.0
-        return await drain_inbox_responses(cancel_after_seconds=0.01, shutdown_intent=shutdown_intent)
+        cleanup_window = _cleanup_window_closed_only_by_the_cleanup() if cleanup_finishes else nullcontext()
+        with cleanup_window:
+            return await drain_inbox_responses(cancel_after_seconds=0.01, shutdown_intent=shutdown_intent)
 
-    bot._response_runner.drain_inbox_responses = fast_drain
+    bot._response_runner.drain_inbox_responses = bounded_drain
 
 
 def _certified_shutdown_bot(tmp_path: Path) -> AgentBot:
@@ -3779,7 +3827,10 @@ async def test_shutdown_tracks_exact_source_recovery_without_gating_raw_checkpoi
         for index, room_id in enumerate(response_rooms)
     ]
     await asyncio.gather(*(event.wait() for event in response_started))
-    _install_fast_response_drain(bot)
+    # A response that parks on `release_response` cannot clean up until this
+    # test lets it, so its drain window must expire; every other response
+    # cleans up straight away and must be allowed to finish doing so.
+    _install_bounded_response_drain(bot, cleanup_finishes=not remains_pending)
     await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
     release_response.set()
@@ -3812,7 +3863,7 @@ async def test_shutdown_keeps_raw_checkpoint_when_response_swallows_cancellation
         recovery_proof_ready=lambda: False,
     )
     await response_started.wait()
-    _install_fast_response_drain(bot)
+    _install_bounded_response_drain(bot)
 
     await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
@@ -3915,7 +3966,7 @@ async def test_shutdown_keeps_raw_checkpoint_when_terminal_interruption_note_did
             recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
         )
         await response_started.wait()
-        _install_fast_response_drain(bot)
+        _install_bounded_response_drain(bot)
         await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     await asyncio.gather(response_task, return_exceptions=True)
@@ -3954,7 +4005,7 @@ async def test_orderly_shutdown_keeps_raw_checkpoint_for_handled_response_withou
         recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
     )
     await response_started.wait()
-    _install_fast_response_drain(bot)
+    _install_bounded_response_drain(bot)
 
     await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
 
