@@ -643,6 +643,7 @@ def _obligation_runner(
             on_redaction=cast("Any", noop),
             on_decryption_failure=cast("Any", noop),
             source_has_live_owner=harness.gate.has_pending_source_event,
+            turn_has_live_claim=harness.turn_store.has_live_turn_claim,
         ),
         room_for_id=lambda _room_id: room,
         turn_is_terminal=harness.turn_store.is_durably_handled,

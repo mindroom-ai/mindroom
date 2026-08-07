@@ -30,6 +30,14 @@ logger = get_logger(__name__)
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRY_DELAY_SECONDS = 30.0
 _BATCH_SIZE = 128
+# How long a deferral may sit before the worker looks at its owner again.
+#
+# This is a cadence, not a deadline. Nothing is declared dead because this
+# elapsed; the probe decides, and it is exact. So the value does not have to
+# exceed the longest legitimate turn the way a death timeout would — it only
+# bounds how long a lost owner goes unnoticed in a bot quiet enough that no
+# admission wakes the pump on its own.
+_DEFERRAL_SCAN_SECONDS = 30.0
 # How far one pass will scan looking for events it can act on. Reached only
 # when a very large backlog is in flight; the pass reports that more remains.
 _MAX_SCAN_PAGES = 16
@@ -38,6 +46,22 @@ _MAX_SCAN_PAGES = 16
 # that is still running — so the event stays pending and whoever owns that work
 # releases it. Returning an outcome means the work is finished.
 type _EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None]]
+
+# Whether the owner a deferring handler handed one event to still exists.
+type _DeferralLivenessProbe = Callable[[JournalEvent], bool]
+
+
+def _assume_owner_is_live(event: JournalEvent) -> bool:
+    """Treat every deferral as owned, which is all a worker alone can know.
+
+    ``pending`` conflates "never started" with "started, someone else owns it",
+    and only the caller that handed the event off can tell them apart. A worker
+    built without a probe therefore has to believe the handoff, exactly as it
+    did before probes existed. The opposite default would re-dispatch every
+    deferral on every scan.
+    """
+    del event
+    return True
 
 
 @dataclass
@@ -52,10 +76,16 @@ class PendingEventWorker:
 
     store: ReplayView
     handle: _EventHandler
+    # Asked about every deferred event on every scan. A deferral whose owner is
+    # gone is durable work nobody is left to release, so the scan takes it back
+    # rather than waiting for a restart to notice.
+    deferral_is_live: _DeferralLivenessProbe = _assume_owner_is_live
+    deferral_scan_seconds: float = _DEFERRAL_SCAN_SECONDS
     _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
     # Events handed to a turn that is still running. They stay pending durably
@@ -95,7 +125,9 @@ class PendingEventWorker:
         self._pump = None
         retry = self._retry
         self._retry = None
-        for task in (pump, retry):
+        deferral_scan = self._deferral_scan
+        self._deferral_scan = None
+        for task in (pump, retry, deferral_scan):
             if task is not None:
                 task.cancel()
                 try:  # noqa: SIM105 - the task may already have finished
@@ -162,6 +194,9 @@ class PendingEventWorker:
             self._start_lane(room_id, events, more_remains=more_remains)
         if started:
             self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
+        # A pass that found every deferral still owned starts no lane, so the
+        # lane-finished path cannot be the only thing that arms the next look.
+        self._schedule_deferral_scan()
 
     def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> None:
         self._rooms_with_more.discard(room_id)
@@ -182,6 +217,27 @@ class PendingEventWorker:
             self._schedule_retry()
         elif room_id in self._rooms_with_more:
             self._wake.set()
+        self._schedule_deferral_scan()
+
+    def _schedule_deferral_scan(self) -> None:
+        """Arrange one later look while anything is deferred.
+
+        Every other wakeup here is caused by something: an admission, a lane
+        finishing, a failure backing off. An owner dying causes none of them,
+        so without this the reclaim would only run when unrelated traffic
+        happened to wake the pump — which is no bound at all in a quiet room.
+        The timer exists only while a deferral does.
+        """
+        if not self._deferred or (self._deferral_scan is not None and not self._deferral_scan.done()):
+            return
+        self._deferral_scan = asyncio.create_task(
+            self._scan_after_deferral_delay(),
+            name="pending_event_deferral_scan",
+        )
+
+    async def _scan_after_deferral_delay(self) -> None:
+        await asyncio.sleep(self.deferral_scan_seconds)
+        self._wake.set()
 
     def _schedule_retry(self) -> None:
         """Re-run a failed pass later, since nothing else will trigger one."""
@@ -211,7 +267,7 @@ class PendingEventWorker:
             cursor = page[-1].receipt_order
             truncated = False
             for event in page:
-                if event.event_id in self._deferred:
+                if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
                     continue
                 lane = by_room.setdefault(event.room_id, [])
                 if len(lane) >= _BATCH_SIZE:
@@ -223,6 +279,27 @@ class PendingEventWorker:
             if len(page) < _BATCH_SIZE:
                 return by_room, False
         return by_room, True
+
+    def _reclaim_lost_deferral(self, event: JournalEvent) -> bool:
+        """Return whether one deferred event is dispatchable again already.
+
+        Deferral is a promise that some owner will call ``release``. Nothing
+        makes that owner keep the promise, and the event is durably pending the
+        whole time, so an owner that dies quietly leaves work that no later
+        admission and no retry will ever reveal. Asking whether the owner still
+        exists turns that into a bounded outage instead of one that lasts until
+        the process restarts.
+        """
+        if self.deferral_is_live(event):
+            return False
+        self._deferred.discard(event.event_id)
+        logger.warning(
+            "pending_event_deferral_owner_lost",
+            event_id=event.event_id,
+            kind=event.kind.value,
+            room_id=event.room_id,
+        )
+        return True
 
     async def _run_lane(self, events: list[JournalEvent]) -> None:
         """Run one room's events in receipt order, stopping at the first failure.

@@ -82,6 +82,7 @@ class JournalCallbacks:
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
     source_has_live_owner: Callable[[str], bool]
+    turn_has_live_claim: Callable[[str], bool]
 
 
 @dataclass
@@ -117,7 +118,11 @@ class JournalDispatcher:
 
     def __post_init__(self) -> None:
         """Build the worker and admission adapter this dispatcher owns."""
-        self._worker = PendingEventWorker(store=self.store, handle=self._run_event)
+        self._worker = PendingEventWorker(
+            store=self.store,
+            handle=self._run_event,
+            deferral_is_live=self._deferral_is_live,
+        )
         self._ingress = JournalIngress(
             store=self.store,
             self_sender=self.self_sender,
@@ -226,6 +231,29 @@ class JournalDispatcher:
         outcome = await self._run_event(stored)
         if outcome is not None:
             await self.store.settle(event.event_id, outcome)
+
+    def _deferral_is_live(self, event: JournalEvent) -> bool:
+        """Return whether the owner one deferred event was handed to still exists.
+
+        Mirrors the reasons ``_run_event`` defers, in the same order, because
+        this is that question inverted: the event is still owed to someone only
+        while the thing it was handed to is still there to hand it back.
+
+        Every answer is conservative. A wrong "live" only reproduces the stall
+        this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
+        then has to refuse.
+        """
+        if event.kind not in TURN_BACKED_KINDS:
+            # A completing callback settles or raises. It never defers, so a
+            # deferral for one of these kinds cannot exist to begin with.
+            return True
+        if not self._turn_replay_released and event.event_id not in self._live_events:
+            # Replay is parked on the fleet, and it is released by draining
+            # rather than by calling back, so nothing here has died.
+            return True
+        return self.callbacks.source_has_live_owner(event.event_id) or self.callbacks.turn_has_live_claim(
+            event.event_id,
+        )
 
     async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
         """Run one journal event's callback and report how it settled."""

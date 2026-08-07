@@ -389,6 +389,18 @@ class TurnStore:
             claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
         claim_changed.set()
 
+    def has_live_turn_claim(self, event_id: str) -> bool:
+        """Return whether some unsettled turn still holds this source or alias.
+
+        The non-blocking form of the test ``wait_for_turn_settled`` waits on.
+        A claim is taken before its turn is handed off and dropped in the
+        ``finally`` that ends the turn however it ends, so its presence is the
+        one in-process fact that distinguishes "a turn owns this" from "a turn
+        owned this and is gone".
+        """
+        with self._pending_claim_lock:
+            return any(event_id in claim.indexed_event_ids for claim in self._pending_turn_claims)
+
     async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
         """Wait until every claim indexed by a source or alias settles."""
         event_id_set = set(event_ids)
