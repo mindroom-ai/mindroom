@@ -28,8 +28,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import nio
-
 from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -44,26 +42,6 @@ if TYPE_CHECKING:
 # else is the last thing this message will ever say, including the three ways a
 # stream ends badly.
 _TRANSPORT_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
-
-
-def is_own_stream_frame(event: nio.Event, *, self_sender: str) -> bool:
-    """Return whether one timeline event is a frame of this bot's own stream.
-
-    Every frame is sent as ``m.notice`` so Matrix suppresses it before
-    evaluating mention rules, which is what keeps a streamed answer from firing
-    one push notification per edit. Only the terminal frame reverts to
-    ``m.text``. A notice is not a kind journal admission owns, so without this
-    the placeholder never becomes a message and the terminal edit arrives with
-    nothing to revise.
-
-    The sender is what earns the exception, not the status key: that key is an
-    ordinary content field any member can set, so recognising a foreign notice
-    by it would let anyone put content into this principal's conversation.
-    """
-    if not isinstance(event, nio.RoomMessageNotice) or event.sender != self_sender:
-        return False
-    content = event.source.get("content")
-    return isinstance(content, dict) and content.get(STREAM_STATUS_KEY) is not None
 
 
 def is_transport_progress_revision(event: ProjectedEvent, *, self_sender: str) -> bool:

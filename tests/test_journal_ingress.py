@@ -237,12 +237,12 @@ class TestProvenanceMapping:
         expected: EventClass,
     ) -> None:
         """Provenance decides whether work may start."""
-        assert _event_class_for(provenance, text_event("$m", "hi"), self_sender=BOT) is expected
+        assert _event_class_for(provenance, text_event("$m", "hi")) is expected
 
     async def test_every_provenance_is_mapped(self) -> None:
         """A new provenance must not silently default to actionable."""
         for provenance in nio.TimelineEventProvenance:
-            assert _event_class_for(provenance, text_event("$m", "hi"), self_sender=BOT) in EventClass
+            assert _event_class_for(provenance, text_event("$m", "hi")) in EventClass
 
 
 class TestEventKinds:
@@ -597,18 +597,53 @@ class TestStreamingProgressIsTransport:
         assert visible.content["body"] == PLACEHOLDER_BODY
         assert visible.revision_event_id == PLACEHOLDER_ID
 
+    async def test_a_thread_summary_reads_the_same_watched_as_hydrated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One conversation must not depend on how the bot came to see it.
+
+        Hydration accepts any `m.room.message`, notices included
+        (`conversation_hydration._projected_from_event`). Live admission used
+        to match `RoomMessageText` alone, so a thread summary -- sent as
+        `m.notice` -- was in a hydrated conversation and absent from a watched
+        one. The prompt then differed by nothing but whether the bot had
+        restarted, which is the divergence the projection exists to remove.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        summary = nio.Event.parse_event(
+            {
+                "event_id": "$summary",
+                "sender": BOT,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.notice",
+                    "body": "So far: they asked about X.",
+                    "io.mindroom.thread_summary": {"message_count": 12},
+                },
+            },
+        )
+        assert isinstance(summary, nio.Event)
+
+        await self._admit_live(ingress, summary)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert [message.logical_event_id for message in page.messages] == ["$summary"]
+        # Present in the conversation, and never a turn to answer.
+        assert await alice.pending() == ()
+
     async def test_someone_elses_notice_is_not_treated_as_our_stream(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """The sender check is what keeps the stream key from being writable.
+        """A stream status on someone else's notice buys them nothing.
 
-        A notice is not a kind journal admission owns, so one from another
-        sender does not reach the conversation at all. Recognising our own
-        frames is the single exception, and it is earned by the sender, not by
-        the key: without that check any member could put content into another
-        principal's conversation context by decorating an `m.notice` with a
-        stream status, which is a room-visible field anyone can set.
+        Notices are admitted now -- the conversation contains them and
+        hydration always kept them -- but only ever as context. That is what
+        makes the status key safe to ignore: it is an ordinary content field
+        any member can set, so if it could promote a notice to work, decorating
+        one would be a way to make the bot answer something it should not.
         """
         ingress = JournalIngress(store=alice, self_sender=BOT)
         foreign = nio.Event.parse_event(
@@ -628,9 +663,10 @@ class TestStreamingProgressIsTransport:
 
         await self._admit_live(ingress, foreign)
 
-        assert ingress.admission_kind(foreign) is None
+        assert ingress.admission_kind(foreign) is EventKind.MESSAGE
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert page.messages == ()
+        assert [message.logical_event_id for message in page.messages] == ["$theirs"]
+        # Admitted, projected, and never work.
         assert await alice.pending() == ()
 
     async def test_the_production_stream_sequence_leaves_one_visible_answer(

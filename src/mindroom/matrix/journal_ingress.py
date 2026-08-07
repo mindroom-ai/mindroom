@@ -26,7 +26,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
-from mindroom.matrix.transport_progress import is_own_stream_frame, is_transport_progress_revision
+from mindroom.matrix.transport_progress import is_transport_progress_revision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -68,6 +68,14 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
 # approval is an `UnknownEvent` distinguished only by its type string.
 _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (lambda event: isinstance(event, nio.RoomMessageText), EventKind.MESSAGE),
+    # A notice is a message. `RoomMessageNotice` is a sibling of
+    # `RoomMessageText` rather than a subclass, so leaving it out dropped every
+    # notice from live admission while hydration -- which accepts any
+    # `m.room.message` -- kept them. One conversation therefore read
+    # differently depending on whether it was hydrated or watched, which is the
+    # divergence this projection exists to remove. What a notice never becomes
+    # is work; see `_event_class_for`.
+    (lambda event: isinstance(event, nio.RoomMessageNotice), EventKind.MESSAGE),
     (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
     (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
     (lambda event: isinstance(event, MATRIX_MEDIA_EVENT_TYPES), EventKind.MEDIA),
@@ -89,12 +97,7 @@ def _event_kind(event: nio.Event) -> EventKind | None:
     return None
 
 
-def _event_class_for(
-    provenance: nio.TimelineEventProvenance,
-    event: nio.Event,
-    *,
-    self_sender: str,
-) -> EventClass:
+def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
@@ -102,14 +105,20 @@ def _event_class_for(
     seeing for the first time, and answering it would mean replying to
     conversations that ended long ago.
 
-    This bot's own streaming frames are the exception at any provenance. They
-    are admitted so the conversation keeps the message the stream lands on, and
-    they can never be work: answering your own placeholder is the loop the
-    router echo drop exists to prevent, one layer earlier.
+    A notice is the exception at any provenance. `m.notice` means "automated,
+    do not react" in Matrix -- it is why clients suppress notifications for it
+    -- so admitting one as work would have agents answering each other's thread
+    summaries, their own streaming placeholders, and every bridge relay. They
+    are still admitted, because the conversation genuinely contains them and
+    because a streamed answer's terminal edit needs the placeholder it lands
+    on, but they can only ever be context.
+
+    That subsumes the narrower rule this used to carry for this bot's own
+    stream frames: those are notices, so they are covered by being notices.
     """
     if provenance is nio.TimelineEventProvenance.HISTORY:
         return EventClass.CONTEXT_ONLY
-    if is_own_stream_frame(event, self_sender=self_sender):
+    if isinstance(event, nio.RoomMessageNotice):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -285,8 +294,6 @@ class JournalIngress:
     def admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
         kind = _event_kind(event)
-        if kind is None and is_own_stream_frame(event, self_sender=self.self_sender):
-            return EventKind.MESSAGE
         if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
             return EventKind.ROOM_LIFECYCLE
         return kind
@@ -309,7 +316,7 @@ class JournalIngress:
         kind = self.admission_kind(event)
         if kind is None:
             return
-        event_class = _event_class_for(provenance, event, self_sender=self.self_sender)
+        event_class = _event_class_for(provenance, event)
         try:
             await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),
