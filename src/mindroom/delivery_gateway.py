@@ -38,6 +38,7 @@ from mindroom.matrix.client_delivery import (
     edit_message_result,
     send_message_result,
 )
+from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.response_delivery import (
@@ -640,6 +641,15 @@ class DeliveryGateway:
                 content,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
+        # Prepared before the row is written, so the frozen payload is the one
+        # that goes on the wire. Uploading the sidecar after the claim left the
+        # row holding the oversized original while Matrix received an MXC
+        # reference, and a recovery resend would upload again -- minting a new
+        # MXC, and new encrypted-file keys, under a transaction ID the
+        # homeserver had already accepted. Preparing twice is harmless: an
+        # already-prepared payload is below the size limit, so this is a no-op
+        # for it, including on the recovery path.
+        content = await prepare_large_message(client, room_id, content)
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
@@ -760,6 +770,13 @@ class DeliveryGateway:
             new_content=content,
             new_text=request.new_text,
         )
+        # Prepared before the row is written, for the same reason the envelope
+        # is built here: the row has to hold the finished wire event. A sidecar
+        # uploaded after the claim would leave the row holding the oversized
+        # original while Matrix received an MXC reference, and a resend would
+        # upload again under a transaction ID already accepted. Preparing an
+        # already-prepared payload is a no-op, so the recovery path is safe.
+        envelope = await prepare_large_message(client, room_id, envelope)
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
