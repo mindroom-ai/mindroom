@@ -19,6 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -1803,6 +1804,147 @@ class TestDeferralOwnership:
         message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
 
         assert dispatcher._deferral_is_live(message) is False
+
+
+class TestRecoveryDoesNotReenterALiveTurn:
+    """A drain runs beside live turns, so it must leave the ones it finds alone."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_turn: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+        live_claims: set[str],
+        *,
+        gate_owns: bool = False,
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose turn claims are whatever the test says."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", on_turn),
+                on_media=cast("Any", on_turn),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: gate_owns,
+                turn_has_live_claim=lambda event_id: event_id in live_claims,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, kind: EventKind = EventKind.MESSAGE) -> None:
+        await store.admit(
+            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+
+    @pytest.mark.parametrize(
+        ("kind", "event"),
+        [(EventKind.MESSAGE, text_event("$m")), (EventKind.MEDIA, image_event("$m"))],
+        ids=("message", "media"),
+    )
+    async def test_a_source_the_gate_still_holds_is_not_handed_to_a_second_turn(
+        self,
+        alice: PrincipalStore,
+        kind: EventKind,
+        event: nio.Event,
+    ) -> None:
+        """Both turn-backed kinds ask this, so neither may answer it for itself.
+
+        A lane cancelled inside its handler -- a shutdown, a hot reload -- can
+        leave a source with the coalescing gate and nothing in the worker's
+        memory saying so. The next scan is then free to collect it, and the
+        media path refused that while the message path walked straight in.
+        """
+        entered: list[str] = []
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, set(), gate_owns=True)
+        dispatcher.release_turn_replay()
+        await self._admit(alice, event, kind)
+
+        await dispatcher.drain_once()
+
+        assert entered == []
+        assert [item.event_id for item in await alice.pending()] == ["$m"]
+
+    async def test_a_drain_leaves_a_running_turns_room_answering(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Re-entering a live turn wedges the room until that turn finishes.
+
+        The duplicate does not answer twice -- the turn store refuses the
+        second claim -- but refusing is not returning. ``_claim_live_turn``
+        waits for the competing owner to settle, and it does that inside the
+        room's lane, so every message received after it goes unanswered for as
+        long as the original turn runs. A turn parked on a tool approval makes
+        that indefinite.
+        """
+        live_claims: set[str] = set()
+        entered: list[str] = []
+        turn_settled = asyncio.Event()
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            if event.event_id in live_claims:
+                # What the real contended claim does: wait for the owner.
+                await turn_settled.wait()
+            live_claims.add(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, live_claims)
+        await self._admit(alice, text_event("$live", ts=1_000))
+        await dispatcher.drain_once()
+        assert entered == ["$live"], "the first drain starts the turn"
+
+        await self._admit(alice, text_event("$next", ts=2_000))
+        try:
+            await asyncio.wait_for(dispatcher.drain_once(), timeout=5)
+        finally:
+            turn_settled.set()
+
+        assert entered == ["$live", "$next"]
+
+    async def test_a_deferred_source_is_still_taken_back_when_its_owner_dies(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Skipping an owned source may not become losing an abandoned one.
+
+        The drain no longer forgets what is in flight, so the liveness probe is
+        the only thing left that can hand an orphaned source back.
+        """
+        live_claims: set[str] = set()
+        entered: list[str] = []
+
+        async def on_turn(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            entered.append(event.event_id)
+            live_claims.add(event.event_id)
+            return TurnDispatchOutcome.DEFERRED
+
+        dispatcher = self._dispatcher(alice, on_turn, live_claims)
+        await self._admit(alice, text_event("$m"))
+
+        await dispatcher.drain_once()
+        await dispatcher.drain_once()
+        assert entered == ["$m"], "a live owner keeps its source"
+
+        live_claims.clear()
+        await dispatcher.drain_once()
+
+        assert entered == ["$m", "$m"]
 
 
 async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:

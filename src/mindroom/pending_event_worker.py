@@ -120,10 +120,6 @@ class PendingEventWorker:
         """
         self._deferred.difference_update(event_ids)
 
-    def forget_all_deferrals(self) -> None:
-        """Treat nothing as in flight, as a recovery pass must."""
-        self._deferred.clear()
-
     @contextmanager
     def sole_handler(self, event_id: str) -> Iterator[None]:
         """Hold one event against lane dispatch while its caller runs it itself.

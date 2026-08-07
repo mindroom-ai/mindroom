@@ -166,14 +166,19 @@ class JournalDispatcher:
     async def drain_once(self) -> int:
         """Run everything currently pending to completion.
 
-        This is the explicit recovery entry point, so it releases turn replay
-        and treats nothing as in flight. A turn that deferred without taking
-        ownership — the router declining an unready candidate, say — would
-        otherwise never be reconsidered. Duplicate turns are prevented by
-        `TurnStore` claiming its sources, not by this bookkeeping.
+        This is the explicit recovery entry point, so it releases turn replay.
+        What it deliberately does not do is forget which sources are in flight.
+        A drain runs beside live turns rather than before them -- every bot
+        that reports ready schedules one, and so does every hot reload -- and a
+        source it hands to a second turn is not merely wasteful. `TurnStore`
+        refuses the second claim, but refusing is not returning: the loser
+        waits for the winner to settle, and it waits inside the room's lane, so
+        the room answers nothing until the original turn ends.
+
+        A deferral nobody kept is still reconsidered, because the liveness
+        probe answers that question exactly rather than by assumption.
         """
         self._turn_replay_released = True
-        self._worker.forget_all_deferrals()
         return await self._worker.drain_once()
 
     async def admit_out_of_band(
@@ -249,6 +254,17 @@ class JournalDispatcher:
             if outcome is not None:
                 await self.store.settle(event.event_id, outcome)
 
+    def _has_live_owner(self, event_id: str) -> bool:
+        """Return whether something in this process is already holding one source.
+
+        The single question both ends of a deferral ask. At dispatch it decides
+        whether handing the source to a turn would put a second one inside it;
+        on a later scan it decides whether the turn it was handed to still
+        exists to hand it back. Two answers to that from two places is how a
+        recovery pass ends up re-entering work it can see is running.
+        """
+        return self.callbacks.source_has_live_owner(event_id) or self.callbacks.turn_has_live_claim(event_id)
+
     def _deferral_is_live(self, event: JournalEvent) -> bool:
         """Return whether the owner one deferred event was handed to still exists.
 
@@ -268,9 +284,7 @@ class JournalDispatcher:
             # Replay is parked on the fleet, and it is released by draining
             # rather than by calling back, so nothing here has died.
             return True
-        return self.callbacks.source_has_live_owner(event.event_id) or self.callbacks.turn_has_live_claim(
-            event.event_id,
-        )
+        return self._has_live_owner(event.event_id)
 
     async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
         """Run one journal event's callback and report how it settled.
@@ -290,6 +304,13 @@ class JournalDispatcher:
             # A turn replayed from a previous process needs responders that may
             # not exist yet. Live events are unaffected: their responders are
             # whatever is running now.
+            return None
+        if event.kind in TURN_BACKED_KINDS and self._has_live_owner(event.event_id):
+            # A coalescing batch or a running turn already holds this source
+            # and will hand it back. Starting a second turn on it does not
+            # answer twice, but the loser of the claim blocks until the winner
+            # settles, and it blocks holding the room's lane. Returning here
+            # leaves the source deferred, which is what it already was.
             return None
         live = self._live_events.pop(event.event_id, None)
         # An event the journal loaded rather than nio just delivered is a
@@ -409,23 +430,25 @@ class _Binding:
     run: Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]
 
 
-async def _run_message(
-    dispatcher: JournalDispatcher,
-    room: nio.MatrixRoom,
-    event: nio.RoomMessageText,
-) -> SettlementOutcome | None:
-    return _turn_outcome(await dispatcher.callbacks.on_message(room, event))
+def _turn_backed(
+    callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[TurnDispatchOutcome]]],
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]:
+    """Wrap a callback whose work may outlive it inside a turn.
 
+    Neither of these two asks whether someone already owns the source. That is
+    the same question for both of them, so ``_run_event`` asks it once for the
+    kind rather than each of them answering it for itself -- which is how the
+    media path came to have a guard the message path did not.
+    """
 
-async def _run_media(
-    dispatcher: JournalDispatcher,
-    room: nio.MatrixRoom,
-    event: MatrixMediaEvent,
-) -> SettlementOutcome | None:
-    if dispatcher.callbacks.source_has_live_owner(event.event_id):
-        # The coalescing gate still owns this source and will hand it back.
-        return None
-    return _turn_outcome(await dispatcher.callbacks.on_media(room, event))
+    async def run(
+        dispatcher: JournalDispatcher,
+        room: nio.MatrixRoom,
+        event: Any,  # noqa: ANN401 - the binding already checked the type
+    ) -> SettlementOutcome | None:
+        return _turn_outcome(await callback(dispatcher.callbacks)(room, event))
+
+    return run
 
 
 def _completing(
@@ -445,8 +468,8 @@ def _completing(
 
 
 _BINDINGS: dict[EventKind, _Binding] = {
-    EventKind.MESSAGE: _Binding(nio.RoomMessageText, _run_message),
-    EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _run_media),
+    EventKind.MESSAGE: _Binding(nio.RoomMessageText, _turn_backed(lambda c: c.on_message)),
+    EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _completing(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
