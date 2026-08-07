@@ -20,7 +20,7 @@ test here while production still ran the model twice.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
@@ -893,39 +893,54 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert runtime.homeserver.room_scans == 0
         assert runtime.homeserver.visible_messages == 1
 
-    async def test_a_row_written_before_the_device_was_recorded_is_reconciled(
+    async def test_a_row_with_no_recorded_device_is_resent_as_it_always_was(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """An attempted row with no device is unknown, not unattempted.
+        """Unknown is not changed, and is deliberately not treated as one.
 
-        Databases created before the column exists carry rows that were
-        genuinely sent by some device nobody wrote down. Reading that absence
-        as "nothing has attempted this" would resend every one of them blind,
-        which is the whole bug, so unknown has to resolve the same way changed
-        does.
+        Rows written before the column existed carry no device. Reading that
+        as "the device changed" would put a backward room pagination in front
+        of every one of them to rule out a re-login that probably never
+        happened. They get what they got before this guard: a resend under the
+        frozen transaction ID, which still collapses if the device is in fact
+        unchanged.
         """
         await admit(runtime.store)
         runtime.homeserver.lose_acknowledgement = True
         await runtime.worker().drain_once()
-        delivered_event_id = runtime.homeserver.room_events[0][1]
 
         await _forget_the_sending_device(runtime)
         stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
         assert stored is not None
-        assert stored.attempted, "the row was attempted; only its device is unknown"
+        assert stored.attempted
         assert stored.sending_device_id is None
 
-        sends_before = runtime.homeserver.sends
         outcome = await runtime.delivery.recover()
 
         assert outcome.failed == 0
-        assert runtime.homeserver.room_scans == 1
-        assert runtime.homeserver.sends == sends_before
+        assert runtime.homeserver.room_scans == 0
         assert runtime.homeserver.visible_messages == 1
-        settled = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
-        assert settled is not None
-        assert settled.acknowledged_event_id == delivered_event_id
+
+    async def test_a_process_that_has_not_logged_in_resends_rather_than_scans(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The other unknown: this side of the comparison, not the row's.
+
+        A delivery built before login has no device to compare against, so it
+        cannot tell a changed one from an unchanged one and must not pretend
+        otherwise by scanning every room it recovers into.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+
+        outcome = await replace(runtime.delivery, sending_device_id=None).recover()
+
+        assert outcome.failed == 0
+        assert runtime.homeserver.room_scans == 0
+        assert runtime.homeserver.visible_messages == 1
 
     async def test_an_edit_is_resent_across_a_relogin_without_a_scan(
         self,
@@ -995,3 +1010,37 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert after is not None
         assert after.attempted
         assert after.sending_device_id == "DEVICE1"
+
+    async def test_a_failing_resend_scans_the_room_once_per_relogin(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The scan is bounded by device changes, not by recovery passes.
+
+        Recovery runs after every sync response, so anything it does per
+        unacknowledged row it does forever until that row resolves. A backward
+        room pagination on that schedule would be a real cost, and a send that
+        keeps failing keeps the row in the set.
+
+        What bounds it is where the device is written: the claim records the
+        device about to send, not the one that succeeded. The first pass after
+        a re-login sees a mismatch and scans; it also leaves the row naming the
+        current device, so every pass after that is an ordinary resend even
+        though the send is still failing.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.fail_next_send = True
+        await runtime.worker().drain_once()
+
+        runtime.homeserver.device_id = "DEVICE2"
+        runtime.homeserver.fail_sends_until = runtime.homeserver.sends + 3
+
+        for _ in range(3):
+            assert (await runtime.delivery.recover()).failed == 1
+
+        assert runtime.homeserver.room_scans == 1, "the room was re-paginated on a later pass"
+        assert runtime.homeserver.visible_messages == 0
+
+        assert (await runtime.delivery.recover()).recovered == 1
+        assert runtime.homeserver.visible_messages == 1
+        assert runtime.homeserver.room_scans == 1

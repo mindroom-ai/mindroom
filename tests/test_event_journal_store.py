@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from dataclasses import replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
@@ -1499,8 +1500,15 @@ class TestOutbox:
         assert stored is not None
         assert stored.payload["body"] == "sent"
 
-    async def test_reclaiming_returns_the_identical_delivery(self, alice: PrincipalStore) -> None:
-        """Reclaiming returns the identical delivery."""
+    async def test_reclaiming_sends_the_identical_delivery(self, alice: PrincipalStore) -> None:
+        """Everything that goes on the wire is frozen; the claim state is not.
+
+        The payload and the transaction ID are the reason claiming exists, and
+        a second claim must reproduce them exactly. The two columns the claim
+        itself writes are the opposite: they describe who took the row and
+        when, so the second claim reports the first one's work rather than
+        repeating the blank state it started from.
+        """
         await alice.enqueue_delivery(
             turn_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -1508,10 +1516,19 @@ class TestOutbox:
             thread_id=None,
             payload=text("sent"),
         )
-        first = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-        second = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        first = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
+        second = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
+        assert first is not None
+        assert second is not None
 
-        assert first == second
+        assert replace(first, attempted=True, sending_device_id="DEVICE1") == second
+        assert first.payload == second.payload
+        assert first.transaction_id == second.transaction_id
+
+        assert not first.attempted
+        assert first.sending_device_id is None
+        assert second.attempted
+        assert second.sending_device_id == "DEVICE1"
 
     async def test_unacknowledged_deliveries_are_replayable(self, alice: PrincipalStore) -> None:
         """Unacknowledged deliveries are replayable."""

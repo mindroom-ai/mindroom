@@ -405,6 +405,11 @@ class AgentBot:
         self._classic_sync_rebuild_pending = False
         self._classic_sync_rebuild_attempt = 0
         self._orchestrator_ready_handled = False
+        # The Matrix device this bot sends as, captured at login rather than
+        # read off the client per send. A transaction ID only deduplicates
+        # within the device that used it, so the outbox records this next to
+        # every claim; before login there is no answer, and `None` says so.
+        self._sending_device_id: str | None = None
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
@@ -579,6 +584,10 @@ class AgentBot:
                     # Resolved late: the dispatcher is built after the gateway.
                     released=lambda event_ids: self._journal_dispatcher.release_delivered_turn_sources(event_ids),
                 ),
+                # Resolved late for the same reason: this gateway is built
+                # before the bot has logged in, and a re-login replaces the
+                # device that the frozen transaction IDs belong to.
+                sending_device_id=lambda: self._sending_device_id,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -1776,7 +1785,7 @@ class AgentBot:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
-        self.client = await login_agent_user(
+        client = await login_agent_user(
             constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             self.agent_user,
             runtime_paths=self.runtime_paths,
@@ -1785,6 +1794,11 @@ class AgentBot:
                 persist_recovery=self.config.matrix_sync.mode == "sliding",
             ),
         )
+        self.client = client
+        # Captured the moment it becomes true. A restart that logs in as a new
+        # device must not resend under the old device's transaction IDs
+        # believing they still deduplicate.
+        self._sending_device_id = client.device_id or None
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
             orchestrator = self.orchestrator

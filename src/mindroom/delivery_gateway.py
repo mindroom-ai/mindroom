@@ -365,6 +365,10 @@ class DeliveryGatewayDeps:
     # turn's answer is durably owed to a room, and this is where that becomes
     # true. Everything after it is the outbox's to recover.
     turn_handoff: TurnHandoff
+    # The Matrix device this process sends as, asked for rather than held: the
+    # gateway is built before login, and a re-login replaces it. ``None`` means
+    # no login has completed, which the outbox reads as "device unknown".
+    sending_device_id: Callable[[], str | None] = lambda: None
 
 
 @dataclass(frozen=True)
@@ -599,7 +603,7 @@ class DeliveryGateway:
         return ResponseDelivery(
             store=self.deps.outbox,
             send=send,
-            sending_device_id=self._client().device_id,
+            sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=self.deps.turn_handoff,
         )
@@ -618,6 +622,14 @@ class DeliveryGateway:
         first attempt is gone. A turn the ledger has never heard of resolves to
         its own anchor event, which is the right question for the uncoalesced
         case and the only one available for the rest.
+
+        This finds answers, not every message. The scan matches a genuine
+        reply -- ``is_falling_back`` false, pointing at a source -- which is
+        what an agent answering a user sends. A delivery with no source to
+        reply to, a scheduled message or a hook-emitted notice, matches
+        nothing and reads as "not delivered", so it is sent. That is the same
+        blind resend as before this guard existed: unchanged for the cases it
+        cannot see, and correct for the ones it can.
         """
         client = self._client()
         response_sender = client.user_id
@@ -666,7 +678,7 @@ class DeliveryGateway:
         return await ResponseDelivery(
             store=self.deps.outbox,
             send=send,
-            sending_device_id=self._client().device_id,
+            sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
         ).recover()
 
