@@ -697,8 +697,9 @@ class _ApprovalManager:
                     self._pending_by_card_event.pop(waiter.card_event_id, None)
 
         cleanup_future = asyncio.ensure_future(recover())
-        self._detached_card_writes.add(cleanup_future)
-        cleanup_future.add_done_callback(self._detached_card_writes.discard)
+        with self._live_lock:
+            self._detached_card_writes.add(cleanup_future)
+        cleanup_future.add_done_callback(self._discard_detached_card_write)
 
     def _bind_live_waiter(
         self,
@@ -1167,6 +1168,7 @@ class _ApprovalManager:
                     self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
+        await self._drain_detached_card_writes()
 
     async def _drain_active_approval_sends(self) -> None:
         while True:
@@ -1198,6 +1200,27 @@ class _ApprovalManager:
                     active_approval_sends=len(pending_sends),
                 )
                 return
+
+    async def _drain_detached_card_writes(self) -> None:
+        """Wait for recovery that outlived its caller before the runtime tears down.
+
+        These record a card and then expire it, and both halves need the
+        journal store and the Matrix client that bot shutdown is about to
+        close. Returning while one is still in flight lets it fail against a
+        closed store and a closed client, leaving exactly the clickable card
+        with no durable row that scheduling it was meant to prevent.
+        """
+        while True:
+            with self._live_lock:
+                pending = tuple(self._detached_card_writes)
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _discard_detached_card_write(self, future: asyncio.Future[None]) -> None:
+        """Drop one finished recovery from the set shutdown drains."""
+        with self._live_lock:
+            self._detached_card_writes.discard(future)
 
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
         while True:

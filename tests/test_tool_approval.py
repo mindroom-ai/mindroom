@@ -3699,3 +3699,76 @@ def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
     store = initialize_approval_store(runtime_paths)
 
     assert get_approval_store() is store
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_cancelled_cards_recovery(tmp_path: Path) -> None:
+    """Shutdown must not return while a card's record-then-expire is in flight.
+
+    That recovery needs the journal store and the Matrix client, and bot
+    shutdown closes both immediately after. Returning early lets the record
+    fail against a closed store and the expiry edit against a closed client,
+    leaving the clickable card with no durable row that detaching the recovery
+    was meant to prevent.
+    """
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    write_started = asyncio.Event()
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+    real_remember = cards.remember_approval_card
+    calls = 0
+
+    async def gated_remember(*args: object, **kwargs: object) -> object:
+        # First call is the caller's, and is cancelled out from under it.
+        # Second is the detached recovery -- the one shutdown must wait for.
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            write_started.set()
+            await asyncio.Event().wait()
+        recovery_started.set()
+        await release_recovery.wait()
+        return await real_remember(*args, **kwargs)
+
+    cards.remember_approval_card = gated_remember  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(write_started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(recovery_started.wait(), timeout=5)
+
+    shutdown = asyncio.create_task(store.shutdown(reason="test shutdown"))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not shutdown.done(), "shutdown returned while the recovery was still blocked"
+
+    release_recovery.set()
+    await asyncio.wait_for(shutdown, timeout=5)
+
+    # Shutdown waited, so the card reached a terminal state while the store and
+    # client were still open.
+    assert editor.await_args is not None
+    assert editor.await_args.args[2]["status"] == "expired"

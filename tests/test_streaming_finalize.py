@@ -1160,3 +1160,20 @@ async def test_an_oversized_send_freezes_the_payload_matrix_receives(tmp_path: P
     # the homeserver's business; either way the row must hold the *prepared*
     # payload, because that is what goes on the wire and what a resend replays.
     assert len(frozen["body"]) < 100_000, "the row kept the oversized original"
+
+
+def test_the_gateway_hands_the_final_transform_to_the_stream() -> None:
+    """The transform only helps if the stream is actually given it.
+
+    The unit tests for this behaviour drive `StreamingResponse` directly, so
+    they pass whether or not the gateway wires the hook in -- deleting the
+    wiring leaves them green. This reads the construction instead: the stream
+    must be built with a `final_text_transform`, and it must come from the
+    request's identity rather than being hardcoded, since a request with no
+    identity has no hook to apply.
+    """
+    import inspect  # noqa: PLC0415 - reading the construction is this test's whole point
+
+    source = inspect.getsource(DeliveryGateway.deliver_stream)
+
+    assert "final_text_transform=self._final_text_transform(request.identity)" in source
