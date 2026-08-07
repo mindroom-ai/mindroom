@@ -1939,14 +1939,7 @@ async def test_a_never_recoverable_room_never_freezes_the_sync_watermark(tmp_pat
         response.rooms = MagicMock(join={}, leave={})
         bot.client.next_batch = response.next_batch
         bot.client.has_uncommitted_classic_sync_state = True
-        with patch.object(
-            bot._conversation_cache,
-            "cache_sync_timeline_for_certification",
-            new=AsyncMock(
-                return_value=SyncCacheWriteResult.from_sync_response(response, complete=True),
-            ),
-        ):
-            await bot._on_sync_response(response)
+        await bot._on_sync_response(response)
         cursors.append(bot.client.next_batch)
 
     # Each window rewinds onto the checkpoint it is measured from until the
