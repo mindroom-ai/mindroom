@@ -26,6 +26,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import EventJournalConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
@@ -3175,10 +3176,12 @@ class TestMultiAgentOrchestrator:
         config_path = tmp_path / "custom-config.yaml"
         current_config = MagicMock()
         current_config.authorization.global_users = []
-        current_config.event_journal = MagicMock()
+        current_config.event_journal = EventJournalConfig()
         new_config = MagicMock()
         new_config.authorization.global_users = []
-        new_config.event_journal = MagicMock()
+        # The same journal, because a *changed* one is refused before the
+        # reload reaches the support-only apply path under test here.
+        new_config.event_journal = current_config.event_journal
         new_config.defaults.enable_streaming = True
 
         orchestrator = _MultiAgentOrchestrator(
@@ -3204,15 +3207,23 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                return_value=plan,
+            ) as mock_build_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
-            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
         ):
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_load_config.assert_called_once()
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
+        # The support-only apply path is what this test covers, so it has to be
+        # the path that ran: an early refusal would satisfy the assertions above
+        # without the planner or the support sync ever being reached.
+        mock_build_plan.assert_called_once()
+        mock_sync_support.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_update_config_refuses_an_event_journal_change(self, tmp_path: Path) -> None:
