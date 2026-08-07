@@ -363,14 +363,27 @@ class PendingEventWorker:
         Stopping matters: if event two fails and event three still ran, the
         room's conversation would be answered out of order, and the retry of
         event two would then arrive after its own reply.
+
+        The store reads and writes around the handler are inside the same
+        failure, because they fail for the same reasons it does and leave the
+        same work owed. Left outside, they would instead fault the lane task
+        itself: nothing retrieves that exception, no room is recorded as
+        failed, and no retry is scheduled -- so a failed settlement would sit
+        until some unrelated event woke the pump, and then run its handler a
+        second time.
         """
         room_id = events[0].room_id if events else ""
         for event in events:
-            if not await self.store.is_pending(event.event_id):
-                self._deferred.discard(event.event_id)
-                continue
             try:
+                if not await self.store.is_pending(event.event_id):
+                    self._deferred.discard(event.event_id)
+                    continue
                 outcome = await self.handle(event)
+                if outcome is None:
+                    self._deferred.add(event.event_id)
+                    continue
+                self._deferred.discard(event.event_id)
+                await self.store.settle(event.event_id, outcome)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -382,9 +395,4 @@ class PendingEventWorker:
                 )
                 self._failed_rooms.add(room_id)
                 return
-            if outcome is None:
-                self._deferred.add(event.event_id)
-                continue
-            self._deferred.discard(event.event_id)
-            await self.store.settle(event.event_id, outcome)
         self._failed_rooms.discard(room_id)

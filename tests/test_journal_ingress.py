@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -1804,6 +1804,107 @@ class TestDeferralOwnership:
         message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
 
         assert dispatcher._deferral_is_live(message) is False
+
+
+@dataclass
+class _FlakyReplayView:
+    """One principal's replay view whose store I/O can be made to fail once."""
+
+    inner: PrincipalStore
+    fail_is_pending: set[str] = field(default_factory=set)
+    fail_settle: set[str] = field(default_factory=set)
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        after_receipt_order: int | None = None,
+    ) -> tuple[JournalEvent, ...]:
+        return await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+
+    async def is_pending(self, event_id: str) -> bool:
+        if event_id in self.fail_is_pending:
+            self.fail_is_pending.discard(event_id)
+            msg = "the journal is unreadable"
+            raise RuntimeError(msg)
+        return await self.inner.is_pending(event_id)
+
+    async def settle(self, event_id: str, outcome: SettlementOutcome) -> None:
+        if event_id in self.fail_settle:
+            self.fail_settle.discard(event_id)
+            msg = "the journal is unwritable"
+            raise RuntimeError(msg)
+        await self.inner.settle(event_id, outcome)
+
+
+class TestStoreFailuresBelongToTheLane:
+    """A lane owns every store call it makes, not only the handler between them."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event) -> None:
+        await store.admit(
+            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    async def test_a_read_that_fails_before_the_handler_is_retried(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Outside the lane's failure, this faults the task and nothing looks again.
+
+        No room is recorded as failed, so no retry is scheduled, and nothing
+        else will wake the pump for a room that is quiet by definition -- the
+        event that would have woken it is the one still sitting there.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            attempts.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        await self._admit(alice, text_event("$m"))
+        store = _FlakyReplayView(alice, fail_is_pending={"$m"})
+        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        try:
+            await _eventually(lambda: attempts == ["$m"], seconds=10)
+        finally:
+            await worker.stop()
+
+        assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_a_settlement_that_fails_is_retried_rather_than_abandoned(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A settlement that never committed leaves the event owed, so say so.
+
+        Faulting the lane instead loses the failure twice over: the exception
+        is never retrieved and the room is never marked, so the next thing to
+        wake the pump is some unrelated event -- and by then the handler runs
+        again against a source it already answered.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            attempts.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        await self._admit(alice, text_event("$m"))
+        store = _FlakyReplayView(alice, fail_settle={"$m"})
+        worker = PendingEventWorker(store=cast("Any", store), handle=handle)
+        worker._retry_delay_seconds = 0.01
+        worker.start()
+
+        try:
+            await _eventually_async(lambda: alice.pending(), seconds=10)
+        finally:
+            await worker.stop()
+
+        assert attempts == ["$m", "$m"]
 
 
 class TestRecoveryDoesNotReenterALiveTurn:
