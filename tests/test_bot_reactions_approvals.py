@@ -23,7 +23,7 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, StoredApprovalCard
+from mindroom.event_journal import EventClass, EventKind, SemanticConsumer
 from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
@@ -33,6 +33,7 @@ from mindroom.hooks import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
+from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
@@ -52,7 +53,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
@@ -62,40 +63,6 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
-
-
-class _FakeApprovalCards:
-    """The approval cards a bot still owes a decision on, recording its lookups."""
-
-    def __init__(self) -> None:
-        self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
-        self.resolutions: dict[str, dict[str, Any]] = {}
-        self.lookups: list[tuple[str, str]] = []
-
-    async def remember_approval_card(self, *, room_id: str, card_event_id: str, card: Mapping[str, Any]) -> None:
-        self.cards.setdefault(card_event_id, (room_id, dict(card)))
-
-    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
-        if card_event_id in self.cards:
-            self.resolutions.setdefault(card_event_id, dict(resolution))
-
-    async def forget_approval_card(self, *, card_event_id: str) -> None:
-        self.cards.pop(card_event_id, None)
-        self.resolutions.pop(card_event_id, None)
-
-    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None:
-        self.lookups.append((room_id, card_event_id))
-        entry = self.cards.get(card_event_id)
-        if entry is None or entry[0] != room_id:
-            return None
-        return StoredApprovalCard(card=entry[1], resolution=self.resolutions.get(card_event_id))
-
-    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[StoredApprovalCard, ...]:
-        return tuple(
-            StoredApprovalCard(card=card, resolution=self.resolutions.get(card["event_id"]))
-            for card_room, card in self.cards.values()
-            if card_room == room_id
-        )[:limit]
 
 
 def _detached_approval_card() -> dict[str, Any]:
@@ -835,7 +802,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = _FakeApprovalCards()
+        cards = FakeApprovalCards()
         store = initialize_approval_store(
             runtime_paths,
             cards=cards,
@@ -878,7 +845,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = _FakeApprovalCards()
+        cards = FakeApprovalCards()
         await cards.remember_approval_card(
             room_id="!test:localhost",
             card_event_id="$approval",
@@ -927,7 +894,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        cards = _FakeApprovalCards()
+        cards = FakeApprovalCards()
         await cards.remember_approval_card(
             room_id="!test:localhost",
             card_event_id="$approval",

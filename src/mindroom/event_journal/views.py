@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from .approvals import StoredApprovalCard
+    from .approvals import RecordedApprovalDecision, StoredApprovalCard
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -237,8 +237,18 @@ class ApprovalView(Protocol):
         """Record one sent approval card as awaiting a decision."""
         ...
 
-    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
-        """Record the decision one card carries, before it is shown."""
+    async def resolve_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
+        """Record the decision one card carries, before it is shown.
+
+        Returns what the durable row ends up carrying, because an update that
+        matched nothing is indistinguishable from one that committed unless
+        the store says so.
+        """
         ...
 
     async def forget_approval_card(self, *, card_event_id: str) -> None:

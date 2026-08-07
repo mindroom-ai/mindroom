@@ -46,30 +46,62 @@ class StoredApprovalCard:
     resolution: dict[str, Any] | None
 
 
+@dataclass(frozen=True, slots=True)
+class RecordedApprovalDecision:
+    """What the durable row carries after one attempt to record a decision."""
+
+    # The decision the row now holds, which is not always the one just
+    # offered: a card already carrying a decision keeps its first one. None
+    # when no row exists at all, so nothing durable agrees with any decision
+    # and nothing will ever redeliver or expire the card.
+    resolution: dict[str, Any] | None
+    # Whether this call is what committed the decision it offered. False both
+    # when there was no row to write and when the row refused the write.
+    recorded: bool
+
+
 def resolve(
     transaction: Transaction,
     principal_id: str,
     *,
     card_event_id: str,
     resolution: Mapping[str, Any],
-) -> None:
+) -> RecordedApprovalDecision:
     """Record the decision this bot is about to show, before it shows it.
 
     Written before the Matrix edit, so a crash between the two leaves an
     answered card rather than a pending one. Startup then redelivers this exact
     decision instead of expiring a card the room may already show as approved.
+
+    The update can match nothing, and the caller cannot act on a decision the
+    store did not take, so what the row actually ends up carrying is reported
+    rather than assumed.
     """
-    transaction.execute(
+    offered = dict(resolution)
+    row = transaction.fetchone(
         """
         UPDATE approval_cards SET resolution_json = ?
         WHERE principal_id = ? AND card_event_id = ? AND resolution_json IS NULL
+        RETURNING card_event_id
         """,
         (
-            json.dumps(dict(resolution), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            json.dumps(offered, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             principal_id,
             card_event_id,
         ),
     )
+    if row is not None:
+        return RecordedApprovalDecision(resolution=offered, recorded=True)
+    # Matching nothing has two causes that are not the same fact. Either no
+    # such card was ever stored, or the card already carries a decision that
+    # the ``resolution_json IS NULL`` guard exists to protect. Only the second
+    # leaves something a later startup will redeliver.
+    existing = transaction.fetchone(
+        "SELECT resolution_json FROM approval_cards WHERE principal_id = ? AND card_event_id = ?",
+        (principal_id, card_event_id),
+    )
+    stored = None if existing is None else _resolution(existing["resolution_json"])
+    return RecordedApprovalDecision(resolution=stored, recorded=False)
 
 
 def remember(
@@ -175,9 +207,14 @@ def _card(row: Row) -> StoredApprovalCard:
     if not isinstance(card, dict):
         msg = "Stored approval card is not an object"
         raise TypeError(msg)
-    stored_resolution = row["resolution_json"]
-    resolution = None if stored_resolution is None else json.loads(stored_resolution)
-    if resolution is not None and not isinstance(resolution, dict):
+    return StoredApprovalCard(card=card, resolution=_resolution(row["resolution_json"]))
+
+
+def _resolution(stored: str | None) -> dict[str, Any] | None:
+    if stored is None:
+        return None
+    resolution = json.loads(stored)
+    if not isinstance(resolution, dict):
         msg = "Stored approval resolution is not an object"
         raise TypeError(msg)
-    return StoredApprovalCard(card=card, resolution=resolution)
+    return resolution

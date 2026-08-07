@@ -50,6 +50,7 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
+_DEFAULT_UNRECORDABLE_CARD_REASON = "Tool approval request could not be recorded durably, so it cannot be answered."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
     "exactly what would run. Retry with a smaller payload — for example save large content to a "
@@ -80,7 +81,12 @@ class _ResolutionOutcome(Enum):
 
 
 class ToolApprovalTransportError(RuntimeError):
-    """One actionable approval transport limitation."""
+    """One actionable reason an approval card cannot be made answerable.
+
+    Either the room cannot carry the card, or nothing durable can hold it.
+    Both leave a request nobody could answer, and both are reported to the
+    caller as the reason its approval was refused.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -345,7 +351,7 @@ class _ApprovalManager:
                 approval_id=approval_id,
             )
         except ToolApprovalTransportError as exc:
-            logger.info("Approval Matrix transport unavailable", room_id=room_id, reason=exc.reason)
+            logger.info("Approval card could not be made answerable", room_id=room_id, reason=exc.reason)
             return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
         except asyncio.CancelledError:
             raise
@@ -603,7 +609,9 @@ class _ApprovalManager:
                 approval_id=approval_id,
                 sent_event=sent_event,
             )
-            await self._remember_card(waiter)
+            if not await self._remember_card(waiter):
+                await self._retire_unrecoverable_card(waiter)
+                raise ToolApprovalTransportError(_DEFAULT_UNRECORDABLE_CARD_REASON)
             shutdown_reason = self._current_shutdown_reason()
             if shutdown_reason is not None:
                 await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
@@ -640,7 +648,9 @@ class _ApprovalManager:
             approval_id=approval_id,
             sent_event=sent_event,
         )
-        await self._remember_card(waiter)
+        if not await self._remember_card(waiter):
+            await self._retire_unrecoverable_card(waiter)
+            return
         try:
             await self._settle_bound_waiter_as_cancelled(waiter)
         finally:
@@ -918,11 +928,16 @@ class _ApprovalManager:
         store that failed is the dangerous case: its row exists and still reads
         as unanswered, so showing the decision anyway would let the next
         startup expire a card whose tool has already run.
+
+        Failing is not only raising. The write is a guarded update that can
+        match no row and say nothing about it, so what the store reports the
+        row now carries -- not the absence of an exception -- is what decides
+        whether this decision was recorded.
         """
         if self._cards is None:
             return True
         try:
-            await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
+            recorded = await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
         except Exception:
             logger.warning(
                 "Failed to record an approval decision before showing it",
@@ -930,7 +945,20 @@ class _ApprovalManager:
                 exc_info=True,
             )
             return False
-        return True
+        if recorded.recorded:
+            return True
+        # Nothing was written. Either no row exists, so no later process can
+        # ever account for this decision, or the row already carries an
+        # earlier one that stands. Both mean the durable record disagrees with
+        # the decision offered here, and a tool released on it would be
+        # released on nothing.
+        logger.warning(
+            "An approval decision was not recorded",
+            event_id=card_event_id,
+            cause="no_stored_card" if recorded.resolution is None else "already_decided",
+            stored_status=None if recorded.resolution is None else recorded.resolution.get("status"),
+        )
+        return False
 
     def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
         """Return the live waiter's own view of one card.
@@ -996,15 +1024,19 @@ class _ApprovalManager:
         # believing a terminal card is pending would resolve it a second time.
         return pending if pending.latest_status(None) == "pending" else None
 
-    async def _remember_card(self, waiter: _LiveApprovalWaiter) -> None:
+    async def _remember_card(self, waiter: _LiveApprovalWaiter) -> bool:
         """Make one sent card recoverable by whoever restarts next.
 
         Recorded even for a card that is about to be cancelled, because the
         cancellation is itself a Matrix edit that can fail: without the row,
         a card left visible in the room would answer nobody forever.
+
+        Returns whether the card is now recoverable, because a waiter bound to
+        a card no row backs is a click away from releasing a tool nothing
+        durable would agree had been approved.
         """
         if self._cards is None:
-            return
+            return True
         try:
             await self._cards.remember_approval_card(
                 room_id=waiter.room_id,
@@ -1018,6 +1050,37 @@ class _ApprovalManager:
                 event_id=waiter.card_event_id,
                 exc_info=True,
             )
+            return False
+        return True
+
+    async def _retire_unrecoverable_card(self, waiter: _LiveApprovalWaiter) -> None:
+        """Take back one card that reached the room with no durable row behind it.
+
+        Nothing recorded this card, so no later process can expire it, no
+        later process can redeliver a decision made on it, and no decision it
+        collects could ever be accounted for. The live waiter is dropped
+        first, so a click can no longer release a tool, and only then is the
+        room told -- the record-before-edit ordering exists to keep a row and
+        the room from disagreeing, and here there is no row to disagree with.
+        """
+        with self._live_lock:
+            self._pending_by_card_event.pop(waiter.card_event_id, None)
+            self._resolved_card_event_ids.add(waiter.card_event_id)
+        self._complete_waiter_direct(
+            waiter,
+            self._new_decision(status="expired", reason=_DEFAULT_UNRECORDABLE_CARD_REASON, resolved_by=None),
+        )
+        pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+        await self._deliver_resolution(
+            pending,
+            self._resolved_event_content(
+                pending,
+                status="expired",
+                reason=_DEFAULT_UNRECORDABLE_CARD_REASON,
+                resolved_by=None,
+                resolved_at=_utcnow(),
+            ),
+        )
 
     async def _forget_card(self, card_event_id: str) -> None:
         if self._cards is None:

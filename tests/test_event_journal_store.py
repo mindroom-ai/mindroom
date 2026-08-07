@@ -834,7 +834,11 @@ class TestSchemaUpgrade:
             assert stored is not None
             assert stored.resolution is None
 
-            await principal.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+            recorded = await principal.resolve_approval_card(
+                card_event_id="$card",
+                resolution={"status": "approved"},
+            )
+            assert recorded.recorded is True
             resolved = await principal.pending_approval_card(room_id=ROOM, card_event_id="$card")
             assert resolved is not None
             assert resolved.resolution == {"status": "approved"}
@@ -1244,26 +1248,82 @@ class TestApprovalCards:
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [entry.resolution for entry in scanned] == [{"status": "approved"}]
 
+    async def test_recording_a_decision_reports_that_it_committed(self, alice: PrincipalStore) -> None:
+        """A caller must not have to infer a commit from the absence of an error.
+
+        Whether the tool runs turns on this answer, and the write is a guarded
+        update that can decline silently.
+        """
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        recorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert recorded.recorded is True
+        assert recorded.resolution == {"status": "approved"}
+
     async def test_a_second_decision_does_not_replace_the_first(self, alice: PrincipalStore) -> None:
         """The committed decision is the one that stands.
 
         A retry after a failed edit resends what was decided; letting a later
         write through would let a second click overwrite a decision whose tool
-        already ran.
+        already ran. The refusal is reported along with the decision that won,
+        because a caller told only that no exception occurred would go on to
+        show and act on the decision the row rejected.
         """
         await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
         await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "denied"})
 
+        refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "denied"})
+
+        assert refused.recorded is False
+        assert refused.resolution == {"status": "approved"}
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
         assert stored is not None
         assert stored.resolution == {"status": "approved"}
 
     async def test_a_decision_on_an_unknown_card_records_nothing(self, alice: PrincipalStore) -> None:
-        """Resolving a card that was never stored must not create one."""
-        await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+        """Resolving a card that was never stored must not create one.
 
+        The update matches no row and raises nothing, so the only thing that
+        can stop the caller from treating this as a commit is being told that
+        no row carries the decision.
+        """
+        unrecorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert unrecorded.recorded is False
+        assert unrecorded.resolution is None
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+
+    async def test_a_forgotten_cards_decision_is_no_longer_recordable(self, alice: PrincipalStore) -> None:
+        """A dropped row is as unrecordable as one that never existed.
+
+        The two zero-row causes stay distinguishable: this one has nothing to
+        report back, where a card that already decided reports what it decided.
+        """
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await alice.forget_approval_card(card_event_id="$card")
+
+        unrecorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert unrecorded.recorded is False
+        assert unrecorded.resolution is None
+
+    async def test_one_principal_cannot_record_a_decision_on_anothers_card(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Another bot's card is not a row this one may answer, or claim to have."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+
+        unrecorded = await bob.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert unrecorded.recorded is False
+        assert unrecorded.resolution is None
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.resolution is None
 
     async def test_a_forgotten_card_is_gone(self, alice: PrincipalStore) -> None:
         """Resolving a card is what removes it, so presence means pending."""
