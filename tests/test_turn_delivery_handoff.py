@@ -690,17 +690,18 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
 
 
 @dataclass
-class _RefusesTheFirstAttempt:
-    """A homeserver that rejects one delivery and then behaves normally.
+class _RefusesTheFirstAttempts:
+    """A homeserver that rejects the opening deliveries and then behaves normally.
 
-    Refusing by call order rather than by shape is deliberate. The failed
+    Refusing by call order rather than by shape is deliberate. The refused
     attempt and its recovery resend carry the same frozen payload, so any
-    discriminator built from the content would let the test pass a fix that
-    only distinguished them by accident.
+    discriminator built from the content would let a fix pass for having
+    accidentally changed the bytes rather than for resolving the ownership.
     """
 
+    refusals: int = 1
+    attempts: int = 0
     delivered: list[str] = field(default_factory=list)
-    refused: bool = False
 
     async def __call__(
         self,
@@ -709,12 +710,17 @@ class _RefusesTheFirstAttempt:
         content: dict[str, Any],
         **_kwargs: object,
     ) -> MagicMock | None:
-        if not self.refused:
-            self.refused = True
+        self.attempts += 1
+        if self.attempts <= self.refusals:
             return None
         event_id = f"$visible{len(self.delivered)}"
         self.delivered.append(event_id)
         return MagicMock(event_id=event_id, content_sent=content)
+
+
+async def final_row(bot: AgentBot, turn_id: str) -> OutboxDelivery | None:
+    """Return the FINAL outbox row for one turn, without claiming it."""
+    return await bot._delivery_gateway.deps.outbox.load_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL)
 
 
 class TestAFailedFinalEditLeavesOneOwner:
@@ -732,11 +738,11 @@ class TestAFailedFinalEditLeavesOneOwner:
         self,
         tmp_path: Path,
     ) -> None:
-        """One failed edit, one fallback, one recovery pass, one visible message."""
+        """One refused edit, one fallback, one recovery pass, one visible message."""
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         adopt(bot, ["$cause"])
-        homeserver = _RefusesTheFirstAttempt()
+        homeserver = _RefusesTheFirstAttempts()
 
         with patch("mindroom.delivery_gateway.send_message_result", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
@@ -751,3 +757,63 @@ class TestAFailedFinalEditLeavesOneOwner:
 
         assert outcome.complete, "recovery left work behind"
         assert homeserver.delivered == ["$visible0"], "recovery sent the failure notice a second time"
+
+    async def test_the_row_names_the_message_that_actually_reached_the_room(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Not merely resolved: resolved onto the event a reader would find.
+
+        The startup repair that recovers a lost response event ID reads the
+        acknowledged FINAL rows, so a row closed against the wrong event would
+        point the turn's later edits at a message that is not its answer.
+        Silencing recovery is only half of what this has to get right.
+        """
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        adopt(bot, ["$cause"])
+
+        with patch("mindroom.delivery_gateway.send_message_result", _RefusesTheFirstAttempts()):
+            await bot._turn_controller._finalize_dispatch_failure(
+                target=MessageTarget.resolve(ROOM, None, "$cause"),
+                error=RuntimeError("boom"),
+                existing_event_id="$placeholder",
+                delivery_turn_id="$cause",
+            )
+
+        row = await final_row(bot, "$cause")
+        assert row is not None, "the refused edit left no row to resolve"
+        assert row.acknowledged_event_id == "$visible0"
+
+    async def test_a_fallback_that_never_landed_leaves_the_answer_to_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The row is given away only once there is something to give it to.
+
+        This is the ordering the fix turns on. Nothing reached the room here,
+        so the outbox is still the only thing that can answer this turn: the
+        FINAL enqueue already took the source off the journal, and resolving
+        the row anyway would leave the user with a placeholder, no error, and
+        nothing durable that owes them either.
+        """
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        adopt(bot, ["$cause"])
+        homeserver = _RefusesTheFirstAttempts(refusals=2)
+
+        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+            resolution = await bot._turn_controller._finalize_dispatch_failure(
+                target=MessageTarget.resolve(ROOM, None, "$cause"),
+                error=RuntimeError("boom"),
+                existing_event_id="$placeholder",
+                delivery_turn_id="$cause",
+            )
+            assert resolution is None, "nothing reached the room"
+            unresolved = await final_row(bot, "$cause")
+            assert unresolved is not None
+            assert unresolved.acknowledged_event_id is None, "the row was closed with nothing to close it onto"
+
+            await bot._delivery_gateway.recover_deliveries()
+
+        assert homeserver.delivered == ["$visible0"], "the failure notice never reached the room"
