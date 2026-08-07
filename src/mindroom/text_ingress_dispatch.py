@@ -31,7 +31,7 @@ from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_payload_preparation import DispatchPayloadInputs
+from mindroom.response_payload_preparation import DispatchPayloadInputs, turn_input_snapshot
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -455,8 +455,24 @@ async def _apply_turn_plan(
         if plan.response_action.kind in {"individual", "team"}
         else None
     )
+
+    payload_inputs = DispatchPayloadInputs(
+        message_attachment_ids=tuple(message_attachment_ids),
+        trusted_attachment_ids=tuple(trusted_attachment_ids),
+        media_events=tuple(media_events or ()),
+        raw_audio_fallback=(
+            prepared.payload_metadata.raw_audio_fallback is True if prepared.payload_metadata is not None else False
+        ),
+        voice_transcript=(
+            prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
+        ),
+    )
+    # The media and attachment inputs are recorded with the turn, not just
+    # carried in memory to the runner. Nothing else in `TurnRecord` describes
+    # them, so a batch of three images and a caption would otherwise be
+    # recoverable only as text.
     handled_turn = controller.deps.turn_store.attach_response_context(
-        prepared.handled_turn,
+        canonicalize_turn_record(prepared.handled_turn, input_snapshot=turn_input_snapshot(payload_inputs)),
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
@@ -470,18 +486,6 @@ async def _apply_turn_plan(
         await visible_responses.settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
-
-    payload_inputs = DispatchPayloadInputs(
-        message_attachment_ids=tuple(message_attachment_ids),
-        trusted_attachment_ids=tuple(trusted_attachment_ids),
-        media_events=tuple(media_events or ()),
-        raw_audio_fallback=(
-            prepared.payload_metadata.raw_audio_fallback is True if prepared.payload_metadata is not None else False
-        ),
-        voice_transcript=(
-            prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
-        ),
-    )
 
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.

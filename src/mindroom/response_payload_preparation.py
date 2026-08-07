@@ -21,8 +21,10 @@ from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
 )
+from mindroom.matrix.media import parse_matrix_media_dispatch_event_source
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.timing import elapsed_ms_between, emit_elapsed_timing
+from mindroom.turn_record import TurnInputSnapshot, TurnMediaSource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -36,6 +38,10 @@ if TYPE_CHECKING:
     from mindroom.turn_policy import IngressHookRunner, PreparedDispatch
 
 
+class _TurnInputSnapshotCorruptionError(RuntimeError):
+    """A recorded turn input snapshot cannot replay without inventing input."""
+
+
 @dataclass(frozen=True)
 class DispatchPayloadInputs:
     """Attachment and media inputs produced by ingress for one response payload."""
@@ -45,6 +51,53 @@ class DispatchPayloadInputs:
     media_events: tuple[MediaDispatchEvent, ...]
     raw_audio_fallback: bool = False
     voice_transcript: bool = False
+
+
+def turn_input_snapshot(payload_inputs: DispatchPayloadInputs) -> TurnInputSnapshot:
+    """Return the durable form of one turn's media and attachment inputs.
+
+    Recorded with the turn at durable adoption, because the journal payload is
+    otherwise the only copy of these facts and nothing in ``TurnRecord``
+    describes them.
+    """
+    return TurnInputSnapshot(
+        media_sources=tuple(
+            TurnMediaSource(event_id=media_event.event_id, source=dict(media_event.source))
+            for media_event in payload_inputs.media_events
+        ),
+        message_attachment_ids=payload_inputs.message_attachment_ids,
+        trusted_attachment_ids=payload_inputs.trusted_attachment_ids,
+        raw_audio_fallback=payload_inputs.raw_audio_fallback,
+        voice_transcript=payload_inputs.voice_transcript,
+    )
+
+
+def _dispatch_payload_inputs_from_snapshot(snapshot: TurnInputSnapshot) -> DispatchPayloadInputs:
+    """Rebuild one turn's exact media and attachment inputs from durable state.
+
+    A source that no longer parses as the media event it was recorded as is
+    refused rather than guessed: running the turn on a different input and
+    calling it recovery is the failure this snapshot exists to prevent.
+
+    Private and unwired on purpose. The snapshot's consumer is the contract-2
+    handoff, where an adopted turn stops being the journal's work and starts
+    being ``TurnStore``'s; recording it has to land first, because that handoff
+    cannot be written while the media it needs is only in the journal payload.
+    """
+    media_events: list[MediaDispatchEvent] = []
+    for media_source in snapshot.media_sources:
+        media_event = parse_matrix_media_dispatch_event_source(media_source.source)
+        if media_event is None or media_event.event_id != media_source.event_id:
+            msg = f"Recorded turn input media {media_source.event_id!r} does not replay as itself"
+            raise _TurnInputSnapshotCorruptionError(msg)
+        media_events.append(media_event)
+    return DispatchPayloadInputs(
+        message_attachment_ids=snapshot.message_attachment_ids,
+        trusted_attachment_ids=snapshot.trusted_attachment_ids,
+        media_events=tuple(media_events),
+        raw_audio_fallback=snapshot.raw_audio_fallback,
+        voice_transcript=snapshot.voice_transcript,
+    )
 
 
 @dataclass(frozen=True)
