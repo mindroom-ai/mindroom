@@ -22,9 +22,8 @@ It should send, edit, redact, and finalize already-generated responses.
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
-`RedactedTurnCleanup` owns durable source-redaction tombstoning and advisory cache sanitization.
-`TurnStore` removes redacted persisted replay before the next response starts in the affected conversation.
-`AgentBot` only delegates the Matrix redaction callback to that collaborator.
+`TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
+The projection learns about a redaction through journal admission, so the Matrix redaction callback owes only that tombstone.
 
 ## Current Problems
 

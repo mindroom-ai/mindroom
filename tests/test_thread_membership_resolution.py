@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import nio
 import pytest
@@ -23,12 +23,8 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
-from tests.conftest import (
-    drain_coalescing,
-)
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _matrix_room,
     _wait_for_room_cache_idle,
 )
 
@@ -183,94 +179,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) == thread_root_id
-        finally:
-            await real_event_cache.close()
-
-    @pytest.mark.asyncio
-    async def test_media_ingress_primes_transitive_ancestors_before_persisting_membership(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Cold-start media ingress should persist the same transitive thread membership used at runtime."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        audio_event_id = "$audio_reply:localhost"
-        room = _matrix_room(room_id)
-        real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
-        await real_event_cache.initialize()
-        bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=bot._runtime_view,
-        )
-        audio_event = nio.RoomMessageAudio.from_dict(
-            {
-                "content": {
-                    "body": "voice-note.ogg",
-                    "msgtype": "m.audio",
-                    "url": "mxc://localhost/voice-note",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_id}},
-                },
-                "event_id": audio_event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567896,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        prechecked_event = MagicMock(event=audio_event, requester_user_id="@user:localhost")
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-
-        def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
-            return nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": content,
-                    "event_id": event_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
-        async def fetch_related_event(fetch_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-            assert fetch_room_id == room_id
-            if event_id == plain_reply_id:
-                return room_get_event_response(
-                    plain_reply_id,
-                    {
-                        "body": "bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                )
-            if event_id == thread_reply_id:
-                return room_get_event_response(
-                    thread_reply_id,
-                    {
-                        "body": "thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                )
-            msg = f"unexpected event lookup: {event_id}"
-            raise AssertionError(msg)
-
-        bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-
-        try:
-            await bot._turn_controller.handle_media_event(room, audio_event)
-            await drain_coalescing(bot)
-            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
-
-            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
         finally:
             await real_event_cache.close()
 

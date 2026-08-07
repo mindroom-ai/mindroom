@@ -348,7 +348,7 @@ class JournalIngress:
         provenance = self.timeline_member_provenance.get(event.event_id)
         if provenance is None:
             return None
-        return _event_class_for(provenance, event, self_sender=self.self_sender)
+        return _event_class_for(provenance, event)
 
     async def _admit(
         self,

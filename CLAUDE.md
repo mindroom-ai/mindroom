@@ -104,7 +104,6 @@ Matrix sync callback
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
 | `sync_restart_retry.py` | Exact sources with committed replacement or orderly terminal interruptions, available to replacement or next-startup recovery |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |

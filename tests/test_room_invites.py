@@ -242,7 +242,7 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
-    await bot._purge_left_room(room_id)
+    await bot._fence_left_room(room_id)
     await bot.join_configured_rooms()
 
     join_room.assert_awaited_once_with(bot.client, room_id)
@@ -1441,6 +1441,17 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
 
     mock_client.room_leave = mock_room_leave
     install_runtime_cache_support(bot)
+    fenced_room_ids: list[str] = []
+
+    class RecordingStore:
+        """Record which rooms the departure fenced."""
+
+        async def advance_membership_epoch(self, room_id: str) -> int:
+            """Record one invalidation and return the room's new epoch."""
+            fenced_room_ids.append(room_id)
+            return len(fenced_room_ids)
+
+    bot._membership_fence.store = RecordingStore()
 
     # Test that the bot leaves unconfigured rooms
     await bot.leave_unconfigured_rooms()
@@ -1448,7 +1459,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
     # Verify the bot left room2 (unconfigured) but not room1 (configured)
     assert len(left_rooms) == 1
     assert "!room2:localhost" in left_rooms
-    bot.event_cache.purge_room.assert_awaited_once_with("!room2:localhost")
+    assert fenced_room_ids == ["!room2:localhost"]
 
 
 @pytest.mark.asyncio

@@ -523,11 +523,16 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban"])
-async def test_joined_sync_timeline_departure_purges_before_reopening_room(
+async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
     tmp_path: Path,
     membership: str,
 ) -> None:
-    """A leave and rejoin compressed into one sync must purge before restoring access."""
+    """A departure only the timeline reports must still fence the room.
+
+    The room's final membership in this response is `join`, so the join/leave
+    sections alone say nothing happened. The projection built before the
+    departure describes a membership that ended, and the epoch is what drops it.
+    """
     bot = _agent_bot(tmp_path)
     room_id = "!departed:localhost"
     response = nio.SyncResponse.from_dict(
@@ -566,15 +571,21 @@ async def test_joined_sync_timeline_departure_purges_before_reopening_room(
             },
         },
     )
-    operation_order: list[str] = []
-    bot._conversation_cache.purge_rooms = AsyncMock(side_effect=lambda _rooms: operation_order.append("purge"))
-    bot._conversation_cache.mark_room_joined = AsyncMock(side_effect=lambda _room: operation_order.append("join"))
+    fenced_room_ids: list[str] = []
+
+    class RecordingStore:
+        """Record which rooms the fence invalidated."""
+
+        async def advance_membership_epoch(self, room_id: str) -> int:
+            """Record one invalidation and return the room's new epoch."""
+            fenced_room_ids.append(room_id)
+            return len(fenced_room_ids)
+
+    bot._membership_fence.store = RecordingStore()
 
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert operation_order == ["purge", "join"]
-    bot._conversation_cache.purge_rooms.assert_awaited_once_with({room_id})
-    bot._conversation_cache.mark_room_joined.assert_awaited_once_with(room_id)
+    assert fenced_room_ids == [room_id]
 
 
 @pytest.mark.asyncio

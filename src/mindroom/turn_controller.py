@@ -793,21 +793,6 @@ class TurnController:
             requester_user_id,
         )
 
-    async def _append_live_event_with_timing(
-        self,
-        room_id: str,
-        event: nio.RoomMessage,
-        *,
-        event_info: EventInfo,
-        dispatch_timing: DispatchPipelineTiming | None,
-    ) -> None:
-        """Persist one ingress cache mutation while recording its contribution to ingress latency."""
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_cache_append_start")
-        await self.deps.conversation_cache.append_live_event(room_id, event, event_info=event_info)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_cache_append_ready")
-
     async def _resolve_text_event_with_ingress_timing(
         self,
         event: nio.RoomMessageText,
@@ -915,15 +900,8 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
         event_info: EventInfo,
-        dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
         """Hand one edited user turn to the edit regenerator."""
-        await self._append_live_event_with_timing(
-            room.room_id,
-            prechecked_event.event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
         await self.deps.edit_regenerator.handle_message_edit(
             room,
             prechecked_event.event,
@@ -2127,13 +2105,6 @@ class TurnController:
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if is_nonterminal_stream:
-            if self.deps.ingress.managed_entity_name_for_sender(event.sender) is not None:
-                await self._append_live_event_with_timing(
-                    room.room_id,
-                    event,
-                    event_info=event_info,
-                    dispatch_timing=None,
-                )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatch_timing = create_dispatch_pipeline_timing(
@@ -2151,7 +2122,7 @@ class TurnController:
         try:
             if event_info.is_edit:
                 await reservation_owner.release()
-                await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
+                await self._handle_edit_event(room, prechecked_event, event_info)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             routed_alias = self.deps.ingress.router_relay_original_event_id(event)
             claim_aliases = (routed_alias,) if routed_alias else ()
@@ -2171,7 +2142,6 @@ class TurnController:
             outcome = await self._ingest_live_text_event(
                 room,
                 prechecked_event,
-                event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
             )
@@ -2191,7 +2161,6 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
         *,
-        event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
     ) -> _IngressAdmissionOutcome:
@@ -2223,12 +2192,6 @@ class TurnController:
             room_id=room.room_id,
             sender=event.sender,
             thread_id=ingress_thread_id,
-        )
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
         )
         prepared_event = await self._resolve_text_event_with_ingress_timing(
             event,
@@ -2310,7 +2273,6 @@ class TurnController:
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
-        event_info = EventInfo.from_event(prechecked_event.event.source)
         if (
             is_audio_message_event(prechecked_event.event)
             and self.deps.ingress.managed_entity_name_for_sender(prechecked_event.event.sender) is not None
@@ -2346,7 +2308,6 @@ class TurnController:
                         event=prechecked_event.event,
                         requester_user_id=prechecked_event.requester_user_id,
                     ),
-                    event_info=event_info,
                     dispatch_timing=dispatch_timing,
                     reservation_owner=reservation_owner,
                     turn_claim=turn_claim,
@@ -2354,15 +2315,7 @@ class TurnController:
                 reservation_owner.pending_turn_claim = None
                 dispatch_outcome = TurnDispatchOutcome.DEFERRED
             else:
-                # Prime transitive ancestor lookups before writing advisory cache membership.
                 coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
-                await self._append_live_event_with_timing(
-                    room.room_id,
-                    prechecked_event.event,
-                    event_info=event_info,
-                    dispatch_timing=dispatch_timing,
-                )
-
                 admission_outcome = await self._dispatch_special_media_as_text(
                     room,
                     prechecked_event,
@@ -2417,7 +2370,6 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         *,
-        event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
         turn_claim: TurnRecord,
@@ -2428,9 +2380,7 @@ class TurnController:
         voice_target, admission_key = await self._resolve_ready_voice_target(
             room,
             event,
-            event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
         )
 
         ready_task = asyncio.create_task(
@@ -2455,16 +2405,8 @@ class TurnController:
         room: nio.MatrixRoom,
         event: AudioMessageEvent,
         *,
-        event_info: EventInfo,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
     ) -> tuple[MessageTarget, CoalescingKey]:
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         voice_target = self.deps.resolver.build_message_target(
             room_id=room.room_id,

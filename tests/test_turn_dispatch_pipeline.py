@@ -51,7 +51,6 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1738,7 +1737,6 @@ class TestAgentBot(AgentBotTestBase):
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
-                event_info=EventInfo.from_event(voice_event.source),
                 dispatch_timing=None,
                 reservation_owner=reservation_owner,
                 turn_claim=turn_claim,
