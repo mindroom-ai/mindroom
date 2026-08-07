@@ -948,6 +948,8 @@ class TurnController:
                     "is still being resolved. Please resend it in a moment."
                 ),
                 recovered_response_event_id=response_event_id,
+                # One notice, then the turn is terminal.
+                through_outbox=True,
             )
             self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(pending_turn, response_event_id=response_event_id),
@@ -1356,6 +1358,12 @@ class TurnController:
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=ack_event_id,
+            # The one caller here that sends twice for one turn: this
+            # acknowledgement, then the selection's real answer. Both would
+            # claim the same (turn, FINAL) row, and the freeze rule would keep
+            # this text and drop the answer. Staging them INITIAL and FINAL is
+            # the fix, and it needs the answer's own delivery identified first.
+            through_outbox=False,
         )
         if not ack_event_id:
             self.deps.logger.error(
@@ -1833,6 +1841,8 @@ class TurnController:
                     target=dispatch.target,
                     response_text=action.rejection_message,
                     recovered_response_event_id=response_event_id,
+                    # One rejection, then the turn is terminal.
+                    through_outbox=True,
                 )
                 self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),

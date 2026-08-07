@@ -144,12 +144,46 @@ class VisibleResponseReconciler:
         response_text: str,
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
+        through_outbox: bool,
     ) -> str | None:
-        """Send and durably bind one non-model reply unless recovery already found it."""
+        """Send and durably bind one non-model reply unless recovery already found it.
+
+        ``through_outbox`` puts the send behind the same claim-before-send row a
+        model answer uses, which is what a reply with a turn behind it should
+        always have had. Two things follow from it, and both are the point.
+
+        The journal sources this turn answers settle inside the enqueue, so the
+        answer becoming durably owed and the turn stopping being the journal's
+        work are one commit. Without it the terminal record lands in the
+        handled-turn ledger first and the journal settles afterwards, leaving a
+        window where a pending row describes finished work -- the window the
+        degraded replay guard has to consult two records to survive.
+
+        And a crashed send is recovered by resending the frozen row rather than
+        by scanning the room for what might already be there. The scan still
+        runs ahead of the send here, because a row from a previous membership
+        is gone and its answer is not, but it stops being the only thing
+        standing between a crash and a lost reply.
+
+        Only callers that send exactly once per turn may pass it. The outbox
+        keys on ``(turn, stage)`` and freezes a row at its first attempt, so a
+        second ``FINAL`` send for the same turn would be refused and its text
+        would never reach the room.
+
+        It has no default on purpose. The safe-looking value is the wrong one
+        for almost every caller here, and a default would let a new reply pick
+        the direct path by saying nothing at all -- which is exactly how these
+        five sends came to be the last visible deliveries outside the outbox.
+        """
         if recovered_response_event_id is not None:
             return recovered_response_event_id
         response_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(target=target, response_text=response_text, skip_mentions=skip_mentions),
+            SendTextRequest(
+                target=target,
+                response_text=response_text,
+                skip_mentions=skip_mentions,
+                delivery_turn_id=handled_turn.anchor_event_id if through_outbox else None,
+            ),
         )
         if response_event_id is not None:
             await self.record_pending_visible_response(handled_turn, response_event_id)
