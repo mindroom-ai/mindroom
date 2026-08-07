@@ -593,7 +593,7 @@ MindRoom never infers `LIVE`, `RECOVERED`, or `HISTORY` from tokens, timestamps,
 | 5 acknowledged sends are provisional | **Superseded and deleted.** Seeding landed and was then removed: the sync echo is the only route into conversation content, so nothing is provisional because nothing is written before the server has ordered it. The ordering hazards this contract existed to manage are gone with the mechanism, and the tests that pinned them went with it. The cost -- a turn that reads the conversation immediately after speaking does not see its own message -- is recorded under the seeding audit |
 | 6 hydration is the prompt window | **Done.** The unused floor is gone and the window is counted in logical messages, not pages of events. The ceiling case is documented as a completion, not a full window |
 | 7 one exceptional repair | Held; point refetch is the only one |
-| 8 membership epochs fence pending facts | **Written, entirely dormant.** `advance_membership_epoch` has no production call site, so nothing in a running MindRoom ever advances an epoch and none of the rejoin behavior below has ever executed outside tests. Wiring it belongs with the read cutover, which is what makes the projection the thing a rejoin invalidates. Previously recorded as "done for deliveries", which was true of the code and false of the system.<br><br>_Prior note:_ **Done for deliveries.** Unattempted rows are dropped; attempted ones are kept so the retry collapses onto the event it may already have created. Sidecar plaintext and approvals are fenced when they are built |
+| 8 membership epochs fence pending facts | **Wired, and being hardened.** `MembershipFence` (`event_journal/membership.py`) advances the epoch at both transitions: immediately on a local leave, and for sync-reported departures. The exactly-once rule is the substance -- one departure arrives twice and the obvious guard, `bot._local_departures_awaiting_sync`, is cleared by `_on_room_joined`, so a rejoin between a leave and its echo would let the echo fence a second time and delete the conversation just hydrated under the new membership. The fence keeps its own record that a join does not clear.<br><br>Review then found the in-process record is not enough: an advance that raises leaves the marker set and the echo is swallowed, giving the departure **zero** fences; a restart between the fence and its echo loses it; two leaves before one echo need two markers and have one; and a marker whose echo never arrives swallows a later genuine departure. Being made durable and atomic with the advance.<br><br>Separately, the fence does not yet stop an **in-flight** turn: `JournalEvent` carries `membership_epoch` but the envelope, response identity, and outbox row do not, so an old-membership turn can finish after a fence and enqueue an answer into the new membership. Enqueue has to become conditional on the epoch. |
 | 9 narrow views, one backend | **Done.** Seven structural protocols in `event_journal/views.py`; each collaborator takes the slice it calls. Enforcement is the type checker: a hydrator reaching for `enqueue_delivery` fails `ty` before any test runs |
 | 10 special facts stay specialized | **Done.** Resolved sidecar plaintext belongs to the visible revision: the projection refuses to store an unresolved preview and records the refresh debt instead, and hydration resolves the one current revision. Approvals have their own `approval_cards` table behind `ApprovalView`, holding only the cards this bot authored and owes a decision on, fenced by membership epoch. The generic projection was not widened for either |
 | 11 classification stays in nio | Held |
@@ -1986,3 +1986,40 @@ relation resolution against the projection with a Matrix point fetch when the
 event was never observed, memoized for the turn and persisting no raw event
 JSON -- not a durable general-purpose lookup, which would rebuild the cache
 this phase exists to delete.
+
+## A second wedge, found while proving the first (2026-08-06)
+
+The Classic-sync livelock has a fix, and it is not the whole story. A later
+live run wedged again with none of that defect's signatures: zero
+`matrix_sync_rebuild_retry_backoff`, zero `Abandoning recovery at the room
+event cap`, zero `sync_recovery_incomplete`, zero
+`matrix_sync_certification_uncertain`. The livelock is loud on every retry, and
+that window was silent. It also needs more than fifty events in one sync window
+to make the server report `limited`, which a short burst right after a restart
+does not reach.
+
+What the log does show is where the turn stopped. The event reached
+`coalescing_gate_message_enqueued` and that line is the last
+`mindroom.coalescing` entry in the file. Every other enqueue in the same run is
+followed by `coalescing_gate_flush_started` within about a millisecond and then
+`flush_finished outcome=dispatched`. This one never gets a `flush_started` at
+all.
+
+So the stall is in the coalescing gate's flush -- after admission, before
+dispatch. That is the same "admitted, never dispatched" shape the journal
+exists to make impossible, arrived at by a different route: the durable record
+is correct and complete, and nothing schedules the work that would drain it.
+The event loop was healthy throughout; a later event in the same process got a
+complete streamed reply.
+
+Two correlations worth chasing, neither yet a conclusion. The stranded enqueue
+lands mid-startup, between `matrix_user_joined_room` and
+`startup_phase_finished rooms_and_memberships`, which is not true of any
+enqueue that did flush. And that same event fired
+`matrix_event_callback_started` twice for the agent, 13 ms and 19 ms apart,
+with one `Received message` and one enqueue -- duplicate delivery across the
+restart.
+
+`src/mindroom/coalescing.py` and `src/mindroom/ingress_lanes.py` are where to
+look. This is a real open defect, distinct from the livelock, and it is the
+reason the live proof cannot yet be called green.
