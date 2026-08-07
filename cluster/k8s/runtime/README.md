@@ -73,8 +73,9 @@ eventCache:
   backend: sqlite
 ```
 
-When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
+When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 

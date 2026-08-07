@@ -1,15 +1,14 @@
 """Durable turn records, in the database that settles the turns they describe.
 
-"Has this turn finished?" is answered today by two records in two substrates:
-the journal's pending set and a JSON-file ledger. They cannot share a
-transaction, so they settle at different moments, and every reader that needs
-a trustworthy answer has to consult both and know why.
+"Has this turn finished?" used to be answered by two records in two
+substrates: the journal's pending set and a JSON-file ledger. They could not
+share a transaction, so they settled at different moments, and every reader
+that needed a trustworthy answer had to consult both and know why.
 
-This is the first half of collapsing that: the same records, stored where a
-settlement can be written in the same transaction. Nothing reads these rows
-yet. The ledger keeps its in-memory map and its own file until the readers and
-writers move across, which is deliberate -- a dedupe substrate that is half
-migrated is one that can answer a message twice.
+These rows are what collapsed that. The ledger in ``handled_turns.py`` now
+loads its whole map from here and writes every change back through this
+module, so a turn and its settlement commit together. The JSON file survives
+only as a one-time import for installs that predate the move.
 
 Two decisions are worth stating because they are easy to get backwards.
 
