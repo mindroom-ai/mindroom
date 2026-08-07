@@ -3330,10 +3330,8 @@ path = "mindroom.response_payload_preparation"
 depends_on = [
     "mindroom.attachments",
     "mindroom.inbound_turn_normalizer",
-    "mindroom.matrix.media",
     "mindroom.matrix.thread_history_result",
     "mindroom.timing",
-    "mindroom.turn_record",
 ]
 visibility = [
     "mindroom.bot",

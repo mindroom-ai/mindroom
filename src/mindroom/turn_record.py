@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from mindroom.attachment_ids import normalize_attachment_id
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 from mindroom.timestamp_formatting import normalize_timestamp_ms
@@ -54,108 +53,6 @@ SourceEventRevision = tuple[int, str]
 
 
 @dataclass(frozen=True)
-class TurnMediaSource:
-    """The exact Matrix media one source event contributed to a turn.
-
-    The whole event source is kept rather than a description of it. A plain
-    image's ``url`` and an encrypted image's ``file`` block -- its key, iv, and
-    hashes -- both live inside that source, and only the second makes the first
-    openable. No media bytes are stored: this is a reference plus the key
-    material that resolves it, which is exactly what the download path takes.
-
-    Decryption results nio attached to the event are deliberately not carried.
-    They authorize the event, and that decision was made when the event was
-    admitted; this value only has to reproduce the file the turn ran on.
-    """
-
-    event_id: str
-    source: Mapping[str, object]
-
-    def __post_init__(self) -> None:
-        """Freeze the payload so a recorded snapshot cannot be edited in place."""
-        object.__setattr__(self, "source", MappingProxyType(dict(self.source)))
-
-    def _to_record(self) -> dict[str, object]:
-        """Return a JSON-safe representation for durable metadata."""
-        return {"event_id": self.event_id, "source": dict(self.source)}
-
-    @classmethod
-    def _from_raw(cls, raw_media_source: object) -> TurnMediaSource | None:
-        """Build one media source from a persisted JSON-like value."""
-        if not isinstance(raw_media_source, Mapping):
-            return None
-        media_source = typing.cast("Mapping[str, object]", raw_media_source)
-        event_id = media_source.get("event_id")
-        source = media_source.get("source")
-        if not isinstance(event_id, str) or not event_id or not isinstance(source, Mapping):
-            return None
-        return cls(event_id, typing.cast("Mapping[str, object]", source))
-
-
-@dataclass(frozen=True)
-class TurnInputSnapshot:
-    """Everything one adopted turn needs to execute that its prompt does not carry.
-
-    ``TurnRecord`` already persists the anchor, the sources, their prompts and
-    revisions, the requester, the conversation target, and the history scope.
-    None of that describes the media a turn was sent, so a coalesced batch of
-    one caption and three images would otherwise replay as text alone.
-
-    ``media_sources`` is in receipt order, which is load-bearing: three images
-    and a caption are one turn to the model, and reordering them changes the
-    input the turn runs on.
-
-    An empty snapshot is a real value meaning "this turn had no media or
-    attachment input", and is not the same as no snapshot at all.
-    """
-
-    media_sources: tuple[TurnMediaSource, ...] = ()
-    message_attachment_ids: tuple[str, ...] = ()
-    trusted_attachment_ids: tuple[str, ...] = ()
-    raw_audio_fallback: bool = False
-    voice_transcript: bool = False
-
-    def _to_record(self) -> dict[str, object]:
-        """Return a JSON-safe representation for durable metadata."""
-        record: dict[str, object] = {}
-        if self.media_sources:
-            record["media_sources"] = [media_source._to_record() for media_source in self.media_sources]
-        if self.message_attachment_ids:
-            record["message_attachment_ids"] = list(self.message_attachment_ids)
-        if self.trusted_attachment_ids:
-            record["trusted_attachment_ids"] = list(self.trusted_attachment_ids)
-        if self.raw_audio_fallback:
-            record["raw_audio_fallback"] = True
-        if self.voice_transcript:
-            record["voice_transcript"] = True
-        return record
-
-    @classmethod
-    def _from_raw(cls, raw_snapshot: object) -> TurnInputSnapshot | None:
-        """Build one input snapshot from a persisted JSON-like value."""
-        if not isinstance(raw_snapshot, Mapping):
-            return None
-        snapshot = typing.cast("Mapping[str, object]", raw_snapshot)
-        raw_media_sources = snapshot.get("media_sources", ())
-        media_sources = (
-            tuple(
-                media_source
-                for raw_media_source in raw_media_sources
-                if (media_source := TurnMediaSource._from_raw(raw_media_source)) is not None
-            )
-            if isinstance(raw_media_sources, list | tuple)
-            else ()
-        )
-        return cls(
-            media_sources=media_sources,
-            message_attachment_ids=_canonical_attachment_ids(snapshot.get("message_attachment_ids")),
-            trusted_attachment_ids=_canonical_attachment_ids(snapshot.get("trusted_attachment_ids")),
-            raw_audio_fallback=snapshot.get("raw_audio_fallback") is True,
-            voice_transcript=snapshot.get("voice_transcript") is True,
-        )
-
-
-@dataclass(frozen=True)
 class _CanonicalSourceState:
     """Canonical source identity and source-owned facts."""
 
@@ -168,7 +65,6 @@ class _CanonicalSourceState:
     source_event_revisions: Mapping[str, SourceEventRevision] | None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None
-    input_snapshot: TurnInputSnapshot | None
 
 
 @dataclass(frozen=True)
@@ -228,7 +124,6 @@ class TurnRecord:
     user_stop_receipt_order: int | None = None
     user_stop_settled_receipt_order: int | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
-    input_snapshot: TurnInputSnapshot | None = None
     response_owner: str | None = None
     requester_id: str | None = None
     correlation_id: str | None = None
@@ -258,7 +153,6 @@ class TurnRecord:
         user_stop_receipt_order: int | None = None,
         user_stop_settled_receipt_order: int | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
-        input_snapshot: TurnInputSnapshot | Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
         correlation_id: str | None = None,
@@ -279,7 +173,6 @@ class TurnRecord:
             source_event_revisions=source_event_revisions,
             suppressed_source_event_revisions=suppressed_source_event_revisions,
             source_event_metadata=source_event_metadata,
-            input_snapshot=input_snapshot,
         )
         delivery = _canonical_delivery_state(
             response_event_id,
@@ -316,7 +209,6 @@ class TurnRecord:
             user_stop_receipt_order=dispatch.user_stop_receipt_order,
             user_stop_settled_receipt_order=dispatch.user_stop_settled_receipt_order,
             source_event_metadata=source.source_event_metadata,
-            input_snapshot=source.input_snapshot,
             response_owner=context.response_owner,
             requester_id=context.requester_id,
             correlation_id=context.correlation_id,
@@ -374,7 +266,6 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     user_stop_receipt_order: int | None
     user_stop_settled_receipt_order: int | None
     source_event_metadata: Mapping[str, object] | None
-    input_snapshot: TurnInputSnapshot | Mapping[str, object] | None
     response_owner: str | None
     requester_id: str | None
     correlation_id: str | None
@@ -408,7 +299,6 @@ def canonicalize_turn_record(
         user_stop_receipt_order=candidate.user_stop_receipt_order,
         user_stop_settled_receipt_order=candidate.user_stop_settled_receipt_order,
         source_event_metadata=candidate.source_event_metadata,
-        input_snapshot=candidate.input_snapshot,
         response_owner=candidate.response_owner,
         requester_id=candidate.requester_id,
         correlation_id=candidate.correlation_id,
@@ -431,7 +321,6 @@ def _canonical_source_state(
     source_event_revisions: Mapping[str, object] | None,
     suppressed_source_event_revisions: Mapping[str, object] | None,
     source_event_metadata: Mapping[str, object] | None,
-    input_snapshot: TurnInputSnapshot | Mapping[str, object] | None = None,
 ) -> _CanonicalSourceState:
     """Return canonical source identity and source-owned facts."""
     canonical_sources = canonical_source_event_ids(source_event_ids)
@@ -482,11 +371,6 @@ def _canonical_source_state(
             excluded_event_ids=redacted_ids,
         ),
         source_event_metadata=canonical_metadata,
-        input_snapshot=_canonical_input_snapshot(
-            input_snapshot,
-            source_event_ids=canonical_sources,
-            excluded_event_ids=redacted_prompt_sources,
-        ),
     )
 
 
@@ -579,59 +463,6 @@ def canonical_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str,
 def canonical_optional_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
-
-
-def _canonical_attachment_ids(attachment_ids: object) -> tuple[str, ...]:
-    """Return validated unique attachment IDs preserving first-seen order."""
-    if not isinstance(attachment_ids, list | tuple):
-        return ()
-    normalized_ids: list[str] = []
-    seen_ids: set[str] = set()
-    for raw_attachment_id in attachment_ids:
-        if not isinstance(raw_attachment_id, str):
-            continue
-        attachment_id = normalize_attachment_id(raw_attachment_id)
-        if attachment_id is None or attachment_id in seen_ids:
-            continue
-        seen_ids.add(attachment_id)
-        normalized_ids.append(attachment_id)
-    return tuple(normalized_ids)
-
-
-def _canonical_input_snapshot(
-    input_snapshot: object,
-    *,
-    source_event_ids: tuple[str, ...],
-    excluded_event_ids: set[str],
-) -> TurnInputSnapshot | None:
-    """Normalize one durable input snapshot against the turn's own identity.
-
-    Media is a per-source fact and follows the record's sources exactly as
-    prompts and source metadata do. A redacted source owns no reply, and a
-    source projected onto another completed turn is no longer this turn's, so
-    in both cases their media leaves with them rather than staying behind for a
-    replay to run on.
-    """
-    snapshot = (
-        input_snapshot if isinstance(input_snapshot, TurnInputSnapshot) else TurnInputSnapshot._from_raw(input_snapshot)
-    )
-    if snapshot is None:
-        return None
-    retained_event_ids = set(source_event_ids).difference(excluded_event_ids)
-    media_sources: list[TurnMediaSource] = []
-    seen_event_ids: set[str] = set()
-    for media_source in snapshot.media_sources:
-        if media_source.event_id not in retained_event_ids or media_source.event_id in seen_event_ids:
-            continue
-        seen_event_ids.add(media_source.event_id)
-        media_sources.append(media_source)
-    return TurnInputSnapshot(
-        media_sources=tuple(media_sources),
-        message_attachment_ids=_canonical_attachment_ids(snapshot.message_attachment_ids),
-        trusted_attachment_ids=_canonical_attachment_ids(snapshot.trusted_attachment_ids),
-        raw_audio_fallback=snapshot.raw_audio_fallback,
-        voice_transcript=snapshot.voice_transcript,
-    )
 
 
 def _positive_int_or_none(value: object) -> int | None:

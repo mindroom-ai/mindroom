@@ -29,8 +29,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.turn_record import (
     SourceEventMetadata,
     SourceEventRevision,
-    TurnInputSnapshot,
-    TurnMediaSource,
     TurnRecord,
     canonical_optional_string,
     canonical_source_event_ids,
@@ -49,8 +47,6 @@ __all__ = [
     "HandledTurnLedger",
     "SourceEventMetadata",
     "SourceEventRevision",
-    "TurnInputSnapshot",
-    "TurnMediaSource",
     "TurnRecord",
     "TurnRecordCodec",
     "canonicalize_turn_record",
@@ -142,8 +138,6 @@ class TurnRecordCodec:
             payload["source_event_metadata"] = {
                 event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
             }
-        if record.input_snapshot is not None:
-            payload["input_snapshot"] = record.input_snapshot._to_record()
         if record.response_owner is not None:
             payload["response_owner"] = record.response_owner
         if record.requester_id is not None:
@@ -162,7 +156,14 @@ class TurnRecordCodec:
 
     @staticmethod
     def _from_ledger_record(event_id: str, raw_record: object) -> TurnRecord | None:
-        """Parse one record from the current ledger schema without legacy migration."""
+        """Parse one record from the current ledger schema without legacy migration.
+
+        Every field is read by name, so a key an older writer emitted and this
+        one no longer knows about is dropped rather than rejected. That is what
+        lets an optional field be retired without a schema version bump, which
+        would quarantine every existing ledger file and discard the live turn
+        identity in it over a field nothing reads.
+        """
         if not isinstance(raw_record, Mapping):
             return None
         record = typing.cast("Mapping[str, object]", raw_record)
@@ -213,7 +214,6 @@ class TurnRecordCodec:
                 record.get("user_stop_settled_receipt_order"),
             ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
-            input_snapshot=_mapping_or_none(record.get("input_snapshot")),
             response_owner=canonical_optional_string(record.get("response_owner")),
             requester_id=canonical_optional_string(record.get("requester_id")),
             correlation_id=canonical_optional_string(record.get("correlation_id")),
@@ -932,7 +932,6 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             if newer.visible_echo_is_fallback is not None
             else older.visible_echo_is_fallback
         ),
-        input_snapshot=newer.input_snapshot if newer.input_snapshot is not None else older.input_snapshot,
         command_execution_started=newer.command_execution_started or older.command_execution_started,
         command_result_text=newer.command_result_text or older.command_result_text,
         latest_edit_receipt_order=max(

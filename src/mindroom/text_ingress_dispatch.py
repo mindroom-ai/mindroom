@@ -31,7 +31,7 @@ from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_payload_preparation import DispatchPayloadInputs, turn_input_snapshot
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -467,12 +467,8 @@ async def _apply_turn_plan(
             prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
         ),
     )
-    # The media and attachment inputs are recorded with the turn, not just
-    # carried in memory to the runner. Nothing else in `TurnRecord` describes
-    # them, so a batch of three images and a caption would otherwise be
-    # recoverable only as text.
     handled_turn = controller.deps.turn_store.attach_response_context(
-        canonicalize_turn_record(prepared.handled_turn, input_snapshot=turn_input_snapshot(payload_inputs)),
+        prepared.handled_turn,
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )

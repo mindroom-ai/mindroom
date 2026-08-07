@@ -2394,7 +2394,6 @@ class TestAgentBot(AgentBotTestBase):
             requester_id="@user:localhost",
             correlation_id="$img_event_fail",
             source_event_prompts={"$img_event_fail": "[Attached image]"},
-            media_events=[event],
         )
         expected_handled_turn = replace(
             expected_handled_turn,

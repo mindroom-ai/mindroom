@@ -190,7 +190,6 @@ class TestAgentBot(AgentBotTestBase):
             requester_id="@user:localhost",
             correlation_id="$img_event",
             source_event_prompts={"$img_event": "[Attached image]"},
-            media_events=[event],
         )
         expected_handled_turn = replace(
             expected_handled_turn,
@@ -829,7 +828,6 @@ class TestAgentBot(AgentBotTestBase):
                 requester_id="@user:localhost",
                 correlation_id="$img_event_history",
                 source_event_prompts={"$img_event_history": "[Attached image]"},
-                media_events=[event],
             ),
         )
 
@@ -1384,7 +1382,6 @@ class TestAgentBot(AgentBotTestBase):
                     requester_id="@user:localhost",
                     correlation_id="$file_event",
                     source_event_prompts={"$file_event": "[Attached file]"},
-                    media_events=[event],
                 ),
                 response_owner=mock_agent_user.agent_name,
                 history_scope=HistoryScope(kind="agent", scope_id=mock_agent_user.agent_name),

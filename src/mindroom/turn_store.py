@@ -927,7 +927,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             if authority.source_event_metadata is not None
             else recovery.source_event_metadata
         ),
-        input_snapshot=(authority.input_snapshot if authority.input_snapshot is not None else recovery.input_snapshot),
         response_owner=authority.response_owner or recovery.response_owner,
         requester_id=authority.requester_id or recovery.requester_id,
         correlation_id=authority.correlation_id or recovery.correlation_id,
@@ -984,9 +983,6 @@ def _reconcile_ledger_and_recovery(
             if recovery_record.source_event_metadata is not None
             else ledger_record.source_event_metadata
         ),
-        # The snapshot is ledger-owned: it is not projected into Agno run
-        # metadata, so a recovery record never carries one to prefer.
-        input_snapshot=ledger_record.input_snapshot,
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,

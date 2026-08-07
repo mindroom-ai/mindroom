@@ -317,11 +317,3 @@ ingress_admission_kind  # unused method (src/mindroom/journal_dispatch.py)
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 load_delivery  # unused method (src/mindroom/event_journal/store.py)
 recover  # unused method (src/mindroom/response_delivery.py)
-
-# The recorded turn input a durably adopted turn replays from. Writing it is
-# what unblocks contract 2 -- the handoff that settles a journal source once
-# `TurnStore` owns the turn -- and reading it is that handoff's job, so the
-# reader lands with its one call site rather than ahead of it. Pinned by
-# tests/test_turn_input_snapshot.py.
-_dispatch_payload_inputs_from_snapshot  # unused function (src/mindroom/response_payload_preparation.py)
-_TurnInputSnapshotCorruptionError  # unused class (src/mindroom/response_payload_preparation.py)

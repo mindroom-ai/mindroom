@@ -682,6 +682,71 @@ def test_missing_source_event_metadata_loads_as_none(temp_dir: Path) -> None:
     assert turn_record.source_event_metadata is None
 
 
+def test_a_retired_input_snapshot_key_loads_without_quarantining_the_record(temp_dir: Path) -> None:
+    """A ledger written by a version that recorded turn media still loads.
+
+    Turn records used to carry an ``input_snapshot`` holding each media
+    source's whole Matrix event, which for an encrypted attachment is its
+    decryption key. That was removed rather than migrated, and a ledger file
+    already on disk still has the key in it.
+
+    Refusing such a record would discard the live turn identity around it, and
+    a turn whose identity is gone is a turn the bot answers twice. So the key
+    is dropped on the next write and everything beside it survives the load,
+    which is the tolerance every retired optional field depends on.
+    """
+    tracker = HandledTurnLedger("test_retired_snapshot", base_path=temp_dir)
+    tracker._responses_file.write_text(
+        json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": {
+                    "$sealed": {
+                        "anchor_event_id": "$sealed",
+                        "source_event_ids": ["$sealed"],
+                        "redacted_source_event_ids": [],
+                        "pending_redaction_cleanup_event_ids": [],
+                        "response_event_id": "$response",
+                        "completed": True,
+                        "timestamp": 1_000.0,
+                        "response_owner": "agent",
+                        "input_snapshot": {
+                            "media_sources": [
+                                {
+                                    "event_id": "$sealed",
+                                    "source": {
+                                        "event_id": "$sealed",
+                                        "type": "m.room.message",
+                                        "content": {
+                                            "msgtype": "m.image",
+                                            "body": "sealed.png",
+                                            "file": {
+                                                "url": "mxc://example.org/sealed",
+                                                "key": {"k": "cipher-key-material", "alg": "A256CTR"},
+                                                "iv": "initialization-vector",
+                                            },
+                                        },
+                                    },
+                                },
+                            ],
+                            "message_attachment_ids": ["att_first"],
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    turn_record = _reload_ledger("test_retired_snapshot", temp_dir).get_turn_record("$sealed")
+
+    assert turn_record is not None
+    assert turn_record.source_event_ids == ("$sealed",)
+    assert turn_record.response_event_id == "$response"
+    assert turn_record.response_owner == "agent"
+    assert "input_snapshot" not in TurnRecordCodec._to_ledger_record(turn_record)
+
+
 def test_record_outcome_with_empty_source_list_is_noop(temp_dir: Path) -> None:
     """Empty outcome batches should not mutate the ledger."""
     tracker = HandledTurnLedger("test_empty_batch", base_path=temp_dir)

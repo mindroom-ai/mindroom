@@ -41,7 +41,7 @@ from mindroom.event_journal.models import (
     DepartureSource,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnInputSnapshot, TurnMediaSource, TurnRecord
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -366,14 +366,8 @@ def _agent_response_handled_turn(
     requester_id: str | None = None,
     correlation_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
-    media_events: Sequence[nio.Event] = (),
 ) -> TurnRecord:
-    """Return the handled-turn state persisted for one direct agent response.
-
-    Every responding turn records its media and attachment inputs, so the
-    default is an empty snapshot rather than none: "this turn carried no media"
-    is a fact the record states, not one it omits.
-    """
+    """Return the handled-turn state persisted for one direct agent response."""
     return replace(
         TurnRecord.create(
             [event_id],
@@ -381,12 +375,6 @@ def _agent_response_handled_turn(
             requester_id=requester_id,
             correlation_id=correlation_id,
             source_event_prompts=source_event_prompts,
-            input_snapshot=TurnInputSnapshot(
-                media_sources=tuple(
-                    TurnMediaSource(event_id=media_event.event_id, source=media_event.source)
-                    for media_event in media_events
-                ),
-            ),
         ),
         response_owner=agent_name,
         history_scope=HistoryScope(kind="agent", scope_id=agent_name),
