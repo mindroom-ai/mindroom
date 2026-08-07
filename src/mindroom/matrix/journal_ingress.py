@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
@@ -266,6 +266,40 @@ def event_is_live(event_id: str) -> bool:
 
 
 @dataclass(slots=True)
+class TimelineMemberProvenance:
+    """What nio said about each room-member event of one sync delivery.
+
+    nio hands provenance to admission once and keeps nothing a later consumer
+    can address, so a consumer that runs after the timeline -- the room-member
+    join walk, which only sees the response -- can know it only by having been
+    told here.
+
+    An entry lives exactly as long as the response that produced it. nio's
+    verdict is about one delivery, and answering a later response from a kept
+    entry would be re-deriving provenance under another name.
+
+    An event nio already accepted on an earlier pass records nothing at all,
+    because nio skips admission for it entirely. That absence is the answer
+    rather than a gap to fill: the event is already journaled with its true
+    class, and guessing one would settle it against that.
+    """
+
+    _recorded: dict[str, nio.TimelineEventProvenance] = field(default_factory=dict)
+
+    def record(self, event_id: str, provenance: nio.TimelineEventProvenance) -> None:
+        """Record what nio said about one room-member event."""
+        self._recorded[event_id] = provenance
+
+    def get(self, event_id: str) -> nio.TimelineEventProvenance | None:
+        """Return nio's verdict for one room-member event, when it gave one."""
+        return self._recorded.get(event_id)
+
+    def clear(self) -> None:
+        """Forget every verdict, because the response that produced them is done."""
+        self._recorded.clear()
+
+
+@dataclass(slots=True)
 class JournalIngress:
     """Commit every inbound Matrix event before nio considers it delivered."""
 
@@ -286,6 +320,12 @@ class JournalIngress:
     # A refused admission must also stop the sync checkpoint advancing past the
     # event, or the next process would never see it again.
     on_persist_failure: Callable[[], None] = lambda: None
+    # What nio said about the room-member events of the response being
+    # delivered, for the consumers that run once the response is complete.
+    timeline_member_provenance: TimelineMemberProvenance = field(
+        default_factory=TimelineMemberProvenance,
+        init=False,
+    )
 
     def register(self, client: nio.AsyncClient) -> None:
         """Install durable admission ahead of every other callback."""
@@ -298,6 +338,18 @@ class JournalIngress:
             return EventKind.ROOM_LIFECYCLE
         return kind
 
+    def timeline_member_event_class(self, event: nio.Event) -> EventClass | None:
+        """Return the class nio's provenance gives one member event, if it said.
+
+        Deriving it here rather than at the call site is what stops a consumer
+        that runs after the timeline from classifying an event differently than
+        admission would have.
+        """
+        provenance = self.timeline_member_provenance.get(event.event_id)
+        if provenance is None:
+            return None
+        return _event_class_for(provenance, event, self_sender=self.self_sender)
+
     async def _admit(
         self,
         room: nio.MatrixRoom,
@@ -305,6 +357,11 @@ class JournalIngress:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         _DELIVERY_PROVENANCE.set((event.event_id, provenance))
+        if isinstance(event, nio.RoomMemberEvent):
+            # Recorded before anything can decline to admit this event.
+            # Declining is exactly when a later consumer needs the verdict:
+            # nothing else in the response will have written it down.
+            self.timeline_member_provenance.record(event.event_id, provenance)
         if provenance is not nio.TimelineEventProvenance.LIVE:
             try:
                 await self.cache_historical_event(room, event)

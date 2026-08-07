@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.event_journal import DispatchView, EventClass
+    from mindroom.matrix.journal_ingress import TimelineMemberProvenance
 
 from mindroom.event_journal import JournalEvent
 
@@ -160,6 +161,15 @@ class JournalDispatcher:
         """Return the kind timeline admission would give one event, if any."""
         return self._ingress.admission_kind(event)
 
+    @property
+    def timeline_member_provenance(self) -> TimelineMemberProvenance:
+        """Return what nio said about this response's room-member events."""
+        return self._ingress.timeline_member_provenance
+
+    def timeline_member_event_class(self, event: nio.Event) -> EventClass | None:
+        """Return the class nio's provenance gives one member event, if it said."""
+        return self._ingress.timeline_member_event_class(event)
+
     async def stop(self) -> None:
         """Stop draining, leaving unfinished work pending for the next start."""
         await self._worker.stop()
@@ -225,6 +235,10 @@ class JournalDispatcher:
         await self.admit_out_of_band(room, event, kind, event_class)
         stored = await self.store.load_event(event.event_id)
         if stored is None or not await self.store.is_pending(event.event_id):
+            # A context-only event is admitted already settled, so no callback
+            # will ever run for it. Keeping the parsed object would hold it for
+            # a run that cannot come.
+            self._live_events.pop(event.event_id, None)
             return
         outcome = await self._run_event(stored)
         if outcome is not None:

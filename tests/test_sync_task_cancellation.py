@@ -7,6 +7,7 @@ import math
 import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -1266,6 +1267,9 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
+    bot._journal_dispatcher = MagicMock()
+    # The sync callback delegates its body, which a spec'd mock would swallow.
+    bot._apply_sync_response = partial(AgentBot._apply_sync_response, bot)
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
     bot.client = FakeClient()

@@ -1695,6 +1695,16 @@ class AgentBot:
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
+        try:
+            await self._apply_sync_response(_response)
+        finally:
+            # nio states an event's provenance once, to admission, and only for
+            # the response carrying it. Anything this response's own consumers
+            # did not read is stale the moment the response is done.
+            self._journal_dispatcher.timeline_member_provenance.clear()
+
+    async def _apply_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+        """Apply one certified sync response through its transport owners."""
         first_sync_response = not self._first_sync_done
         rejected_response = False
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
@@ -2507,11 +2517,18 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
         ):
+            event_class = self._journal_dispatcher.timeline_member_event_class(event)
+            if event_class is None:
+                # nio accepted this event on an earlier pass and so said
+                # nothing about it in this response. It is already journaled
+                # with its true class, and a guess here would settle a
+                # recovered join against it, permanently.
+                continue
             await self._journal_dispatcher.admit_and_run(
                 room,
                 event,
                 EventKind.ROOM_LIFECYCLE,
-                EventClass.ACTIONABLE,
+                event_class,
             )
 
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
