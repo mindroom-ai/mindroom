@@ -1973,10 +1973,9 @@ visibility = [
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
-depends_on = ["mindroom.matrix.cache", "mindroom.response_admission"]
+depends_on = ["mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
-    "mindroom.matrix.thread_mutation_impact",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
