@@ -1540,13 +1540,14 @@ _QUEUE_POLL_SECONDS = 0.01
 # cluster-wide, so the count is scoped by the application name the two rival
 # stores connect under, minted per fixture and shared by nothing else -- not
 # the connection holding the row, not the one running this query, not another
-# xdist worker. Scoping by database would not work: `postgres_journal_url`
-# gives every worker of one run the same container and the same `mindroom`
-# database, keeping them apart by schema, so `datname = current_database()`
-# counts waiters belonging to other workers. One of those inflates the count,
-# the row is released before both racers are behind it, and the late one
-# declines against an already-bound row -- the test passing for the one reason
-# it exists to rule out, and passing silently.
+# xdist worker. Scoping by database would work today -- `postgres_journal_url`
+# gives each worker its own `mindroom_<worker_id>` and a master run its own
+# container -- but it would read isolation off the fixture's topology rather
+# than off the connections being counted. Should that topology ever narrow to
+# one shared database, an unrelated waiter would inflate the count, the row
+# would be released before both racers were behind it, and the late one would
+# decline against an already-bound row: the test passing for the one reason it
+# exists to rule out, and passing silently.
 _QUEUED_RACERS = """
     SELECT count(*) FROM pg_stat_activity
     WHERE application_name = %s AND wait_event_type = 'Lock'
