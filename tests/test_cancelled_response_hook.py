@@ -49,6 +49,7 @@ from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    ignore_final_delivery_handoff,
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_outbox_mock,
@@ -519,6 +520,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
 
@@ -651,6 +653,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
 
@@ -733,6 +736,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -816,6 +820,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
 
@@ -889,6 +894,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             resolver=MagicMock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
 

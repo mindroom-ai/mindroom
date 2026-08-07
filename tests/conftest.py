@@ -1161,6 +1161,15 @@ def make_outbox_mock() -> OutboxView:
     return cast("OutboxView", FakeOutbox())
 
 
+async def ignore_final_delivery_handoff(_turn_id: str) -> None:
+    """Drop contract 2's journal handoff, for tests that are not about it.
+
+    Named rather than a bare lambda so a reader can see that the handoff was
+    deliberately stubbed here, not forgotten. Tests that care what the handoff
+    settles use a real journal store instead.
+    """
+
+
 @dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""

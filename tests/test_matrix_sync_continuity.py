@@ -123,22 +123,6 @@ def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tm
     assert bot._room_for_journal_event("!missing:localhost").room_id == "!missing:localhost"
 
 
-def test_terminal_turn_settlement_does_no_io_on_the_persisting_thread(
-    tmp_path: Path,
-) -> None:
-    """Handled-turn persistence may run off-loop, so settlement must not block.
-
-    The callback only releases the events in memory and asks the worker to
-    look again; the worker does the durable settlement on its own loop.
-    """
-    bot = _agent_bot(tmp_path)
-    callback = bot._turn_store.deps.on_terminal_turn_persisted
-
-    assert callback == bot._settle_terminal_turn_sources
-    bot._journal_dispatcher.release_terminal_turn_sources(("$done",))
-    assert "$done" not in bot._journal_dispatcher._worker._deferred
-
-
 def _install_fast_response_drain(bot: AgentBot) -> None:
     """Keep real response draining while shortening its bounded waits."""
     drain_inbox_responses = bot._response_runner.drain_inbox_responses
@@ -3828,51 +3812,6 @@ async def test_cancelled_admission_still_commits_and_holds_the_cursor(
     assert await bot._journal_dispatcher.store.load_event(event.event_id) is None
     assert bot.client.next_batch == "s_after_cancel"
     run_persisted.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_journal_event_waits_for_terminal_turn_durability(tmp_path: Path) -> None:
-    """In-memory terminal state must not retire exact work before its ledger fsync."""
-    bot = _agent_bot(tmp_path)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    event = _text_event("$write-behind", "hello", 1)
-    await bot._journal_dispatcher.admit_out_of_band(
-        room,
-        event,
-        EventKind.MESSAGE,
-        EventClass.ACTIONABLE,
-        live=False,
-    )
-    persist_started = threading.Event()
-    release_persist = threading.Event()
-    original_persist = bot._turn_store._ledger._persist_records
-
-    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
-        persist_started.set()
-        assert release_persist.wait(timeout=2)
-        original_persist(records)
-
-    with patch.object(bot._turn_store._ledger, "_persist_records", side_effect=blocking_persist):
-        bot._turn_store.record_turn(TurnRecord.create([event.event_id], response_event_id="$response"))
-        assert await asyncio.to_thread(persist_started.wait, 2)
-        run_task = asyncio.create_task(bot._journal_dispatcher.drain_once())
-        try:
-            await asyncio.sleep(0.05)
-            pending_before_durable_turn = await bot._journal_dispatcher.store.is_pending(event.event_id)
-        finally:
-            release_persist.set()
-            await asyncio.gather(run_task, return_exceptions=True)
-
-    # While the ledger write is in flight the turn is not durably handled, so
-    # the event must still be pending: settling on in-memory state would retire
-    # work whose record could still be lost.
-    assert pending_before_durable_turn
-
-    await bot._journal_dispatcher.drain_once()
-    assert not await bot._journal_dispatcher.store.is_pending(event.event_id)
-    settled = await bot._journal_dispatcher.store.load_event(event.event_id)
-    assert settled is not None
-    assert settled.kind is EventKind.MESSAGE
 
 
 @pytest.mark.asyncio

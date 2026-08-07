@@ -598,7 +598,6 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         self_sender="@lane:example.org",
         callbacks=callbacks,
         room_for_id=lambda _room_id: _room(),
-        turn_is_terminal=lambda _event_id: False,
     )
     event = _image_event(event_id=source_event_id)
     await dispatcher.admit_out_of_band(_room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)

@@ -51,6 +51,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
+    ignore_final_delivery_handoff,
     make_conversation_reader_mock,
     make_event_cache_mock,
     make_outbox_mock,
@@ -418,6 +419,7 @@ def _build_response_runner(
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
     _set_gateway_method(

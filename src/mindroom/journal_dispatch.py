@@ -8,9 +8,11 @@ several features could each claim.
 The important asymmetry is between callbacks that finish and callbacks that
 defer. A reaction is done when its handler returns. A message is not: it enters
 coalescing and a turn, which may still be running long after the callback
-returns. So a deferring handler leaves its event pending, and the turn settles
-it when the turn becomes terminal. That is why a crash mid-turn replays the
-message rather than losing the answer.
+returns. So a deferring handler leaves its event pending, and the source is
+settled when its answer is durably owed to a room -- the FINAL outbox enqueue
+-- or when the turn deliberately owes no answer at all. That is why a crash
+mid-turn replays the message rather than losing the answer, and why a crash
+after the answer is durable does not spend the model again.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ logger = get_logger(__name__)
 _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
 
 # Kinds whose work outlives its callback, because the callback only starts a
-# turn. Their events stay pending until the turn is terminal.
+# turn. Their events stay pending until that turn's answer is durably owed.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
 
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
@@ -95,7 +97,6 @@ class JournalDispatcher:
     self_sender: str
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
-    turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] | None = None
@@ -111,9 +112,6 @@ class JournalDispatcher:
     # an event that is still in hand would parse every event twice and discard
     # the decryption state nio attached to the original.
     _live_events: dict[str, tuple[nio.MatrixRoom, nio.Event]] = field(default_factory=dict, init=False, repr=False)
-    # Turn-backed events whose turn reported itself terminal. Recorded by
-    # whichever thread finished the turn and settled by the worker.
-    _terminal_sources: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the worker and admission adapter this dispatcher owns."""
@@ -228,16 +226,15 @@ class JournalDispatcher:
             await self.store.settle(event.event_id, outcome)
 
     async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
-        """Run one journal event's callback and report how it settled."""
-        if event.kind in TURN_BACKED_KINDS and (
-            event.event_id in self._terminal_sources or self.turn_is_terminal(event.event_id)
-        ):
-            # A turn that has already reported itself terminal owes nothing
-            # more, and running its callback again would ask the turn engine to
-            # redo work it has finished.
-            self._worker.release((event.event_id,))
-            self._terminal_sources.discard(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+        """Run one journal event's callback and report how it settled.
+
+        There is no "has this turn finished?" question here any more. A source
+        leaves the journal when its answer is durably owed to a room, and a
+        turn that owes no answer settles through the intentionally-ignored
+        path. Asking `TurnStore` was the duplicate execution authority the
+        journal was meant to remove, and it answered the wrong question: a turn
+        can be terminal with nothing durable behind it.
+        """
         if (
             event.kind in TURN_BACKED_KINDS
             and not self._turn_replay_released
@@ -314,22 +311,20 @@ class JournalDispatcher:
             raise RuntimeError(msg)
         return event.receipt_order
 
-    def release_terminal_turn_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Hand turn-backed events back to the worker once their turn is terminal.
+    async def settle_delivered_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Hand a turn's sources to the outbox now that its answer is durable.
 
-        Called from wherever the turn became durable, which may be a worker
-        thread, so this only mutates in-memory state and does no I/O. The
-        worker settles them on its own loop. Settling here would mean
-        scheduling a coroutine from an arbitrary thread onto a loop nothing
-        awaits, which is how a finished turn ends up looking pending forever.
+        This is contract 2's handoff. It runs on the event loop, from the
+        delivery path that just recorded the intent, which is why nothing here
+        has to be reachable from a worker thread the way settling after model
+        execution did.
         """
         self._worker.release(event_ids)
-        self._terminal_sources.update(event_ids)
+        await self.store.settle_many(event_ids, SettlementOutcome.SUCCEEDED)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
         self._worker.release(event_ids)
-        self._terminal_sources.difference_update(event_ids)
         await self.store.settle_many(event_ids, SettlementOutcome.INTENTIONALLY_IGNORED)
 
     def retry_turn_source(self, event_id: str) -> None:
@@ -339,7 +334,6 @@ class JournalDispatcher:
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
         self._worker.release(event_ids)
-        self._terminal_sources.difference_update(event_ids)
         self._worker.wake()
 
     async def unsettled_event_ids(self) -> frozenset[str]:

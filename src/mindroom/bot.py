@@ -474,7 +474,6 @@ class AgentBot:
         runtime_matrix_id = self.matrix_id
         self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
         self._journal_store = self._open_journal_store()
-        self._journal_settlement_loop: asyncio.AbstractEventLoop | None = None
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -562,6 +561,7 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
+                on_final_delivery_enqueued=self._settle_delivered_turn_sources,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -581,7 +581,6 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
-                on_terminal_turn_persisted=self._settle_terminal_turn_sources,
             ),
         )
         self._journal_dispatcher = JournalDispatcher(
@@ -599,7 +598,6 @@ class AgentBot:
             ),
             room_for_id=self._room_for_journal_event,
             cache_historical_event=self._conversation_cache.cache_historical_event,
-            turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
@@ -1941,7 +1939,6 @@ class AgentBot:
         )
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
-            self._journal_settlement_loop = asyncio.get_running_loop()
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
@@ -2523,25 +2520,18 @@ class AgentBot:
             suppress_notice=self._room_lifecycle.decrypt_notice_is_fenced(room.room_id),
         )
 
-    def _settle_terminal_turn_sources(self, source_event_ids: tuple[str, ...]) -> None:
-        """Release the journal events one terminal turn accounted for.
+    async def _settle_delivered_turn_sources(self, turn_id: str) -> None:
+        """Hand one turn's journal sources over once its answer is durably owed.
 
-        Called from wherever the turn became durable, which may be a worker
-        thread, so nothing here does I/O. The worker settles them on its own
-        loop; all this does is stop treating them as still in flight and ask
-        the worker to look again.
+        The turn is named by its anchor event, which is what the outbox keys
+        on, but a coalesced batch answers several sources at once and all of
+        them are handed over together. Without the ledger's own record of that
+        set, the anchor would settle and its siblings would replay into a turn
+        that has already been answered.
         """
-        if not source_event_ids:
-            return
-        self._journal_dispatcher.release_terminal_turn_sources(source_event_ids)
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self._journal_settlement_loop
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(self._journal_dispatcher.wake)
-            return
-        self._journal_dispatcher.wake()
+        record = self._turn_store.get_turn_record(turn_id)
+        source_event_ids = record.indexed_event_ids if record is not None else (turn_id,)
+        await self._journal_dispatcher.settle_delivered_turn_sources(source_event_ids)
 
     async def _handle_decryption_failure_event(
         self,
