@@ -199,6 +199,12 @@ class TurnStore:
         bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
         return None if bound.anchor_event_id is None else bound
 
+    def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
+        """Bring the in-memory ledger level with a record the acknowledgement committed."""
+        record = self.terminal_turn_record(turn_id, response_event_id)
+        if record is not None:
+            self._ledger.publish_committed(record)
+
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)

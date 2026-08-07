@@ -521,8 +521,12 @@ class PrincipalStore:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> None:
-        """Record the Matrix event one claimed delivery produced.
+    ) -> bool:
+        """Record the Matrix event one claimed delivery produced, if nothing else has.
+
+        Returns whether this call bound the row. Callers need that to know
+        whether anything they cached alongside the record is now true: a loser
+        wrote nothing here and must publish nothing anywhere else either.
 
         ``terminal_turn`` is the turn record this acknowledgement completes,
         written in the same transaction. The acknowledgement is the durable
@@ -538,7 +542,7 @@ class PrincipalStore:
         database. That is the whole reason turn records were moved here.
         """
 
-        def acknowledge(transaction: Transaction) -> None:
+        def acknowledge(transaction: Transaction) -> bool:
             bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
@@ -558,8 +562,9 @@ class PrincipalStore:
                     anchor_event_id=terminal_turn.anchor_event_id,
                     record_json=terminal_turn.record_json,
                 )
+            return bound
 
-        await self._backend.write(acknowledge)
+        return await self._backend.write(acknowledge)
 
     async def unacknowledged_deliveries(
         self,

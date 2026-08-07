@@ -378,6 +378,9 @@ class DeliveryGatewayDeps:
     # two commits, and a crash between them leaves a delivered answer whose
     # record cannot be edited.
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None
+    # Told after an acknowledgement bound its row, so the synchronous ledger
+    # can adopt the record that commit wrote without a second write.
+    terminal_turn_committed: Callable[[str, str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -621,6 +624,7 @@ class DeliveryGateway:
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
+            terminal_turn_committed=self.deps.terminal_turn_committed,
         )
 
     def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:

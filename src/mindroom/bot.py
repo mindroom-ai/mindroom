@@ -593,6 +593,10 @@ class AgentBot:
                 # produced an event ID, so the acknowledgement can carry the
                 # record that needs to know it.
                 terminal_turn_for=lambda turn_id, event_id: self._turn_store.terminal_turn_record(turn_id, event_id),
+                terminal_turn_committed=lambda turn_id, event_id: self._turn_store.publish_committed_response(
+                    turn_id,
+                    event_id,
+                ),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(

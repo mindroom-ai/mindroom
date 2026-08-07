@@ -39,6 +39,11 @@ type ResolveDelivered = Callable[[OutboxDelivery], Awaitable[str | None]]
 # no record for the turn, or one that already knows its response event.
 type _TerminalTurnFor = Callable[[str, str], "TerminalTurnWrite | None"]
 
+# Told after an acknowledgement this caller actually bound, so an in-memory
+# view of the same record can catch up without a second write. A caller that
+# lost the row is never told, because it committed nothing to catch up with.
+type _TerminalTurnCommitted = Callable[[str, str], None]
+
 
 @dataclass(frozen=True, slots=True)
 class TurnHandoff:
@@ -98,6 +103,7 @@ class ResponseDelivery:
     # ID is; the record is the thing that needs to know it. Committing them
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
+    terminal_turn_committed: _TerminalTurnCommitted | None = None
 
     async def deliver(
         self,
@@ -220,12 +226,7 @@ class ResponseDelivery:
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
-                await self.store.acknowledge_delivery(
-                    turn_id=turn_id,
-                    stage=stage,
-                    event_id=already_delivered,
-                    terminal_turn=self._terminal_turn(turn_id, stage, already_delivered),
-                )
+                await self._acknowledge(turn_id, stage, already_delivered)
                 return already_delivered
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
@@ -234,13 +235,30 @@ class ResponseDelivery:
         # and post the answer twice.
         await self.store.record_sending_device(turn_id=turn_id, stage=stage, device_id=self.sending_device_id)
         event_id = await self.send(claimed)
-        await self.store.acknowledge_delivery(
+        await self._acknowledge(turn_id, stage, event_id)
+        return event_id
+
+    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
+        """Bind the row and let an in-memory view of the record catch up.
+
+        The record commits inside the acknowledgement, so nothing else writes
+        it -- which means nothing else tells the synchronous ledger either.
+        Recovery is where that matters: it acknowledges and returns without any
+        ordinary terminal write following, so without this the database knows
+        the answer's event and memory does not, and an edit arriving before the
+        next restart is dropped for having no response to edit.
+
+        Only on a bound acknowledgement. A loser committed nothing, so it has
+        nothing to publish and must not overwrite the winner's record.
+        """
+        bound = await self.store.acknowledge_delivery(
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
             terminal_turn=self._terminal_turn(turn_id, stage, event_id),
         )
-        return event_id
+        if bound and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
+            self.terminal_turn_committed(turn_id, event_id)
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.
