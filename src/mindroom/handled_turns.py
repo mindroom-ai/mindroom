@@ -413,8 +413,8 @@ class HandledTurnLedger:
             if self._state.loaded:
                 return
         stored = await self.records.load_all()
-        if not stored:
-            stored = await self._import_legacy_ledger()
+        if imported := await self._import_legacy_ledger({index_event_id for index_event_id, _, _ in stored}):
+            stored = imported
         with self._state.lock:
             if self._state.loaded:
                 return
@@ -512,7 +512,7 @@ class HandledTurnLedger:
             self._require_loaded()
             return self._has_responded_locked(event_id)
 
-    async def _import_legacy_ledger(self) -> tuple[tuple[str, str, str], ...]:
+    async def _import_legacy_ledger(self, already_stored: set[str]) -> tuple[tuple[str, str, str], ...]:
         """Adopt an agent's pre-database records, once, and return them as stored rows.
 
         Skipping this is not a missing nicety, it is the worst failure this
@@ -521,12 +521,23 @@ class HandledTurnLedger:
         table sees an empty ledger, concludes nothing has ever been answered,
         and re-answers the entire backlog the first time it replays.
 
-        Only runs when the table is empty, so a compaction that legitimately
-        empties it cannot resurrect deleted history -- the file is renamed on
-        the way out, and a renamed file is never read again. The rename is what
-        makes the import idempotent: it is atomic, so a crash either leaves the
-        original in place for the next attempt or leaves the copy that already
-        committed.
+        The presence of the file is the only trigger, and its rename is the
+        only marker. Gating on an empty table instead would look safer and be
+        worse: an import that crashed partway leaves rows behind, so the gate
+        would never fire again and every turn it had not yet reached would stay
+        missing for good -- which for those turns is identical to never having
+        imported at all.
+
+        What keeps that safe is importing only events the table does not
+        already hold. A record already here was either written by this runtime
+        or imported by an earlier pass, and in both cases it is at least as
+        current as the file's copy; overwriting it with an older one would undo
+        real work. So a resumed import fills the gaps and touches nothing else.
+
+        The rename is atomic, so it either happens or does not, and a renamed
+        file is never read again. That is also what stops a later compaction
+        from resurrecting history it deliberately dropped: by then there is no
+        file left to re-import.
 
         The same codec reads the file and writes the rows, so the round trip is
         lossless by construction. A field the current codec has retired is
@@ -549,7 +560,12 @@ class HandledTurnLedger:
         # One row per distinct turn, not per index: `upsert` already stores a
         # record under every event that indexes it, and writing it once per
         # index would re-delete and re-insert the same siblings repeatedly.
-        for record in {record.indexed_event_ids: record for record in decoded.values()}.values():
+        unseen = {
+            record.indexed_event_ids: record
+            for record in decoded.values()
+            if not already_stored.issuperset(record.indexed_event_ids)
+        }
+        for record in unseen.values():
             # Canonicalizing derives an anchor for a record written before one
             # was always stored, which is exactly the vintage this import
             # exists to read. Dropping such a record instead would lose the
@@ -565,7 +581,7 @@ class HandledTurnLedger:
         logger.info(
             "handled_turn_ledger_imported",
             agent=self.agent_name,
-            imported_event_count=len(decoded),
+            imported_event_count=len(unseen),
         )
         return await self.records.load_all()
 

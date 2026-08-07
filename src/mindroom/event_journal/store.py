@@ -539,14 +539,18 @@ class PrincipalStore:
         """
 
         def acknowledge(transaction: Transaction) -> None:
-            outbox.acknowledge(
+            bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
                 turn_id=turn_id,
                 stage=stage,
                 event_id=event_id,
             )
-            if terminal_turn is not None:
+            # A caller that lost the acknowledgement must not write the record
+            # either. The row already names another event, and a terminal
+            # record pointing somewhere else is the disagreement this whole
+            # transaction exists to prevent.
+            if bound and terminal_turn is not None:
                 turn_records.upsert(
                     transaction,
                     terminal_turn.agent_name,

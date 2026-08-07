@@ -1419,7 +1419,19 @@ async def test_a_populated_database_is_never_overwritten_by_a_legacy_file(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A table that already holds records owns them; the file is left untouched."""
+    """A record the table already holds is never replaced by the file's copy.
+
+    A non-empty table is not proof the file was imported, so ignoring the file
+    outright would strand an import that crashed partway -- every turn it had
+    not reached would stay missing for good. What must not happen is the
+    opposite: a record already stored was written by this runtime or by an
+    earlier pass, so it is at least as current as the file's, and overwriting
+    it with an older copy would undo real work.
+
+    So the file's *unseen* records are adopted, the stored one is left exactly
+    as it is, and the file is renamed either way so no later pass can read it
+    again.
+    """
     await _seed_records(
         journal_store,
         "legacy_ignored",
@@ -1432,10 +1444,10 @@ async def test_a_populated_database_is_never_overwritten_by_a_legacy_file(
 
     tracker = await _open_ledger(journal_store, "legacy_ignored", legacy_responses_file=legacy_file)
 
-    assert tracker.get_turn_record("$superseded") is None
-    assert _get_response_event_id(tracker, "$current") == "$current-reply"
-    assert legacy_file.exists()
-    assert not legacy_file.with_suffix(".json.imported").exists()
+    assert _get_response_event_id(tracker, "$current") == "$current-reply", "a stored record was overwritten"
+    assert _get_response_event_id(tracker, "$superseded") == "$old-reply", "an unseen record was not adopted"
+    assert not legacy_file.exists()
+    assert legacy_file.with_suffix(".json.imported").exists()
 
 
 @pytest.mark.asyncio

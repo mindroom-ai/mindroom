@@ -190,8 +190,24 @@ def acknowledge(
     turn_id: str,
     stage: DeliveryStage,
     event_id: str,
-) -> None:
-    """Record the Matrix event a claimed delivery produced."""
+) -> bool:
+    """Record the Matrix event a claimed delivery produced, if nothing else has.
+
+    Returns whether this call is the one that bound the row. Acknowledgement is
+    first-writer-wins, so a second caller for the same delivery changes nothing
+    here -- and anything it wanted to write *beside* the acknowledgement must
+    not be written either. A losing caller that carried on would leave the row
+    naming one event and whatever it wrote naming another.
+    """
+    row = transaction.fetchone(
+        """
+        SELECT acknowledged_event_id FROM response_outbox
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        """,
+        (principal_id, turn_id, stage.value),
+    )
+    if row is None or row["acknowledged_event_id"] is not None:
+        return False
     transaction.execute(
         """
         UPDATE response_outbox SET acknowledged_event_id = ?
@@ -199,6 +215,7 @@ def acknowledge(
         """,
         (event_id, principal_id, turn_id, stage.value),
     )
+    return True
 
 
 def unacknowledged(
