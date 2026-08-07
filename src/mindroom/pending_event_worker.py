@@ -14,6 +14,7 @@ healthy.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,7 @@ from mindroom.event_journal import SettlementOutcome
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Iterator
 
     from mindroom.event_journal import JournalEvent, ReplayView
 
@@ -95,6 +96,10 @@ class PendingEventWorker:
     # Rooms a pass found work for but could not dispatch, because their lane
     # was still busy. Their lane wakes the pump when it finishes.
     _rooms_with_more: set[str] = field(default_factory=set, init=False, repr=False)
+    # Events a caller is running itself, off the lanes. An event is pending in
+    # the store for the whole time its handler runs, so a scan that could not
+    # see these would collect one and put a second handler inside it.
+    _running_off_lane: set[str] = field(default_factory=set, init=False, repr=False)
 
     def start(self) -> None:
         """Begin draining, including anything a previous process left behind."""
@@ -118,6 +123,32 @@ class PendingEventWorker:
     def forget_all_deferrals(self) -> None:
         """Treat nothing as in flight, as a recovery pass must."""
         self._deferred.clear()
+
+    @contextmanager
+    def sole_handler(self, event_id: str) -> Iterator[None]:
+        """Hold one event against lane dispatch while its caller runs it itself.
+
+        Some events are ordered against the response that produced them, so
+        their caller has to see the handler finish rather than hand it to the
+        pump. That does not exempt the event from having one handler: it stays
+        pending for its handler's whole duration, and nothing else here treats
+        a running handler as in flight.
+
+        Enter this before admitting, not after. A scan can only collect a
+        committed row, so a claim taken first cannot be missed; taken
+        afterwards it leaves a window in which the pump starts the very
+        handler the caller is about to start.
+
+        Releasing wakes the pump, because a handler that deferred leaves its
+        event pending and the admission that would have revealed it has
+        already been spent on a scan that skipped it.
+        """
+        self._running_off_lane.add(event_id)
+        try:
+            yield
+        finally:
+            self._running_off_lane.discard(event_id)
+            self._wake.set()
 
     async def stop(self) -> None:
         """Stop draining, leaving unfinished events pending for the next start."""
@@ -292,6 +323,10 @@ class PendingEventWorker:
             cursor = page[-1].receipt_order
             truncated = False
             for event in page:
+                if event.event_id in self._running_off_lane:
+                    # Its caller is inside the handler right now, and releases
+                    # the claim with a wake so a later pass reconsiders it.
+                    continue
                 if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
                     continue
                 lane = by_room.setdefault(event.room_id, [])
