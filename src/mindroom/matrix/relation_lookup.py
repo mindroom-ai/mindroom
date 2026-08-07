@@ -78,6 +78,31 @@ class RelationLookup:
         finally:
             _TURN_EVENT_INFO.reset(token)
 
+    async def admitted_thread_id(self, room_id: str, event_id: str) -> str | None:
+        """Return the thread one event belongs to, asking only what is already here.
+
+        The journal-only half of ``thread_id``, for callers that must not pay a
+        homeserver round trip to find out. The degraded replay guard sweeps up
+        to a page of recent room events looking for positive same-thread proof;
+        letting each unproven one fetch would turn one skipped message into
+        hundreds of sequential requests inside a turn.
+
+        Not knowing is reported as not in the thread, which is the same answer
+        the guard wants: it acts only on proof, so an event it cannot place
+        must not cause a skip.
+        """
+        try:
+            admitted, thread_id = await self.store.admitted_thread_id(room_id=room_id, event_id=event_id)
+        except Exception:
+            logger.warning(
+                "Failed to read the admitted thread for an event; treating it as unproven",
+                room_id=room_id,
+                event_id=event_id,
+                exc_info=True,
+            )
+            return None
+        return thread_id if admitted else None
+
     async def thread_id(self, room_id: str, event_id: str) -> str | None:
         """Return the thread one event belongs to, or nothing.
 

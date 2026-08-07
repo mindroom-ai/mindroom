@@ -506,6 +506,7 @@ def _build_harness(
             agent_name=agent_name,
             matrix_id=matrix_id,
             conversation_cache=conversation_cache,
+            relations=make_relation_lookup(),
             resolver=resolver,
             normalizer=normalizer,
             command_executor=command_executor,
