@@ -88,7 +88,6 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
         body="Revised follow-up details",
         timestamp=1_700_000_002_000,
         latest_event_id="$reply-edit:localhost",
-        thread_id="$thread/root:localhost",
         content={"body": "Revised follow-up details", "msgtype": "m.text"},
     )
     fetch_result = [
