@@ -286,6 +286,56 @@ async def test_a_skipped_gap_moves_the_checkpoint_and_the_next_read_repays_it(
     assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
+async def test_repaid_gap_messages_are_readable_but_answer_nobody(alice: PrincipalStore) -> None:
+    """The deliberate limit of the escape, pinned so it cannot be mistaken for a bug.
+
+    Repayment restores the *conversation*, not the *work*. The messages the bot
+    never saw become readable, and no turn is ever owed for them, so they are
+    never answered.
+
+    This is not a cost the escape introduced. Those events were undispatched
+    because nio could not fetch them, which is equally true without the escape
+    -- the difference is only that a principal without one stays wedged and
+    stops answering every other room too. Repayment strictly adds the reading.
+
+    Nor is leaving them unanswered an oversight, and the reason is contract 11.
+    Actionability comes
+    from nio's provenance and MindRoom may never infer it. These events did not
+    arrive through sync at all -- they were fetched by a client-initiated
+    ``/messages`` walk, which carries no ``TimelineEventProvenance`` -- so
+    admitting them as actionable would mean inventing the classification that
+    contract forbids. Every alternative is a heuristic about how stale a gap is
+    allowed to be before its messages stop deserving an answer, and none of
+    them can be derived from anything the server said.
+
+    So the walk installs projected events and admits nothing, which is exactly
+    what cold history does, and is measured the same way: zero pending events.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+    await alice.record_room_history_debt(ROOM)
+
+    client = FakeClient(
+        pages=[
+            [
+                raw("$three", "three", ts=3_000),
+                raw("$two", "two", ts=2_000),
+                raw("$one", "one", ts=1_000),
+            ],
+        ],
+    )
+    await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    # The gap's messages are readable...
+    assert await bodies(alice) == ["one", "two", "three"]
+    assert await alice.room_history_debt(ROOM) is None
+    # ...and owe no reply. Asserted against the live event rather than against
+    # an empty set, because an empty set would also pass if admission had
+    # stopped working entirely. `$one` arrived through sync and is pending
+    # exactly as it should be; `$two` and `$three` came back from the
+    # repayment walk and are absent, so no turn will ever run for them.
+    assert await alice.unsettled_event_ids() == frozenset({"$one"})
+
+
 async def test_an_already_hydrated_room_walks_again_for_its_debt(alice: PrincipalStore) -> None:
     """The shape production actually produces, and the reason the gate exists.
 
