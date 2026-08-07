@@ -4454,15 +4454,12 @@ from = ["mindroom.matrix.client_visible_messages"]
 
 [[interfaces]]
 expose = [
-    "BulkThreadRefreshStats",
     "ThreadRoomScanRootNotFoundError",
-    "bulk_refresh_room_thread_histories",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_ids_needing_refill",
 ]
 from = ["mindroom.matrix.client_thread_history"]
 

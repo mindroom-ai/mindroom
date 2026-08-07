@@ -83,20 +83,6 @@ class ConversationEventCache(Protocol):
         here, and a superseded edit must.
         """
 
-    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
-        """Return whether any durably present snapshot rows exist for one thread.
-
-        A gap marker says a snapshot is unusable; its absence does not say a snapshot exists. Both
-        answers are needed to decide whether a thread would be served from cache, and a caller that
-        asks only about the marker treats a never-cached thread as a cache hit.
-
-        Distinct from ``get_thread_events``: this one answers existence in a single bounded probe
-        instead of loading and collapsing the whole thread to test it for emptiness.
-        """
-
-    async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
-        """Return locally known thread IDs for one room ordered by newest cached activity."""
-
     async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
         """Return the durable gap marker recorded against one cached thread, if any."""
 

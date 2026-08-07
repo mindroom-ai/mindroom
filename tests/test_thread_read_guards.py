@@ -483,11 +483,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_guarded_thread_replace_skips_stale_prewarm_write_after_newer_live_update(
+    async def test_guarded_thread_replace_skips_stale_write_after_newer_live_update(
         self,
         tmp_path: Path,
     ) -> None:
-        """A guarded prewarm write must not overwrite a newer thread snapshot written after the fetch began."""
+        """A guarded write must not overwrite a newer thread snapshot written after its fetch began."""
         event_cache = SqliteEventCache(tmp_path / "event_cache.db")
         await event_cache.initialize()
         room_id = "!test:localhost"
@@ -520,13 +520,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         try:
-            prewarm_fetch_started_at = time.time()
+            stale_fetch_started_at = time.time()
             await _replace_thread(
                 event_cache,
                 room_id,
                 thread_id,
                 [new_root_event.source, new_reply_event.source],
-                fetch_started_at=prewarm_fetch_started_at + 1,
+                fetch_started_at=stale_fetch_started_at + 1,
             )
 
             replaced = await event_cache.replace_thread(
@@ -534,13 +534,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 thread_id,
                 [old_root_event.source, old_reply_event.source],
                 expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
-                fetch_started_at=prewarm_fetch_started_at,
+                fetch_started_at=stale_fetch_started_at,
             )
             cached_history = await event_cache.get_thread_events(room_id, thread_id)
         finally:
             await event_cache.close()
 
-        # The older prewarm reports success -- a strictly fresher snapshot is installed -- but its
+        # The older fetch reports success -- a strictly fresher snapshot is installed -- but its
         # events must not replace the newer ones.
         assert replaced
         assert cached_history is not None

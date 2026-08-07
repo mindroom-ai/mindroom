@@ -13,8 +13,6 @@ from nio.responses import RoomThreadsError, RoomThreadsResponse
 import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache import thread_cache_rejection_reason
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_thread_history import (
     _fetch_thread_history_via_room_messages_with_events,
@@ -26,7 +24,6 @@ from mindroom.matrix.room_history_reads import _event_source_for_cache, _group_s
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from mindroom.thread_utils import get_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_visible_message, test_runtime_paths
-from tests.event_cache_test_support import raw_nio_event
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import persist_entity_accounts
 
@@ -35,6 +32,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from nio.api import RelationshipType
+
+    from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 
 def _event_cache() -> AsyncMock:
@@ -1039,155 +1038,6 @@ class TestThreadHistoryCache:
         assert history.diagnostics["cache_store_written"] is False
         # A refused store is not a write fault; the diagnostics have to keep the two apart.
         assert history.diagnostics["cache_store_failed"] is False
-
-    @staticmethod
-    def _opaque_source(
-        event_id: str,
-        *,
-        origin_server_ts: int,
-        relation: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        content: dict[str, object] = {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": "opaque",
-            "device_id": "DEVICE",
-            "sender_key": "sender-key",
-            "session_id": "session",
-        }
-        if relation is not None:
-            content["m.relates_to"] = relation
-        return {
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": origin_server_ts,
-            "type": "m.room.encrypted",
-            "content": content,
-        }
-
-    @classmethod
-    def _room_messages_client(cls, chunk: list[object]) -> MagicMock:
-        client = MagicMock()
-        client.user_id = "@mindroom_general:localhost"
-        page = MagicMock(spec=nio.RoomMessagesResponse)
-        page.chunk = chunk
-        page.end = None
-        client.room_messages = AsyncMock(return_value=page)
-        return client
-
-    def _thread_root_and_child(self) -> tuple[MagicMock, MagicMock]:
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        child_event = self._make_text_event(
-            event_id="$clear_child",
-            sender="@agent:localhost",
-            body="Clear child",
-            server_timestamp=2000,
-            source_content={
-                "body": "Clear child",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        return root_event, child_event
-
-    @pytest.mark.asyncio
-    async def test_bulk_refresh_marks_only_opaque_affected_thread_stale(self, tmp_path: Path) -> None:
-        """Bulk refills must store clean threads while marking only the opaque-poisoned thread stale."""
-        cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await cache.initialize()
-        root_event, child_event = self._thread_root_and_child()
-        other_root = self._make_text_event(
-            event_id="$other_root",
-            sender="@user:localhost",
-            body="Other root",
-            server_timestamp=1500,
-            source_content={"body": "Other root"},
-        )
-        opaque_other_child = raw_nio_event(
-            self._opaque_source(
-                "$opaque_other_child",
-                origin_server_ts=2500,
-                relation={"rel_type": "m.thread", "event_id": "$other_root"},
-            ),
-        )
-
-        try:
-            client = self._room_messages_client([opaque_other_child, child_event, other_root, root_event])
-            stats = await matrix_client_module.bulk_refresh_room_thread_histories(
-                client,
-                "!room:localhost",
-                cache,
-                thread_root_ids=["$thread_root", "$other_root"],
-            )
-            clean_rows = await cache.get_thread_events("!room:localhost", "$thread_root")
-            clean_state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
-            poisoned_rows = await cache.get_thread_events("!room:localhost", "$other_root")
-            poisoned_state = await cache.get_thread_cache_gap("!room:localhost", "$other_root")
-        finally:
-            await cache.close()
-
-        assert stats.usable_threads == 1
-        assert stats.missing_root_ids == frozenset()
-        assert clean_rows is not None
-        assert {source["event_id"] for source in clean_rows} == {"$thread_root", "$clear_child"}
-        assert thread_cache_rejection_reason(clean_state) is None
-        assert poisoned_rows is None
-        assert poisoned_state is not None
-        assert poisoned_state.gap_reason == "thread_history_opaque_encrypted_event"
-
-    @pytest.mark.asyncio
-    async def test_bulk_refresh_with_unresolved_opaque_marks_all_requested_threads_stale(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Unknown opaque impact must fail the whole bulk refill closed."""
-        cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await cache.initialize()
-        root_event, child_event = self._thread_root_and_child()
-        other_root = self._make_text_event(
-            event_id="$other_root",
-            sender="@user:localhost",
-            body="Other root",
-            server_timestamp=1500,
-            source_content={"body": "Other root"},
-        )
-        unresolved_opaque = raw_nio_event(
-            self._opaque_source(
-                "$opaque_unresolved",
-                origin_server_ts=2500,
-                relation={"m.in_reply_to": {"event_id": "$outside-scan-window"}},
-            ),
-        )
-
-        try:
-            client = self._room_messages_client([unresolved_opaque, child_event, other_root, root_event])
-            stats = await matrix_client_module.bulk_refresh_room_thread_histories(
-                client,
-                "!room:localhost",
-                cache,
-                thread_root_ids=["$thread_root", "$other_root"],
-            )
-            states = {
-                thread_id: await cache.get_thread_cache_gap("!room:localhost", thread_id)
-                for thread_id in ("$thread_root", "$other_root")
-            }
-            rows = {
-                thread_id: await cache.get_thread_events("!room:localhost", thread_id)
-                for thread_id in ("$thread_root", "$other_root")
-            }
-        finally:
-            await cache.close()
-
-        assert stats.usable_threads == 0
-        for thread_id in ("$thread_root", "$other_root"):
-            # Failing the whole bulk closed removes every snapshot, which is stronger than marking
-            # them: there is nothing left for a later read to serve.
-            assert rows[thread_id] is None
-            assert states[thread_id] is None
 
     @pytest.mark.asyncio
     async def test_source_refresh_survives_membership_epoch_cache_failure(self) -> None:

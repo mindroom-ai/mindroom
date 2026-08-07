@@ -40,7 +40,6 @@ Cache rules (each encodes a shipped regression fix; do not weaken them):
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -48,9 +47,6 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import (
-    thread_cache_rejection_reason,
-)
 from mindroom.matrix.cache.thread_cache_gap import (
     mark_room_threads_gap_fail_closed,
     mark_thread_gap_fail_closed,
@@ -71,7 +67,6 @@ from mindroom.matrix.message_content import (
 from mindroom.matrix.room_history_reads import (
     OpaqueEncryptedThreadHistoryError,
     UnresolvedOpaqueRoomHistoryError,
-    bulk_scan_thread_event_sources,
     bundled_replacement_source,
     fetch_thread_event_sources_via_room_messages,
     parse_room_message_event,
@@ -808,133 +803,8 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
-@dataclass(frozen=True)
-class BulkThreadRefreshStats:
-    """Summary for one bulk thread-cache refresh pass over a room."""
-
-    requested_threads: int
-    usable_threads: int
-    missing_root_ids: frozenset[str]
-    room_scan_pages: int
-    scanned_event_count: int
-    scan_truncated: bool = False
-
-
-async def bulk_refresh_room_thread_histories(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    thread_root_ids: Collection[str],
-    caller_label: str = "unknown",
-    max_scan_pages: int | None = None,
-) -> BulkThreadRefreshStats:
-    """Warm the durable thread cache for many threads with one backward room scan.
-
-    The per-thread refresh walks room history until it sees that one thread's root, so bulk
-    backfills of dormant rooms degrade to O(threads x history) homeserver work. This performs one
-    O(history) walk, buckets every scanned event with the same canonical resolution rules as the
-    per-thread path, and stores each requested thread through the same
-    ``replace_thread`` path. Threads whose root never appeared in the scan are
-    reported in ``missing_root_ids`` and never stored. A caller-provided page budget stops the scan
-    with remaining roots reported as missing and ``scan_truncated`` set. Threads whose reconstruction
-    contains still-opaque encrypted evidence are gap-marked instead of stored, and a scan holding
-    opaque relations with unresolved impact gap-marks every requested thread.
-    """
-    fetch_started_at = time.time()
-    fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    scan_result = await bulk_scan_thread_event_sources(
-        client,
-        room_id,
-        thread_root_ids=thread_root_ids,
-        max_scan_pages=max_scan_pages,
-    )
-    usable_threads = 0
-    opaque_gap_threads = 0
-    if scan_result.unresolved_opaque_event_ids:
-        logger.warning(
-            "Bulk thread refresh scan contains opaque encrypted relations with unresolved impact",
-            room_id=room_id,
-            caller_label=caller_label,
-            user_id=client.user_id,
-            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
-        )
-        await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
-        opaque_gap_threads = len(set(thread_root_ids))
-    else:
-        for thread_id, event_sources in scan_result.thread_event_sources.items():
-            rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
-            if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
-                await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-                opaque_gap_threads += 1
-                continue
-            if rejection_reason is not None:
-                continue
-            store_result = await _store_thread_history_cache(
-                event_cache,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_sources=event_sources,
-                expected_membership_epoch=fetch_membership_epoch,
-                fetch_started_at=fetch_started_at,
-            )
-            if store_result.written:
-                usable_threads += 1
-    stats = BulkThreadRefreshStats(
-        requested_threads=len(set(thread_root_ids)),
-        usable_threads=usable_threads,
-        missing_root_ids=scan_result.missing_root_ids,
-        room_scan_pages=scan_result.page_count,
-        scanned_event_count=scan_result.scanned_event_count,
-        scan_truncated=scan_result.scan_truncated,
-    )
-    logger.info(
-        "Bulk thread cache refresh completed",
-        room_id=room_id,
-        caller_label=caller_label,
-        requested_threads=stats.requested_threads,
-        usable_threads=stats.usable_threads,
-        opaque_gap_threads=opaque_gap_threads,
-        missing_roots=len(stats.missing_root_ids),
-        room_scan_pages=stats.room_scan_pages,
-        scanned_event_count=stats.scanned_event_count,
-        scan_truncated=stats.scan_truncated,
-    )
-    return stats
-
-
-async def thread_ids_needing_refill(
-    event_cache: ConversationEventCache,
-    room_id: str,
-    thread_ids: Collection[str],
-) -> tuple[str, ...]:
-    """Return the given threads whose durable snapshots would not be served from cache.
-
-    Two ways a thread fails to serve, and both have to be asked about: it carries a gap marker, or
-    it has no snapshot at all. Checking only the marker silently reports every never-cached thread
-    as a cache hit, which turns startup prewarm into a no-op.
-    """
-    reads = await asyncio.gather(
-        *(
-            asyncio.gather(
-                event_cache.get_thread_cache_gap(room_id, thread_id),
-                event_cache.has_thread_snapshot(room_id, thread_id),
-            )
-            for thread_id in thread_ids
-        ),
-    )
-    return tuple(
-        thread_id
-        for thread_id, (gap, has_snapshot) in zip(thread_ids, reads, strict=True)
-        if thread_cache_rejection_reason(gap) is not None or not has_snapshot
-    )
-
-
 __all__ = [
-    "BulkThreadRefreshStats",
     "ThreadRoomScanRootNotFoundError",
-    "bulk_refresh_room_thread_histories",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_ids_needing_refill",
 ]

@@ -401,42 +401,6 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
 
     @pytest.mark.asyncio
-    async def test_snapshot_presence_is_reported_separately_from_the_gap_marker(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """A never-cached thread has no gap marker either, so presence has to be asked separately.
-
-        ``thread_ids_needing_refill`` decides what startup prewarm fetches. Answering it from the
-        marker alone reports every cold thread as a cache hit and turns prewarm into a no-op, which
-        no read-path test catches because the reads themselves still refill on demand.
-        """
-        room_id = "!presence:localhost"
-        cached_thread_id = "$cached:localhost"
-        cold_thread_id = "$cold:localhost"
-
-        assert await event_cache.has_thread_snapshot(room_id, cold_thread_id) is False
-        assert await event_cache.get_thread_cache_gap(room_id, cold_thread_id) is None
-
-        await replace_thread_unconditionally(
-            event_cache,
-            room_id,
-            cached_thread_id,
-            [_message_event(cached_thread_id, 1)],
-        )
-        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is True
-
-        # A gap marker does not remove the rows, so presence stays true while the thread is unusable.
-        await event_cache.mark_thread_gap(room_id, cached_thread_id, reason="live_thread_mutation")
-        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is True
-
-        # Purging the rows does flip it, and marking a gap on a thread that has none never invents one.
-        await event_cache.invalidate_thread(room_id, cached_thread_id)
-        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is False
-        await event_cache.mark_thread_gap(room_id, cold_thread_id, reason="live_thread_mutation")
-        assert await event_cache.has_thread_snapshot(room_id, cold_thread_id) is False
-
-    @pytest.mark.asyncio
     async def test_an_unreadable_gap_marker_refuses_the_snapshot(
         self,
         event_cache: ConversationEventCache,

@@ -57,7 +57,6 @@ from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.response_runner import (
     ResponseRequest,
 )
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.conftest import (
@@ -242,7 +241,6 @@ def _install_runtime_cache_support(bot: AgentBot | TeamBot) -> None:
     """Attach the full injected runtime-support bundle to a bot test instance."""
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
-    bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
 
 
 def _empty_full_thread_history() -> ThreadHistoryResult:

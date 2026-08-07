@@ -65,8 +65,6 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
-    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-    startup_thread_prewarm: true
 
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
@@ -92,7 +90,6 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
-| `startup_thread_prewarm` | No | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
@@ -127,8 +124,6 @@ If you set `compaction.model`, that summary model must also define its own `cont
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Compaction uses an in-room lifecycle notice that is edited in place.
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## When to Use Each Mode
 

@@ -10,7 +10,7 @@ SQLite stores the principal ID and room ID in every event, index, tombstone, sta
 
 PostgreSQL derives an opaque SHA-256 namespace from the configured base namespace and full Matrix user ID, and every row remains room-scoped inside that principal-exclusive namespace.
 
-The default constructor principal exists for standalone cache consumers and tests, while the orchestrator, approval transport, startup prewarm, and thread exporter use explicit principal views.
+The default constructor principal exists for standalone cache consumers and tests, while the orchestrator, approval transport, and thread exporter use explicit principal views.
 
 An event lookup is keyed by principal, room, and event ID.
 

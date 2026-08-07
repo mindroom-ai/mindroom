@@ -118,7 +118,6 @@ A refill that completes without installing a snapshot still returns its homeserv
 
 A degraded dispatch proof for an unproven thread candidate retries strict proof before it may demote the event to room level.
 
-Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch reads.
 
 A refill whose reconstruction contains still-opaque encrypted evidence for the requested thread, or whose scan holds an opaque relation with unresolved thread impact, gap-marks the thread and fails the read instead of certifying incomplete history.
 

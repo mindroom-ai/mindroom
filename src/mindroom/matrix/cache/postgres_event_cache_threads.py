@@ -184,29 +184,6 @@ async def load_thread_event_ids(
     return {str(row[0]) for row in rows}
 
 
-async def load_recent_room_thread_ids(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    limit: int,
-) -> list[str]:
-    """Return thread IDs for one room ordered by the newest locally cached event timestamp."""
-    rows = await fetchall(
-        db,
-        """
-        SELECT thread_id
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s
-        GROUP BY thread_id
-        ORDER BY MAX(origin_server_ts) DESC, thread_id ASC
-        LIMIT %s
-        """,
-        (namespace, room_id, limit),
-    )
-    return [str(row[0]) for row in rows]
-
-
 async def load_thread_cache_gap(
     db: AsyncConnection,
     *,
@@ -724,8 +701,8 @@ async def _append_existing_thread_event(
         # history scan can make this thread readable again. Advance the watermark anyway: a fetch
         # already in flight when this event landed cannot represent the thread, so it must not be
         # allowed to install a snapshot that predates the event. The runtime coordinator normally
-        # serializes same-thread refills and appends; this watermark also protects off-lane startup,
-        # prewarm, and cross-process races.
+        # serializes same-thread refills and appends; this watermark also protects off-lane startup
+        # and cross-process races.
         await _advance_snapshot_watermark(
             db,
             namespace=namespace,
@@ -910,37 +887,6 @@ async def _thread_event_ids_for_thread(
         (namespace, room_id, thread_id),
     )
     return [str(row[0]) for row in rows]
-
-
-async def thread_snapshot_exists(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-) -> bool:
-    """Return whether one thread has at least one durably present snapshot row.
-
-    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
-    gone is not durably present, and answering yes for one reports a thread as cached that no read
-    can serve, which is how startup prewarm silently skips it.
-    """
-    cursor = await db.execute(
-        """
-        SELECT 1
-        FROM mindroom_event_cache_thread_events AS thread_events
-        JOIN mindroom_event_cache_events AS events
-            ON events.namespace = thread_events.namespace
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.namespace = %s AND thread_events.room_id = %s AND thread_events.thread_id = %s
-        LIMIT 1
-        """,
-        (namespace, room_id, thread_id),
-    )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return row is not None
 
 
 async def _thread_event_ids_for_room(
