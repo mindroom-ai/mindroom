@@ -567,13 +567,20 @@ class CacheFuzzRunner:
         return await self.observe()
 
     async def _apply_sync(self, room: int, events: Sequence[nio.Event], *, limited: bool = False) -> None:
-        result = await self.policy.cache_sync_timeline_for_certification(
-            cast("nio.SyncResponse", _sync_response(events, room=room, limited=limited)),
-        )
-        assert result.complete is True
-        assert result.certified is True
-        assert result.limited_room_ids == ((room_id(room),) if limited else ())
-        assert result.errors == ()
+        """Persist one sync timeline, failing the trace if any room's write does.
+
+        Certification no longer comes from this write -- the journal's admission
+        decides it -- so the four fields the old result carried are asserted the
+        way the surviving API expresses them: the limited-room set is read from
+        the response directly, and completeness is `raise_on_cache_write_failure`
+        turning any per-room failure into an exception the runner surfaces with
+        the scenario that produced it.
+        """
+        response = cast("nio.SyncResponse", _sync_response(events, room=room, limited=limited))
+        limited_room_ids, validation_errors = self.policy.limited_sync_timeline_room_ids(response)
+        assert validation_errors == ()
+        assert limited_room_ids == ((room_id(room),) if limited else ())
+        await asyncio.gather(*self.policy.cache_sync_timeline(response, raise_on_cache_write_failure=True))
 
     def _remember_source(self, source: dict[str, Any]) -> None:
         source_room_id = cast("str", source["room_id"])
