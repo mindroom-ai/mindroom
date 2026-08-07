@@ -20,6 +20,7 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.delivered_turn_repair import repair_delivered_turns
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -1832,6 +1833,12 @@ class AgentBot:
 
     async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
+        # Before replay, because both things replay drives read terminal state:
+        # a guard asking whether a source was handled, and an edit looking for
+        # the response event to revise. A crash between the outbox
+        # acknowledgement and the ledger write leaves both answers wrong, and
+        # nothing else repairs it.
+        await repair_delivered_turns(self._journal_principal(), self._turn_store)
         self._journal_dispatcher.release_turn_replay()
         await self._journal_dispatcher.drain_once()
         await asyncio.to_thread(
