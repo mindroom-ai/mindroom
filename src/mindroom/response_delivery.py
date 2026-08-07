@@ -154,23 +154,22 @@ class ResponseDelivery:
         homeserver has never seen from *this* device, so the resend is accepted
         as a new message and the room gets the answer twice.
 
-        A row nobody has attempted is trivially safe -- there is no earlier
-        event to collide with.
-
-        Both devices have to be known before this says no. An unknown one --
-        a row from before the column existed, or a process that has not
-        completed a login -- resolves to the behaviour that shipped before
-        this guard: resend, and let the transaction ID do whatever it can.
-        Treating unknown as changed would be safer in the abstract, but it
-        makes every ordinary recovery pay a room scan to rule out a device
-        change that almost never happened, and the case it would catch is one
-        nobody can distinguish from a first attempt anyway.
+        Both devices have to be known before this says no, and an unknown one
+        covers three situations at once. A row nobody has attempted has no
+        device because only the claim writes one, and it is trivially safe --
+        there is no earlier event to collide with. A row from before the
+        column existed, and a process that has not completed a login, are
+        genuinely unknown, and they get the behaviour that shipped before this
+        guard: resend, and let the transaction ID do whatever it can. Treating
+        unknown as changed would be safer in the abstract, but it puts a
+        backward room scan in front of every ordinary recovery to rule out a
+        device change nobody has evidence of.
 
         An edit is exempt. A second ``m.replace`` carrying identical content
         resolves to the same visible message as the first, so the duplicate a
         stale transaction ID admits is not one anybody can see.
         """
-        if not claimed.attempted or claimed.edits_event_id is not None:
+        if claimed.edits_event_id is not None:
             return True
         if claimed.sending_device_id is None or self.sending_device_id is None:
             return True
