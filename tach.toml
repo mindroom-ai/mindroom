@@ -123,6 +123,7 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
+    "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
 ]
 
@@ -2724,6 +2725,7 @@ visibility = [
 [[modules]]
 path = "mindroom.thread_export.projected_history"
 depends_on = [
+    "mindroom.event_journal",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
 ]

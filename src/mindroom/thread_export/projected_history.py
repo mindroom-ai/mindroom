@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.event_journal.views import ConversationReadView, HydrationView
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader, projected_visible_messages
 
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
-    from mindroom.event_journal import ConversationCursor, PrincipalStore
+    from mindroom.event_journal import ConversationCursor
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 # One page is a store round trip, not a homeserver one, so this trades a little
@@ -62,6 +63,19 @@ class SupportsConversationCompleteness(Protocol):
     async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether the walk that hydrated this conversation ran to its end."""
         ...
+
+
+class ExportProjectionView(ConversationReadView, HydrationView, SupportsConversationCompleteness, Protocol):
+    """Everything export reads from one principal's projection, and nothing else.
+
+    Export is the one caller that needs all three slices at once -- it reads
+    pages, it triggers the hydration behind the first of them, and it asks
+    whether that hydration finished -- so this is where the union is written
+    down. Naming it keeps the factory from taking the whole ``PrincipalStore``
+    for want of a type: an export that reached for ``enqueue_delivery`` or
+    ``admit`` would fail the type checker rather than typecheck and be caught,
+    if at all, in review.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +108,7 @@ def export_conversation_reader(
     *,
     client: nio.AsyncClient,
     config: Config,
-    store: PrincipalStore,
+    store: ExportProjectionView,
     self_sender: str,
 ) -> ProjectedThreadReader:
     """Return the projection view one export login uses for thread bodies.
@@ -175,6 +189,7 @@ async def fetch_projected_thread_history(
 
 __all__ = [
     "EXPORT_PAGE_MESSAGES",
+    "ExportProjectionView",
     "ProjectedThreadReader",
     "SupportsConversationCompleteness",
     "ThreadExportIncompleteError",
