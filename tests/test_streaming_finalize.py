@@ -1125,3 +1125,38 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(tmp_path: Pa
                 extra_content=None,
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_send_freezes_the_payload_matrix_receives(tmp_path: Path) -> None:
+    """The frozen row must be the wire event, not the oversized original.
+
+    The sidecar upload used to happen inside the send, after the row was
+    claimed and frozen, so the durable payload kept the whole body while
+    Matrix received an MXC reference. They disagreed, and a recovery resend
+    would upload again -- minting a new MXC, and new encrypted-file keys,
+    under a transaction ID the homeserver had already accepted.
+    """
+    from mindroom.delivery_gateway import SendTextRequest  # noqa: PLC0415 - a request type only this test builds
+    from mindroom.event_journal import DeliveryStage  # noqa: PLC0415 - ditto
+
+    gateway = _delivery_gateway(tmp_path)
+
+    await gateway._send_content(
+        SendTextRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$src"),
+            response_text="",
+            delivery_turn_id="$turn",
+            delivery_stage=DeliveryStage.FINAL,
+        ),
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
+
+    rows = gateway.deps.outbox.rows  # type: ignore[attr-defined]
+    assert rows, "the send never reached the outbox"
+    frozen = next(iter(rows.values())).payload
+    # Whether the sidecar upload succeeds or degrades to an inline preview is
+    # the homeserver's business; either way the row must hold the *prepared*
+    # payload, because that is what goes on the wire and what a resend replays.
+    assert len(frozen["body"]) < 100_000, "the row kept the oversized original"
