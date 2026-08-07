@@ -639,6 +639,56 @@ class TestBoundedReads:
         assert seen == sorted(identifiers)
 
 
+class TestStoreGeneration:
+    """The identity a sync checkpoint is saved beside."""
+
+    async def test_the_generation_is_minted_once_and_then_kept(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A second open must not rewrite it.
+
+        This is the whole mechanism. If reopening the store minted a new
+        generation, every saved checkpoint would be rejected on every restart
+        and the bot would resync from scratch forever. If it *overwrote* the
+        stored one, no checkpoint would ever be rejected and a replaced
+        database would silently resume from a token covering events it never
+        saw.
+        """
+        first = await journal_store.generation(new_generation="born-here")
+        second = await journal_store.generation(new_generation="a-later-process")
+
+        assert first == "born-here"
+        assert second == "born-here"
+
+    async def test_a_different_database_has_a_different_generation(
+        self,
+        journal_store: EventJournalStore,
+        tmp_path: Path,
+    ) -> None:
+        """Two stores must not agree, or the check proves nothing."""
+        from mindroom.event_journal import EventJournalStore as Store  # noqa: PLC0415
+
+        mine = await journal_store.generation(new_generation="mine")
+        replacement = Store.open_sqlite(tmp_path / "replacement.db")
+        try:
+            theirs = await replacement.generation(new_generation="theirs")
+        finally:
+            await replacement.close()
+
+        assert mine != theirs
+
+    async def test_the_generation_belongs_to_the_database_not_a_principal(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Every principal in one database lost the same history if it were replaced."""
+        generation = await journal_store.generation(new_generation="shared")
+
+        assert journal_store.principal(ALICE).principal_id != journal_store.principal(BOB).principal_id
+        assert await journal_store.generation(new_generation="ignored") == generation
+
+
 class TestAdmittedThreadId:
     """What the journal already knows about an event's place in a thread."""
 

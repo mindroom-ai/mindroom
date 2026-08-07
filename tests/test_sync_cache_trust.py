@@ -47,6 +47,10 @@ def _trust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
         runtime=runtime,
         logger=MagicMock(),
+        # The journal's identity, which the bot resolves at startup. Named
+        # `cache_generation` in these tests because that is what the saved
+        # checkpoint field is still called.
+        store_generation=cache_generation,
     )
     return trust, cache, runtime
 
@@ -418,13 +422,14 @@ async def test_shutdown_persist_without_cache_generation_clears_saved_checkpoint
     tmp_path: Path,
 ) -> None:
     """Disabled cache generation must leave restart cold without masking shutdown."""
-    trust, _cache, runtime = _trust(tmp_path)
+    trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.checkpoint = SyncCheckpoint("s_runtime")
     trust.continuity_store.replace_checkpoint(
         SyncCheckpoint("s_saved", cache_generation=_GENERATION),
     )
-    runtime.event_cache.cache_generation = None
+    # The store lost its identity mid-run; a checkpoint can no longer be certified.
+    trust.store_generation = None
 
     await trust.persist_current()
 

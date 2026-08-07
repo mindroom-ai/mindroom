@@ -657,6 +657,17 @@ class EventJournalStore:
             raise ValueError(msg)
         return PrincipalStore(_backend=self.backend, _principal_id=principal_id)
 
+    async def generation(self, *, new_generation: str) -> str:
+        """Return this database's identity, minting it the first time it is opened.
+
+        Shared across principals rather than per-principal: the thing being
+        identified is the database, and every principal in it lost the same
+        history if it were replaced.
+        """
+        return await self.backend.write(
+            lambda transaction: journal.store_generation(transaction, new_generation=new_generation),
+        )
+
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()

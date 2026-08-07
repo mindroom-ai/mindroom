@@ -1315,6 +1315,11 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
         bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
     if bot._runtime_view.startup_thread_prewarm_registry is None:
         bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+    # Sync checkpoints are certified by the event journal, whose real generation
+    # is a fresh UUID per database. Pinned to the same constant the cache mock
+    # reports so a test that saves a checkpoint and restarts exercises the token
+    # logic, rather than the first-open mint that would rightly reject it.
+    bot._sync_cache_trust.store_generation = "test-cache-generation"
     sync_bot_runtime_state(bot)
     return bot
 

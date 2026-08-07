@@ -176,6 +176,20 @@ _TABLES = (
         PRIMARY KEY (principal_id, card_event_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS journal_identity (
+        -- One row, ever. A Matrix sync token is only meaningful next to the
+        -- store that consumed the events it already covers: resuming from a
+        -- token saved before this database was created would skip every event
+        -- between, and nothing downstream would notice the gap. The generation
+        -- is written once when the store is first opened and never rewritten,
+        -- so a checkpoint that names a different one is from a database that
+        -- no longer exists.
+        singleton BOOLEAN NOT NULL PRIMARY KEY,
+        generation TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL
+    )
+    """,
 )
 
 

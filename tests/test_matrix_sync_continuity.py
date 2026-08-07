@@ -931,7 +931,8 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         tmp_path,
         bot.agent_name,
         "s_saved",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
 
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -989,7 +990,8 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
         tmp_path,
         bot.agent_name,
         "s_saved",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.next_batch = None
@@ -1213,7 +1215,8 @@ async def test_authoritative_leave_clears_checkpoint_before_cache_cleanup(tmp_pa
         tmp_path,
         bot.agent_name,
         "s_before_leave",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
     response = MagicMock(spec=nio.SyncResponse)
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
@@ -1245,7 +1248,8 @@ async def test_leave_fences_before_failing_call_reconciliation(
         tmp_path,
         bot.agent_name,
         "s_before_leave",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
     response = MagicMock(spec=nio.SyncResponse)
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
@@ -1296,11 +1300,15 @@ async def test_bot_start_initializes_postgres_principal_before_restoring_checkpo
     reopened_root = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
     bot.event_cache = reopened_root.for_principal(principal_id)
     assert bot.event_cache.cache_generation is None
+    # The checkpoint is certified by the event journal now, not by the cache's
+    # per-principal generation. The cache seeding above still matters -- this
+    # test exists to prove the principal is initialized before the restore --
+    # but the generation the token carries has to be the journal's.
     save_sync_token(
         tmp_path,
         bot.agent_name,
         "s_postgres_restart",
-        cache_generation=generation,
+        cache_generation=_CACHE_GENERATION,
     )
     client = make_matrix_client_mock(user_id=principal_id)
     client.next_batch = None
@@ -3145,7 +3153,8 @@ async def test_new_world_readable_join_cache_failure_rewinds_and_keeps_fence(  #
         tmp_path,
         bot.agent_name,
         "s_before_join",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
     assert await bot._sync_cache_trust.prepare_startup() == "s_before_join"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
@@ -3673,7 +3682,8 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
         tmp_path,
         bot.agent_name,
         "s_before_precallback",
-        cache_generation=bot.event_cache.cache_generation,
+        # Certified by the journal now, which the fixture pins.
+        cache_generation=_CACHE_GENERATION,
     )
     bot._runtime_view.mark_runtime_started()
     bot.client.next_batch = await bot._sync_cache_trust.prepare_startup()

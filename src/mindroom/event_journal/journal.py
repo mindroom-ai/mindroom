@@ -46,6 +46,36 @@ _JOURNAL_COLUMNS = """
 """
 
 
+def store_generation(transaction: Transaction, *, new_generation: str) -> str:
+    """Return this database's generation, minting it on first use.
+
+    A Matrix sync token only means something beside the store that consumed the
+    events it already covers. Resume from a token saved before this database
+    existed and every event between is skipped silently -- the homeserver
+    considers them delivered and will not send them again, and nothing
+    downstream can tell the difference between "no messages" and "the messages
+    went to a database that is gone".
+
+    So the token is saved next to a generation, and a checkpoint naming a
+    different one is refused. ``new_generation`` is only used if no row exists;
+    an established database keeps the value it was born with, which is what
+    makes the comparison mean "same database" rather than "same process".
+    """
+    transaction.execute(
+        """
+        INSERT INTO journal_identity (singleton, generation, created_at_ns)
+        VALUES (?, ?, ?)
+        ON CONFLICT (singleton) DO NOTHING
+        """,
+        (True, new_generation, time.time_ns()),
+    )
+    row = transaction.fetchone("SELECT generation FROM journal_identity WHERE singleton = ?", (True,))
+    if row is None:
+        msg = "Event journal identity row is missing immediately after it was written"
+        raise RuntimeError(msg)
+    return str(row["generation"])
+
+
 def current_membership_epoch(
     transaction: Transaction,
     principal_id: str,

@@ -631,12 +631,16 @@ def _save_certified_sync_token(
     bot: AgentBot,
     token: str,
 ) -> None:
-    """Persist one cache-bound certified sync token for bot lifecycle tests."""
+    """Persist one certified sync token for bot lifecycle tests.
+
+    Certified by the event journal, not the event cache: the token has to name
+    the store that consumed the events it covers, and that is the journal now.
+    """
     save_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        cache_generation=bot.event_cache.cache_generation,
+        cache_generation=bot._sync_cache_trust.store_generation,
     )
 
 
@@ -686,6 +690,10 @@ class ThreadingBehaviorTestBase:
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
         bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+        # Sync checkpoints are certified by the event journal. Pinned so a test
+        # that saves one and restarts exercises the token logic rather than the
+        # first-open mint, which would rightly reject it.
+        bot._sync_cache_trust.store_generation = "test-cache-generation"
 
         # Initialize components that depend on client
 

@@ -20,7 +20,7 @@ from mindroom.matrix.sync_recovery_escape import SkippedRecoveryGap, SyncRecover
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
 
     import structlog
 
@@ -35,6 +35,17 @@ class SyncCacheTrust:
     continuity_store: SyncContinuityStore
     runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
+    # Resolves the event journal's identity. A sync token only means something
+    # beside the store that consumed the events it covers, and the journal is
+    # that store now -- the cache generation this replaced certified a database
+    # nothing reads for conversation history any more.
+    #
+    # A provider rather than a value, resolved on demand and memoized. Reading
+    # it once during startup would mean anything that reaches certification by
+    # another route -- and several things do -- silently had no generation and
+    # refused every checkpoint.
+    store_generation_provider: Callable[[], Awaitable[str | None]] | None = None
+    store_generation: str | None = None
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
     _tokenless_baseline_pending: bool = field(default=False, init=False, repr=False)
@@ -49,10 +60,17 @@ class SyncCacheTrust:
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
+    async def _resolve_store_generation(self) -> str | None:
+        """Return the journal's identity, asking for it the first time it is needed."""
+        if self.store_generation is None and self.store_generation_provider is not None:
+            self.store_generation = await self.store_generation_provider()
+        return self.store_generation
+
     async def prepare_startup(
         self,
     ) -> str | None:
         """Initialize cache trust and choose the safe startup transport position."""
+        await self._resolve_store_generation()
         cache = self.runtime.event_cache
         try:
             await cache.initialize()
@@ -87,7 +105,7 @@ class SyncCacheTrust:
         if checkpoint is None:
             return None
 
-        cache_generation = self.runtime.event_cache.cache_generation
+        cache_generation = self.store_generation
         if cache_generation is None:
             self.logger.warning("matrix_sync_token_cache_generation_unavailable")
             return None
@@ -104,7 +122,7 @@ class SyncCacheTrust:
         joined_room_ids: Iterable[str] | None = None,
     ) -> SyncContinuityRecord | None:
         """Persist one checkpoint while the mutation lock owns publication order."""
-        cache_generation = self.runtime.event_cache.cache_generation
+        cache_generation = self.store_generation
         if cache_generation is None:
             return None
         durable_checkpoint = SyncCheckpoint(
@@ -302,6 +320,12 @@ class SyncCacheTrust:
         joined_room_ids: Iterable[str] = (),
     ) -> SyncContinuityRecord | None:
         """Apply one certifier decision while mutation order is serialized."""
+        # Every path that can persist a checkpoint funnels through here, so this
+        # is where the journal's identity has to be known -- resolving it only
+        # in startup left anything reaching certification another way with no
+        # generation, which reads as "refuse this checkpoint" rather than as
+        # the wiring mistake it is.
+        await self._resolve_store_generation()
         if decision.checkpoint_to_save is not None:
             record = await self._persist_checkpoint_locked(
                 decision.checkpoint_to_save,
@@ -351,7 +375,7 @@ class SyncCacheTrust:
         if self.checkpoint is not None:
             return self.checkpoint.token
         saved = self._saved_checkpoint
-        cache_generation = self.runtime.event_cache.cache_generation
+        cache_generation = self.store_generation
         if saved is None or cache_generation is None or saved.cache_generation != cache_generation:
             return None
         return saved.token

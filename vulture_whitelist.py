@@ -344,3 +344,7 @@ get_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
 get_mxc_texts  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
 store_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
 store_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
+# Joined them when the last tool-side reader moved off the cache facade: thread
+# bookkeeping now resolves relations through the journal, which fences on its
+# own membership epoch instead of serving rows a departure never invalidated.
+get_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/, src/mindroom/matrix/conversation_cache.py)

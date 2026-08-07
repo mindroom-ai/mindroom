@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
@@ -414,6 +415,10 @@ class AgentBot:
             continuity_store=self._sync_continuity_store,
             runtime=self._runtime_view,
             logger=self.logger,
+            # Resolved on first use rather than now: the journal store is built
+            # further down, and trusting a saved token means asserting that
+            # store already holds every event the token covers.
+            store_generation_provider=self._resolve_journal_generation,
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
@@ -451,6 +456,10 @@ class AgentBot:
             ),
         )
         self._init_runtime_components()
+
+    async def _resolve_journal_generation(self) -> str | None:
+        """Return the event journal's durable identity, minting it on first open."""
+        return await self._journal_store.generation(new_generation=uuid.uuid4().hex)
 
     def _open_journal_store(self) -> EventJournalStore:
         """Open the durable store this bot's journal, projection, and outbox share.

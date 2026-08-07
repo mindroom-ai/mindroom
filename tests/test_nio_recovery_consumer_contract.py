@@ -53,6 +53,7 @@ def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCacheTrust:
         runtime=cast("BotRuntimeView", runtime),
         logger=get_logger(),
         state=state,
+        store_generation=_CACHE_GENERATION,
     )
 
 
