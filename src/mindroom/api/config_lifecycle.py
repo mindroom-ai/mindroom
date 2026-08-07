@@ -58,11 +58,21 @@ class ConfigLoadResult:
 
 @dataclass
 class ApiSnapshot:
-    """One published API runtime snapshot."""
+    """One published API runtime snapshot.
+
+    ``generation`` is what consumers bind to, so it only advances when the
+    config they see actually changes. ``revision`` advances on every
+    publication without exception, including ones that deliberately leave the
+    generation alone -- a refused or failed load. Writers compare-and-swap on
+    ``revision``: a request that pinned a snapshot before such a publication
+    would otherwise still pass a generation check and commit its stale copy of
+    the payload over whatever the operator had just edited on disk.
+    """
 
     generation: int
     runtime_paths: constants.RuntimePaths
     config_data: dict[str, Any]
+    revision: int = 0
     runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     source_fingerprint: str | None = None
@@ -459,7 +469,7 @@ def _published_snapshot(
     source_files: frozenset[Path] | None | object = _UNSET,
     auth_state: object = _UNSET,
 ) -> ApiSnapshot:
-    """Return one new published snapshot with an incremented generation."""
+    """Return one new published snapshot, always with a fresh commit revision."""
     updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
     updated_config_data = snapshot.config_data if config_data is None else config_data
     updated_runtime_config = (
@@ -480,6 +490,7 @@ def _published_snapshot(
     return replace(
         snapshot,
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
+        revision=snapshot.revision + 1,
         runtime_paths=updated_runtime_paths,
         config_data=updated_config_data,
         runtime_config=updated_runtime_config,
@@ -576,7 +587,7 @@ def _commit_mutated_snapshot[T](
     api_app: FastAPI,
     initial_state: ApiState,
     *,
-    expected_generation: int,
+    expected_revision: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
     validated_config: Config,
@@ -586,7 +597,7 @@ def _commit_mutated_snapshot[T](
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.generation != expected_generation or current.runtime_paths != runtime_paths:
+        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
         _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
@@ -638,7 +649,7 @@ def _commit_replaced_snapshot(
     api_app: FastAPI,
     initial_state: ApiState,
     *,
-    expected_generation: int,
+    expected_revision: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
     validated_config: Config,
@@ -647,7 +658,7 @@ def _commit_replaced_snapshot(
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.generation != expected_generation or current.runtime_paths != runtime_paths:
+        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         source_fingerprint = _save_config_to_file(
@@ -670,7 +681,7 @@ def _commit_raw_replaced_snapshot(
     api_app: FastAPI,
     initial_state: ApiState,
     *,
-    expected_generation: int,
+    expected_revision: int,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
     validated_config: Config,
@@ -682,7 +693,7 @@ def _commit_raw_replaced_snapshot(
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.generation != expected_generation or current.runtime_paths != runtime_paths:
+        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
         _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
@@ -720,7 +731,7 @@ def _build_and_commit_mutation[T](
         return _commit_mutated_snapshot(
             api_app,
             initial_state,
-            expected_generation=snapshot.generation,
+            expected_revision=snapshot.revision,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
             validated_config=validated_config,
@@ -761,7 +772,7 @@ def _build_and_commit_replacement(
         return _commit_replaced_snapshot(
             api_app,
             initial_state,
-            expected_generation=snapshot.generation,
+            expected_revision=snapshot.revision,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
             validated_config=validated_config,
@@ -804,7 +815,7 @@ def _build_and_commit_raw_replacement(
         return _commit_raw_replaced_snapshot(
             api_app,
             initial_state,
-            expected_generation=snapshot.generation,
+            expected_revision=snapshot.revision,
             runtime_paths=snapshot.runtime_paths,
             validated_payload=validated_payload,
             validated_config=validated_config,
@@ -830,7 +841,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
-        if current.generation != snapshot.generation or current.runtime_paths != runtime_paths:
+        if current.revision != snapshot.revision or current.runtime_paths != runtime_paths:
             logger.info(
                 "Discarding stale API config load after runtime swap",
                 load_config_path=str(runtime_paths.config_path),
@@ -922,7 +933,7 @@ def _publish_runtime_config_into_app(
             )
             return False
         same_config = current.config_data == validated_payload
-        if current.generation != snapshot.generation and not same_config:
+        if current.revision != snapshot.revision and not same_config:
             logger.info(
                 "Discarding stale API config publish after config changed",
                 publish_config_path=str(runtime_paths.config_path),

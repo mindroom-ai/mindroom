@@ -518,6 +518,46 @@ class TestEventJournalChangeRefusal:
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk == hand_edited, "an unrelated write flattened the operator's on-disk edits"
 
+    def test_a_write_pinned_before_the_refusal_cannot_overwrite_it(self, loaded_app: FastAPI) -> None:
+        """A refusal holds the generation still on purpose, so it needs a separate commit identity.
+
+        Holding the generation is what lets reverting the journal field recover
+        with nothing to rebind. The cost, if the generation is also the only
+        thing writers compare against, is that a request pinned before the
+        refusal still passes the commit check and saves its stale copy of the
+        last good payload -- flattening both the operator's unrelated edit and
+        the journal edit, and publishing success over the refusal.
+        """
+        before = _snapshot(loaded_app)
+        request = _request_for(loaded_app)
+        pinned = config_lifecycle.bind_current_request_snapshot(request)
+
+        hand_edited = copy.deepcopy(VALID_CONFIG)
+        hand_edited["agents"]["hand_written"] = {
+            "display_name": "Hand Written",
+            "role": "Added by hand in the same save",
+        }
+        hand_edited["event_journal"] = dict(self.JOURNAL_MOVE)
+        _write_config(before.runtime_paths.config_path, hand_edited)
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
+        refused = _snapshot(loaded_app)
+        assert refused.generation == pinned.generation, "this test only bites while the refusal holds the generation"
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.write_committed_config(
+                request,
+                lambda config: config["defaults"].__setitem__("markdown", False),
+                error_prefix="test write",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert _snapshot(loaded_app).config_load_result == refused.config_load_result, (
+            "a stale pinned write published success over the refusal"
+        )
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert on_disk == hand_edited, "a request pinned before the refusal flattened the operator's on-disk edits"
+
     def test_reverting_the_journal_field_recovers_without_a_generation_bump(self, loaded_app: FastAPI) -> None:
         """Putting the field back is the documented way out, so it has to actually work."""
         before = _snapshot(loaded_app)
