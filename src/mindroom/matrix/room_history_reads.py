@@ -338,16 +338,19 @@ async def _group_scanned_sources_by_thread(
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id in edit_candidates.original_event_ids():
-        winner = edit_candidates.winner_for(
+        edit_event = edit_candidates.winner_for(
             original_event_id,
             sender=_scanned_event_sender(scanned_message_sources.get(original_event_id)),
         )
-        if winner is None:
+        if edit_event is None:
             continue
-        edit_event, edit_thread_id = winner
+        # A replacement lands in the thread its original was resolved into, and nowhere else.
+        # The thread its own ``m.new_content`` names is not consulted: Matrix ignores every
+        # relation written there, so it is a claim, and a claim about an event this scan never
+        # read is the one input an outsider fully controls.
         target_roots = {
             root_id
-            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
+            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id))
             if root_id in grouped
         }
         for root_id in target_roots:
@@ -699,7 +702,7 @@ async def fetch_thread_messages_from_source(
         client,
         messages_by_event_id=messages_by_event_id,
         edit_candidates=edit_candidates,
-        required_thread_id=thread_id,
+        synthesize_unseen_originals=False,
         trusted_sender_ids=trusted_sender_ids,
     )
     messages = list(messages_by_event_id.values())

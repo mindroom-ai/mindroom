@@ -68,20 +68,22 @@ def _edit_event(
     *,
     timestamp: int,
     thread_root_id: str,
+    sender: str = "@alice:localhost",
+    new_body: str = "edited reply",
 ) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {
             "event_id": event_id,
-            "sender": "@alice:localhost",
+            "sender": sender,
             "origin_server_ts": timestamp,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
             "content": {
-                "body": "* edited reply",
+                "body": f"* {new_body}",
                 "msgtype": "m.text",
                 "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
                 "m.new_content": {
-                    "body": "edited reply",
+                    "body": new_body,
                     "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
                 },
@@ -364,6 +366,75 @@ async def test_thread_messages_from_source_resolves_edits_without_touching_a_sto
     # so the parameter list is the thing worth pinning.
     parameters = inspect.signature(fetch_thread_messages_from_source).parameters
     assert not [name for name in parameters if "cache" in name or "store" in name]
+
+
+def _injected_edit_scan_client(root_id: str, reply_id: str) -> AsyncMock:
+    """Return a room whose newest event is an edit of something the scan never sees."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [
+                    _edit_event(
+                        "$injection:localhost",
+                        "$never-scanned:localhost",
+                        timestamp=4000,
+                        thread_root_id=root_id,
+                        sender="@intruder:localhost",
+                        new_body="injected text",
+                    ),
+                    _message_event(reply_id, "a real reply", timestamp=2000, thread_root_id=root_id),
+                    _message_event(root_id, "the question", timestamp=1000),
+                ],
+                end=None,
+            ),
+        ],
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_thread_event_sources_exclude_an_edit_whose_original_the_scan_never_saw() -> None:
+    """A scan buckets a replacement by its original's thread, never by the thread it names.
+
+    These sources are what proves whether a candidate event is a real thread root, so a foreign
+    replacement filed into the wrong bucket does not merely add a row: it can promote any
+    relation-free message in the room into a thread that only the replacement's author asked for.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+
+    scan_result = await fetch_thread_event_sources_via_room_messages(
+        _injected_edit_scan_client(root_id, reply_id),
+        _ROOM_ID,
+        root_id,
+    )
+
+    assert [source["event_id"] for source in scan_result.event_sources] == [root_id, reply_id]
+
+
+@pytest.mark.asyncio
+async def test_thread_read_excludes_an_edit_whose_original_the_scan_never_saw() -> None:
+    """An edit naming a thread must not publish its content into that thread's read.
+
+    Applying ``m.new_content`` keeps the original event's relation and ignores every
+    ``m.relates_to`` written inside the replacement, so the thread named there is a claim about an
+    event this scan never read. Honouring it lets anyone who can send an edit put text of their
+    choosing into the answer to "what is in this thread" - reporting that text's placement as
+    unknown does not help, because being in the answer at all is the injection.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+
+    messages = await fetch_thread_messages_from_source(
+        _injected_edit_scan_client(root_id, reply_id),
+        _ROOM_ID,
+        root_id,
+    )
+
+    assert [message.event_id for message in messages] == [root_id, reply_id]
+    assert all(message.sender != "@intruder:localhost" for message in messages)
+    assert all("injected text" not in message.body for message in messages)
 
 
 @pytest.mark.asyncio

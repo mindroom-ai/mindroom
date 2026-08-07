@@ -14,6 +14,10 @@ proves. Its thread is not one of those things, so it is reported as unknown rath
 Invariant: a replacement never places anything. Applying ``m.new_content`` keeps the original
 event's relation and ignores every ``m.relates_to`` inside the replacement, so a thread named there
 is a claim: it neither moves a message that was read nor places one that was reconstructed.
+
+Invariant: nor does that claim admit anything. A read scoped to one thread contains no
+reconstruction of a message it never saw, because the claim is the only thing that could have put
+one there - reporting the placement as unknown does not undo publishing the text into the thread.
 """
 
 from __future__ import annotations
@@ -59,11 +63,14 @@ def _record(candidates: ThreadEditCandidates, event: nio.RoomMessageText) -> Non
 async def _apply(
     candidates: ThreadEditCandidates,
     messages: dict[str, ResolvedVisibleMessage],
+    *,
+    synthesize_unseen_originals: bool = True,
 ) -> None:
     await apply_latest_edits_to_messages(
         AsyncMock(),
         messages_by_event_id=messages,
         edit_candidates=candidates,
+        synthesize_unseen_originals=synthesize_unseen_originals,
         trusted_sender_ids=(_AUTHOR, _IMPOSTOR),
     )
 
@@ -298,6 +305,62 @@ class TestSynthesizedMessagePlacement:
         assert messages[_ORIGINAL_ID].to_dict()["thread_id"] is None
         assert messages[_ORIGINAL_ID].thread_id_known is True
         assert messages[_ORIGINAL_ID].body == "final answer"
+
+
+class TestThreadScopedAdmission:
+    """Which reconstructions a thread-scoped read is allowed to contain at all."""
+
+    @pytest.mark.asyncio
+    async def test_thread_scoped_read_drops_an_edit_whose_original_it_never_saw(self) -> None:
+        """A thread read must not admit a message the replacement is the only evidence for.
+
+        The one thing that could put this reconstruction in a thread is the replacement's own
+        claim, and Matrix ignores every ``m.relates_to`` inside ``m.new_content``. Marking the
+        result's placement unknown is not enough on its own: it is already inside the answer to
+        "what is in this thread", which is where the injected text becomes visible.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$injection",
+                body="* injected",
+                new_body="injected",
+                sender=_IMPOSTOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+                new_thread_id="$victim-thread",
+            ),
+        )
+        messages: dict[str, ResolvedVisibleMessage] = {}
+
+        await _apply(candidates, messages, synthesize_unseen_originals=False)
+
+        assert messages == {}
+
+    @pytest.mark.asyncio
+    async def test_thread_scoped_read_still_applies_an_edit_to_a_message_it_did_see(self) -> None:
+        """Refusing unseen originals must not stop a thread read from folding real edits in."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        original = _original_message()
+        original.thread_id = "$root"
+        messages = {_ORIGINAL_ID: original}
+
+        await _apply(candidates, messages, synthesize_unseen_originals=False)
+
+        assert messages[_ORIGINAL_ID].body == "final answer"
+        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] == "$root"
 
 
 class TestReplacementWinnerSelection:

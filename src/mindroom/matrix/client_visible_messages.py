@@ -366,13 +366,6 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
     return status if isinstance(status, str) else None
 
 
-# One replacement event plus the thread its ``m.new_content`` claims, which is a claim and never a
-# placement: Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
-# every ``m.relates_to`` inside the replacement. The claim is only ever used to decide whether an
-# edit is worth resolving for a given thread read.
-type _EditCandidate = tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]
-
-
 def _edit_candidate_is_newer(
     candidate: nio.RoomMessageText | nio.RoomMessageNotice,
     current: nio.RoomMessageText | nio.RoomMessageNotice,
@@ -419,7 +412,9 @@ class ThreadEditCandidates:
     would let one foreign edit hide the newest legitimate one.
     """
 
-    _by_original_and_sender: dict[str, dict[str, _EditCandidate]] = field(default_factory=dict)
+    _by_original_and_sender: dict[str, dict[str, nio.RoomMessageText | nio.RoomMessageNotice]] = field(
+        default_factory=dict,
+    )
 
     def record(
         self,
@@ -427,21 +422,32 @@ class ThreadEditCandidates:
         *,
         event_info: EventInfo,
     ) -> bool:
-        """Track one replacement candidate, returning whether the event was an edit at all."""
+        """Track one replacement candidate, returning whether the event was an edit at all.
+
+        Only the replacement event is kept. The thread its ``m.new_content`` names is not: Matrix
+        applies ``m.new_content`` by keeping the original event's relation and ignoring every
+        ``m.relates_to`` written inside the replacement, so that value places nothing, proves no
+        membership, and is not evidence that the edit belongs to any particular read.
+        """
         if not (event_info.is_edit and event_info.original_event_id):
             return False
 
         by_sender = self._by_original_and_sender.setdefault(event_info.original_event_id, {})
         current = by_sender.get(event.sender)
-        if current is None or _edit_candidate_is_newer(event, current[0]):
-            by_sender[event.sender] = (event, event_info.thread_id_from_edit)
+        if current is None or _edit_candidate_is_newer(event, current):
+            by_sender[event.sender] = event
         return True
 
     def original_event_ids(self) -> list[str]:
         """Return every original event ID some candidate claims to replace."""
         return list(self._by_original_and_sender)
 
-    def winner_for(self, original_event_id: str, *, sender: str | None) -> _EditCandidate | None:
+    def winner_for(
+        self,
+        original_event_id: str,
+        *,
+        sender: str | None,
+    ) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
         """Return the newest legitimate replacement for one original.
 
         ``sender`` is the original's sender, or ``None`` when the original was never seen. An
@@ -455,7 +461,7 @@ class ThreadEditCandidates:
             return by_sender.get(sender)
         newest = next(iter(by_sender.values()))
         for candidate in by_sender.values():
-            if _edit_candidate_is_newer(candidate[0], newest[0]):
+            if _edit_candidate_is_newer(candidate, newest):
                 newest = candidate
         return newest
 
@@ -465,26 +471,29 @@ async def apply_latest_edits_to_messages(
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,
-    required_thread_id: str | None = None,
+    synthesize_unseen_originals: bool = True,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
-    """Apply latest edits to message records and synthesize missing originals when allowed."""
+    """Apply latest edits to message records, reconstructing unseen originals when allowed.
+
+    ``synthesize_unseen_originals=False`` is for a read scoped to one thread. Such a read has no
+    way to place a message it never saw: the original carries the relation, the replacement
+    inherits it rather than restating it, and applying ``m.new_content`` ignores any relation
+    written inside the replacement. Nothing left could admit the reconstruction except the
+    replacement's own claim to belong here, so the read declines to contain it at all - saying its
+    placement is unknown would not undo it having been published into this thread's answer.
+    """
     for original_event_id in edit_candidates.original_event_ids():
         existing_message = messages_by_event_id.get(original_event_id)
-        winner = edit_candidates.winner_for(
+        # Bail out before resolving potentially large edit payloads from sidecar storage.
+        if existing_message is None and not synthesize_unseen_originals:
+            continue
+        edit_event = edit_candidates.winner_for(
             original_event_id,
             sender=None if existing_message is None else existing_message.sender,
         )
         # A replacement from anyone but the original's sender is not an edit of that message.
-        if winner is None:
-            continue
-        edit_event, claimed_thread_id = winner
-
-        # Ignore missing originals unrelated to this thread before resolving
-        # potentially large edit payloads from sidecar storage. This is the one thing the
-        # replacement's own thread claim decides: whether the edit is worth reading at all for this
-        # thread. It never decides where the resulting message is said to live.
-        if existing_message is None and required_thread_id is not None and claimed_thread_id != required_thread_id:
+        if edit_event is None:
             continue
 
         edited_body, edited_content = await extract_edit_body(
