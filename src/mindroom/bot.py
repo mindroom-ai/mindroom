@@ -58,7 +58,12 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
-from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
+from mindroom.matrix.sync_loop import (
+    OwnRoomMembership,
+    own_membership_from_sliding_sync,
+    own_membership_from_sync,
+    run_matrix_sync_forever,
+)
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -1719,51 +1724,31 @@ class AgentBot:
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
-        joined_room_ids = set(response.rooms.join)
-        left_room_ids = set(response.rooms.leave)
-        timeline_departure_room_ids = {
-            room_id
-            for room_id, room_info in response.rooms.join.items()
-            if any(
-                isinstance(event, nio.RoomMemberEvent)
-                and event.state_key == self.agent_user.user_id
-                and event.membership in {"leave", "ban"}
-                for event in room_info.timeline.events
-            )
-        }
         await self._apply_own_room_membership(
-            joined_room_ids=joined_room_ids,
-            left_room_ids=left_room_ids,
-            departed_room_ids=left_room_ids | timeline_departure_room_ids,
+            own_membership_from_sync(response, self_user_id=self.agent_user.user_id),
         )
 
     async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
         """Apply this bot's room memberships reported by one sliding sync response."""
-        joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
         await self._apply_own_room_membership(
-            joined_room_ids=joined_room_ids,
-            left_room_ids=departed_room_ids,
-            departed_room_ids=departed_room_ids,
+            own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id),
         )
 
-    async def _apply_own_room_membership(
-        self,
-        *,
-        joined_room_ids: set[str],
-        left_room_ids: set[str],
-        departed_room_ids: set[str],
-    ) -> None:
+    async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        await self._membership_fence.fence_reported_departures(departed_room_ids)
+        await self._membership_fence.fence_reported_departures(membership.departures)
+        departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
-        current_joined_room_ids = joined_room_ids - left_room_ids - self._local_departures_awaiting_sync
+        current_joined_room_ids = (
+            membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
+        )
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
                 joined_room_ids=current_joined_room_ids,
-                left_room_ids=left_room_ids,
+                left_room_ids=membership.left_room_ids,
             )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:

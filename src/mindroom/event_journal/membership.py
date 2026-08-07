@@ -97,7 +97,14 @@ class MembershipFence:
         self._track(room_id, outcome)
 
     async def fence_reported_departures(self, room_ids: Iterable[str]) -> None:
-        """Fence departures a sync reported, absorbing the report local ones are owed."""
+        """Fence departures a sync reported, absorbing the report local ones are owed.
+
+        One entry per departure, not per room. A room that was left, rejoined
+        and left again inside one sync interval is two departures, and only the
+        first of them is the report the local leave is owed; offered as a set
+        it would be one observation, absorbed, and the second departure would
+        never invalidate anything.
+        """
         reported = tuple(room_ids)
         await self._recover_owed_reports()
         for room_id in reported:

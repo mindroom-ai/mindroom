@@ -478,6 +478,88 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     )
 
 
+def _departure_member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> dict[str, object]:
+    """Return one member event ending this account's stay in a room."""
+    return {
+        "content": {"membership": membership},
+        "event_id": event_id,
+        "origin_server_ts": ts,
+        "sender": "@admin:localhost",
+        "state_key": user_id,
+        "type": "m.room.member",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_report(
+    tmp_path: Path,
+) -> None:
+    """Two departures in one sync interval are two departures, not one room id.
+
+    The bot left the room itself, so it is owed exactly one sync report for
+    that leave. It came back, and was then removed again before the next sync.
+    The response shows the room once, and offered to the fence as a room id it
+    is one observation -- absorbed as the report the first leave was owed,
+    leaving the kick to invalidate nothing at all. Everything the second
+    membership built then survives into a membership that has no right to it.
+    """
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    user_id = bot.agent_user.user_id
+    await bot._membership_fence.fence_local_departure(room_id)
+    await bot._membership_fence.note_membership_restarted(room_id)
+    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s-after-kick",
+            "rooms": {
+                "invite": {},
+                "join": {},
+                "leave": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                _departure_member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                                {
+                                    "content": {"membership": "join"},
+                                    "event_id": "$rejoin",
+                                    "origin_server_ts": 2,
+                                    "sender": user_id,
+                                    "state_key": user_id,
+                                    "type": "m.room.member",
+                                },
+                                _departure_member_event("$kick", user_id=user_id, membership="leave", ts=3),
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-kick",
+                        },
+                    },
+                },
+            },
+        },
+    )
+
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin + 1
+
+
+@pytest.mark.asyncio
+async def test_replaying_one_sync_response_fences_its_departures_once(
+    tmp_path: Path,
+) -> None:
+    """A response whose checkpoint could not advance is presented again as it was."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    response = _sync_response_with_room_membership_section(room_id, membership="leave")
+
+    await bot._apply_own_room_membership_from_sync(response)
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert await bot._journal_principal().membership_epoch(room_id) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban"])
 async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(

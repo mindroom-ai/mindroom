@@ -41,7 +41,11 @@ from mindroom.matrix.health import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.sync_certification import SyncTrustState
-from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
+from mindroom.matrix.sync_loop import (
+    _sliding_sync_lists,
+    _sliding_sync_room_subscriptions,
+    own_membership_from_sliding_sync,
+)
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -1615,10 +1619,49 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
         },
     )
 
-    joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
+    membership = own_membership_from_sliding_sync(response, self_user_id="@mindroom_code:localhost")
 
-    assert joined_room_ids == {"!joined:localhost", "!window:localhost"}
-    assert departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
+    assert membership.joined_room_ids == {"!joined:localhost", "!window:localhost"}
+    assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
+    assert sorted(membership.departures) == ["!banned:localhost", "!kicked:localhost"]
+
+
+def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None:
+    """One room id cannot say "two departures", and the fence needs it to."""
+    user_id = "@mindroom_code:localhost"
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!churned:localhost": nio.SlidingSyncRoom(
+                membership="leave",
+                timeline=[
+                    _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                    _member_event("$rejoin", user_id=user_id, membership="join", ts=2),
+                    _member_event("$kick", user_id=user_id, membership="leave", ts=3),
+                ],
+            ),
+        },
+    )
+
+    membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
+
+    assert membership.departures == ("!churned:localhost", "!churned:localhost")
+
+
+def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> nio.Event:
+    """Return one parsed room-member event for this account."""
+    event = nio.Event.parse_event(
+        {
+            "content": {"membership": membership},
+            "event_id": event_id,
+            "origin_server_ts": ts,
+            "sender": "@admin:localhost",
+            "state_key": user_id,
+            "type": "m.room.member",
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
 
 
 def _sliding_response_bot(tmp_path: Path) -> AgentBot:
