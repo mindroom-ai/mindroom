@@ -146,6 +146,22 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS room_history_debt (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        -- The newest message the projection held when sync gave up on
+        -- rebuilding a gap in this room. Everything the room received after it
+        -- may be missing, so a later history walk that reaches back to this
+        -- timestamp has covered the whole gap. NULL means nothing is owed.
+        owed_through_ts BIGINT,
+        -- A walk finished without reaching the timestamp it owed. The hole is
+        -- real and no bounded walk will close it, so this stays set: it is the
+        -- one honest way to say that history was lost rather than deferred.
+        history_lost INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (principal_id, room_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS response_outbox (
         principal_id TEXT NOT NULL,
         turn_id TEXT NOT NULL,

@@ -24,12 +24,13 @@ from mindroom.matrix.sync_recovery_escape import (
     SkippedRecoveryGap,
     SyncRecoveryStallTracker,
 )
-from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.event_journal import HistoryDebtRecordView
 
 _CACHE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
@@ -62,14 +63,16 @@ class _Runtime:
         self.event_cache = _EventCache()
 
 
-def _trust(tmp_path: Path) -> SyncCacheTrust:
+def _trust(tmp_path: Path, *, history_debt: HistoryDebtRecordView | None = None) -> SyncCacheTrust:
     """Build one principal's real cache trust over a temporary continuity store."""
+    recorder = RecordedHistoryDebts() if history_debt is None else history_debt
     return SyncCacheTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
         runtime=cast("BotRuntimeView", _Runtime()),
         logger=get_logger(),
         state=SyncTrustState.PENDING,
         store_generation=_CACHE_GENERATION,
+        history_debt_provider=lambda: recorder,
     )
 
 

@@ -18,7 +18,7 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,6 +51,7 @@ def _trust(
         # `cache_generation` in these tests because that is what the saved
         # checkpoint field is still called.
         store_generation=cache_generation,
+        history_debt_provider=RecordedHistoryDebts,
     )
     return trust, cache, runtime
 

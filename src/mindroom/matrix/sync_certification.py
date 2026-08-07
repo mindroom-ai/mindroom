@@ -75,6 +75,11 @@ class SyncCertificationDecision:
     reset_client_token: bool = False
     reason: str | None = None
     cache_scope_epoch: int | None = None
+    # Rooms this checkpoint is about to move past without their history. The
+    # decision carries them from planning to application because the durable
+    # record of what was skipped has to be written before the checkpoint that
+    # skips it, and only the applying side is allowed to write anything.
+    skipped_recovery_room_ids: frozenset[str] = frozenset()
 
 
 def _uncertain_decision(
@@ -143,6 +148,7 @@ def certify_sync_response(
         # response from ever being acknowledged. Restart the client from the
         # newly certified position instead of acknowledging in place.
         reset_client_token=bool(skipped_recovery_room_ids),
+        skipped_recovery_room_ids=skipped_recovery_room_ids,
     )
 
 

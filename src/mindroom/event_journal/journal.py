@@ -107,6 +107,12 @@ def advance_membership_epoch(
 
     The journal rows survive on purpose. They are the proof that an event
     already produced its one turn, and that has to outlive any rejoin.
+
+    A history debt goes with the projection it describes. It names a hole
+    between messages this membership stored and messages that arrived after a
+    skipped sync gap, and both ends of that statement are being deleted here.
+    Keeping it would make the next read walk the server to repay a hole in a
+    conversation that no longer exists.
     """
     epoch = current_membership_epoch(transaction, principal_id, room_id) + 1
     transaction.execute(
@@ -117,7 +123,13 @@ def advance_membership_epoch(
         """,
         (principal_id, room_id, epoch),
     )
-    for table in ("conversation_hydration", "visible_messages", "unresolved_edits", "redaction_tombstones"):
+    for table in (
+        "conversation_hydration",
+        "visible_messages",
+        "unresolved_edits",
+        "redaction_tombstones",
+        "room_history_debt",
+    ):
         transaction.execute(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
             (principal_id, room_id),

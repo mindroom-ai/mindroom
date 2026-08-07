@@ -27,6 +27,7 @@ from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from tests.event_cache_test_support import replace_thread_unconditionally
+from tests.sync_continuity_helpers import RecordedHistoryDebts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -907,6 +908,7 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
             continuity_store=SyncContinuityStore(tmp_path, "alice"),
             runtime=runtime,
             logger=MagicMock(),
+            history_debt_provider=RecordedHistoryDebts,
         )
         assert await trust.prepare_startup() is None
 
@@ -944,6 +946,7 @@ async def test_obsolete_sync_schema_at_legacy_path_starts_cold(
         continuity_store=continuity_store,
         runtime=MagicMock(event_cache=cache, callback_failure_count=0),
         logger=MagicMock(),
+        history_debt_provider=RecordedHistoryDebts,
     )
     try:
         assert await trust.prepare_startup() is None

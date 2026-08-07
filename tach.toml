@@ -119,6 +119,7 @@ visibility = [
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.journal_ingress",
     "mindroom.matrix.relation_lookup",
+    "mindroom.matrix.sync_cache_trust",
     "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
@@ -2150,6 +2151,7 @@ depends_on = [
 path = "mindroom.matrix.sync_cache_trust"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.event_journal",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_recovery_escape",
     "mindroom.matrix.sync_token_values",
