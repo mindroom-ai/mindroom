@@ -16,12 +16,23 @@ only warm for a principal something is syncing. A warm thread therefore costs
 zero Matrix history calls; a thread nobody has read yet costs exactly one
 hydration, and never again under the same membership.
 
-Prompts and export want opposite things from that hydration -- a prompt wants a
-bounded window, export wants the whole thread -- and this does not resolve that
-by asking for a second, unbounded walk. There is one walk with one bound, and
-the two callers differ only in how they react to hitting it: a prompt accepts a
-shorter conversation, and export refuses to write a file that claims to be a
-whole thread and is not.
+Prompts and export want opposite things from that hydration: a prompt wants a
+bounded window, export wants the whole thread. There is still one walk and one
+reducer -- a second Matrix interpreter is the thing this module exists to
+prevent -- but the two callers do not share its *bounds*, and an earlier version
+of this made them, which was a regression rather than a simplification. The
+prompt window sizes a model's context; imposed on export it turns "export this
+thread" into "refuse any thread longer than a prompt", because hydration records
+`complete=False` and this module then rightly declines to write a suffix as
+though it were the whole thread. Before the cutover an export paginated Matrix
+directly and had no such limit.
+
+So export walks with its own, far larger bounds. They are bounds and not
+infinities on purpose: a runaway guard that never fires is not a guard, and a
+thread past even these is reported as too large to write honestly rather than
+silently truncated. The two callers still differ in how they react to hitting a
+bound -- a prompt accepts a shorter conversation, export refuses -- which is the
+part that was right all along.
 """
 
 from __future__ import annotations
@@ -45,6 +56,16 @@ if TYPE_CHECKING:
 # window: export is the caller that reads whole threads, and a page that big
 # would make the paging loop untested in practice.
 EXPORT_PAGE_MESSAGES = 500
+
+# What an export is willing to walk, as distinct from what a prompt is willing
+# to read. A prompt stops at the window because a model cannot use more; an
+# export stops only to keep one pathological thread from running forever. These
+# are deliberately far above the prompt bounds rather than unbounded: a runaway
+# guard that never fires is not a guard, and an export that hangs is worse than
+# one that says the thread is too large to write honestly.
+EXPORT_WINDOW_MESSAGES = 1_000_000
+EXPORT_MAX_FETCHED_EVENTS = 2_000_000
+EXPORT_MAX_MESSAGES_REQUESTS = 20_000
 
 
 class ThreadExportIncompleteError(RuntimeError):
@@ -125,6 +146,17 @@ def export_conversation_reader(
                 store=store,
                 runtime=_ExportClientRuntime(client=client, config=config),
                 self_sender=self_sender,
+                # An export asks a different question than a prompt, so it
+                # cannot inherit the prompt's bounds. The message window exists
+                # to size a model's context; applied here it silently converts
+                # "export this thread" into "refuse any thread longer than a
+                # prompt", because hydration records `complete=False` and this
+                # module then correctly declines to write a suffix as if it were
+                # the whole thread. Before this cutover an export paginated
+                # Matrix directly and had no such limit.
+                prompt_window_messages=EXPORT_WINDOW_MESSAGES,
+                max_fetched_events=EXPORT_MAX_FETCHED_EVENTS,
+                max_requests=EXPORT_MAX_MESSAGES_REQUESTS,
             ),
         ),
         completeness=store,
@@ -188,7 +220,10 @@ async def fetch_projected_thread_history(
 
 
 __all__ = [
+    "EXPORT_MAX_FETCHED_EVENTS",
+    "EXPORT_MAX_MESSAGES_REQUESTS",
     "EXPORT_PAGE_MESSAGES",
+    "EXPORT_WINDOW_MESSAGES",
     "ExportProjectionView",
     "ProjectedThreadReader",
     "SupportsConversationCompleteness",

@@ -18,6 +18,11 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.event_journal import EventClass, EventKind
+from mindroom.matrix.conversation_hydration import (
+    _MAX_FETCHED_EVENTS,
+    _MAX_MESSAGES_REQUESTS,
+    HYDRATED_PROMPT_WINDOW_MESSAGES,
+)
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
@@ -599,3 +604,23 @@ async def test_a_thread_that_fits_the_window_is_complete_and_exports(router: Pri
     messages = await export(projection)
 
     assert bodies(messages) == ["root", "message-0", "message-1", "message-2", "message-3", "message-4"]
+
+
+async def test_export_does_not_inherit_the_prompt_window(router: PrincipalStore) -> None:
+    """An export must not refuse a thread merely for being longer than a prompt.
+
+    The prompt window sizes a model's context. Imposed on export it silently
+    turns "export this thread" into "refuse any thread longer than a prompt",
+    because hydration records ``complete=False`` past the window and export then
+    rightly declines to write a suffix as though it were the whole thread.
+    Before this cutover an export paginated Matrix directly and had no such
+    limit, so inheriting it was a regression rather than a simplification.
+
+    The bounds are still finite: a runaway guard that never fires is not a
+    guard. What matters is that they are the export's own.
+    """
+    hydrator = reader_for(router, FakeHomeserver()).reader.hydrator
+
+    assert hydrator.prompt_window_messages > HYDRATED_PROMPT_WINDOW_MESSAGES
+    assert hydrator.max_fetched_events > _MAX_FETCHED_EVENTS
+    assert hydrator.max_requests > _MAX_MESSAGES_REQUESTS
