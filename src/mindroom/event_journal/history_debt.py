@@ -119,15 +119,23 @@ def settle(
     was merely uneventful.
 
     Whether the walk ran out of room or out of allowance does not enter into
-    it, and that is deliberate. A server that has purged the history a debt
-    names answers a walk that runs to the very beginning and still never
-    reaches the timestamp; treating "the server had no more" as repayment would
-    file real loss as success. Only reaching the timestamp is coverage.
+    it, and that is deliberate, but it only holds because the walk is bounded
+    for this job rather than for a prompt. Both of its remaining stopping
+    reasons are real loss. A server that has purged the history a debt names
+    runs a walk to the very beginning without ever reaching the timestamp, and
+    treating "the server had no more" as repayment would file that as success.
+    A gap deeper than the walk's cost ceiling is the other, and it is loss for a
+    different reason: a later walk starts from a tip that has only moved
+    forward, so the same allowance carries it less far back, not further. There
+    is no answer to wait for. Only reaching the timestamp is coverage.
 
-    Settling happens exactly once per walk in either direction, so a room can
-    never be left owing history no later read will look for. Loss is sticky:
-    a hole nothing can fill does not stop existing because a later, shallower
-    debt was repaid over the top of it.
+    That is also what keeps a debt from becoming an unbounded read tax. An
+    outstanding debt withholds the room's hydration marker, so leaving one open
+    would re-walk the room on every read forever -- for a strictly worse answer
+    each time. Settling happens exactly once per walk in either direction, so a
+    room can never be left owing history no later read will look for. Loss is
+    sticky: a hole nothing can fill does not stop existing because a later,
+    shallower debt was repaid over the top of it.
     """
     covered = reached_ts is not None and reached_ts <= debt.owed_through_ts
     if covered:
