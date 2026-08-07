@@ -595,6 +595,7 @@ class AgentBot:
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
                 source_has_live_owner=self._coalescing_gate.has_pending_source_event,
+                turn_has_live_claim=self._turn_store.has_live_turn_claim,
             ),
             room_for_id=self._room_for_journal_event,
             cache_historical_event=self._conversation_cache.cache_historical_event,

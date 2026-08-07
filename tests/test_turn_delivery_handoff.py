@@ -125,8 +125,20 @@ async def deliver_answer(
     )
 
 
-def _dispatcher(bot: AgentBot, on_message: _MessageCallback) -> JournalDispatcher:
-    """Return a dispatcher over this bot's journal with one watched callback."""
+def _dispatcher(
+    bot: AgentBot,
+    on_message: _MessageCallback,
+    *,
+    owner_is_live: bool = False,
+) -> JournalDispatcher:
+    """Return a dispatcher over this bot's journal with one watched callback.
+
+    ``owner_is_live`` stands in for a turn that is still running. The worker
+    drops a deferral whose owner has vanished, so a test that wants to observe
+    a deferral surviving until the handoff has to say that its owner is still
+    there -- otherwise the liveness recheck clears it first and the assertion
+    passes against an empty set for the wrong reason.
+    """
 
     async def unused(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         msg = "this callback is not part of the test"
@@ -143,7 +155,8 @@ def _dispatcher(bot: AgentBot, on_message: _MessageCallback) -> JournalDispatche
             on_room_lifecycle=cast("Any", unused),
             on_redaction=cast("Any", unused),
             on_decryption_failure=cast("Any", unused),
-            source_has_live_owner=lambda _event_id: False,
+            source_has_live_owner=lambda _event_id: owner_is_live,
+            turn_has_live_claim=lambda _event_id: False,
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, BOT),
     )
@@ -429,10 +442,10 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         async def defer(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> TurnDispatchOutcome:
             return TurnDispatchOutcome.DEFERRED
 
-        dispatcher = _dispatcher(bot, defer)
+        dispatcher = _dispatcher(bot, defer, owner_is_live=True)
         await admit(journal(bot), text_event("$cause"))
         await dispatcher.drain_once()
-        assert "$cause" in dispatcher._worker._deferred
+        assert "$cause" in dispatcher._worker._deferred, "the deferral must survive to be released"
 
         await dispatcher.settle_delivered_turn_sources(("$cause",))
 

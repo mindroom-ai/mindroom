@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 import pytest
@@ -19,6 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import EventClass, EventKind, SettlementOutcome, VisibleMessage
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -139,6 +140,21 @@ def redaction_event(event_id: str, redacts: str, *, ts: int = 2_000) -> nio.Even
             "type": "m.room.redaction",
             "redacts": redacts,
             "content": {},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+def reaction_event(event_id: str, *, target: str = "$target", key: str = "OK") -> nio.Event:
+    """Return a parsed annotation, whose callback finishes when it returns."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": 1_000,
+            "type": "m.reaction",
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": key}},
         },
     )
     assert isinstance(event, nio.Event)
@@ -1385,6 +1401,210 @@ class TestPendingEventWorker:
         await worker.stop()
 
         assert attempts == ["$m", "$m"]
+
+    async def test_a_deferral_survives_a_worker_that_cannot_probe_its_owner(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A worker with no probe has to believe the handoff, as it always did.
+
+        Pins the default so the opposite one cannot be introduced by accident:
+        assuming every owner is gone would re-dispatch every in-flight turn on
+        every scan, which answers live conversations twice.
+        """
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+
+        await worker.drain_once()
+        await worker.drain_once()
+
+        assert attempts == ["$m"]
+        assert [event.event_id for event in await alice.pending()] == ["$m"]
+
+    async def test_a_deferral_whose_owner_is_alive_is_never_taken_back(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The turn is still running, so re-dispatching would answer twice."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: True,
+        )
+
+        await worker.drain_once()
+        await worker.drain_once()
+        await worker.drain_once()
+
+        assert attempts == ["$m"]
+
+    async def test_a_deferral_whose_owner_died_is_dispatched_again(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The hole this closes: durable work owed to an owner that is gone.
+
+        Deferral is a promise to call ``release``. An owner that dies without
+        keeping it leaves the event pending forever while the process looks
+        healthy, because no admission and no retry ever reconsiders it.
+        """
+        attempts: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+        )
+
+        await worker.drain_once()
+        await worker.drain_once()
+        assert attempts == ["$m"], "a live owner must keep its event"
+
+        owner_alive = False
+        await worker.drain_once()
+
+        assert attempts == ["$m", "$m"]
+
+    async def test_a_lost_owner_is_noticed_without_any_further_admission(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nothing wakes the pump when an owner dies, so it has to look again.
+
+        Driven through the pump rather than a drain: a drain is an explicit
+        "look now", and the failure being closed is precisely that a quiet room
+        never gets one.
+        """
+        attempts: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> None:
+            attempts.append(event.event_id)
+
+        await self._admit(alice, text_event("$m"))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        await _eventually(lambda: attempts == ["$m"])
+
+        # Several scan periods pass with the owner alive and nothing is retaken.
+        await asyncio.sleep(0.1)
+        assert attempts == ["$m"]
+
+        owner_alive = False
+
+        await _eventually(lambda: attempts == ["$m", "$m"], seconds=10)
+        await worker.stop()
+
+
+class TestDeferralOwnership:
+    """Which deferrals still have an owner, and which are work nobody holds."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        *,
+        gate_owns: bool = False,
+        turn_claimed: bool = False,
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose two owner probes answer as configured."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: gate_owns,
+                turn_has_live_claim=lambda _event_id: turn_claimed,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    @staticmethod
+    async def _admitted(store: PrincipalStore, event: nio.Event, kind: EventKind) -> JournalEvent:
+        """Admit one event and return the journal row the worker would see."""
+        await store.admit(
+            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+        return next(item for item in await store.pending() if item.event_id == event.event_id)
+
+    async def test_a_completing_kind_can_never_have_a_lost_owner(self, alice: PrincipalStore) -> None:
+        """A reaction is finished when its handler returns, so it never defers.
+
+        Reporting one of these as lost would take back an event that is not
+        deferred at all, which is how a settled reaction runs twice.
+        """
+        dispatcher = self._dispatcher(alice)
+        dispatcher.release_turn_replay()
+        reaction = await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
+
+        assert dispatcher._deferral_is_live(reaction) is True
+
+    async def test_replay_parked_on_the_fleet_is_not_a_lost_owner(self, alice: PrincipalStore) -> None:
+        """Turn replay waits for responders to exist, and is released by draining.
+
+        Nothing calls back to hand these over, so treating the absence of a
+        claim as death would re-dispatch every replayed turn on every scan,
+        before the agents that answer them are even running.
+        """
+        dispatcher = self._dispatcher(alice)
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_a_source_the_coalescing_gate_still_holds_is_owned(self, alice: PrincipalStore) -> None:
+        """A batch still debouncing has no turn claim yet, and is not abandoned."""
+        dispatcher = self._dispatcher(alice, gate_owns=True)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_a_source_an_unsettled_turn_still_claims_is_owned(self, alice: PrincipalStore) -> None:
+        """The running turn will answer this message, so nobody else may."""
+        dispatcher = self._dispatcher(alice, turn_claimed=True)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is True
+
+    async def test_a_source_with_neither_a_gate_nor_a_claim_is_lost(self, alice: PrincipalStore) -> None:
+        """Both owners are gone and the event is still pending: nobody will release it."""
+        dispatcher = self._dispatcher(alice)
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
+
+        assert dispatcher._deferral_is_live(message) is False
 
 
 async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:

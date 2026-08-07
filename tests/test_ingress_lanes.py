@@ -592,6 +592,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_redaction=cast("Callable", noop),
         on_decryption_failure=cast("Callable", noop),
         source_has_live_owner=gate.has_pending_source_event,
+        turn_has_live_claim=lambda _event_id: False,
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),

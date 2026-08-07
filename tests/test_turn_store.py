@@ -323,6 +323,30 @@ def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: 
     assert record.history_scope is None
 
 
+def test_a_live_claim_is_observable_without_waiting_for_it(tmp_path: Path) -> None:
+    """Whether a turn still owns a source, asked without blocking on the answer.
+
+    The claim is taken before the turn is handed off and dropped however the
+    turn ends, so its presence is what separates "a turn owns this" from "a
+    turn owned this and is gone". A caller holding durable work owed to that
+    turn has to be able to ask without joining the wait.
+    """
+    store = _store(tmp_path)
+    claim = TurnRecord.create(("$source",), discovery_event_ids=("$alias",), completed=False)
+
+    assert store.has_live_turn_claim("$source") is False
+
+    assert store.try_claim_turn(claim) is True
+    assert store.has_live_turn_claim("$source") is True
+    assert store.has_live_turn_claim("$alias") is True, "an alias is indexed by the same claim"
+    assert store.has_live_turn_claim("$unrelated") is False
+
+    store.release_pending_turn_claim(claim)
+
+    assert store.has_live_turn_claim("$source") is False
+    assert store.has_live_turn_claim("$alias") is False
+
+
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:
     """Overlapping delivery of one source event must start one response."""
     store = _store(tmp_path)
