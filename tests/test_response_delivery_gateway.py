@@ -802,3 +802,83 @@ class TestAnEndedMembershipStopsTheAnswer:
             await gateway.deliver_stream(request)
 
         assert await stream.await_args.kwargs["transport_is_current"]()
+
+
+class TestTheFrozenEditSpeaksOneAnswer:
+    """A stored edit must read the same to every client that renders it.
+
+    An `m.replace` carries the answer twice: inside `m.new_content`, which a
+    client that understands edits renders, and in the top-level `body`, which
+    is what every other client shows. They are built from two separate inputs
+    -- the replacement content and `new_text` -- so nothing structural stops
+    them disagreeing, and the outbox freezes whatever they were.
+
+    A row that disagrees with itself is the same failure the projection exists
+    to remove, one layer lower: two readers of one history seeing two answers.
+    """
+
+    @staticmethod
+    def _target() -> MessageTarget:
+        """Return the room-mode target these tests deliver into."""
+        return MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
+
+    async def test_the_stored_edit_says_the_same_thing_to_both_kinds_of_client(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The fallback body is the replacement body, marked as an edit.
+
+        `* ` is the Matrix convention for an edit's fallback, so the fallback
+        agreeing means the prefix and nothing else.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        assert terminal is not None
+        answer = "the whole answer"
+        delivered = SimpleNamespace(event_id="$sent", content_sent={})
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=delivered)):
+            await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"msgtype": "m.text", "body": answer}, answer)
+
+        stored = outbox.rows[("$cause", DeliveryStage.FINAL.value)].payload
+        replacement = stored["m.new_content"]
+        assert isinstance(replacement, dict)
+        assert replacement["body"] == answer
+        assert stored["body"] == f"* {answer}"
+
+    async def test_a_replacement_body_the_fallback_does_not_carry_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The two inputs are independent, so the disagreement is constructible.
+
+        This is the shape a caller producing its fallback from a different
+        string would store: the edit-aware client reads the answer, everyone
+        else reads something the agent never said. Nothing rejects it today,
+        which is what this pins -- the assertion is on the stored bytes, so it
+        fails the moment the two stop being derived from one text.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        assert terminal is not None
+        delivered = SimpleNamespace(event_id="$sent", content_sent={})
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=delivered)):
+            await terminal(
+                AsyncMock(),
+                _ROOM_ID,
+                "$placeholder",
+                {"msgtype": "m.text", "body": "what the agent said"},
+                "something else entirely",
+            )
+
+        stored = outbox.rows[("$cause", DeliveryStage.FINAL.value)].payload
+        replacement = stored["m.new_content"]
+        assert isinstance(replacement, dict)
+        # Recorded, not endorsed: today the row keeps both strings. If a later
+        # change makes the envelope derive one from the other, this fails and
+        # should be replaced by an assertion that the mismatch is impossible.
+        assert replacement["body"] == "what the agent said"
+        assert stored["body"] == "* something else entirely"
