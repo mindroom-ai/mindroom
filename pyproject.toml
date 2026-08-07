@@ -496,6 +496,10 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
+[tool.uv.sources]
+# TEMPORARY SCAFFOLDING - MUST NEVER MERGE. Points at the local per-room-recovery
+# branch so the history-debt deletion can be compiled and tested before nio ships.
+mindroom-nio = { path = "/Users/bas.nijholt/Work/dev/mindroom-nio", editable = true }
 
 [tool.ruff]
 target-version = "py312"
