@@ -26,6 +26,7 @@ it. Transactionality comes from sharing the database, not the scope key.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -501,27 +502,41 @@ class HandledTurnLedger:
             # Canonicalization derives an anchor from the sources whenever one was
             # not supplied, and a record with no sources was already rejected above.
             assert persisted_record.anchor_event_id is not None
+            # Shielded, so cancellation cannot leave the outcome unknown.
+            #
+            # Publishing before the commit is deliberate: it stops a
+            # synchronous reader seeing "not handled" while this turn's write
+            # is in flight and answering the same message twice. Undoing that
+            # publication is therefore only correct when the write definitely
+            # did not land.
+            #
+            # Cancelling a bare `await` gives no such certainty. The backend
+            # runs the statement on an `asyncio.to_thread` worker that a
+            # cancelled await cannot stop, so the transaction commits anyway
+            # while the rollback removes the record from memory -- leaving the
+            # live process answering a message it has already answered, and a
+            # restart disagreeing with it. Shielding lets the write settle and
+            # report, after which the cancellation propagates as it should.
+            write = asyncio.shield(
+                asyncio.ensure_future(
+                    self.records.upsert(
+                        index_event_ids=persisted_record.indexed_event_ids,
+                        anchor_event_id=persisted_record.anchor_event_id,
+                        record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
+                    ),
+                ),
+            )
             try:
-                await self.records.upsert(
-                    index_event_ids=persisted_record.indexed_event_ids,
-                    anchor_event_id=persisted_record.anchor_event_id,
-                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
-                )
+                await write
             except BaseException:
-                # Publishing before the commit is deliberate: it stops a
-                # synchronous reader seeing "not handled" while this turn's
-                # write is in flight and answering the same message twice. What
-                # it must not do is outlive a write that failed, because then
-                # memory claims a record the database has never held -- which
-                # reads correctly until a restart and then answers twice.
-                # Undoing the publication keeps the two in step and lets the
-                # failure reach a caller that can retry.
-                #
-                # `BaseException`, not `Exception`, because cancellation is the
-                # likeliest way this write is abandoned -- a cancelled turn, a
-                # shutdown mid-flight -- and `CancelledError` does not derive
-                # from `Exception`. Catching only `Exception` left exactly the
-                # published-but-never-stored state this exists to prevent.
+                # A cancelled caller has not learned the write's fate yet: the
+                # shield kept it running, so wait for it before deciding
+                # whether memory is wrong. Only a genuinely failed write
+                # justifies undoing the publication.
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(write)
+                if write.done() and write.exception() is None:
+                    raise
                 self._restore_superseded(persisted_record, superseded)
                 raise
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
