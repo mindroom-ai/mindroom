@@ -7,6 +7,7 @@ the event the homeserver already accepted rather than posting a second answer.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -26,6 +27,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -39,7 +41,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, OutboxView, PrincipalStore
@@ -63,7 +65,12 @@ def alice(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal("agent@alice")
 
 
-def _gateway(tmp_path: Path, outbox: OutboxView | None = None) -> DeliveryGateway:
+def _gateway(
+    tmp_path: Path,
+    outbox: OutboxView | None = None,
+    *,
+    terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
+) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
         Config(agents={"agent": AgentConfig(display_name="Agent")}),
@@ -92,6 +99,7 @@ def _gateway(tmp_path: Path, outbox: OutboxView | None = None) -> DeliveryGatewa
             response_hooks=MagicMock(_apply_before_response=AsyncMock(), emit_after_response=AsyncMock()),
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=ignore_final_delivery_handoff,
+            terminal_turn_for=terminal_turn_for,
         ),
     )
 
@@ -984,3 +992,110 @@ class TestTheFrozenEditSpeaksOneAnswer:
         # should be replaced by an assertion that the mismatch is impossible.
         assert replacement["body"] == "what the agent said"
         assert stored["body"] == "* something else entirely"
+
+
+class TestTheTerminalRecordCommitsWithItsAcknowledgement:
+    """A delivered answer and the record that names it are one write.
+
+    The acknowledgement is the durable proof that a visible answer exists and
+    what its event ID is, which is exactly the fact the turn record is missing.
+    Written separately, a crash between them leaves a delivered answer whose
+    record does not know its response event -- and an edit of that message is
+    then dropped, because there is nothing recorded to edit. Nothing else
+    repairs it: outbox recovery walks unacknowledged rows and steps over this
+    one, and the journal has no pending source to re-enter through.
+    """
+
+    @staticmethod
+    def _final_request(text: str) -> FinalDeliveryRequest:
+        """Return one final delivery for the turn caused by `$cause`."""
+        return TestTurnDeliveryGoesThroughTheOutbox._final_request(text)
+
+    async def test_a_final_acknowledgement_carries_the_bound_record(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The record travelling with the acknowledgement names the delivered event."""
+        outbox = FakeOutbox()
+        pending = TurnRecord.create(["$cause"], completed=False, response_owner="agent")
+
+        def bind(turn_id: str, event_id: str) -> TurnRecord | None:
+            assert turn_id == "$cause"
+            return replace(pending, response_event_id=event_id, completed=True)
+
+        gateway = _gateway(tmp_path, outbox, terminal_turn_for=bind)
+        gateway.deps.response_hooks._apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        )
+        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+            await gateway.deliver_final(self._final_request("answer"))
+
+        assert len(outbox.acknowledged_terminal_turns) == 1
+        turn_id, terminal_turn = outbox.acknowledged_terminal_turns[0]
+        assert turn_id == "$cause"
+        assert terminal_turn is not None
+        assert terminal_turn.agent_name == "agent"
+        assert terminal_turn.index_event_ids == ("$cause",)
+        assert terminal_turn.anchor_event_id == "$cause"
+        record = json.loads(terminal_turn.record_json)
+        assert record["response_event_id"] == "$sent"
+        assert record["completed"] is True
+
+    async def test_a_placeholder_acknowledgement_carries_no_record(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A placeholder's acknowledgement must not bind the turn's terminal record.
+
+        An INITIAL row is the "Thinking..." message, and calling the turn
+        finished on the strength of it would mark the source handled while the
+        model is still running -- so the real answer, when it arrives, has
+        nowhere to go.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(
+            tmp_path,
+            outbox,
+            terminal_turn_for=lambda _turn_id, event_id: TurnRecord.create(
+                ["$cause"],
+                response_event_id=event_id,
+            ),
+        )
+        delivered = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "..."})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text="...",
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+
+        assert outbox.acknowledged_terminal_turns == [("$cause", None)]
+
+    async def test_nothing_is_carried_when_there_is_no_record_to_bind(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A turn with no record, or one that already names its answer, binds nothing.
+
+        The acknowledgement still has to happen -- the answer is in the room
+        either way -- so the delivery must not be held up by having nothing to
+        write beside it.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox, terminal_turn_for=lambda _turn_id, _event_id: None)
+        gateway.deps.response_hooks._apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        )
+        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.event_id == "$sent"
+        assert outbox.acknowledged_terminal_turns == [("$cause", None)]

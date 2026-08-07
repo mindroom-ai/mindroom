@@ -593,6 +593,7 @@ markers = [
   "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
   "e2e: marks end-to-end tests",
   "slow: marks tests as slow",
+  "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
 
 [tool.coverage.report]

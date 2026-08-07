@@ -2231,6 +2231,77 @@ async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal
 
 
 @pytest.mark.asyncio
+async def test_the_record_a_final_acknowledgement_commits_binds_its_response(
+    journal_store: EventJournalStore,
+) -> None:
+    """A delivered answer's event ID reaches the record in the acknowledgement's own commit.
+
+    Until the record names the response event, an edit of that message has
+    nothing to edit and is dropped. A startup pass used to rejoin the two
+    afterwards; this closes the window instead of repairing it, so what the
+    acknowledgement carries has to be the bound, completed record.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(["$source"], completed=False, response_owner="agent"),
+    )
+
+    bound = store.terminal_turn_record("$source", "$answer")
+
+    assert bound is not None
+    assert bound.response_event_id == "$answer"
+    assert bound.completed is True
+    assert bound.source_event_ids == ("$source",)
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_already_names_an_answer_is_left_alone(
+    journal_store: EventJournalStore,
+) -> None:
+    """The first answer ever sent must not overwrite a later, better one.
+
+    Recovery can acknowledge a frozen row long after the turn moved on, and
+    the event that row names may be older than the one the record already
+    holds. Binding it anyway would replace the current answer with a stale one.
+    """
+    store = await _store(journal_store)
+    await store.record_turn(TurnRecord.create(["$source"], response_event_id="$better"))
+
+    assert store.terminal_turn_record("$source", "$first-ever-sent") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_turn_has_no_record_to_commit(journal_store: EventJournalStore) -> None:
+    """An acknowledgement for a turn this ledger never recorded carries nothing."""
+    store = await _store(journal_store)
+
+    assert store.terminal_turn_record("$never-seen", "$answer") is None
+
+
+@pytest.mark.asyncio
+async def test_preparing_the_record_does_not_publish_it(journal_store: EventJournalStore) -> None:
+    """Reading the record must not mark the turn answered before the commit lands.
+
+    This runs *before* the transaction, and the transaction can lose the
+    acknowledgement race -- first writer wins. Publishing here would leave the
+    ledger calling a turn finished on the strength of a write that never
+    happened, and the answer that did land named by nobody.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(["$source"], completed=False, response_owner="agent"),
+    )
+
+    assert store.terminal_turn_record("$source", "$answer") is not None
+
+    still_pending = store.get_turn_record("$source")
+    assert still_pending is not None
+    assert still_pending.completed is False
+    assert still_pending.response_event_id is None
+    assert store.is_handled("$source") is False
+
+
+@pytest.mark.asyncio
 async def test_record_responded_turn_rejects_empty_response_event_id(journal_store: EventJournalStore) -> None:
     """The durable response boundary should reject a noncanonical empty event ID."""
     store = await _store(journal_store)
