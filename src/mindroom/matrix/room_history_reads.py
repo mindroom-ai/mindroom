@@ -349,9 +349,7 @@ async def _group_scanned_sources_by_thread(
         # relation written there, so it is a claim, and a claim about an event this scan never
         # read is the one input an outsider fully controls.
         target_roots = {
-            root_id
-            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id))
-            if root_id in grouped
+            root_id for root_id in (original_event_id, resolved_thread_ids.get(original_event_id)) if root_id in grouped
         }
         for root_id in target_roots:
             edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
