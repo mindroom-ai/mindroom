@@ -66,7 +66,16 @@ The fix is to apply the transform *before* the terminal enqueue, which removes t
 
 All of that is derived, in one place, from a single string: `_prepare_delivery_from_snapshot` (`streaming.py:366`) takes `snapshot.accumulated_text`, formats it once at `:370`, and everything downstream — `display_text`, `format_message_with_mentions`, `content["body"]`, the warmup suffix — follows from it. Transform that text and every derived field is consistent for free, with no content rebuilding anywhere.
 
-The remaining obstacle is that `_prepare_delivery_from_snapshot` is synchronous while the transform hook is async, so the transform cannot run inside it. It has to be applied to the final text *before* the terminal snapshot is constructed, in the async caller that knows the stream has ended. That is the actual piece of work: find that point, apply the hook there for the final snapshot only, and delete the post-hoc edit at `:1734-1750`.
+`_prepare_delivery_from_snapshot` is synchronous while the transform hook is async, so the hook cannot run inside it — but its async caller is the right place, and it already exists.
+
+Implementation, traced end to end:
+
+1. `_prepare_delivery` (`streaming.py:1010-1026`) is async: it builds the snapshot, then hands formatting to `asyncio.to_thread`. Apply the transform between those two steps, for `is_final=True` only, with `dataclasses.replace(snapshot, accumulated_text=...)`. Every derived field is then computed from the transformed text by the existing code.
+2. The streaming object needs the hook. Add an optional `final_text_transform: Callable[[str], Awaitable[str]] | None` beside `terminal_edit` and `terminal_send` (`streaming.py:468-469`), which are wired the same way.
+3. Bind it where those two are constructed in `delivery_gateway`, closing over `identity` so it can call `_apply_final_response_transform`.
+4. Delete the post-hoc block at `delivery_gateway.py:1734-1750`, keeping its guard that an empty or unchanged transform result is ignored.
+
+Verify with the full suite, then `tests/manual/streamed_edit_live_proof.py`, which reads the room's *raw* final state rather than `m.new_content` and is the probe that can actually see a wrong fallback body. The mutation to check is that the `FINAL` outbox row's payload and the visible room body carry the same text.
 
 The same shape, second instance: an oversized terminal delivery uploads its sidecar after the claim, so the frozen payload lacks the MXC the wire carries. Same remedy — prepare the wire payload before the enqueue.
 
