@@ -77,6 +77,23 @@ async def admit(store: PrincipalStore, *events: nio.Event) -> None:
         )
 
 
+async def admit_redaction(store: PrincipalStore, event_id: str, *, redacts: str) -> None:
+    """Admit one redaction, which owes cleanup rather than an answer."""
+    parsed = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": 2_000,
+            "room_id": ROOM,
+            "type": "m.room.redaction",
+            "redacts": redacts,
+            "content": {},
+        },
+    )
+    assert isinstance(parsed, nio.Event)
+    await store.admit(inbound_event(ROOM, parsed, EventKind.REDACTION, EventClass.ACTIONABLE), None)
+
+
 def journal(bot: AgentBot) -> PrincipalStore:
     """Return the bot's own principal-bound store."""
     return bot._journal_store.principal(bot._journal_principal_id)
@@ -634,6 +651,27 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
 
         assert await pending_ids(bot) == []
         assert await journal(bot).load_event("$cause") is not None, "the dedup proof was deleted with the work"
+
+    async def test_the_fence_leaves_work_that_was_never_unanswerable(self, tmp_path: Path) -> None:
+        """Only turn-backed work is retired, because only it becomes impossible.
+
+        The argument for settling is that enqueue refuses a turn admitted under
+        a stale epoch, so its answer can never be written. Nothing about that
+        applies to a redaction: it enqueues no answer, so the epoch predicate
+        never blocks it, and it still owes real cleanup -- removing the
+        redacted request from durable turn and session state.
+
+        Sweeping it up with the rest would drop that work silently and leave
+        the redacted content readable in later context.
+        """
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        await admit_redaction(journal(bot), "$redaction", redacts="$cause")
+        assert sorted(await pending_ids(bot)) == ["$cause", "$redaction"]
+
+        await journal(bot).advance_membership_epoch(ROOM)
+
+        assert await pending_ids(bot) == ["$redaction"]
 
     async def test_a_retry_after_the_fence_neither_sends_nor_reoffers(self, tmp_path: Path) -> None:
         """The state a restart finds is terminal, so the model does not run again."""

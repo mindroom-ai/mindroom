@@ -154,10 +154,10 @@ def advance_membership_epoch(
         """,
         (principal_id, room_id),
     )
-    # Work still pending from the membership that just ended can never finish.
-    # Its answer would have to be enqueued, and enqueue refuses any turn whose
-    # admitted epoch is not the room's current one -- correctly, because that
-    # answer belongs to a conversation this bot is no longer in.
+    # Turn-backed work still pending from the membership that just ended can
+    # never finish. Its answer would have to be enqueued, and enqueue refuses
+    # any turn whose admitted epoch is not the room's current one -- correctly,
+    # because that answer belongs to a conversation this bot is no longer in.
     #
     # Leaving those rows pending makes the refusal permanent rather than final:
     # the worker offers the source again on every replay, the model runs again,
@@ -165,18 +165,29 @@ def advance_membership_epoch(
     # "cannot be answered" into "will not be attempted". The rows themselves
     # survive, as everything above does, because they are still the proof that
     # these events already had their one turn.
+    #
+    # Only the turn-backed kinds. A redaction, a reaction, an approval reply
+    # and a decryption failure do not enqueue an answer, so the epoch predicate
+    # never blocks them and none of them is unanswerable. A redaction in
+    # particular still owes real cleanup -- removing the redacted request from
+    # durable turn and session state -- and sweeping it up here would drop that
+    # work silently and let the redacted content survive in later context.
+    turn_backed = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
+    kind_placeholders = ", ".join("?" for _ in turn_backed)
     transaction.execute(
-        """
+        f"""
         UPDATE journal_events
         SET state = ?, outcome = ?, settled_at_ns = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND state = 'pending'
-        """,
+          AND kind IN ({kind_placeholders})
+        """,  # noqa: S608 - placeholders are generated, values are still bound
         (
             SETTLED_STATE,
             SettlementOutcome.INTENTIONALLY_IGNORED.value,
             time.time_ns(),
             principal_id,
             room_id,
+            *turn_backed,
         ),
     )
     return epoch
