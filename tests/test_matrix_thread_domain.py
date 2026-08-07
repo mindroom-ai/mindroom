@@ -353,7 +353,7 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
         relations=relations,
     )
 
-    assert impact == MutationThreadImpactState.THREADED
+    assert impact is MutationThreadImpactState.THREADED
 
 
 @pytest.mark.parametrize(
@@ -403,8 +403,7 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
         relations=relations,
     )
 
-    assert impact.state is MutationThreadImpactState.UNKNOWN
-    assert impact.thread_id is None
+    assert impact is MutationThreadImpactState.UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -427,8 +426,7 @@ async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_f
         relations=relations,
     )
 
-    assert impact.state is MutationThreadImpactState.UNKNOWN
-    assert impact.thread_id is None
+    assert impact is MutationThreadImpactState.UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -463,7 +461,7 @@ async def test_resolve_redaction_thread_impact_for_client_returns_room_level_for
         relations=relations,
     )
 
-    assert impact == MutationThreadImpactState.ROOM_LEVEL
+    assert impact is MutationThreadImpactState.ROOM_LEVEL
 
 
 @pytest.mark.asyncio

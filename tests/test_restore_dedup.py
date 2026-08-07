@@ -13,7 +13,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
 
 
-def _conversation_cache() -> AsyncMock:
+def _conversation_reader() -> AsyncMock:
     return AsyncMock()
 
 
@@ -79,7 +79,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     # recent past once-task is restored; invalid cron and cancelled cron are skipped
     assert restored == 1
@@ -115,7 +115,7 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     assert restored == 0
 
@@ -159,7 +159,7 @@ async def test_restore_marks_ancient_missed_task_failed_via_admin_when_active_wr
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        _conversation_cache(),
+        _conversation_reader(),
     )
 
     assert restored == 0
@@ -205,7 +205,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        _conversation_cache(),
+        _conversation_reader(),
     )
     assert restored == 1
     start_mock.assert_called_once()
@@ -251,7 +251,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         "!r:server",
         config,
         resolve_runtime_paths(process_env={}),
-        _conversation_cache(),
+        _conversation_reader(),
     )
 
     assert restored == 0

@@ -1928,11 +1928,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        get_thread_id_for_event = AsyncMock(
-            side_effect=lambda room_id, event_id: (
-                "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
-            ),
-        )
 
         def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
             return nio.RoomGetEventResponse.from_dict(
@@ -1998,11 +1993,6 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with (
-            patch.object(
-                unwrap_extracted_collaborator(bot._conversation_cache),
-                "get_thread_id_for_event",
-                get_thread_id_for_event,
-            ),
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
         ):
             await _dispatch_reaction(bot, room, event)

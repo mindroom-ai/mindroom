@@ -213,7 +213,7 @@ async def test_router_joins_rooms_on_start(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 

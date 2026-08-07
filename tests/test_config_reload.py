@@ -234,13 +234,6 @@ async def _noop_sync_mcp_manager(
     return set()
 
 
-async def _noop_sync_event_cache_service(
-    self: _MultiAgentOrchestrator,
-    config: Config,
-) -> None:
-    del self, config
-
-
 async def _noop_sync_runtime_support_services(
     self: _MultiAgentOrchestrator,
     config: Config,
@@ -301,10 +294,6 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",
         _noop_sync_mcp_manager,
-    )
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._sync_event_cache_service",
-        _noop_sync_event_cache_service,
     )
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_runtime_support_services",
@@ -1454,7 +1443,6 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
                 new=AsyncMock(side_effect=start_blocked_reload),
             ),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
@@ -2216,7 +2204,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2299,7 +2287,7 @@ async def test_router_updates_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2378,7 +2366,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2452,7 +2440,7 @@ async def test_team_room_changes_on_config_reload(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -2659,7 +2647,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 

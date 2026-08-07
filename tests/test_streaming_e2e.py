@@ -377,13 +377,10 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         # Access the bots
         helper_bot = orchestrator.agent_bots["helper"]
         calc_bot = orchestrator.agent_bots["calculator"]
-        empty_thread_history = thread_history_result([], is_full_history=True)
         empty_thread_snapshot = thread_history_result([], is_full_history=False)
-        helper_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
         helper_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=empty_thread_snapshot,
         )
-        calc_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
         calc_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
 
         # Ensure calculator bot has streaming disabled for this test

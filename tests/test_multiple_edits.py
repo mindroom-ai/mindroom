@@ -74,9 +74,6 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_journal_support(bot)
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
     bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )

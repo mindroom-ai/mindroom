@@ -75,9 +75,6 @@ def setup_test_bot(
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
     bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )

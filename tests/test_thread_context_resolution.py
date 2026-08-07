@@ -291,14 +291,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            context = await bot._conversation_resolver.extract_message_context(room, event)
+        context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -887,41 +880,30 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_explicit_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
         """Cyclic edit chains should fail closed instead of raising from the shared resolver."""
-        bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-        bot._conversation_resolver.deps.conversation_cache.get_event = AsyncMock(
-            side_effect=[
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "* a",
-                            "msgtype": "m.text",
-                            "m.new_content": {"body": "a", "msgtype": "m.text"},
-                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-b:localhost"},
-                        },
-                        "event_id": "$edit-a:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 1,
-                        "room_id": "!test:localhost",
-                        "type": "m.room.message",
+        cycle = {
+            "$edit-a:localhost": ("a", "$edit-b:localhost", 1),
+            "$edit-b:localhost": ("b", "$edit-a:localhost", 2),
+        }
+
+        async def fetch_cyclic_edit(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            body, replaces, timestamp = cycle[event_id]
+            return nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": f"* {body}",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": body, "msgtype": "m.text"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": replaces},
                     },
-                ),
-                nio.RoomGetEventResponse.from_dict(
-                    {
-                        "content": {
-                            "body": "* b",
-                            "msgtype": "m.text",
-                            "m.new_content": {"body": "b", "msgtype": "m.text"},
-                            "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-a:localhost"},
-                        },
-                        "event_id": "$edit-b:localhost",
-                        "sender": "@user:localhost",
-                        "origin_server_ts": 2,
-                        "room_id": "!test:localhost",
-                        "type": "m.room.message",
-                    },
-                ),
-            ],
-        )
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": timestamp,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            )
+
+        bot.client.room_get_event = AsyncMock(side_effect=fetch_cyclic_edit)
         event_info = EventInfo.from_event(
             {
                 "content": {
@@ -1018,26 +1000,19 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=list(dispatch_history),
         )
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            preview_context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            preview_context = preview_context_result.context
+        preview_context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        preview_context = preview_context_result.context
 
-            assert preview_context.is_thread is True
-            assert preview_context.thread_id == "$thread_root:localhost"
-            assert [message.event_id for message in preview_context.thread_history] == [
-                "$thread_root:localhost",
-                "$thread_msg:localhost",
-                "$plain1:localhost",
-            ]
-            assert preview_context.requires_model_history_refresh is False
-            bot.client.download.assert_not_awaited()
-            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
+        assert preview_context.is_thread is True
+        assert preview_context.thread_id == "$thread_root:localhost"
+        assert [message.event_id for message in preview_context.thread_history] == [
+            "$thread_root:localhost",
+            "$thread_msg:localhost",
+            "$plain1:localhost",
+        ]
+        assert preview_context.requires_model_history_refresh is False
+        bot.client.download.assert_not_awaited()
+        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_routes_bounded_full_reads_through_single_cache_entrypoint(
@@ -1074,15 +1049,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             messages=list(dispatch_history),
         )
 
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
@@ -1471,31 +1439,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "type": "m.room.message",
             },
         )
-        plain_response = nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {"body": "not a thread root", "msgtype": "m.text"},
-                "event_id": "$plain:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567880,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {"body": "not a thread root", "msgtype": "m.text"},
+                    "event_id": "$plain:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567880,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
         )
 
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value=None),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_event",
-                AsyncMock(return_value=plain_response),
-            ),
-        ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
 
         assert context.is_thread is False
         assert context.thread_id is None
@@ -1813,39 +1771,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             messages=list(thread_history),
         )
 
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_id_for_event",
-                AsyncMock(return_value=None),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_event",
-                AsyncMock(
-                    return_value=nio.RoomGetEventResponse.from_dict(
-                        {
-                            "content": {
-                                "body": "Root",
-                                "msgtype": "m.text",
-                            },
-                            "event_id": "$thread_root:localhost",
-                            "sender": "@user:localhost",
-                            "origin_server_ts": 1,
-                            "room_id": room_id,
-                            "type": "m.room.message",
-                        },
-                    ),
-                ),
-            ),
-        ):
-            thread_context = await bot._conversation_resolver._resolve_thread_context(
-                room_id,
-                incoming_event_id,
-                event_info,
-                mode=ThreadReadMode.ADVISORY_FULL,
-                caller_label="threading_error_test",
-            )
+        thread_context = await bot._conversation_resolver._resolve_thread_context(
+            room_id,
+            incoming_event_id,
+            event_info,
+            mode=ThreadReadMode.ADVISORY_FULL,
+            caller_label="threading_error_test",
+        )
 
         assert thread_context.is_thread is True
         assert thread_context.thread_id == "$thread_root:localhost"

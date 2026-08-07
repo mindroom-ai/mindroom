@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -45,7 +44,6 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -76,22 +74,6 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
             rooms=["!room:localhost"],
         ),
     )
-
-
-@asynccontextmanager
-async def _bind_shared_runtime_support(
-    orchestrator: _MultiAgentOrchestrator,
-    bots_by_name: dict[str, AgentBot],
-) -> AsyncIterator[None]:
-    orchestrator.agent_bots = dict(bots_by_name)
-    await orchestrator._runtime_support.event_cache.initialize()
-    for bot in bots_by_name.values():
-        orchestrator._bind_runtime_support_services(bot)
-        bot.orchestrator = orchestrator
-    try:
-        yield
-    finally:
-        await orchestrator._close_runtime_support_services()
 
 
 def _thread_root_event(
@@ -579,40 +561,6 @@ async def test_sync_join_section_reaches_call_manager(
         joined_room_ids={room_id},
         left_room_ids=set(),
     )
-
-
-@pytest.mark.asyncio
-async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
-    """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
-    bot = _agent_bot(tmp_path)
-    bot.client = AsyncMock()
-
-    message_event = nio.RoomMessageText.from_dict(
-        {
-            "content": {
-                "body": "Thread reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
-            },
-            "event_id": "$thread_msg:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234567890,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-        },
-    )
-    sync_response = MagicMock()
-    sync_response.__class__ = nio.SyncResponse
-    sync_response.rooms = MagicMock(
-        join={
-            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
-        },
-    )
-
-    bot._conversation_cache.cache_sync_timeline(sync_response)
-    await wait_for_background_tasks(timeout=1.0, owner=bot.event_cache_write_coordinator.background_task_owner)
-
-    bot.event_cache.store_events_batch.assert_awaited_once()
 
 
 @pytest.mark.asyncio

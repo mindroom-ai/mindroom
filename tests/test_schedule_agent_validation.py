@@ -45,7 +45,7 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
     return room
 
 
-def _conversation_cache() -> MagicMock:
+def _conversation_reader() -> MagicMock:
     return MagicMock()
 
 

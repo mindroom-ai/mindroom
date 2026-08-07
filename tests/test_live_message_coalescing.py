@@ -1123,9 +1123,6 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         reply_to_event_id="$thread-seed",
         server_timestamp=1001,
     )
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$thread-seed" else None,
-    )
     # The reply inherits its thread from the event it answers, so the journal
     # has to already place that event in one. Without it the walk reaches an
     # unhydrated candidate root instead, and unproven roots are refused a
@@ -1204,8 +1201,6 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
     async def get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
         return root_response(event_id)
 
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_event = AsyncMock(side_effect=get_event)
     bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         side_effect=TimeoutError("dispatch read timed out"),
     )
@@ -3588,9 +3583,6 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
         reply_to_event_id="$old-reply",
         body="room-level follow-up",
         server_timestamp=1001,
-    )
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$old-reply" else None,
     )
     batch = build_coalesced_batch(
         CoalescingKey(room.room_id, None, "@user:localhost"),

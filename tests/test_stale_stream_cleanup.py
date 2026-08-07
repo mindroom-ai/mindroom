@@ -3295,13 +3295,11 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.client = router_client
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
-    router_bot._conversation_cache = MagicMock()
     agent_client = AsyncMock(spec=nio.AsyncClient)
     agent_bot = MagicMock()
     agent_bot.agent_name = "test_agent"
     agent_bot.client = agent_client
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
-    agent_bot._conversation_cache = MagicMock()
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
@@ -3339,7 +3337,6 @@ async def test_orchestrator_recovery_still_cleans_when_router_is_unavailable(tmp
     agent_bot.agent_name = "test_agent"
     agent_bot.client = agent_client
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
-    agent_bot._conversation_cache = MagicMock()
     orchestrator.agent_bots = {"test_agent": agent_bot}
 
     with patch(

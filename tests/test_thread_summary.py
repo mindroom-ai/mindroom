@@ -683,7 +683,7 @@ class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
 
     @pytest.fixture(autouse=True)
-    def _conversation_cache(self) -> Iterator[None]:
+    def _conversation_reader(self) -> Iterator[None]:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_reader = make_conversation_reader_mock()
         # The pre-delivery pin guard reads from the homeserver; default "no pin".
@@ -2229,7 +2229,7 @@ class TestSendSummaryEvent:
 class TestSetManualThreadSummary:
     """Direct tests for the shared manual summary write path."""
 
-    async def test_sets_summary_and_updates_cache(self) -> None:
+    async def test_sets_summary_and_updates_reader(self) -> None:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
         client = _mock_client()
         conversation_reader = make_conversation_reader_mock()
@@ -2982,7 +2982,7 @@ class TestSummaryWritersLeavePinStateAlone:
         default there would silently release a pin the user had set.
         """
         client = _mock_client()
-        conversation_cache = MagicMock()
+        conversation_reader = MagicMock()
 
         await send_thread_summary_event(
             client,
@@ -2991,7 +2991,7 @@ class TestSummaryWritersLeavePinStateAlone:
             "Spawned session summary",
             1,
             "manual",
-            conversation_cache,
+            conversation_reader,
         )
 
         sent_content = client.room_send.await_args.kwargs["content"]
@@ -3001,7 +3001,7 @@ class TestSummaryWritersLeavePinStateAlone:
     async def test_explicit_decision_lands_in_sent_metadata(self, pinned: bool) -> None:
         """An explicit pin decision must reach the Matrix event, not just the call."""
         client = _mock_client()
-        conversation_cache = MagicMock()
+        conversation_reader = MagicMock()
 
         await send_thread_summary_event(
             client,
@@ -3010,7 +3010,7 @@ class TestSummaryWritersLeavePinStateAlone:
             "A deliberate title",
             1,
             "manual",
-            conversation_cache,
+            conversation_reader,
             pinned=pinned,
         )
 
@@ -3055,7 +3055,7 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     This drives the real send path, then recovers from exactly what was sent.
     """
     client = _mock_client()
-    conversation_cache = MagicMock()
+    conversation_reader = MagicMock()
 
     await send_thread_summary_event(
         client,
@@ -3064,7 +3064,7 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
         "A deliberate title",
         4,
         "manual",
-        conversation_cache,
+        conversation_reader,
         pinned=pinned,
     )
 
@@ -3084,7 +3084,7 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
 class TestPinLandingDuringGeneration:
     """A pin written while the model runs must supersede the in-flight summary."""
 
-    def _cache(self, source_history: list | None = None) -> AsyncMock:
+    def _reader(self, source_history: list | None = None) -> AsyncMock:
         # The guard must read from the homeserver, not through the projection:
         # a pin written by another runtime has not reached this one yet.
         return AsyncMock(return_value=source_history if source_history is not None else [])
@@ -3137,29 +3137,29 @@ class TestPinLandingDuringGeneration:
             *_make_thread_history(12),
             _make_summary_notice_message("$thread1", message_count=12, pinned=True),
         ]
-        conversation_cache = self._cache(source_history=pinned_at_source)
+        conversation_reader = self._reader(source_history=pinned_at_source)
 
         # Cache reads stay unpinned for the whole pass.
-        deliver = await self._run(conversation_cache, [unpinned, unpinned])
+        deliver = await self._run(conversation_reader, [unpinned, unpinned])
 
         deliver.assert_not_awaited()
-        conversation_cache.assert_awaited_once()
+        conversation_reader.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
         """The re-check must not suppress ordinary summaries."""
         unpinned = _make_thread_history(12)
 
-        deliver = await self._run(self._cache(source_history=list(unpinned)), [unpinned, unpinned])
+        deliver = await self._run(self._reader(source_history=list(unpinned)), [unpinned, unpinned])
 
         deliver.assert_awaited_once()
 
     async def test_recheck_failure_still_delivers(self) -> None:
         """A failed source re-read falls back to the pre-generation decision."""
         unpinned = _make_thread_history(12)
-        conversation_cache = AsyncMock(side_effect=RuntimeError("source read failed"))
+        conversation_reader = AsyncMock(side_effect=RuntimeError("source read failed"))
 
-        deliver = await self._run(conversation_cache, [unpinned, unpinned])
+        deliver = await self._run(conversation_reader, [unpinned, unpinned])
 
         deliver.assert_awaited_once()
 

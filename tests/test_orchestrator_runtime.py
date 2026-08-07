@@ -2901,15 +2901,10 @@ class TestMultiAgentOrchestrator:
         old_cards = MagicMock()
         router_cards = MagicMock()
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_cards=router_cards)}
-        support = SimpleNamespace(
-            event_cache=MagicMock(),
-            event_cache_write_coordinator=MagicMock(),
-        )
         store = initialize_approval_store(runtime_paths, cards=old_cards)
 
         try:
             with (
-                patch("mindroom.orchestrator.sync_owned_runtime_support", new=AsyncMock(return_value=support)),
                 patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):

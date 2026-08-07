@@ -773,30 +773,6 @@ class TestAgentBot(AgentBotTestBase):
         assert context is not None
         assert context.room is None
 
-    def test_agent_bot_init_does_not_resolve_cache_path_eagerly(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """AgentBot construction should not resolve cache paths before injected startup support is bound."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        config.cache = MagicMock()
-        config.cache.resolve_db_path.side_effect = AssertionError("cache path resolution should be lazy")
-
-        AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        config.cache.resolve_db_path.assert_not_called()
-
     def test_build_tool_runtime_context_returns_none_when_client_unavailable(
         self,
         mock_agent_user: AgentMatrixUser,

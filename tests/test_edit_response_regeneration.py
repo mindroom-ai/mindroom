@@ -4480,9 +4480,6 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-            return_value=thread_history_result([], is_full_history=True),
-        )
         bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
@@ -4593,9 +4590,6 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-            return_value=thread_history_result([], is_full_history=True),
-        )
         bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )

@@ -1695,7 +1695,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     fence_started = asyncio.Event()
     allow_fence_finish = asyncio.Event()
     fenced_room_ids: list[str] = []
-    invalidation_count = 0
     membership_updates: list[tuple[set[str], set[str]]] = []
 
     class BlockingStore(FencedRoomRecorder):
@@ -1707,11 +1706,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
             fence_started.set()
             await allow_fence_finish.wait()
             return await super().fence_departure(room_id, source=source)
-
-    async def invalidate() -> bool:
-        nonlocal invalidation_count
-        invalidation_count += 1
-        return True
 
     class CallManagerProbe:
         async def on_sync_room_membership(
@@ -1741,19 +1735,13 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     )
     bot._membership_fence.store = BlockingStore()
 
-    with patch.object(
-        bot._sync_checkpoint_trust,
-        "invalidate_for_cache_scope_cleanup",
-        new=invalidate,
-    ):
-        await _assert_sliding_cache_progress_stays_fresh(
-            bot,
-            response,
-            fence_started=fence_started,
-            allow_fence_finish=allow_fence_finish,
-        )
+    await _assert_sliding_cache_progress_stays_fresh(
+        bot,
+        response,
+        fence_started=fence_started,
+        allow_fence_finish=allow_fence_finish,
+    )
 
-    assert invalidation_count == 1
     assert fenced_room_ids == ["!kicked:localhost"]
     assert membership_updates == [
         ({"!joined:localhost"}, {"!kicked:localhost"}),
@@ -1772,7 +1760,7 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
     bot._sync_continuity_store.replace_checkpoint(
         SyncCheckpoint(
             "s_classic",
-            store_generation=bot.event_cache.store_generation,
+            store_generation=bot._sync_checkpoint_trust.store_generation,
         ),
     )
     error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
@@ -2061,7 +2049,6 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.mcp_servers = {}
         config.plugins = []
         config.cache = MagicMock()
-        config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
         config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config
@@ -2087,8 +2074,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
-        with patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()):
-            await orchestrator.initialize()
+        await orchestrator.initialize()
 
         # Manually simulate what start() does for sync tasks
         # (We can't actually run start() because it would block on gather())
@@ -2112,7 +2098,6 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     config.teams = {}
     config.mcp_servers = {}
     config.cache = MagicMock()
-    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
     orchestrator.config = config
 
     router_bot = AsyncMock()
@@ -2178,7 +2163,6 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     config.teams = {}
     config.mcp_servers = {}
     config.cache = MagicMock()
-    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
     orchestrator.config = config
 
     router_bot = AsyncMock()
@@ -2294,7 +2278,6 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
@@ -2381,7 +2364,6 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         old_config.teams = {}
         old_config.mcp_servers = {}
         old_config.cache = MagicMock()
-        old_config.cache.resolve_db_path.return_value = tmp_path / "event_cache-old.db"
         old_config.authorization = MagicMock()
         old_config.authorization.global_users = []
         orchestrator.config = old_config
@@ -2400,7 +2382,6 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         new_config.teams = {}
         new_config.mcp_servers = {}
         new_config.cache = MagicMock()
-        new_config.cache.resolve_db_path.return_value = tmp_path / "event_cache-new.db"
         new_config.authorization = MagicMock()
         new_config.authorization.global_users = []  # Add this for the logging
         mock_load_config.return_value = new_config
@@ -2539,7 +2520,6 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             for task in list(orchestrator._sync_tasks.values()):
                 task.cancel()
             await asyncio.gather(*orchestrator._sync_tasks.values(), return_exceptions=True)
-            await orchestrator._close_runtime_support_services()
 
         # --- assert: create_bot_for_entity called exactly once for "coach" ---
         coach_calls = [c for c in mock_create_bot.call_args_list if c[0][0] == "coach"]

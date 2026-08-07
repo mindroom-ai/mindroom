@@ -58,7 +58,7 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
 type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
-type __ThreadRootProofLookup = Callable[[str, str], Awaitable["_ThreadRootProof"]]
+type _ThreadRootProofLookup = Callable[[str, str], Awaitable["_ThreadRootProof"]]
 type _ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
@@ -72,7 +72,7 @@ class _SupportsEventId(Protocol):
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
 
 
-class __ThreadRootProofState(Enum):
+class _ThreadRootProofState(Enum):
     """Outcome of proving whether one candidate event is a real thread root."""
 
     PROVEN = auto()
@@ -84,19 +84,19 @@ class __ThreadRootProofState(Enum):
 class _ThreadRootProof:
     """Result of one thread-root proof attempt."""
 
-    state: __ThreadRootProofState
+    state: _ThreadRootProofState
     error: Exception | None = None
     thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
     def proven(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> _ThreadRootProof:
         """Return a successful root proof."""
-        return cls(__ThreadRootProofState.PROVEN, thread_history=thread_history)
+        return cls(_ThreadRootProofState.PROVEN, thread_history=thread_history)
 
     @classmethod
     def not_a_thread_root(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> _ThreadRootProof:
         """Return a definite non-thread-root result."""
-        return cls(__ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
+        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
 
     @classmethod
     def proof_unavailable(
@@ -105,7 +105,7 @@ class _ThreadRootProof:
         thread_history: Sequence[_SupportsEventId] | None = None,
     ) -> _ThreadRootProof:
         """Return one failed proof attempt without weakening caller policy."""
-        return cls(__ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
+        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
 
 
 class ThreadResolutionState(Enum):
@@ -184,7 +184,7 @@ class ThreadMembershipAccess:
 
     lookup_thread_id: _ThreadIdLookup
     fetch_event_info: _EventInfoLookup
-    prove_thread_root: __ThreadRootProofLookup
+    prove_thread_root: _ThreadRootProofLookup
 
 
 def _conversation_relation_thread_membership_access(
@@ -221,9 +221,9 @@ def _resolution_from_root_proof(
     proof: _ThreadRootProof,
 ) -> ThreadResolution:
     """Convert one root proof result into canonical thread membership."""
-    if proof.state is __ThreadRootProofState.PROVEN:
+    if proof.state is _ThreadRootProofState.PROVEN:
         return ThreadResolution._threaded(thread_root_id, thread_history=proof.thread_history)
-    if proof.state is __ThreadRootProofState.NOT_A_THREAD_ROOT:
+    if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
         return ThreadResolution.room_level(thread_history=proof.thread_history)
     assert proof.error is not None
     return ThreadResolution._indeterminate(

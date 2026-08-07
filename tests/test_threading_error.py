@@ -1,4 +1,4 @@
-"""End-to-end threading integration tests (see test_thread_* and test_bot_sync_event_cache for split concerns)."""
+"""End-to-end threading integration tests (see test_thread_* for split concerns)."""
 
 from __future__ import annotations
 
@@ -74,7 +74,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache.get_thread_events.return_value = None
 
         # Initialize the bot (to set up components it needs)
 
@@ -149,7 +148,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache.get_thread_events.return_value = None
 
         # Initialize response tracking
 
@@ -600,7 +598,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache.get_thread_events.return_value = None
 
         # Initialize response tracking
 
