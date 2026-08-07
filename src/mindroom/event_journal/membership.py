@@ -130,24 +130,39 @@ class MembershipFence:
             self._report_deadlines.setdefault(room_id, _OWED_REPORT_SYNC_RESPONSES)
 
     async def _recover_owed_reports(self) -> None:
-        """Give reports owed by a previous process a window in this one."""
+        """Give reports owed by a previous process a window in this one.
+
+        Marked done only once the read came back. A read that failed recovered
+        nothing, and treating it as done would leave every debt this process
+        inherited with no window to expire in -- durable debt that no longer
+        has an in-memory countdown is never retired, and the next genuine
+        departure of that room is absorbed by it instead of being fenced.
+        """
         if self._recovered_owed_reports:
             return
+        owed = await self.store.rooms_owing_departure_reports()
         self._recovered_owed_reports = True
-        for room_id in await self.store.rooms_owing_departure_reports():
+        for room_id in owed:
             self._report_deadlines.setdefault(room_id, _OWED_REPORT_SYNC_RESPONSES)
 
     async def _expire_unarrived_reports(self) -> None:
-        """Spend one sync response of every owed report's window."""
+        """Spend one sync response of every owed report's window.
+
+        A window is dropped only after the durable retirement it pairs with
+        commits. Dropping it first would leave the debt in the journal with
+        nothing left to retire it, which is the same permanent absorption a
+        failed recovery causes; keeping the expired window means the next sync
+        response simply asks again.
+        """
         expired = []
         for room_id, remaining in tuple(self._report_deadlines.items()):
             if remaining > 1:
                 self._report_deadlines[room_id] = remaining - 1
                 continue
-            del self._report_deadlines[room_id]
             expired.append(room_id)
         for room_id in expired:
             await self.store.retire_owed_departure_reports(room_id)
+            self._report_deadlines.pop(room_id, None)
             logger.info("journal_membership_report_retired", room_id=room_id)
 
     def _log(self, room_id: str, outcome: DepartureOutcome) -> None:

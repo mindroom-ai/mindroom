@@ -40,11 +40,17 @@ class RecordingStore:
     ``fails_next_fence`` models a durable advance that never commits, which is
     the case the process-local marker got wrong: it recorded the debt first, so
     a failed advance left the departure with no fence at all.
+
+    ``fails_next_owed_report_read`` and ``fails_next_retirement`` model the two
+    other durable operations the same marker discipline applies to: the read
+    that recovers inherited debt, and the write that retires it.
     """
 
     principal: PrincipalStore
     advanced: list[str] = field(default_factory=list)
     fails_next_fence: BaseException | None = None
+    fails_next_owed_report_read: BaseException | None = None
+    fails_next_retirement: BaseException | None = None
 
     async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
         """Apply one departure observation, recording the ones that invalidated."""
@@ -63,10 +69,18 @@ class RecordingStore:
 
     async def retire_owed_departure_reports(self, room_id: str) -> None:
         """Forget reports that can no longer arrive."""
+        failure = self.fails_next_retirement
+        if failure is not None:
+            self.fails_next_retirement = None
+            raise failure
         await self.principal.retire_owed_departure_reports(room_id)
 
     async def rooms_owing_departure_reports(self) -> frozenset[str]:
         """Return rooms whose local departure is still owed a report."""
+        failure = self.fails_next_owed_report_read
+        if failure is not None:
+            self.fails_next_owed_report_read = None
+            raise failure
         return await self.principal.rooms_owing_departure_reports()
 
 
@@ -367,6 +381,62 @@ async def test_a_retired_report_is_forgotten_durably(
     restarted = MembershipFence(store=store)
     await restarted.note_membership_restarted(ROOM)
     await restarted.fence_reported_departures([ROOM])
+
+    assert store.advanced == [ROOM, ROOM]
+
+
+async def test_a_failed_recovery_of_inherited_debt_is_tried_again(
+    membership: MembershipFence,
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A store read that failed recovered nothing, so recovery is still owed.
+
+    Debt inherited from a previous process is only ever retired by the window
+    this recovery hands it. Treating a failed read as a completed one loses
+    that window for the life of the process, and the debt it left behind goes
+    on to absorb the room's next genuine departure.
+    """
+    await membership.fence_local_departure(ROOM)
+
+    restarted = MembershipFence(store=store)
+    store.fails_next_owed_report_read = RuntimeError("durable read failed")
+    with pytest.raises(RuntimeError, match="durable read failed"):
+        await sync_response_without_departures(restarted)
+
+    await sync_response_without_departures(restarted)
+    await sync_response_without_departures(restarted)
+    assert await principal.rooms_owing_departure_reports() == frozenset()
+
+    await restarted.note_membership_restarted(ROOM)
+    await restarted.fence_reported_departures([ROOM])
+
+    assert store.advanced == [ROOM, ROOM]
+
+
+async def test_a_failed_retirement_is_tried_again(
+    membership: MembershipFence,
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A retirement that never committed leaves the debt, so its window must stay.
+
+    Spending the window on a write that failed retires nothing and leaves
+    nothing that ever will, so the debt outlives the departure it belongs to
+    and swallows the next one.
+    """
+    await membership.fence_local_departure(ROOM)
+    await sync_response_without_departures(membership)
+
+    store.fails_next_retirement = RuntimeError("durable retirement failed")
+    with pytest.raises(RuntimeError, match="durable retirement failed"):
+        await sync_response_without_departures(membership)
+
+    await sync_response_without_departures(membership)
+    assert await principal.rooms_owing_departure_reports() == frozenset()
+
+    await membership.note_membership_restarted(ROOM)
+    await membership.fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
 
