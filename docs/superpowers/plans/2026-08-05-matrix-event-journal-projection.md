@@ -44,7 +44,23 @@ One owner is nevertheless possible, and this is unfinished work rather than an i
 
 Export now walks with its own far larger bounds. There is still one walk and one reducer — a second Matrix interpreter is what that module exists to prevent — and the bounds are still finite, because a runaway guard that never fires is not a guard: a thread past even these is reported as too large to write honestly rather than silently truncated. Pinned by `test_export_does_not_inherit_the_prompt_window`, which fails `assert 2000 > 2000` if the bounds are inherited again.
 
-**Known-open, deliberately not in this PR:** `matrix_conversation` tool room reads never collapse edits. It predates this work and is not made worse by it.
+### Known open, with evidence
+
+Every item here was validated against the code, not accepted from a review. None removes a capability the branch had before; the export regression, which did, was fixed. They are listed with their fix direction so the next person does not re-derive them.
+
+**Approval-card sends are the last visible send outside the outbox.** `approval_manager.py` sends the card, then writes its durable row (`:584` then `:612`). A cancellation or crash in that gap leaves a clickable card no restart can see: no expiry edit, and a later click finds neither a live waiter nor a stored card. `origin/main` recovered these by scanning the event cache for original approval events, and this branch deleted that discovery path.
+
+The cheap fix does not work, and this is worth recording because it looks obviously right. Shielding the durable write so cancellation cannot skip it makes the row land — a probe confirms the window is real, `assert [] == ['$approval']` without it — but it breaks five existing tests, because cancellation propagating *immediately* is what drives the expiry path. Suppressing it converts a cancelled approval into an approved one, which is worse than the orphaned card.
+
+The correct fix is structural: an approval card is a visible Matrix send, and this branch already has exactly one durable owner for those. Routing it through the response outbox gives it claim-before-send, a deterministic transaction ID, and recovery — the same guarantees every other visible send now has. That makes it the unfinished remainder of the delivery cutover rather than an approval-subsystem patch, which is also why it does not belong in a late patch to this PR.
+
+**Two payload divergences on the delivery path.** `_finalize_visible_replacement_edit` builds an `EditTextRequest` with no `delivery_turn_id`, so the final streamed transform edits outside the outbox after the `FINAL` row is acknowledged: the durable row holds raw text while the room shows transformed, and a crash between them leaves the room raw. Separately, an oversized terminal delivery uploads its sidecar after the claim, so the frozen payload lacks the MXC the wire carries. Both are the same class — the durable record and the wire event disagree — and both want the wire payload prepared before the enqueue.
+
+**Outbox idempotency rests on an unmeasured assumption.** Recovery retries under the same transaction ID but persists neither the sending device nor a retry horizon, so a re-login or a server that has expired its transaction mapping can turn one row into two visible answers.
+
+**Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization; the fix is to own one store at the orchestrator and inject principal views. And "is this turn finished?" is answered by both journal pending state and the `TurnStore` handled ledger, which live in different substrates and cannot share a transaction — load-bearing today, reachable by moving `TurnRecord` into the journal.
+
+**Predates this work:** `matrix_conversation` tool room reads never collapse edits. Not made worse by it.
 
 ### What replaced `main`'s gap markers
 
