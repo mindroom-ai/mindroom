@@ -7,6 +7,7 @@ backend is a rule MindRoom does not actually have.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -25,6 +26,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
     SettlementOutcome,
+    TerminalTurnWrite,
     delivery_transaction_id,
 )
 from mindroom.event_journal.schema import (
@@ -1466,6 +1468,61 @@ class TestMembershipEpoch:
 
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
+
+    async def test_a_losing_acknowledgement_writes_neither_the_row_nor_the_record(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """First-writer-wins has to cover the record travelling beside the row.
+
+        The acknowledgement is the proof of which event is visible, and the
+        terminal record is written from that same proof. If a second caller
+        loses the row but still writes its record, the outbox names one event
+        and the record names another -- which is the disagreement putting them
+        in one transaction was supposed to make impossible.
+
+        Against a real store on both backends, because the guard this pins is a
+        property of the SQL statement. A fake outbox cannot observe it: the
+        gateway tests inject one, the turn-store tests only build the record,
+        and every one of them stays green with the guard removed.
+        """
+        alice = journal_store.principal("agent@alice")
+        await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        def record(event_id: str) -> TerminalTurnWrite:
+            return TerminalTurnWrite(
+                agent_name="general",
+                index_event_ids=("$source",),
+                anchor_event_id="$source",
+                record_json=json.dumps({"response_event_id": event_id}),
+            )
+
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$first",
+            terminal_turn=record("$first"),
+        )
+        await alice.acknowledge_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$second",
+            terminal_turn=record("$second"),
+        )
+
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$first", "the row was rebound by a losing caller"
+        rows = await journal_store.turn_records("general").load_all()
+        assert [json.loads(row[2])["response_event_id"] for row in rows] == ["$first"], (
+            "the losing caller rewrote the terminal record beside the row it did not win"
+        )
 
     async def test_the_transaction_id_is_derived_not_random(self) -> None:
         """The transaction id is derived not random."""

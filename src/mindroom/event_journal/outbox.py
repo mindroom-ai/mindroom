@@ -198,24 +198,25 @@ def acknowledge(
     here -- and anything it wanted to write *beside* the acknowledgement must
     not be written either. A losing caller that carried on would leave the row
     naming one event and whatever it wrote naming another.
+
+    The conditional update reports its own ownership through ``RETURNING``,
+    which is the only way this answer is trustworthy. Reading the column first
+    and then updating it looks equivalent and is not: two processes against one
+    PostgreSQL database can both read a null, and the loser's update then
+    matches zero rows while it still believes it won. Reproduced with two
+    stores on one database -- both returned success, the outbox named the first
+    event and the terminal record named the second. Only the writing statement
+    knows whether it wrote.
     """
-    row = transaction.fetchone(
-        """
-        SELECT acknowledged_event_id FROM response_outbox
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
-        """,
-        (principal_id, turn_id, stage.value),
-    )
-    if row is None or row["acknowledged_event_id"] is not None:
-        return False
-    transaction.execute(
+    bound = transaction.fetchone(
         """
         UPDATE response_outbox SET acknowledged_event_id = ?
         WHERE principal_id = ? AND turn_id = ? AND stage = ? AND acknowledged_event_id IS NULL
+        RETURNING turn_id
         """,
         (event_id, principal_id, turn_id, stage.value),
     )
-    return True
+    return bound is not None
 
 
 def unacknowledged(
