@@ -222,6 +222,42 @@ async def test_an_unconvergent_rebuild_escapes_and_certifies_forward(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_permanently_wedged_room_keeps_advancing_the_watermark(tmp_path: Path) -> None:
+    """A room that can never be rebuilt must not freeze the checkpoint forever.
+
+    One escape only proves the first skip lands. The freeze this guards against
+    is the cycle after it: the skip certifies a checkpoint, the client restarts
+    from it, the same room fails again, and the principal must keep moving. So
+    this drives many rounds and asserts the durable token advanced every time,
+    by value, rather than that any single response was certified.
+    """
+    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    trust = _trust(tmp_path)
+    assert await trust.prepare_startup() == _STUCK
+
+    rounds = 4
+    certified_tokens = []
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT * rounds):
+        state, _reset = await _certify_unrecovered(
+            trust,
+            next_batch=f"s_live_{attempt}",
+            unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
+        )
+        if state is SyncTrustState.CERTIFIED:
+            durable = load_sync_checkpoint(tmp_path, "code")
+            assert durable is not None
+            certified_tokens.append(durable.token)
+
+    # One escape per full stall window, each from the checkpoint the previous
+    # escape established, so the watermark never stops moving.
+    assert certified_tokens == [
+        f"s_live_{window * _CLASSIC_SYNC_RECOVERY_STALL_LIMIT + _CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
+        for window in range(rounds)
+    ]
+    assert trust.retry_token() == certified_tokens[-1]
+
+
+@pytest.mark.asyncio
 async def test_a_checkpoint_that_advances_between_failures_never_escapes(tmp_path: Path) -> None:
     """A rebuild whose checkpoint keeps moving is progress and must never skip history."""
     save_sync_token(tmp_path, "code", "s_start", cache_generation=_CACHE_GENERATION)
