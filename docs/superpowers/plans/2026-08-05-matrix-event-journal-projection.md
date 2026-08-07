@@ -163,7 +163,17 @@ Giving the journal backends a dedicated executor breaks the cycle -- verified wi
 
 So the honest shape of step 2 is an async conversion, not a bridge. `update_handled_turn` becomes awaitable and the queue, the barrier futures, the retry timer, the dedicated executor and `wait_for_persist` all delete with it -- awaiting *is* the durability wait, which is roughly 300 lines removed rather than ten added. The cost the earlier note omitted: 32 call sites across 9 public writers, of which only 5 are already inside `asyncio.to_thread`, plus sync callbacks (`turn_controller.py:1796-1804`, `edit_regenerator.py:333`) that are handed to the response machinery and would have to become async callbacks, changing the signatures that invoke them on the hottest path in the runtime.
 
-That is a phase, not a step, and it is the one place where being wrong answers a user twice. It should land on its own, gated on the live fuzz's `_assert_no_wrong_replies` -- see the note below on which number actually catches a duplicate. What is *not* affected by any of this is the table itself: `turn_records` has the same shape under either write path, and it ships empty, so a shape the consuming phase disagrees with is a drop and recreate rather than a migration. Step 1 stands rather than being reverted.
+That is a phase, not a step, and it is the one place where being wrong answers a user twice. It is gated on the live fuzz's `_assert_no_wrong_replies` -- see the note below on which number actually catches a duplicate.
+
+**The conversion is written, and the measured cost is nothing like the estimate above.** Production is **+332 −581, net −249**, with `handled_turns.py` going 1053 → 804 and exactly one file growing. The estimate of "32 call sites" was right in kind and the reason it stayed that small is worth stating: only *writes* became awaitable. The hundred-odd synchronous reads were left alone by keeping the in-memory map and populating it once, so the conversion never reached them.
+
+That choice has one consequence that had to be paid for rather than assumed. A synchronous read can no longer lazily load, so an unloaded read raises instead of answering. Returning "no record" would have been the worst possible wrong answer: it reads as "this turn was never handled", which is precisely how a bot answers a message twice.
+
+Three defects surfaced in the conversion, all of which the estimate had no way to predict:
+
+- 🔒 The first version read only the new table, which would have made every existing installation re-answer its entire backlog on upgrade -- all of its terminal truth is in a JSON file the new code never opened. Now imported once, through the same codec that writes the rows.
+- Shared in-memory state was keyed by agent name alone, so two ledgers over different databases aliased and the second answered "handled" from rows it had never held.
+- Memory was published before the row committed with no way back, so a write that failed left the map claiming a record the database did not have -- correct until a restart, and a duplicate answer after one. The publication is now rolled back on failure, and cleanup inverts the order for the same reason: deleting before forgetting can only suppress a duplicate, while forgetting first can cause one.
 
 Why it must land atomically: a half-migrated dedupe substrate answers users twice.
 
@@ -907,19 +917,13 @@ They are gates on phase 3, not on the phases before it.
 
 - One pending-event worker and one outbox recovery path: **holds today.**
 - No cache repair, certification, or gap machinery in the replacement: **holds today.**
-- No duplicate "should this event run?" authority: **does not hold** until contract 2 lands, because the journal and `TurnStore` both currently gate execution.
-- Bounded prompt reads: **holds at the SQL API, not end-to-end.** Every projection read takes a limit, but a strict read of a thread that has never been hydrated triggers an unbounded recursive relation walk first. See contract 6.
-- Materially fewer production lines: **still does not hold, and it went backwards again.**
-  Re-measured at `262f1f7d8`: `git diff --numstat origin/main -- src/mindroom` reports +8,796 / −4,856, a net of **+3,940 production lines**. The recorded history of this row is +2,624, then +2,754, now +3,940, and every step was in the wrong direction.
-  That is not a contradiction, it is the shape of a cutover measured honestly: the replacements for the read path, the relation lookup, the transport-progress policy, the export pagination, and the sync escape all landed as additions, while the thing they replace is still standing. The most recent 1,200 lines are correctness machinery the reviews demanded — the exactly-once membership fence, in-flight epoch fencing, bounded thread hydration, the durable input snapshot — none of which deletes anything.
-  What is still standing, measured rather than estimated at this HEAD: `matrix/cache/` is 10,874 lines, and `conversation_cache.py` plus the cache trust and certification owners are another 1,571, so **12,445 lines** are queued for deletion behind phase 8f.
-  Against 4,078 lines of `event_journal/`, the gate is still satisfiable, and by a wide margin: collecting 8f moves this row to roughly −8,500. But 8f is paused on purpose, so the number will keep drifting upward until it lands, and reading that drift as failure would be reading the wrong thing.
-  What would be a real failure is the replacement growing faster than the thing it replaces. It is not: `event_journal/` grew 576 lines while the cache did not shrink at all, because the cache is frozen pending deletion rather than being maintained in parallel.
-  This row has now been wrong in the optimistic direction twice. It stays "does not hold" until the deletion is in the diff, and it should not be restated as anything else before then.
-
-The edge cases that must each stay inside one owner are crash boundaries, edit-before-original, redaction-before-original, current-edit redaction, membership re-entry, sidecar plaintext, approvals, and send-acknowledgement-before-echo.
-If handling one of them needs changes in several owners, the boundary is wrong and gets reconsidered rather than coordinated around.
-
+- No duplicate "should this event run?" authority: **now holds.** Contract 2 landed -- the handoff is durable outbox enqueue and enqueue-and-settle is one transaction -- and the second half followed when turn records moved into the journal database, so the terminal record and the settlement of the sources it answers commit together. The startup pass that used to rejoin them (`delivered_turn_repair.py`) is deleted rather than kept, which is the check that this is a collapse and not another reconciliation.
+- Bounded prompt reads: **now holds end-to-end.** Every projection read takes a limit, and the thread walk that used to be unbounded behind a strict read now carries the same bounds as the room walk: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` caps the raw relation tree that streaming makes an order of magnitude larger than the message count. See contract 6.
+- Materially fewer production lines: **now holds.**
+  Measured at this HEAD: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +12,827 / -21,475, a net of **-8,648 production lines**. The whole branch is -26,682.
+  The recorded history of this row was +2,624, then +2,754, then +3,940, and every step was in the wrong direction -- because the replacements landed as additions while the thing they replace was still standing. It turned when `matrix/cache/` was deleted, which is exactly where the earlier notes said the turn would come from.
+  Read the direction of travel rather than the level, though: production has grown **+1,658** since the cache deletion itself, and that growth is real. Some of it is the replacement finishing (the outbox, the projection, hydration), and some is correctness machinery the reviews demanded. Two known deletions are still queued behind other work: `history_debt.py` (187) and `sync_recovery_escape.py` (98) go when `mindroom-nio` ships per-room continued recovery.
+  This row was wrong in the optimistic direction twice before. It is stated as holding now only because the deletion is in the diff and the number is reproducible from the command above.
 ## One-PR Implementation Sequence
 
 ### 0. mindroom-nio prerequisite
