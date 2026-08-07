@@ -96,21 +96,25 @@ async def sync_response_without_departures(membership: MembershipFence) -> None:
 async def test_a_local_departure_fences_immediately(
     membership: MembershipFence,
     store: RecordingStore,
+    principal: PrincipalStore,
 ) -> None:
     """A local departure fences immediately, without waiting for sync."""
     await membership.fence_local_departure(ROOM)
 
     assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
 
 
 async def test_a_sync_reported_departure_fences(
     membership: MembershipFence,
     store: RecordingStore,
+    principal: PrincipalStore,
 ) -> None:
     """A departure the bot did not initiate still fences."""
     await membership.fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
 
 
 async def test_the_echo_of_a_local_departure_does_not_fence_again(
