@@ -110,7 +110,7 @@ from tests.conftest import (
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from pathlib import Path
 
 
@@ -1184,7 +1184,14 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
 
 @pytest.mark.asyncio
 async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(tmp_path: Path) -> None:
-    """Unproven roots should not be admitted as canonical room-level coalescing keys."""
+    """Unproven roots should not be admitted as canonical room-level coalescing keys.
+
+    An unhydrated candidate is ordinarily repaired by a strict read, so the
+    homeserver here refuses the relation walk that repair depends on: it serves
+    ``$root-a`` but will not say what relates to it. That leaves the candidate
+    genuinely unprovable, which is the only state in which admitting anything
+    would mean guessing the key the batch is formed under.
+    """
     bot = _make_bot(tmp_path)
     room = _make_room()
     reply_a = _reply_event(
@@ -1200,26 +1207,11 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         body="root a",
     )
 
-    def root_response(event_id: str) -> nio.RoomGetEventResponse:
-        return nio.RoomGetEventResponse.from_dict(
-            {
-                "content": {"body": event_id, "msgtype": "m.text"},
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 999,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
+    async def refuse_relations(**_kwargs: object) -> AsyncIterator[nio.Event]:
+        raise nio.InsufficientRecursionDepthError(required=0, reported=None)
+        yield  # pragma: no cover - unreachable, keeps this an async generator
 
-    async def get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-        return root_response(event_id)
-
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-    bot._turn_controller.deps.resolver.deps.conversation_cache.get_event = AsyncMock(side_effect=get_event)
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
-        side_effect=TimeoutError("dispatch read timed out"),
-    )
+    bot.client.room_get_event_relations = MagicMock(side_effect=refuse_relations)
     calls: list[list[str]] = []
 
     async def record_dispatch(

@@ -36,6 +36,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
+    ThreadResolution,
     ThreadResolutionState,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
@@ -517,20 +518,29 @@ class ConversationResolver:
                 event_info,
                 fallback_root_event_id=event.event_id,
             )
-        try:
-            resolution = await resolve_event_thread_membership(
-                room.room_id,
+        resolution = await self._coalescing_thread_resolution(
+            room,
+            event,
+            event_info,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            caller_label="coalescing_thread_id",
+        )
+        if resolution.state is ThreadResolutionState.INDETERMINATE and resolution.candidate_thread_root_id is not None:
+            # A dispatch-safe read cannot prove a root in a conversation it has
+            # never hydrated, and a plain reply to an unthreaded message is the
+            # ordinary way to reach one. Unlike thread-context resolution, which
+            # repairs an unproven candidate a moment later, coalescing has no
+            # later stage to correct a wrong key in -- the batch is formed here.
+            # So the same repair happens here, and it costs nothing extra: it is
+            # the walk this turn was about to do anyway, and `ensure_hydrated`
+            # shares one of those per conversation.
+            resolution = await self._coalescing_thread_resolution(
+                room,
+                event,
                 event_info,
-                event_id=event.event_id,
-                access=self._thread_membership_access(
-                    mode=ThreadReadMode.DISPATCH_SNAPSHOT,
-                    caller_label="coalescing_thread_id",
-                    requires_complete_history=True,
-                ),
+                mode=ThreadReadMode.STRICT_FULL,
+                caller_label="coalescing_thread_id_strict_candidate_fallback",
             )
-        except Exception as exc:
-            msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
-            raise ThreadMembershipLookupError(msg) from exc
         if resolution.state is ThreadResolutionState.THREADED:
             return resolution.thread_id
         if resolution.state is ThreadResolutionState.ROOM_LEVEL:
@@ -539,6 +549,31 @@ class ConversationResolver:
         if resolution.error is not None:
             raise ThreadMembershipLookupError(msg) from resolution.error
         raise ThreadMembershipLookupError(msg)
+
+    async def _coalescing_thread_resolution(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | MatrixMediaEvent,
+        event_info: EventInfo,
+        *,
+        mode: ThreadReadMode,
+        caller_label: str,
+    ) -> ThreadResolution:
+        """Resolve one event's coalescing membership under one read mode."""
+        try:
+            return await resolve_event_thread_membership(
+                room.room_id,
+                event_info,
+                event_id=event.event_id,
+                access=self._thread_membership_access(
+                    mode=mode,
+                    caller_label=caller_label,
+                    requires_complete_history=True,
+                ),
+            )
+        except Exception as exc:
+            msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
+            raise ThreadMembershipLookupError(msg) from exc
 
     async def _explicit_thread_id_for_event(
         self,

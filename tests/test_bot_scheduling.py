@@ -1757,7 +1757,6 @@ class TestRouterSkipsSingleAgent:
         bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
             "$thread_root",
-            source_event_id=event.event_id,
             caller_label="router_pre_ingress_skip",
         )
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
