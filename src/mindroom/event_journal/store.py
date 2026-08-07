@@ -682,7 +682,25 @@ def _repay_history_debt(
     reached_ts: int | None,
     expected_membership_epoch: int,
 ) -> HistoryDebtOutcome:
-    """Install a repayment walk as the room conversation's hydration, and settle."""
+    """Install a repayment walk as the room conversation's hydration, and settle.
+
+    Both effects are gated on the debt this walk was launched with still being
+    the outstanding one, checked here in the same transaction that applies them.
+    Concurrent readers of an indebted room can each end up carrying a snapshot:
+    one reads the debt, a second reads it before the first settles, and the
+    shared-task map cannot join a walk that has already finished. The loser then
+    arrives with an answer to a question nobody is asking, and neither effect is
+    harmless -- its shorter walk would replace a room conversation the winner
+    just installed in full, and `settle` would stamp permanent, sticky loss on a
+    room that was repaid seconds earlier.
+
+    The check is a compare-and-set on the exact anchor rather than a presence
+    test, so a *later* gap recorded over the top is superseding too: its debt is
+    a different question, and this walk did not answer it.
+    """
+    current = history_debt.outstanding(transaction, principal_id, debt.room_id)
+    if current is None or current.owed_through_ts != debt.owed_through_ts:
+        return HistoryDebtOutcome.SUPERSEDED
     if not _install_hydration(
         transaction,
         principal_id,

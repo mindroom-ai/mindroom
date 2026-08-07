@@ -713,3 +713,43 @@ async def test_every_skipped_room_is_written_down_and_only_a_holed_one_owes(
     assert recorded == [(OTHER_ROOM, None), (ROOM, 1_000)]
     assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000)
     assert await alice.room_history_debt(OTHER_ROOM) is None
+
+
+async def test_a_walk_carrying_a_settled_debt_changes_nothing(alice: PrincipalStore) -> None:
+    """A repayment whose debt another walk already settled must not land.
+
+    Two readers of an indebted room can each be holding a debt snapshot: one
+    reads it, a second reads it before the first settles, and the shared-task
+    map cannot be joined to a walk that has already finished. The loser then
+    arrives with an answer to a question nobody is asking any more.
+
+    Neither of its effects is harmless. Its shorter walk would replace the room
+    conversation the winner installed in full, and ``settle``'s loss branch is
+    sticky -- it would stamp permanent history loss on a room that was repaid
+    seconds earlier, which makes every later completeness question answer no and
+    fails every thread export for that membership, forever, with no outstanding
+    debt left to send any read back to the server.
+    """
+    await admit_all(alice, [raw("$old", "old", ts=1_000)])
+    debt = await alice.record_room_history_debt(ROOM)
+    assert debt is not None
+
+    client = FakeClient(pages=[[raw("$gap", "gap", ts=1_000)]])
+    await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+    assert await alice.room_history_debt(ROOM) is None
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+
+    # The loser: same debt object, a walk that never reaches the anchor.
+    outcome = await alice.repay_room_history_debt(
+        debt,
+        events=(),
+        complete=False,
+        reached_ts=9_000,
+        expected_membership_epoch=await alice.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryDebtOutcome.SUPERSEDED
+    # The repaid room is untouched: not lost, still complete, still readable.
+    assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert await bodies(alice) == ["gap", "old"]
