@@ -642,6 +642,23 @@ _LEGACY_TABLE_DDL = (
         PRIMARY KEY (principal_id, room_id)
     )
     """,
+    """
+    CREATE TABLE response_outbox (
+        principal_id TEXT NOT NULL, turn_id TEXT NOT NULL, stage TEXT NOT NULL,
+        room_id TEXT NOT NULL, thread_id TEXT NOT NULL, transaction_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL, edits_event_id TEXT,
+        attempted INTEGER NOT NULL DEFAULT 0, acknowledged_event_id TEXT,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, turn_id, stage)
+    )
+    """,
+    """
+    CREATE TABLE conversation_hydration (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, thread_id)
+    )
+    """,
 )
 
 

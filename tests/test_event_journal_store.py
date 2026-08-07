@@ -997,6 +997,51 @@ class TestSchemaUpgrade:
         finally:
             await store.close()
 
+    async def test_an_outbox_predating_the_sending_device_column_still_delivers(
+        self,
+        legacy_journal_store: EventJournalStore,
+    ) -> None:
+        """The upgrade has to reach the outbox, not just the tables it shipped with.
+
+        Every statement the delivery path runs names ``sending_device_id``, so
+        a database created before that column stops delivering entirely if the
+        add does not run -- and it runs through a different mechanism on each
+        backend, one guarding the add itself and the other inspecting the
+        existing columns.
+
+        The row that comes back reads the new column as NULL, which is the
+        answer the resend guard is built to accept: unknown device, resend as
+        before.
+        """
+        store = legacy_journal_store
+        try:
+            alice = store.principal("agent@alice")
+            await alice.enqueue_delivery(
+                turn_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("answer"),
+            )
+
+            claimed = await alice.claim_delivery(
+                turn_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                device_id="DEVICE1",
+            )
+            assert claimed is not None
+            assert claimed.sending_device_id is None
+            assert not claimed.attempted
+
+            stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+            assert stored is not None
+            assert stored.attempted
+            assert stored.sending_device_id == "DEVICE1"
+
+            assert [d.turn_id for d in await alice.unacknowledged_deliveries()] == ["turn-1"]
+        finally:
+            await store.close()
+
     async def test_every_added_column_is_declared_in_the_table_too(self) -> None:
         """The two lists are edited by hand and drift silently otherwise."""
         statements = " ".join(schema_statements(SQLITE_DIALECT))
