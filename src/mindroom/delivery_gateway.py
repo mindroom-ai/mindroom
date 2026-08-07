@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from html import escape as html_escape
@@ -12,8 +13,9 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.event_journal import OutboxDelivery, OutboxView  # noqa: TC001
+from mindroom.event_journal import OutboxDelivery, OutboxView, TerminalTurnWrite
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -369,6 +371,13 @@ class DeliveryGatewayDeps:
     # gateway is built before login, and a re-login replaces it. ``None`` means
     # no login has completed, which the outbox reads as "device unknown".
     sending_device_id: Callable[[], str | None] = lambda: None
+    # The terminal turn record a FINAL acknowledgement should commit with it,
+    # asked for only once the event ID exists. Returning ``None`` means there
+    # is nothing to bind -- no record for the turn, or one that already knows
+    # its response event. Without this the acknowledgement and the record are
+    # two commits, and a crash between them leaves a delivered answer whose
+    # record cannot be edited.
+    terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -606,6 +615,26 @@ class DeliveryGateway:
             sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=self.deps.turn_handoff,
+            terminal_turn_for=self._terminal_turn_write,
+        )
+
+    def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
+        """Turn the terminal record for one delivered answer into a journal row.
+
+        The turn store produces the record and stops at its own boundary; this
+        layer already owns the journal's types, so the conversion belongs here
+        rather than reaching across.
+        """
+        if self.deps.terminal_turn_for is None:
+            return None
+        record = self.deps.terminal_turn_for(turn_id, event_id)
+        if record is None or record.anchor_event_id is None:
+            return None
+        return TerminalTurnWrite(
+            agent_name=self.deps.agent_name,
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=record.anchor_event_id,
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
         )
 
     async def _delivered_under_a_previous_device(self, claimed: OutboxDelivery) -> str | None:

@@ -3613,6 +3613,18 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
     assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
 
 
+def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]:
+    """Return the metadata of the newest run this bot persisted for one session."""
+    storage = bot._conversation_state_writer.create_storage(None)
+    try:
+        session = get_agent_session(storage, session_id)
+    finally:
+        storage.close()
+    assert session is not None
+    assert session.runs is not None
+    return session.runs[0].metadata
+
+
 @pytest.mark.ledger_loads_from_disk
 @pytest.mark.asyncio
 async def test_handle_message_edit_recovers_newer_run_response_event_id_after_restart(
@@ -3629,18 +3641,23 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
     config.agents["test_agent"].thread_mode = "room"
     session_id = create_session_id("!test:example.com", None)
 
-    bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!test:example.com"],
-    )
-    await bot._turn_store.warm()
-    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
+    async def start_bot() -> AgentBot:
+        """Build one warmed bot, the way startup does before any callback runs."""
+        started = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:example.com"],
+        )
+        await started._turn_store.warm()
+        started.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
+        replace_edit_regenerator_deps(started)
+        started.logger = MagicMock()
+        return started
+
+    bot = await start_bot()
     bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
-    replace_edit_regenerator_deps(bot)
-    bot.logger = MagicMock()
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
         thread_id=None,
@@ -3730,26 +3747,9 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
         )
 
     assert _handled_response_event_id(resolution) == "$response-new:example.com"
-    storage = bot._conversation_state_writer.create_storage(None)
-    try:
-        persisted_session = get_agent_session(storage, session_id)
-    finally:
-        storage.close()
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    assert persisted_session.runs[0].metadata["matrix_response_event_id"] == "$response-new:example.com"
+    assert _persisted_run_metadata(bot, session_id)["matrix_response_event_id"] == "$response-new:example.com"
 
-    restarted_bot = AgentBot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!test:example.com"],
-    )
-    await restarted_bot._turn_store.warm()
-    restarted_bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    replace_edit_regenerator_deps(restarted_bot)
-    restarted_bot.logger = MagicMock()
+    restarted_bot = await start_bot()
     assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")

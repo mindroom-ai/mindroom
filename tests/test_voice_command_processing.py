@@ -1697,6 +1697,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
 
 
 @pytest.mark.asyncio
+@pytest.mark.ledger_loads_from_disk
 async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -1710,6 +1711,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         agents=agents,
         send_response_side_effect=["$voice_echo", None],
     )
+    await bot._turn_store.warm()
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1730,6 +1732,9 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         agents=agents,
         send_response_return="$route",
     )
+    # The replacement opens its own database handle, so the echo it must reuse
+    # only reaches it by reading the rows the first run wrote.
+    await restarted_bot._turn_store.warm()
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,

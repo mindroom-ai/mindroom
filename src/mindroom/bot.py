@@ -20,7 +20,6 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.delivered_turn_repair import repair_delivered_turns
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -588,6 +587,11 @@ class AgentBot:
                 # before the bot has logged in, and a re-login replaces the
                 # device that the frozen transaction IDs belong to.
                 sending_device_id=lambda: self._sending_device_id,
+                # Deferred for the same reason as the device: the turn store is
+                # built after this gateway. Consulted only once a FINAL send has
+                # produced an event ID, so the acknowledgement can carry the
+                # record that needs to know it.
+                terminal_turn_for=lambda turn_id, event_id: self._turn_store.terminal_turn_record(turn_id, event_id),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -1811,15 +1815,6 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
-            # Immediately after the ledger is readable and before a single sync
-            # callback is registered. A crash between the outbox acknowledgement
-            # and the ledger write leaves a delivered answer whose record does
-            # not know its response event, and an edit of that message arriving
-            # on the first sync would be dropped and settled as ignored -- gone
-            # for good, because nothing re-delivers a consumed edit. Waiting for
-            # the turn-replay gate is not enough: recovered events arrive as
-            # live ones and are exempt from it by design.
-            await repair_delivered_turns(self._journal_principal(), self._turn_store)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None

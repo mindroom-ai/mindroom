@@ -251,47 +251,6 @@ def unacknowledged(
     return tuple(_delivery(row) for row in rows)
 
 
-def acknowledged_finals(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    limit: int,
-    after: tuple[int, str] | None = None,
-) -> tuple[tuple[int, str, str], ...]:
-    """Return ``(created_at_ns, turn_id, acknowledged_event_id)`` for delivered answers.
-
-    The ordering key is returned with each row so a caller can resume past it.
-    Without that the scan is capped at one page, which reads as "everything was
-    repaired" while leaving the rest permanently broken.
-
-    The durable proof that a turn produced a visible Matrix message. Delivery
-    settles the journal source and acknowledges the row, but the handled-turn
-    ledger is a separate store written afterwards, so a crash in between leaves
-    an answer that was sent and a ledger that does not know its event ID. This
-    is what a startup repair joins against.
-
-    Only ``final`` rows: an acknowledged placeholder is not an answer, and
-    adopting one as a turn's response would point every later edit at a message
-    that was replaced.
-
-    Paged in the same byte order as the unacknowledged scan, and for the same
-    reason -- the cursor's comparison and the server's collation have to agree
-    or rows are skipped or revisited.
-    """
-    cursor_clause = "" if after is None else " AND (created_at_ns, turn_id/*bytes*/) > (?, ?)"
-    cursor_params: tuple[object, ...] = () if after is None else after
-    rows = transaction.fetchall(
-        f"""
-        SELECT turn_id, acknowledged_event_id, created_at_ns FROM response_outbox
-        WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL{cursor_clause}
-        ORDER BY created_at_ns, turn_id/*bytes*/
-        LIMIT ?
-        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-        (principal_id, *cursor_params, limit),
-    )
-    return tuple((int(row["created_at_ns"]), str(row["turn_id"]), str(row["acknowledged_event_id"])) for row in rows)
-
-
 def load(
     transaction: Transaction,
     principal_id: str,

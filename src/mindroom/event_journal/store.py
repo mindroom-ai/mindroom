@@ -577,22 +577,6 @@ class PrincipalStore:
             ),
         )
 
-    async def acknowledged_final_deliveries(
-        self,
-        *,
-        limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
-        after: tuple[int, str] | None = None,
-    ) -> tuple[tuple[int, str, str], ...]:
-        """Return ``(created_at_ns, turn_id, acknowledged_event_id)`` for accepted answers."""
-        return await self._backend.read(
-            lambda transaction: outbox.acknowledged_finals(
-                transaction,
-                self._principal_id,
-                limit=limit,
-                after=after,
-            ),
-        )
-
     async def room_messages_from_sender(
         self,
         *,

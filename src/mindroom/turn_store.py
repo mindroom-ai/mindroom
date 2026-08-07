@@ -170,6 +170,35 @@ class TurnStore:
 
         await self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
 
+    def terminal_turn_record(self, turn_id: str, response_event_id: str) -> TurnRecord | None:
+        """Return the record a FINAL acknowledgement should commit alongside it.
+
+        The acknowledgement is the durable proof that an answer is visible and
+        what its event ID is, and until the record is told, an edit of that
+        message has nothing to edit. Committing the two together is what closes
+        that window; a startup pass used to rejoin them afterwards.
+
+        Nothing is returned when there is nothing to bind: no record for this
+        turn, or one that already names a response event. A record that already
+        names one is left alone deliberately -- it may name a later, better
+        answer than the first thing ever sent, and overwriting it would undo
+        that.
+
+        Pure by design. The in-memory map is not touched here, because this is
+        called *before* the transaction and the transaction may lose the
+        acknowledgement race. Memory is updated by the ordinary terminal write
+        that follows, or by the next load.
+
+        Returns the domain record rather than the journal's write type, so this
+        module stays on its own side of the store boundary; the delivery layer,
+        which already owns that boundary, turns it into a row.
+        """
+        record = self._ledger.get_turn_record(turn_id)
+        if record is None or record.response_event_id is not None:
+            return None
+        bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
+        return None if bound.anchor_event_id is None else bound
+
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
