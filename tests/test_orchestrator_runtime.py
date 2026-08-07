@@ -18,6 +18,7 @@ import uvicorn
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.approval_manager import (
+    ApprovalStartupSweep,
     get_approval_store,
     initialize_approval_store,
 )
@@ -98,6 +99,18 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+
+async def _await_until(condition: Callable[[], bool]) -> None:
+    """Yield to the loop until a background task has done what is expected of it.
+
+    Polled rather than signalled because the thing being waited for is a task
+    the runtime owns and does not announce; the timeout is what keeps a test
+    that will never be satisfied from hanging the suite.
+    """
+    async with asyncio.timeout(5.0):
+        while not condition():  # noqa: ASYNC110 - no event exists to wait on; production owns the task
+            await asyncio.sleep(0)
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -1563,10 +1576,10 @@ class TestMultiAgentOrchestrator:
         async def _sync_runtime_support_services(*_: object, **__: object) -> None:
             call_order.append("support_services")
 
-        async def _discard_pending_on_startup() -> int:
+        async def _discard_pending_on_startup() -> ApprovalStartupSweep:
             call_order.append("startup_discard")
             startup_discarded.set()
-            return 2
+            return ApprovalStartupSweep(discarded=2, failed=0)
 
         async def _sync_forever_with_restart(started_bot: object) -> None:
             await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
@@ -1638,7 +1651,7 @@ class TestMultiAgentOrchestrator:
 
         with patch(
             "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
-            new=AsyncMock(return_value=1),
+            new=AsyncMock(return_value=ApprovalStartupSweep(discarded=1, failed=0)),
         ) as expire_orphaned_approval_cards_on_startup:
             orchestrator._approval_transport.reset_startup_cleanup_gate()
             await orchestrator.handle_bot_ready(bot)
@@ -1667,7 +1680,7 @@ class TestMultiAgentOrchestrator:
 
         with patch(
             "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
-            new=AsyncMock(return_value=1),
+            new=AsyncMock(return_value=ApprovalStartupSweep(discarded=1, failed=0)),
         ) as expire_orphaned_approval_cards_on_startup:
             orchestrator._approval_transport.reset_startup_cleanup_gate()
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
@@ -1696,7 +1709,7 @@ class TestMultiAgentOrchestrator:
 
         with patch(
             "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
-            new=AsyncMock(return_value=1),
+            new=AsyncMock(return_value=ApprovalStartupSweep(discarded=1, failed=0)),
         ) as expire_orphaned_approval_cards_on_startup:
             orchestrator._approval_transport.reset_startup_cleanup_gate()
             await asyncio.gather(
@@ -1725,7 +1738,7 @@ class TestMultiAgentOrchestrator:
 
         with patch(
             "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
-            new=AsyncMock(return_value=1),
+            new=AsyncMock(return_value=ApprovalStartupSweep(discarded=1, failed=0)),
         ) as expire_orphaned_approval_cards_on_startup:
             orchestrator._approval_transport.reset_startup_cleanup_gate()
             await orchestrator.handle_bot_ready(bot)
@@ -1735,6 +1748,53 @@ class TestMultiAgentOrchestrator:
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
+        assert expire_orphaned_approval_cards_on_startup.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_startup_discard_that_could_not_finish_comes_back_on_its_own(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The gates that arm this sweep are startup events, and they fire once.
+
+        A card the sweep could not settle is still in the room and still
+        clickable, with no live waiter behind it to answer a click. Nothing
+        else will bring the sweep back for it, so an unfinished pass has to
+        arrange the next one itself rather than mark the work done.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        sweeps = [
+            ApprovalStartupSweep(discarded=0, failed=1),
+            ApprovalStartupSweep(discarded=1, failed=0),
+        ]
+        with (
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch(
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(side_effect=sweeps),
+            ) as expire_orphaned_approval_cards_on_startup,
+        ):
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+            assert expire_orphaned_approval_cards_on_startup.await_count == 1
+
+            await _await_until(lambda: expire_orphaned_approval_cards_on_startup.await_count == 2)
+
+            # The second pass settled everything, so nothing schedules a third.
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+
+        await orchestrator._approval_transport.cancel_startup_cleanup_retry()
         assert expire_orphaned_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio

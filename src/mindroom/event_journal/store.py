@@ -710,6 +710,7 @@ class PrincipalStore:
         *,
         room_id: str,
         limit: int = _DEFAULT_ROOM_CARD_LIMIT,
+        after: tuple[int, str] | None = None,
     ) -> tuple[StoredApprovalCard, ...]:
         """Return one room's unfinished cards, oldest first."""
         return await self._backend.read(
@@ -718,6 +719,7 @@ class PrincipalStore:
                 self._principal_id,
                 room_id=room_id,
                 limit=limit,
+                after=after,
             ),
         )
 

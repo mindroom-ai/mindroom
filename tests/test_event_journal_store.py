@@ -2413,11 +2413,33 @@ class TestApprovalCards:
         assert [entry.card["event_id"] for entry in stored] == ["$card-0", "$card-1", "$card-2"]
 
     async def test_the_scan_honors_its_limit(self, alice: PrincipalStore) -> None:
-        """A bounded scan is what tells the caller its own view was truncated."""
+        """A bounded scan is what lets the caller walk a room one page at a time."""
         for index in range(5):
             await self.remember(alice, f"$card-{index}")
 
         assert len(await alice.pending_approval_cards(room_id=ROOM, limit=2)) == 2
+
+    async def test_the_scan_resumes_past_the_page_it_already_read(self, alice: PrincipalStore) -> None:
+        """A card whose settlement failed keeps its row, so paging cannot restart.
+
+        The row is retained on purpose while its decision may be undelivered,
+        which leaves it inside this query's window. Without somewhere to resume
+        from, a page of such rows is handed back forever and every card behind
+        them is never seen.
+        """
+        for index in range(5):
+            await self.remember(alice, f"$card-{index}")
+
+        walked: list[str] = []
+        cursor: tuple[int, str] | None = None
+        while True:
+            page = await alice.pending_approval_cards(room_id=ROOM, limit=2, after=cursor)
+            if not page:
+                break
+            cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+            walked.extend(str(entry.card["event_id"]) for entry in page)
+
+        assert walked == [f"$card-{index}" for index in range(5)]
 
     async def test_rejoining_makes_the_previous_memberships_cards_unrecoverable(
         self,

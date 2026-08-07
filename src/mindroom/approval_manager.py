@@ -39,7 +39,7 @@ ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 SendingDeviceProvider = Callable[[], str | None]
 
-_STARTUP_DISCARD_SCAN_LIMIT = 10_000
+_STARTUP_DISCARD_SCAN_PAGE = 256
 _POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
@@ -252,6 +252,36 @@ class SentApprovalEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalStartupSweep:
+    """What one startup approval sweep settled, and what it still owes.
+
+    A card the sweep could not settle stays clickable in the room with nothing
+    live behind it, so the failure count is what the caller schedules its next
+    attempt on. Reporting only the settled count would make a pass that
+    finished nothing look exactly like a pass with nothing to do.
+    """
+
+    discarded: int
+    failed: int
+
+    @property
+    def complete(self) -> bool:
+        """Return whether nothing is left for a later sweep to retry."""
+        return self.failed == 0
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentifiedCard:
+    """One recovered row's card, or why this pass could not name its event."""
+
+    card: StoredApprovalCard | None
+    # Whether a missing card is finished with rather than owed. An unsendable
+    # claim is dropped on purpose and must not keep the sweep coming back; a
+    # resend whose outcome is unknown must.
+    settled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalActionResult:
     """One approval-action outcome parsed from a Matrix control event."""
 
@@ -421,7 +451,7 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def discard_pending_on_startup(self) -> int:
+    async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
 
         A card whose decision was already recorded is redelivered rather than
@@ -429,37 +459,86 @@ class _ApprovalManager:
         have run, and the room may already show it. Only a card nobody ever
         answered is expired, because its requester is gone with the process
         that asked.
+
+        Every card is walked, not one page of them, and what could not be
+        settled is counted rather than swallowed. Both matter for the same
+        reason: a card left behind here is one the user can still click, whose
+        answer no live waiter and no later pass would otherwise come back for.
+        The count is what the caller schedules that later pass on.
         """
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
-            return 0
+            return ApprovalStartupSweep(discarded=0, failed=0)
 
         discarded = 0
+        failed = 0
         for room_id in self._configured_approval_room_ids():
-            for claimed in await self._recoverable_room_cards(room_id):
-                stored = await self._identified_card(room_id, claimed)
-                if stored is None:
-                    continue
-                pending = self._trusted_pending_from_card_event(
-                    stored.card,
-                    room_id=room_id,
-                    transport_sender=transport_sender,
-                )
-                if pending is None:
-                    continue
-                if stored.resolution is not None:
-                    if await self._redeliver_recorded_resolution(pending, stored):
+            # A card whose settlement failed keeps its row deliberately, so it
+            # stays inside the scan's window. Skipping it in memory is not
+            # enough -- a whole page of failures would be read again on every
+            # turn of this loop and everything behind it would never be seen.
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self._recoverable_room_cards(room_id, after=cursor)
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+                for claimed in page:
+                    settled = await self._settle_recovered_card(
+                        room_id=room_id,
+                        claimed=claimed,
+                        transport_sender=transport_sender,
+                    )
+                    if settled is None:
+                        continue
+                    if settled:
                         discarded += 1
-                    continue
-                result = await self._discard_matrix_only_card(
-                    pending=pending,
-                    transaction_id=stored.transaction_id,
-                    reason=_STARTUP_DISCARD_REASON,
-                    resolved_by=transport_sender,
-                )
-                if result.resolved:
-                    discarded += 1
-        return discarded
+                    else:
+                        failed += 1
+        return ApprovalStartupSweep(discarded=discarded, failed=failed)
+
+    async def _settle_recovered_card(
+        self,
+        *,
+        room_id: str,
+        claimed: StoredApprovalCard,
+        transport_sender: str,
+    ) -> bool | None:
+        """Settle one recovered card, or report that a later pass should try again.
+
+        None is neither: the row is finished with as far as this pass is
+        concerned and retrying would reach the same answer, so counting it as
+        owed would keep the sweep asking forever.
+        """
+        identified = await self._identified_card(room_id, claimed)
+        if identified.card is None:
+            return None if identified.settled else False
+        pending = self._trusted_pending_from_card_event(
+            identified.card.card,
+            room_id=room_id,
+            transport_sender=transport_sender,
+        )
+        if pending is None:
+            # The stored body is not one this bot may act on -- it does not
+            # parse as a card, or it names a sender this transport is not. No
+            # later pass reads it differently, so it is logged rather than
+            # retried; the row stays as the only remaining trace of it.
+            logger.warning(
+                "approval_startup_card_unusable",
+                room_id=room_id,
+                transaction_id=identified.card.transaction_id,
+                card_event_id=identified.card.card_event_id,
+            )
+            return None
+        if identified.card.resolution is not None:
+            return await self._redeliver_recorded_resolution(pending, identified.card)
+        result = await self._discard_matrix_only_card(
+            pending=pending,
+            transaction_id=identified.card.transaction_id,
+            reason=_STARTUP_DISCARD_REASON,
+            resolved_by=transport_sender,
+        )
+        return result.resolved
 
     async def _redeliver_recorded_resolution(self, pending: PendingApproval, stored: StoredApprovalCard) -> bool:
         """Show a decision a previous process committed to but may not have shown.
@@ -1179,24 +1258,30 @@ class _ApprovalManager:
         except Exception:
             logger.warning("Failed to drop an approval card", transaction_id=transaction_id, exc_info=True)
 
-    async def _recoverable_room_cards(self, room_id: str) -> tuple[StoredApprovalCard, ...]:
-        """Return every card this room may still owe a decision on.
+    async def _recoverable_room_cards(
+        self,
+        room_id: str,
+        *,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return one page of the cards this room may still owe a decision on.
 
         One source, because there is only one: a card is claimed before it is
         sent, so nothing can be in the room without a row here. Reading the
         room itself to look for strays would be looking for a state the claim
         ordering does not produce.
+
+        A page rather than the room, because the caller walks all of them. The
+        bound exists so one enormous room cannot hold the whole sweep in
+        memory, not to decide how much of that room gets recovered.
         """
         if self._cards is None:
             return ()
-        cards = await self._cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_DISCARD_SCAN_LIMIT)
-        if len(cards) >= _STARTUP_DISCARD_SCAN_LIMIT:
-            logger.warning(
-                "approval_startup_scan_truncated",
-                room_id=room_id,
-                scan_limit=_STARTUP_DISCARD_SCAN_LIMIT,
-            )
-        return cards
+        return await self._cards.pending_approval_cards(
+            room_id=room_id,
+            limit=_STARTUP_DISCARD_SCAN_PAGE,
+            after=after,
+        )
 
     def _repeat_would_deduplicate(self, stored: StoredApprovalCard) -> bool:
         """Return whether presenting this row's transaction again is safe.
@@ -1215,7 +1300,7 @@ class _ApprovalManager:
             return False
         return stored.sending_device_id == current
 
-    async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> StoredApprovalCard | None:
+    async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
         """Establish which Matrix event one claimed card became, sending it again if need be.
 
         A row with no event id is the crash window claiming turns from
@@ -1239,10 +1324,12 @@ class _ApprovalManager:
 
         A repeat that fails leaves the row alone. The outcome is still unknown,
         and dropping the claim would abandon whatever did reach the room; the
-        next startup asks again.
+        next sweep asks again -- which is why the two empty answers here are
+        not the same answer. A card dropped because no device can present it
+        is finished with; one whose repeat did not come back is still owed.
         """
         if stored.card_event_id is not None:
-            return stored
+            return _IdentifiedCard(card=stored)
         if not self._repeat_would_deduplicate(stored):
             logger.info(
                 "approval_startup_card_expired_unsendable_device",
@@ -1252,30 +1339,35 @@ class _ApprovalManager:
                 sending_device=self._sending_device_id(),
             )
             await self._forget_card(stored.transaction_id)
-            return None
+            return _IdentifiedCard(card=None, settled=True)
         cards = self._cards
         content = stored.card.get("content")
         if cards is None or self._send_event is None or not isinstance(content, dict):
-            return None
+            # No transport to ask with, or a body that is not a card. Neither
+            # is something a later sweep resolves differently.
+            return _IdentifiedCard(card=None, settled=True)
         try:
             sent_event = await self._send_event(room_id, content.get("thread_id"), content, stored.transaction_id)
         except Exception:
             logger.warning("approval_startup_resend_failed", room_id=room_id, exc_info=True)
-            return None
+            return _IdentifiedCard(card=None)
         if sent_event is None:
-            return None
+            return _IdentifiedCard(card=None)
         card = _sent_card_body(stored.card, sent_event)
         await cards.acknowledge_approval_card(
             transaction_id=stored.transaction_id,
             card_event_id=sent_event.event_id,
             card=card,
         )
-        return StoredApprovalCard(
-            card=card,
-            resolution=stored.resolution,
-            transaction_id=stored.transaction_id,
-            card_event_id=sent_event.event_id,
-            sending_device_id=stored.sending_device_id,
+        return _IdentifiedCard(
+            card=StoredApprovalCard(
+                card=card,
+                resolution=stored.resolution,
+                transaction_id=stored.transaction_id,
+                card_event_id=sent_event.event_id,
+                sending_device_id=stored.sending_device_id,
+                created_at_ns=stored.created_at_ns,
+            ),
         )
 
     async def shutdown(self, *, reason: str) -> None:

@@ -47,7 +47,7 @@ _DEFAULT_ROOM_CARD_LIMIT = 256
 _CARD_COLUMNS = """
     cards.card_json AS card_json, cards.resolution_json AS resolution_json,
     cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id,
-    cards.sending_device_id AS sending_device_id
+    cards.sending_device_id AS sending_device_id, cards.created_at_ns AS created_at_ns
 """
 
 
@@ -71,6 +71,9 @@ class StoredApprovalCard:
     # belongs to. Only that device can present it again and get the same event
     # back; None means no device was recorded and none can be proven.
     sending_device_id: str | None
+    # When the row was claimed. Half of the room scan's ordering, and therefore
+    # half of the cursor a caller resumes that scan from.
+    created_at_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,13 +271,24 @@ def pending_cards(
     *,
     room_id: str,
     limit: int = _DEFAULT_ROOM_CARD_LIMIT,
+    after: tuple[int, str] | None = None,
 ) -> tuple[StoredApprovalCard, ...]:
     """Return one room's unfinished cards, oldest first.
 
     Includes cards no send has come back from. Those are the ones a crash is
     most likely to have stranded, and leaving them out would restore exactly
     the blind spot claiming before sending exists to close.
+
+    ``after`` resumes past a row already visited, in the same order the scan
+    uses. A card whose settlement failed keeps its row on purpose, so without a
+    cursor a page of them is re-read forever and every card behind it starves.
     """
+    # transaction_id shipped as unpinned TEXT, so the byte-order pin goes on
+    # the comparison itself. A server whose collation is not byte order would
+    # otherwise order the rows differently from the cursor that walks them, and
+    # the scan would skip rows or revisit them.
+    cursor_clause = "" if after is None else " AND (cards.created_at_ns, cards.transaction_id/*bytes*/) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
         f"""
         SELECT {_CARD_COLUMNS}
@@ -284,14 +298,14 @@ def pending_cards(
          AND membership.room_id = cards.room_id
         WHERE cards.principal_id = ?
           AND cards.room_id = ?
-          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
+          AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0){cursor_clause}
         -- Two cards sent in the same nanosecond would otherwise come back in
         -- whatever order each backend felt like, and the caller expires them
         -- in the order it reads them.
         ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
         LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, room_id, limit),
+        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+        (principal_id, room_id, *cursor_params, limit),
     )
     return tuple(_card(row) for row in rows)
 
@@ -307,6 +321,7 @@ def _card(row: Row) -> StoredApprovalCard:
         transaction_id=str(row["transaction_id"]),
         card_event_id=row["card_event_id"],
         sending_device_id=row["sending_device_id"],
+        created_at_ns=int(row["created_at_ns"]),
     )
 
 

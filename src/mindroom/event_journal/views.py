@@ -395,6 +395,7 @@ class ApprovalView(Protocol):
         *,
         room_id: str,
         limit: int = ...,
+        after: tuple[int, str] | None = None,
     ) -> tuple[StoredApprovalCard, ...]:
         """Return one room's unfinished cards, oldest first."""
         ...

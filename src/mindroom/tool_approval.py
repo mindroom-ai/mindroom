@@ -19,6 +19,7 @@ from mindroom.approval_manager import (
     ApprovalActionResult,
     ApprovalDecision,
     ApprovalRoomProvider,
+    ApprovalStartupSweep,
     MatrixEventEditor,
     MatrixEventSender,
     SendingDeviceProvider,
@@ -44,6 +45,7 @@ __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "ApprovalActionResult",
     "ApprovalDecision",
+    "ApprovalStartupSweep",
     "MatrixApprovalAction",
     "SentApprovalEvent",
     "ToolApprovalCall",
@@ -351,11 +353,11 @@ def initialize_approval_runtime(
     )
 
 
-async def expire_orphaned_approval_cards_on_startup() -> int:
+async def expire_orphaned_approval_cards_on_startup() -> ApprovalStartupSweep:
     """Expire router-authored approval cards that can no longer have live waiters."""
     manager = approval_manager.get_approval_store()
     if manager is None:
-        return 0
+        return ApprovalStartupSweep(discarded=0, failed=0)
     return await manager.discard_pending_on_startup()
 
 

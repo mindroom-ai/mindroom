@@ -33,6 +33,9 @@ class _StoredRow:
     # transaction collapses onto the same event, so a row claimed elsewhere is
     # one recovery must expire rather than present again.
     sending_device_id: str | None = None
+    # Claim order, which is the order the room scan reads in and therefore what
+    # a paging caller resumes from.
+    created_at_ns: int = 0
 
 
 class FakeApprovalCards:
@@ -62,6 +65,9 @@ class FakeApprovalCards:
         # redundant writes, and the ones a send outcome later settled.
         self.claimed: list[str] = []
         self.acknowledged: list[tuple[str, str]] = []
+        # Stands in for the claim timestamp the real table records, which is
+        # what orders the room scan and what a page cursor is built from.
+        self._claims = 0
 
     @property
     def resolutions(self) -> dict[str, dict[str, Any]]:
@@ -95,10 +101,12 @@ class FakeApprovalCards:
         if transaction_id in self.rows:
             return
         self.claimed.append(transaction_id)
+        self._claims += 1
         self.rows[transaction_id] = _StoredRow(
             room_id=room_id,
             card=dict(card),
             sending_device_id=sending_device_id,
+            created_at_ns=self._claims,
         )
 
     async def acknowledge_approval_card(
@@ -148,11 +156,21 @@ class FakeApprovalCards:
         )
         return None if entry is None else _stored(*entry)
 
-    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[StoredApprovalCard, ...]:
-        """Return one room's stored cards, acknowledged or not."""
-        return tuple(
-            _stored(transaction_id, row) for transaction_id, row in self.rows.items() if row.room_id == room_id
-        )[:limit]
+    async def pending_approval_cards(
+        self,
+        *,
+        room_id: str,
+        limit: int = 256,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return one page of a room's stored cards, acknowledged or not."""
+        ordered = sorted(
+            (_stored(transaction_id, row) for transaction_id, row in self.rows.items() if row.room_id == room_id),
+            key=lambda card: (card.created_at_ns, card.transaction_id),
+        )
+        if after is not None:
+            ordered = [card for card in ordered if (card.created_at_ns, card.transaction_id) > after]
+        return tuple(ordered[:limit])
 
     async def store_card(self, card_event_id: str, room_id: str, card: dict[str, Any]) -> None:
         """Seed one card as if a previous process had sent it and recorded the event."""
@@ -198,6 +216,7 @@ def _stored(transaction_id: str, row: _StoredRow) -> StoredApprovalCard:
         transaction_id=transaction_id,
         card_event_id=row.card_event_id,
         sending_device_id=row.sending_device_id,
+        created_at_ns=row.created_at_ns,
     )
 
 

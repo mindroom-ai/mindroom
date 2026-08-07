@@ -1926,6 +1926,7 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
+        await self._approval_transport.cancel_startup_cleanup_retry()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         owner = self._mcp_catalog_change_task_owner

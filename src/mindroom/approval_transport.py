@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
@@ -35,6 +36,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
+
+# How long a startup approval sweep that could not finish waits before asking
+# again. Nothing else will trigger it: the gates that arm the sweep are startup
+# events that have already happened, so a pass that gave up on a transient
+# failure would leave answered cards clickable until the next restart.
+_STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
+_STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 
 
 class _ApprovalTransportBot(Protocol):
@@ -121,6 +129,12 @@ class ApprovalMatrixTransport:
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _startup_cleanup_retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _startup_cleanup_retry_delay: float = field(
+        default=_STARTUP_CLEANUP_INITIAL_RETRY_SECONDS,
+        init=False,
+        repr=False,
+    )
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -404,6 +418,25 @@ class ApprovalMatrixTransport:
         self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
+        self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is not None:
+            retry.cancel()
+
+    async def cancel_startup_cleanup_retry(self) -> None:
+        """Await the cancellation of a sweep still waiting to try again.
+
+        A retry sleeps for up to half a minute, which is long enough to outlive
+        an orderly shutdown and be torn down as a pending task instead.
+        """
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is None or retry.done():
+            return
+        retry.cancel()
+        with suppress(asyncio.CancelledError):
+            await retry
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that approval runtime support can now perform startup cleanup."""
@@ -418,6 +451,14 @@ class ApprovalMatrixTransport:
         await self._run_startup_cleanup_if_ready()
 
     async def _run_startup_cleanup_if_ready(self) -> None:
+        """Run the startup approval sweep once it can run, and until it finishes.
+
+        Marked done only by a sweep that settled everything it found. A card it
+        could not settle is still in the room and still clickable, with nothing
+        live behind it to answer the click -- and the gates that arm this sweep
+        are startup events that will not happen a second time. So a pass that
+        came up short arranges the next one itself.
+        """
         if (
             self._startup_cleanup_done
             or not self._startup_router_ready_for_cleanup
@@ -431,15 +472,36 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
-            await self._discard_orphaned_approval_cards_on_startup()
+            if not await self._discard_orphaned_approval_cards_on_startup():
+                self._schedule_startup_cleanup_retry()
+                return
             self._startup_cleanup_done = True
+            self._startup_cleanup_retry = None
 
-    async def _discard_orphaned_approval_cards_on_startup(self) -> None:
-        """Discard orphaned approval cards once startup approval gates are ready."""
+    async def _discard_orphaned_approval_cards_on_startup(self) -> bool:
+        """Discard orphaned approval cards, reporting whether any are still owed."""
         try:
-            discarded_count = await expire_orphaned_approval_cards_on_startup()
+            sweep = await expire_orphaned_approval_cards_on_startup()
         except Exception as exc:
             logger.warning("tool_approval_startup_discard_failed", error=str(exc))
+            return False
+        if sweep.discarded > 0:
+            logger.info("approval.startup_discard", discarded_count=sweep.discarded)
+        if not sweep.complete:
+            logger.warning("tool_approval_startup_discard_incomplete", owed_count=sweep.failed)
+        return sweep.complete
+
+    def _schedule_startup_cleanup_retry(self) -> None:
+        """Arrange one later sweep, since no startup gate will fire again."""
+        if self._startup_cleanup_retry is not None and not self._startup_cleanup_retry.done():
             return
-        if discarded_count > 0:
-            logger.info("approval.startup_discard", discarded_count=discarded_count)
+        self._startup_cleanup_retry = asyncio.create_task(
+            self._run_startup_cleanup_after_delay(),
+            name="approval_startup_cleanup_retry",
+        )
+
+    async def _run_startup_cleanup_after_delay(self) -> None:
+        delay = self._startup_cleanup_retry_delay
+        self._startup_cleanup_retry_delay = min(delay * 2, _STARTUP_CLEANUP_MAX_RETRY_SECONDS)
+        await asyncio.sleep(delay)
+        await self._run_startup_cleanup_if_ready()
