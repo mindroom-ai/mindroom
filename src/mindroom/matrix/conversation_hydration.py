@@ -26,11 +26,19 @@ question, reads the same principal's projection, and always arrives second --
 so `require_complete` lets it walk past a marker earned under smaller bounds
 rather than inherit an answer to a question it did not ask.
 
-The marker therefore records how wide the widest walk here was allowed to be,
-not only whether one reached the start. Without that, "walk past a marker
-earned under smaller bounds" becomes "walk again on every read" the moment the
-bounds already spent are this caller's own, which for a permanently oversized
-thread is the entire maximum walk, every time, forever.
+The marker therefore records which policy the widest walk here ran under, not
+only whether one reached the start. Without that, "walk past a marker earned
+under smaller bounds" becomes "walk again on every read" the moment the bounds
+already spent are this caller's own, which for a permanently oversized thread
+is the entire maximum walk, every time, forever. A policy and not one of its
+ceilings, because a caller is defined by all three of its ceilings at once and
+two policies can differ on any one of them.
+
+That record is a cost decision and never a proof. A walk that stopped at a
+ceiling has not shown that a wider one would stop there too, and pagination
+that collapses superseded edits can carry the same policy further tomorrow. It
+says only that paying again for a walk no wider than one already tried here is
+not worth it; completeness is a separate fact, and export reads that one.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ import nio
 
 from mindroom.event_journal import (
     HistoryDebtOutcome,
+    HydrationPolicy,
     ProjectedEvent,
     RefreshRequest,
     replacement_target,
@@ -247,6 +256,15 @@ class ConversationHydrator:
     # projection would have held.
     self_sender: str
     required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
+    # Which named set of bounds the three ceilings below belong to. It is what
+    # a walk writes down about itself, and the three numbers are what the walk
+    # actually spends -- recorded as a name because a caller is defined by all
+    # three at once, and any single one of them read back later cannot tell two
+    # policies apart that differ only on one of the others. A caller whose
+    # bounds are not one of these named sets has to name a new policy and rank
+    # it, which is the point: the ordering is declared rather than inferred
+    # from whichever ceiling happened to get stored.
+    policy: HydrationPolicy = HydrationPolicy.PROMPT
     prompt_window_messages: int = HYDRATED_PROMPT_WINDOW_MESSAGES
     max_fetched_events: int = _MAX_FETCHED_EVENTS
     max_requests: int = _MAX_MESSAGES_REQUESTS
@@ -357,13 +375,23 @@ class ConversationHydrator:
         A prompt asks for recency, and any marker for the current membership
         answers it. A caller that needs the whole conversation asks a strictly
         harder question, and it is satisfied two ways: a walk ran out of
-        conversation, or a walk at least this wide already ran and did not.
-        Either way it is one store read.
+        conversation, or a walk under a policy ranked at least as wide as this
+        one already ran and did not. Either way it is one store read.
 
-        The second half is what keeps "owed exactly once" true across calls.
-        Without it a thread past even this caller's bounds is walked to the
-        same ceiling on every single read -- at export's allowance, millions of
-        fetched events each time -- because nothing durable distinguishes a
+        The two halves are not the same kind of statement and only the first is
+        a guarantee. Reaching the start of the conversation is permanent. A
+        spent policy is a cost decision: it does not say a wider walk would get
+        no further -- the servers MindRoom runs against collapse superseded
+        `m.replace` events out of pagination, so the same policy can carry a
+        later walk past a ceiling it hit today -- it says only that paying for
+        a walk no wider than one already tried here is not worth it. Which is
+        why the caller's own completeness check reads `complete` and this is
+        never allowed to stand in for it.
+
+        The second half is still what keeps "owed exactly once" true across
+        calls. Without it a thread past even this caller's bounds is walked to
+        the same ceiling on every single read -- at export's policy, millions
+        of fetched events each time -- because nothing durable distinguishes a
         conversation whose deepest walk has already been spent from one nobody
         walked deeply at all.
 
@@ -379,7 +407,7 @@ class ConversationHydrator:
         coverage = await self.store.conversation_hydration_coverage(room_id=room_id, thread_id=thread_id)
         if coverage is None:
             return False
-        return coverage.reached_its_end or coverage.attempted_window_messages >= self.prompt_window_messages
+        return coverage.reached_its_end or coverage.attempted_policy_rank >= self.policy
 
     async def _shared[Key](
         self,
@@ -424,7 +452,7 @@ class ConversationHydrator:
             thread_id=thread_id,
             events=walk.events,
             complete=walk.complete,
-            attempted_window_messages=self.prompt_window_messages,
+            attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
         )
         if not installed:
@@ -461,7 +489,7 @@ class ConversationHydrator:
             events=walk.events,
             complete=walk.complete,
             saw_anchor=walk.saw_anchor,
-            attempted_window_messages=self.prompt_window_messages,
+            attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
         )
         log = logger.info

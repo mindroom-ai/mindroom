@@ -145,14 +145,16 @@ _TABLES = (
         -- newest one: walks of different widths run concurrently over this
         -- row, and the narrower finishing last must not un-say the wider.
         complete INTEGER NOT NULL DEFAULT 0,
-        -- The logical-message window of the widest walk attempted here under
-        -- this membership, whether or not it got anywhere. Completeness alone
-        -- cannot distinguish a conversation nobody walked deeply from one
+        -- The rank of the widest-ranked `HydrationPolicy` any walk here has run
+        -- under this membership, whether or not it got anywhere. Completeness
+        -- alone cannot distinguish a conversation nobody walked deeply from one
         -- where the deepest available walk has already been spent and failed,
         -- and a caller that cannot tell those apart repeats its whole walk on
-        -- every read of a conversation that will never satisfy it. Also the
-        -- best answer rather than the newest, for the same reason as above.
-        attempted_window_messages BIGINT NOT NULL DEFAULT 0,
+        -- every read of a conversation that will never satisfy it. A policy
+        -- rank rather than one of its ceilings, because a caller is defined by
+        -- all three of them together and two policies can differ on any one.
+        -- Also the best answer rather than the newest, for the reason above.
+        attempted_policy_rank BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, thread_id)
     )
     """,
@@ -355,11 +357,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # answer. Claiming completeness for a conversation nobody measured is the
     # one direction that silently serves a truncated read.
     ("conversation_hydration", "complete", "INTEGER NOT NULL DEFAULT 0"),
-    # Zero says "no walk of any width is on record here", which for a row that
-    # predates this column is the truth: nothing measured what it was walked
-    # with. It costs one deeper walk per conversation after the upgrade, which
+    # Zero says "no walk of any policy is on record here", which for a row that
+    # predates this column is the truth: nothing recorded what it was walked
+    # under. It costs one deeper walk per conversation after the upgrade, which
     # is the direction that cannot serve a truncated read as a whole one.
-    ("conversation_hydration", "attempted_window_messages", "BIGINT NOT NULL DEFAULT 0"),
+    ("conversation_hydration", "attempted_policy_rank", "BIGINT NOT NULL DEFAULT 0"),
     # NULL means "no device is recorded", which for an already-attempted row is
     # not the same as "no device sent it" -- it is a row from before this column
     # existed, whose sending device is simply unknown. Recovery treats unknown

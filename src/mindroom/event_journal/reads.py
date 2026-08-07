@@ -274,7 +274,7 @@ def _current_hydration(
         """
         SELECT hydration.membership_epoch AS hydrated_epoch,
                hydration.complete AS complete,
-               hydration.attempted_window_messages AS attempted_window_messages,
+               hydration.attempted_policy_rank AS attempted_policy_rank,
                COALESCE(membership.membership_epoch, 0) AS current_epoch,
                debt.owed_through_event_id AS owed_through_event_id,
                COALESCE(debt.history_lost, 0) AS history_lost
@@ -350,8 +350,9 @@ def conversation_hydration_coverage(
 
     Read as a whole record rather than as a predicate because the two facts in
     it answer to different owners. Whether a walk reached the start is a fact
-    about the conversation; whether a bound has already been spent here is a
-    fact about the caller's own bounds, and only the caller knows those.
+    about the conversation; which policies have already been spent here only
+    means something next to the caller's own policy, and only the caller knows
+    that.
 
     Asked only by a caller that needs completeness. A prompt is served by the
     hydration marker alone, which is what keeps its warm reads free.
@@ -361,7 +362,7 @@ def conversation_hydration_coverage(
         return None
     return HydrationCoverage(
         reached_its_end=bool(row["complete"]),
-        attempted_window_messages=int(row["attempted_window_messages"]),
+        attempted_policy_rank=int(row["attempted_policy_rank"]),
     )
 
 
@@ -401,7 +402,7 @@ def mark_conversation_hydrated(
     room_id: str,
     thread_id: str | None,
     complete: bool,
-    attempted_window_messages: int,
+    attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> bool:
     """Record a completed hydration, unless membership moved under it.
@@ -419,7 +420,7 @@ def mark_conversation_hydrated(
     projection is additive and a walk reads backwards from the tip, so coverage
     is a suffix that only ever extends: reaching the start of the conversation
     is a fact about the conversation rather than about the walk that proved it,
-    and the deepest bound anyone has spent here only ever gets deeper. A later
+    and the widest policy anyone has spent here only ever gets wider. A later
     walk can fail to re-prove either; it cannot make either untrue.
 
     A later epoch is a different room membership and clears both. They are
@@ -439,7 +440,7 @@ def mark_conversation_hydrated(
     transaction.execute(
         """
         INSERT INTO conversation_hydration (
-            principal_id, room_id, thread_id, membership_epoch, complete, attempted_window_messages
+            principal_id, room_id, thread_id, membership_epoch, complete, attempted_policy_rank
         )
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
@@ -450,11 +451,11 @@ def mark_conversation_hydrated(
                 THEN conversation_hydration.complete
                 ELSE excluded.complete
             END,
-            attempted_window_messages = CASE
+            attempted_policy_rank = CASE
                 WHEN conversation_hydration.membership_epoch = excluded.membership_epoch
-                     AND conversation_hydration.attempted_window_messages > excluded.attempted_window_messages
-                THEN conversation_hydration.attempted_window_messages
-                ELSE excluded.attempted_window_messages
+                     AND conversation_hydration.attempted_policy_rank > excluded.attempted_policy_rank
+                THEN conversation_hydration.attempted_policy_rank
+                ELSE excluded.attempted_policy_rank
             END
         """,
         (
@@ -463,7 +464,7 @@ def mark_conversation_hydrated(
             encode_thread_id(thread_id),
             current_epoch,
             int(complete),
-            attempted_window_messages,
+            attempted_policy_rank,
         ),
     )
     return True

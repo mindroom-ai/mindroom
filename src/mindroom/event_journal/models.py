@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -175,6 +175,29 @@ class VisibleMessage:
     content: Mapping[str, object]
 
 
+class HydrationPolicy(IntEnum):
+    """A named set of bounds a hydration walk may run under, ordered by cost.
+
+    A walk is limited by three separate ceilings -- logical messages, fetched
+    events, and requests -- and a caller is defined by all three of them
+    together. Recording only one of the numbers made two policies that differ
+    on either of the others indistinguishable, which happens to be harmless
+    today because MindRoom's two callers move on every axis at once, and stops
+    being harmless the moment a third policy exists or one ceiling is raised
+    alone: a walk that stopped under a narrower event budget would look like it
+    had already discharged a caller needing a wider one.
+
+    So the durable record names the policy rather than measuring it, and the
+    member value is the rank that orders one policy against another. Values are
+    spaced so a policy can be added between two existing ones without
+    renumbering rows already written under them; zero is reserved for "no walk
+    of any policy is on record here".
+    """
+
+    PROMPT = 10
+    EXPORT = 20
+
+
 @dataclass(frozen=True, slots=True)
 class HydrationCoverage:
     """What the walks under one membership have proven about one conversation.
@@ -184,8 +207,8 @@ class HydrationCoverage:
     that ran out of conversation proved something permanent about the
     conversation; without recording that, a narrower walk finishing later
     un-says it. A walk that ran out of allowance proved something about the
-    bound it ran under; without recording *which* bound, a caller cannot tell
-    an untried conversation from one where its own bound has already been
+    policy it ran under; without recording *which* policy, a caller cannot tell
+    an untried conversation from one where its own bounds have already been
     spent, and pays for the identical walk on every read forever.
 
     Neither field says anything about history a skipped sync gap lost. That is
@@ -198,11 +221,18 @@ class HydrationCoverage:
     # a membership epoch: it is a fact about the conversation, not about the
     # walk that happened to prove it.
     reached_its_end: bool
-    # The logical-message window of the widest walk attempted so far, which is
-    # the bound that names a caller's grade -- a prompt's and an export's
-    # ceilings all move together. Also monotonic within an epoch, and read as
-    # "a walk at least this wide has already been tried here and failed".
-    attempted_window_messages: int
+    # The rank of the widest-ranked `HydrationPolicy` any walk here has run
+    # under, or zero if none has. Also monotonic within an epoch, and read as
+    # "a walk under a policy at least this wide has already been tried here".
+    #
+    # A cost decision and not a guarantee. It does not say that no wider walk
+    # would get further, which is false: the servers MindRoom runs against
+    # collapse superseded `m.replace` events out of pagination, so the same
+    # policy can carry a later walk past a ceiling it hit today. It says only
+    # that retrying under a policy no wider than this one is not worth paying
+    # for. Completeness is `reached_its_end`, and a caller whose correctness is
+    # completeness must read that field and never this one.
+    attempted_policy_rank: int
 
 
 @dataclass(frozen=True, slots=True)

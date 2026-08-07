@@ -23,7 +23,13 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.event_journal import EventClass, EventKind, HistoryDebtOutcome, RoomHistoryDebt
+from mindroom.event_journal import (
+    EventClass,
+    EventKind,
+    HistoryDebtOutcome,
+    HydrationPolicy,
+    RoomHistoryDebt,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_hydration import ConversationHydrator, _HydrationError
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
@@ -161,14 +167,22 @@ def hydrator(
     client: FakeClient,
     *,
     require_complete: bool = False,
+    policy: HydrationPolicy = HydrationPolicy.PROMPT,
     **bounds: int,
 ) -> ConversationHydrator:
-    """Return a hydrator wired to a fake homeserver."""
+    """Return a hydrator wired to a fake homeserver.
+
+    The bounds are shrunk far below either policy's real ceilings so a walk can
+    reach one inside a test. The policy is passed separately for that reason:
+    it names which caller this stands for, and the durable marker is compared
+    on that ordering rather than on the shrunken numbers.
+    """
     return ConversationHydrator(
         store=store,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
         self_sender=BOT,
         require_complete=require_complete,
+        policy=policy,
         **bounds,
     )
 
@@ -792,7 +806,7 @@ async def test_lost_history_does_not_make_a_strict_caller_walk_the_room_forever(
     await admit_all(alice, [raw("$one", "one", ts=1_000)])
     await alice.record_room_history_debt(ROOM)
     client = FakeClient(pages=[[raw("$six", "six", ts=6_000), raw("$five", "five", ts=5_000)]])
-    strict = hydrator(alice, client, require_complete=True)
+    strict = hydrator(alice, client, require_complete=True, policy=HydrationPolicy.EXPORT)
 
     await strict.ensure_hydrated(room_id=ROOM, thread_id=None)
     walked = client.calls
@@ -826,13 +840,18 @@ async def test_a_repayment_counts_as_the_deeper_walk_on_later_reads_too(
     # A room deeper than the walk's request ceiling, so the repayment stops
     # short of both the anchor and the start of the room.
     client = FakeClient(endless=True)
-    bounds = {"prompt_window_messages": 1, "max_requests": 3}
+    bounds: dict[str, Any] = {
+        "prompt_window_messages": 1,
+        "max_requests": 3,
+        "require_complete": True,
+        "policy": HydrationPolicy.EXPORT,
+    }
 
-    await hydrator(alice, client, require_complete=True, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+    await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
     walked = client.calls
     assert walked == 3
 
-    await hydrator(alice, client, require_complete=True, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+    await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert client.calls == walked
     # Not re-walked, and still honestly short: a strict caller refuses on this.

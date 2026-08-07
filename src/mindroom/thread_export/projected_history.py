@@ -49,6 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.event_journal import HydrationPolicy
 from mindroom.event_journal.views import ConversationReadView, HydrationView
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader, projected_visible_messages
@@ -163,6 +164,12 @@ def export_conversation_reader(
                 # module then correctly declines to write a suffix as if it were
                 # the whole thread. Before this cutover an export paginated
                 # Matrix directly and had no such limit.
+                # The three ceilings and the name they go by. The name is what
+                # a walk writes into the marker, so these must be changed
+                # together: a policy is the whole set, and recording one of
+                # its numbers instead could not tell two policies apart that
+                # differ only on one of the others.
+                policy=HydrationPolicy.EXPORT,
                 prompt_window_messages=EXPORT_WINDOW_MESSAGES,
                 max_fetched_events=EXPORT_MAX_FETCHED_EVENTS,
                 max_requests=EXPORT_MAX_MESSAGES_REQUESTS,

@@ -217,7 +217,7 @@ class HydrationView(Protocol):
         events: tuple[ProjectedEvent, ...],
         complete: bool,
         saw_anchor: bool,
-        attempted_window_messages: int = 0,
+        attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
         """Install one room walk and settle the debt it was run for, together."""
@@ -243,7 +243,7 @@ class HydrationView(Protocol):
         thread_id: str | None,
         events: tuple[ProjectedEvent, ...],
         complete: bool,
-        attempted_window_messages: int = 0,
+        attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> bool:
         """Install a completed hydration atomically, or install nothing."""

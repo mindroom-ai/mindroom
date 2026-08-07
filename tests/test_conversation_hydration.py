@@ -21,7 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.event_journal import EventClass, EventKind, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, HydrationPolicy, ProjectedEvent
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
@@ -278,16 +278,32 @@ def hydrator(
     *,
     self_sender: str = BOT,
     require_complete: bool = False,
+    policy: HydrationPolicy = HydrationPolicy.PROMPT,
     **bounds: int,
 ) -> ConversationHydrator:
-    """Return a hydrator wired to a fake homeserver."""
+    """Return a hydrator wired to a fake homeserver.
+
+    The bounds are shrunk far below either policy's real ceilings so a walk can
+    reach one inside a test. The policy is passed separately for that reason:
+    it names which caller this stands for, and the ordering that the durable
+    marker is compared on is the policy's, not the shrunken numbers'.
+    """
     return ConversationHydrator(
         store=store,
         runtime=SimpleNamespace(client=client),  # type: ignore[arg-type]
         self_sender=self_sender,
         require_complete=require_complete,
+        policy=policy,
         **bounds,
     )
+
+
+# What an export caller is, as the hydrator sees it: it needs the whole
+# conversation and it walks under the widest policy there is. Named once
+# because the two travel together. A strict caller left on the prompt policy
+# would be satisfied by a prompt's own marker, which is the bug that made every
+# warm thread unexportable.
+EXPORT_CALLER: dict[str, Any] = {"require_complete": True, "policy": HydrationPolicy.EXPORT}
 
 
 def edited_thread(answers: int, edits: int) -> FakeClient:
@@ -850,7 +866,7 @@ class TestCompletenessRequirement:
             alice,
             client,
             prompt_window_messages=50,
-            require_complete=True,
+            **EXPORT_CALLER,
         ).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
@@ -873,7 +889,7 @@ class TestCompletenessRequirement:
         make.
         """
         client = edited_thread(answers=4, edits=1)
-        strict = hydrator(alice, client, prompt_window_messages=50, require_complete=True)
+        strict = hydrator(alice, client, prompt_window_messages=50, **EXPORT_CALLER)
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         walked = client.relation_calls
 
@@ -900,7 +916,7 @@ class TestCompletenessRequirement:
         every read of a thread that will never satisfy it.
         """
         client = edited_thread(answers=4, edits=1)
-        strict = hydrator(alice, client, prompt_window_messages=2, require_complete=True)
+        strict = hydrator(alice, client, prompt_window_messages=2, **EXPORT_CALLER)
 
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -908,7 +924,7 @@ class TestCompletenessRequirement:
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
-        await hydrator(alice, client, prompt_window_messages=2, require_complete=True).ensure_hydrated(
+        await hydrator(alice, client, prompt_window_messages=2, **EXPORT_CALLER).ensure_hydrated(
             room_id=ROOM,
             thread_id="$root",
         )
@@ -938,7 +954,7 @@ class TestCompletenessRequirement:
         thread = edited_thread(answers=5, edits=1)
         client = HeldFirstWalk(events=thread.events, relations=thread.relations)
         prompt = hydrator(alice, client, prompt_window_messages=2)
-        export = hydrator(alice, client, prompt_window_messages=50, require_complete=True)
+        export = hydrator(alice, client, prompt_window_messages=50, **EXPORT_CALLER)
 
         bounded = asyncio.create_task(prompt.ensure_hydrated(room_id=ROOM, thread_id="$root"))
         await client.started.wait()
@@ -975,7 +991,7 @@ class TestCompletenessRequirement:
         thread = edited_thread(answers=5, edits=1)
         client = HeldFirstWalk(events=thread.events, relations=thread.relations)
         prompt = hydrator(alice, client, prompt_window_messages=2)
-        export = hydrator(alice, client, prompt_window_messages=3, require_complete=True)
+        export = hydrator(alice, client, prompt_window_messages=3, **EXPORT_CALLER)
 
         bounded = asyncio.create_task(prompt.ensure_hydrated(room_id=ROOM, thread_id="$root"))
         await client.started.wait()
@@ -984,7 +1000,7 @@ class TestCompletenessRequirement:
         await bounded
         walked = client.relation_calls
 
-        await hydrator(alice, client, prompt_window_messages=3, require_complete=True).ensure_hydrated(
+        await hydrator(alice, client, prompt_window_messages=3, **EXPORT_CALLER).ensure_hydrated(
             room_id=ROOM,
             thread_id="$root",
         )

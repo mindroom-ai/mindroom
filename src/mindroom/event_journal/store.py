@@ -346,7 +346,7 @@ class PrincipalStore:
         thread_id: str | None,
         events: tuple[ProjectedEvent, ...],
         complete: bool,
-        attempted_window_messages: int = 0,
+        attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> bool:
         """Install a completed hydration atomically, or install nothing.
@@ -359,12 +359,13 @@ class PrincipalStore:
         it: a conversation bounded by the prompt window and one that is simply
         that short leave identical rows behind.
 
-        ``attempted_window_messages`` is how wide that walk was allowed to be,
-        and it is what lets a later caller tell a conversation nobody walked
-        deeply from one where its own bound has already been spent and failed.
-        It defaults to zero -- no walk of any width on record -- which is the
-        literal truth for a caller installing events it did not walk for, and
-        the direction that costs a redundant walk rather than a short answer.
+        ``attempted_policy_rank`` names the `HydrationPolicy` that walk ran
+        under, and it is what lets a later caller tell a conversation nobody
+        walked deeply from one where its own policy has already been spent and
+        failed. It defaults to zero -- no walk of any policy on record -- which
+        is the literal truth for a caller installing events it did not walk
+        for, and the direction that costs a redundant walk rather than a short
+        answer.
         """
         return await self._backend.write(
             lambda transaction: _install_hydration(
@@ -374,7 +375,7 @@ class PrincipalStore:
                 thread_id=thread_id,
                 events=events,
                 complete=complete,
-                attempted_window_messages=attempted_window_messages,
+                attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
         )
@@ -398,7 +399,7 @@ class PrincipalStore:
         events: tuple[ProjectedEvent, ...],
         complete: bool,
         saw_anchor: bool,
-        attempted_window_messages: int = 0,
+        attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
         """Install one room walk and settle the debt it was run for, together.
@@ -409,8 +410,8 @@ class PrincipalStore:
         projection already holds, or -- far worse the other way round -- holding
         a repaired room that still reads as indebted forever.
 
-        A repayment is a real walk of the room under the hydrator's own bounds,
-        so it records how wide it was for the same reason an ordinary hydration
+        A repayment is a real walk of the room under the hydrator's own policy,
+        so it records that policy for the same reason an ordinary hydration
         does: it is the deeper walk a strict caller was owed, and nothing else
         would remember that it already happened.
         """
@@ -422,7 +423,7 @@ class PrincipalStore:
                 events=events,
                 complete=complete,
                 saw_anchor=saw_anchor,
-                attempted_window_messages=attempted_window_messages,
+                attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
         )
@@ -820,7 +821,7 @@ def _repay_history_debt(
     events: tuple[ProjectedEvent, ...],
     complete: bool,
     saw_anchor: bool,
-    attempted_window_messages: int,
+    attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> HistoryDebtOutcome:
     """Install a repayment walk as the room conversation's hydration, and settle.
@@ -849,7 +850,7 @@ def _repay_history_debt(
         thread_id=None,
         events=events,
         complete=complete,
-        attempted_window_messages=attempted_window_messages,
+        attempted_policy_rank=attempted_policy_rank,
         expected_membership_epoch=expected_membership_epoch,
     ):
         return HistoryDebtOutcome.SUPERSEDED
@@ -870,7 +871,7 @@ def _install_hydration(
     thread_id: str | None,
     events: tuple[ProjectedEvent, ...],
     complete: bool,
-    attempted_window_messages: int,
+    attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> bool:
     from .projection import project  # noqa: PLC0415 - keeps the module import-light
@@ -881,7 +882,7 @@ def _install_hydration(
         room_id=room_id,
         thread_id=thread_id,
         complete=complete,
-        attempted_window_messages=attempted_window_messages,
+        attempted_policy_rank=attempted_policy_rank,
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
