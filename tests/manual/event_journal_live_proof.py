@@ -171,14 +171,25 @@ class Findings:
     results: list[tuple[str, bool, str]] = field(default_factory=list)
 
     def record(self, name: str, passed: bool, detail: str = "") -> None:
-        """Record one observation."""
+        """Record one observation that must hold on every server."""
         self.results.append((name, passed, detail))
         marker = "PASS" if passed else "FAIL"
         print(f"[{marker}] {name}{f' — {detail}' if detail else ''}")
 
+    def note(self, name: str, detail: str) -> None:
+        """Record what a server did without requiring every server to do it.
+
+        Some behaviour differs legitimately between implementations, and the
+        useful thing is the measurement rather than a verdict. Asserting one
+        server's answer as if it were the contract makes this harness fail on
+        the other, which stops it being run there at all -- the opposite of
+        what a two-server proof is for.
+        """
+        print(f"[NOTE] {name} — {detail}")
+
     @property
     def ok(self) -> bool:
-        """Return whether every observation passed."""
+        """Return whether every required observation passed."""
         return all(passed for _name, passed, _detail in self.results)
 
 
@@ -216,15 +227,19 @@ async def prove_recursion_depth(
         isinstance(reported, int),
         f"recursion_depth={reported!r}",
     )
-    # This server reports the depth of the deepest event it actually returned,
-    # so a genuinely shallow tree reports a small number. Synapse instead
-    # returns the constant it is willing to traverse. Recorded rather than
-    # asserted, because the number is not comparable across servers and no
-    # numeric floor above zero would be correct on both.
-    findings.record(
-        "the reported depth describes the tree, not a fixed capability",
-        isinstance(reported, int) and reported < 3,
-        f"a two-level tree reported recursion_depth={reported!r}",
+    # Measured, not asserted, because the two servers mean different things by
+    # it. Tuwunel reports the depth of the deepest event it actually returned,
+    # so this two-level tree reports 1. Synapse reports the constant 3, the
+    # depth it is willing to traverse, whatever the tree looks like. Both are
+    # defensible readings of the same field name, so no numeric floor above
+    # zero is correct on both -- which is exactly why
+    # `_REQUIRED_RECURSION_DEPTH` is 0 and the requirement MindRoom actually
+    # enforces is the next check: the server reported a depth at all, meaning
+    # it honoured `recurse` rather than silently returning direct children.
+    findings.note(
+        "what the reported depth means on this server",
+        f"a two-level tree reported recursion_depth={reported!r}"
+        f" ({'the tree it returned' if isinstance(reported, int) and reported < 3 else 'a fixed capability'})",
     )
     findings.record(
         "recursive traversal returns the indirectly related edit",

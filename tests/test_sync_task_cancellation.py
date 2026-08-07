@@ -2048,7 +2048,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.teams = {}
         config.mcp_servers = {}
         config.plugins = []
-        config.cache = MagicMock()
+        config.event_journal = MagicMock()
         config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config
@@ -2097,7 +2097,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     config.agents = {"general": MagicMock()}
     config.teams = {}
     config.mcp_servers = {}
-    config.cache = MagicMock()
+    config.event_journal = MagicMock()
     orchestrator.config = config
 
     router_bot = AsyncMock()
@@ -2162,7 +2162,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
     config.agents = {"general": MagicMock()}
     config.teams = {}
     config.mcp_servers = {}
-    config.cache = MagicMock()
+    config.event_journal = MagicMock()
     orchestrator.config = config
 
     router_bot = AsyncMock()
@@ -2363,7 +2363,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         old_config.agents = {"agent1": MagicMock()}
         old_config.teams = {}
         old_config.mcp_servers = {}
-        old_config.cache = MagicMock()
+        old_config.event_journal = MagicMock()
         old_config.authorization = MagicMock()
         old_config.authorization.global_users = []
         orchestrator.config = old_config
@@ -2381,7 +2381,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         new_config.agents = {"agent1": MagicMock()}
         new_config.teams = {}
         new_config.mcp_servers = {}
-        new_config.cache = MagicMock()
+        new_config.event_journal = MagicMock()
         new_config.authorization = MagicMock()
         new_config.authorization.global_users = []  # Add this for the logging
         mock_load_config.return_value = new_config

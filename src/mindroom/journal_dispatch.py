@@ -26,7 +26,7 @@ import nio
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import EventKind, SemanticConsumer, SettlementOutcome
+from mindroom.event_journal import TURN_BACKED_KINDS, EventKind, SemanticConsumer, SettlementOutcome
 from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -52,10 +52,6 @@ logger = get_logger(__name__)
 # it to claim a consumer or read their receipt order without every one of them
 # having to thread the event through its own signature.
 _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
-
-# Kinds whose work outlives its callback, because the callback only starts a
-# turn. Their events stay pending until that turn's answer is durably owed.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
 
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
@@ -224,18 +220,34 @@ class JournalDispatcher:
         Membership hooks are ordered against the sync response that produced
         them, so their callback has to finish inside that response rather than
         whenever the worker next looks.
+
+        Running it here does not exempt it from having one handler. Admission
+        wakes the pump, two awaits separate that wake from the callback, and
+        an event stays pending for as long as its handler runs -- so a scan in
+        that window collects the event this is already running and dispatches
+        it into the room's lane. Claiming it as this caller's sole handler is
+        what closes that, and the claim is taken before admission because a
+        scan can only collect a row that has committed.
+
+        Draining through the room's lane, the way recovery does, is the wrong
+        answer for this one. This runs on the sync task, and a lane can hold a
+        message handler blocked on another turn settling -- which in turn can
+        be waiting days for a tool-approval decision that only a live sync can
+        deliver. Waiting for the lane here would trade a duplicate dispatch
+        for a bot that receives nothing at all.
         """
-        await self.admit_out_of_band(room, event, kind, event_class)
-        stored = await self.store.load_event(event.event_id)
-        if stored is None or not await self.store.is_pending(event.event_id):
-            # A context-only event is admitted already settled, so no callback
-            # will ever run for it. Keeping the parsed object would hold it for
-            # a run that cannot come.
-            self._live_events.pop(event.event_id, None)
-            return
-        outcome = await self._run_event(stored)
-        if outcome is not None:
-            await self.store.settle(event.event_id, outcome)
+        with self._worker.sole_handler(event.event_id):
+            await self.admit_out_of_band(room, event, kind, event_class)
+            stored = await self.store.load_event(event.event_id)
+            if stored is None or not await self.store.is_pending(event.event_id):
+                # A context-only event is admitted already settled, so no
+                # callback will ever run for it. Keeping the parsed object
+                # would hold it for a run that cannot come.
+                self._live_events.pop(event.event_id, None)
+                return
+            outcome = await self._run_event(stored)
+            if outcome is not None:
+                await self.store.settle(event.event_id, outcome)
 
     def _deferral_is_live(self, event: JournalEvent) -> bool:
         """Return whether the owner one deferred event was handed to still exists.

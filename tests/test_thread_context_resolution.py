@@ -1665,7 +1665,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
-        """Ingress coalescing should reject indeterminate thread proof refreshes it triggers."""
+        """Ingress coalescing repairs an unproven candidate once, then rejects it.
+
+        Two labelled reads, in this order. The dispatch-safe one is what every
+        turn pays; the strict one runs only for a candidate root the first read
+        could not prove, and here the stub refuses to prove it either, so the
+        repair is exhausted and the scope stays unresolved.
+        """
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -1703,11 +1709,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             await resolver.coalescing_thread_id(room, event)
 
-        mock_access.assert_called_once_with(
-            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
-            caller_label="coalescing_thread_id",
-            requires_complete_history=True,
-        )
+        assert mock_access.call_args_list == [
+            call(
+                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+                caller_label="coalescing_thread_id",
+                requires_complete_history=True,
+            ),
+            call(
+                mode=ThreadReadMode.STRICT_FULL,
+                caller_label="coalescing_thread_id_strict_candidate_fallback",
+                requires_complete_history=True,
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_rejects_lookup_failure_candidate(self, bot: AgentBot) -> None:

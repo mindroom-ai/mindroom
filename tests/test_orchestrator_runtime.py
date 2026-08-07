@@ -2850,7 +2850,7 @@ class TestMultiAgentOrchestrator:
         config.mindroom_user = None
         config.matrix_room_access = MagicMock()
         config.authorization = MagicMock()
-        config.cache = MagicMock()
+        config.event_journal = MagicMock()
         config.defaults.enable_streaming = True
 
         orchestrator.config = config
@@ -3175,10 +3175,10 @@ class TestMultiAgentOrchestrator:
         config_path = tmp_path / "custom-config.yaml"
         current_config = MagicMock()
         current_config.authorization.global_users = []
-        current_config.cache = MagicMock()
+        current_config.event_journal = MagicMock()
         new_config = MagicMock()
         new_config.authorization.global_users = []
-        new_config.cache = MagicMock()
+        new_config.event_journal = MagicMock()
         new_config.defaults.enable_streaming = True
 
         orchestrator = _MultiAgentOrchestrator(
@@ -3221,10 +3221,10 @@ class TestMultiAgentOrchestrator:
 
         current_config = MagicMock()
         current_config.authorization.global_users = []
-        current_config.cache = MagicMock()
+        current_config.event_journal = MagicMock()
         new_config = MagicMock()
         new_config.authorization.global_users = []
-        new_config.cache = MagicMock()
+        new_config.event_journal = MagicMock()
         old_hook_registry = HookRegistry.empty()
         new_hook_registry = HookRegistry.empty()
 

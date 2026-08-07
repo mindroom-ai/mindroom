@@ -244,7 +244,7 @@ async def test_matrix_api_send_event_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_records_threaded_room_message() -> None:
-    """send_event should write successful threaded room messages through the conversation cache."""
+    """send_event should send successful threaded room messages with their thread relation."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -317,8 +317,8 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send() -> None:
-    """A successful send_event should delegate advisory bookkeeping through the cache facade."""
+async def test_matrix_api_send_event_reports_the_event_it_sent() -> None:
+    """A successful send_event reports the event the homeserver accepted."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -378,7 +378,7 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_delegates_thread_classification_to_shared_helper() -> None:
-    """send_event should call the shared thread-membership helper instead of inlining cache policy."""
+    """send_event should call the shared thread-membership helper instead of inlining thread policy."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_send.return_value = nio.RoomSendResponse(
@@ -431,7 +431,7 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeeping() -> None:
+async def test_matrix_api_send_event_room_mode_edit_stays_room_level() -> None:
     """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
     tool = MatrixApiTools()
     ctx = _make_context()
@@ -624,7 +624,7 @@ async def test_matrix_api_put_state_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_happy_path() -> None:
-    """Threaded redactions should call room_redact and notify threaded cache bookkeeping."""
+    """Threaded redactions should call room_redact after proving the target's thread."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
     ctx.client.room_get_event.return_value = _event_response(
@@ -667,7 +667,7 @@ async def test_matrix_api_redact_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_delegates_thread_classification_to_shared_helper() -> None:
-    """Redact should call the shared thread-membership helper instead of inlining cache policy."""
+    """Redact should call the shared thread-membership helper instead of inlining thread policy."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(

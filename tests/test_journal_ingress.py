@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -18,7 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.event_journal import EventClass, EventKind, SettlementOutcome, VisibleMessage
+from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import _projected_from_event
@@ -1182,6 +1183,10 @@ class TestPendingEventWorker:
             projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
+    @staticmethod
+    async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
+        await store.admit(inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
         """A rooms events run in receipt order."""
         handled: list[str] = []
@@ -1250,6 +1255,68 @@ class TestPendingEventWorker:
 
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
+
+    async def test_a_recovery_drain_runs_a_room_through_its_lane_not_beside_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room has one lane, and a drain has to take it rather than add one.
+
+        Recovery is not a phase that finishes before the pump starts:
+        `JournalDispatcher.drain_once` is scheduled every time a bot reports
+        ready, so it runs against a live pump. A drain that dispatched beside
+        the room's lane would break both halves of what a lane guarantees --
+        one event would be inside two handlers at once, and event three would
+        overtake event two.
+
+        The handler claims a semantic consumer the way a reaction's does, so
+        the second handler is not merely wasteful: its claim raises against
+        the row the first one already settled, and `_run_lane` logs that and
+        stops the room mid-pass. The claim is right to raise. Nothing settles
+        an event while its own handler is running, so a settled row there
+        means the event was already being run somewhere else.
+        """
+        handled: list[str] = []
+        concurrent = 0
+        peak_concurrent = 0
+        inside_first = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            nonlocal concurrent, peak_concurrent
+            handled.append(event.event_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+            try:
+                if event.event_id == "$first":
+                    # Held open so a drain has a window to start while the
+                    # pump's lane is demonstrably inside this event.
+                    inside_first.set()
+                    await release_first.wait()
+                await alice.claim_semantic_consumer(event.event_id, SemanticConsumer.REACTION_HOOKS)
+            finally:
+                concurrent -= 1
+            return SettlementOutcome.SUCCEEDED
+
+        for event_id in ("$first", "$second", "$third"):
+            await self._admit_reaction(alice, reaction_event(event_id))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await asyncio.wait_for(inside_first.wait(), timeout=5)
+
+        draining = asyncio.create_task(worker.drain_once())
+        # Enough turns of the loop for a drain to scan the store and dispatch.
+        for _ in range(50):
+            await asyncio.sleep(0)
+        release_first.set()
+
+        await asyncio.wait_for(draining, timeout=5)
+        await worker.stop()
+
+        assert handled == ["$first", "$second", "$third"]
+        assert peak_concurrent == 1
+        assert await alice.unsettled_event_ids() == frozenset()
 
     async def test_one_stalled_room_does_not_block_another(
         self,
@@ -1559,6 +1626,93 @@ class TestPendingEventWorker:
 
         await _eventually(lambda: attempts == ["$m", "$m"], seconds=10)
         await worker.stop()
+
+
+class TestOutOfBandDispatch:
+    """An event its caller runs itself is still an event with one handler."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_room_lifecycle: Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]],
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose only interesting callback is the lifecycle one."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=on_room_lifecycle,
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    async def test_admit_and_run_is_the_events_only_handler(self, alice: PrincipalStore) -> None:
+        """Running an event inline does not exempt it from having one handler.
+
+        ``admit_and_run`` wakes the pump and then awaits twice -- a load and a
+        pending check -- before it reaches the callback. The pump has no
+        in-flight filter, because an event stays pending for the whole time its
+        handler runs, so a scan inside that window collects the very event the
+        caller is already running and dispatches it into the room's lane.
+
+        The count matters as much as the concurrency. Asserting only that
+        nothing raised would pass with the bug present: a room-lifecycle
+        callback claims no semantic consumer, so the second handler runs to
+        completion and settles a row the first one is about to settle again.
+        """
+        handled: list[str] = []
+        concurrent = 0
+        peak_concurrent = 0
+        inside_handler = asyncio.Event()
+        second_handler = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def on_room_lifecycle(_room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+            nonlocal concurrent, peak_concurrent
+            handled.append(event.event_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+            if concurrent > 1:
+                second_handler.set()
+            try:
+                # Held open so the pump has a window to collect an event that
+                # is pending precisely because its handler has not finished.
+                inside_handler.set()
+                await release_handler.wait()
+            finally:
+                concurrent -= 1
+
+        dispatcher = self._dispatcher(alice, on_room_lifecycle)
+        dispatcher.start()
+        running = asyncio.create_task(
+            dispatcher.admit_and_run(room(), member_event("$join"), EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE),
+        )
+        await asyncio.wait_for(inside_handler.wait(), timeout=5)
+        with contextlib.suppress(TimeoutError):
+            # A second handler has to wake the pump, read a page of pending
+            # events and start a lane, so this waits on wall time rather than
+            # loop turns. Reaching the timeout is the passing case.
+            await asyncio.wait_for(second_handler.wait(), timeout=0.5)
+        release_handler.set()
+
+        await asyncio.wait_for(running, timeout=5)
+        await dispatcher.stop()
+
+        assert handled == ["$join"]
+        assert peak_concurrent == 1
+        assert await alice.unsettled_event_ids() == frozenset()
 
 
 class TestDeferralOwnership:

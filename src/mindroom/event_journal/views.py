@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .approvals import RecordedApprovalDecision, StoredApprovalCard
+    from .history_debt import HistoryDebtOutcome, RoomHistoryDebt
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -175,11 +176,41 @@ class ConversationReadView(ProjectionView, Protocol):
         ...
 
 
+class HistoryDebtRecordView(Protocol):
+    """Writing down history a skipped sync gap left a room owing, and nothing else.
+
+    Deliberately one method. The writer is sync certification, which has to make
+    the hole durable before it moves the checkpoint past it; giving that caller
+    anything it could read would let a decision about the transport start
+    depending on the state of the projection.
+    """
+
+    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
+        """Write down the history a skipped sync gap left this room owing."""
+        ...
+
+
 class HydrationView(Protocol):
     """Building a conversation from the server and repairing one message of it."""
 
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
+        ...
+
+    async def room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
+        """Return the history this room still owes a walk, or nothing."""
+        ...
+
+    async def repay_room_history_debt(
+        self,
+        debt: RoomHistoryDebt,
+        *,
+        events: tuple[ProjectedEvent, ...],
+        complete: bool,
+        reached_ts: int | None,
+        expected_membership_epoch: int,
+    ) -> HistoryDebtOutcome:
+        """Install one room walk and settle the debt it was run for, together."""
         ...
 
     async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
@@ -329,6 +360,7 @@ __all__ = [
     "ApprovalView",
     "ConversationReadView",
     "DispatchView",
+    "HistoryDebtRecordView",
     "HydrationView",
     "OutboxView",
     "PendingTurnView",

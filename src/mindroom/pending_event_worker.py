@@ -14,6 +14,7 @@ healthy.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,7 @@ from mindroom.event_journal import SettlementOutcome
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Iterator
 
     from mindroom.event_journal import JournalEvent, ReplayView
 
@@ -95,6 +96,10 @@ class PendingEventWorker:
     # Rooms a pass found work for but could not dispatch, because their lane
     # was still busy. Their lane wakes the pump when it finishes.
     _rooms_with_more: set[str] = field(default_factory=set, init=False, repr=False)
+    # Events a caller is running itself, off the lanes. An event is pending in
+    # the store for the whole time its handler runs, so a scan that could not
+    # see these would collect one and put a second handler inside it.
+    _running_off_lane: set[str] = field(default_factory=set, init=False, repr=False)
 
     def start(self) -> None:
         """Begin draining, including anything a previous process left behind."""
@@ -118,6 +123,32 @@ class PendingEventWorker:
     def forget_all_deferrals(self) -> None:
         """Treat nothing as in flight, as a recovery pass must."""
         self._deferred.clear()
+
+    @contextmanager
+    def sole_handler(self, event_id: str) -> Iterator[None]:
+        """Hold one event against lane dispatch while its caller runs it itself.
+
+        Some events are ordered against the response that produced them, so
+        their caller has to see the handler finish rather than hand it to the
+        pump. That does not exempt the event from having one handler: it stays
+        pending for its handler's whole duration, and nothing else here treats
+        a running handler as in flight.
+
+        Enter this before admitting, not after. A scan can only collect a
+        committed row, so a claim taken first cannot be missed; taken
+        afterwards it leaves a window in which the pump starts the very
+        handler the caller is about to start.
+
+        Releasing wakes the pump, because a handler that deferred leaves its
+        event pending and the admission that would have revealed it has
+        already been spent on a scan that skipped it.
+        """
+        self._running_off_lane.add(event_id)
+        try:
+            yield
+        finally:
+            self._running_off_lane.discard(event_id)
+            self._wake.set()
 
     async def stop(self) -> None:
         """Stop draining, leaving unfinished events pending for the next start."""
@@ -152,6 +183,12 @@ class PendingEventWorker:
         has to be observable rather than eventually true. Unlike a pump pass,
         this keeps scanning until nothing dispatchable is left, so its return
         value is the whole backlog rather than one bounded slice of it.
+
+        Recovery runs while the pump is live rather than only before it starts,
+        so this drains through the room's lane instead of beside it. A second
+        lane over one room is not a faster drain: it puts two handlers inside
+        one event and lets event three overtake event two, which are the two
+        things a lane exists to make impossible.
         """
         drained = 0
         attempted: frozenset[str] = frozenset()
@@ -166,7 +203,24 @@ class PendingEventWorker:
                 return drained
             attempted = ids
             drained += len(ids)
-            await asyncio.gather(*(self._run_lane(events) for events in by_room.values()))
+            await asyncio.gather(*(self._drain_room(room_id, events) for room_id, events in by_room.items()))
+
+    async def _drain_room(self, room_id: str, events: list[JournalEvent]) -> None:
+        """Run one room's events, once whatever lane owns that room is done.
+
+        Rechecked after each wait because the pump wakes on the same lane
+        completion, so the room can be claimed again before this resumes.
+        Someone else's lane is waited on rather than awaited: whether that one
+        was cancelled is the pump's business, and a drain must not inherit it.
+        """
+        while (active := self._lanes.get(room_id)) is not None and not active.done():
+            await asyncio.wait([active])
+        lane = self._start_lane(room_id, events, more_remains=False)
+        await asyncio.wait([lane])
+        # This lane is the drain's own, so whatever ended it is the drain's to
+        # report. A cancelled turn is not a failed one: it leaves its event
+        # pending and hands the cancellation to whoever asked for the drain.
+        lane.result()
 
     async def _run(self) -> None:
         while True:
@@ -198,7 +252,8 @@ class PendingEventWorker:
         # lane-finished path cannot be the only thing that arms the next look.
         self._schedule_deferral_scan()
 
-    def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> None:
+    def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> asyncio.Task[None]:
+        """Make one room's lane, which is the only one that room may have."""
         self._rooms_with_more.discard(room_id)
         lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
@@ -207,6 +262,7 @@ class PendingEventWorker:
             # owe work that no later admission would reveal.
             self._rooms_with_more.add(room_id)
         lane.add_done_callback(lambda task: self._lane_finished(room_id, task))
+        return lane
 
     def _lane_finished(self, room_id: str, lane: asyncio.Task[None]) -> None:
         if self._lanes.get(room_id) is lane:
@@ -267,6 +323,10 @@ class PendingEventWorker:
             cursor = page[-1].receipt_order
             truncated = False
             for event in page:
+                if event.event_id in self._running_off_lane:
+                    # Its caller is inside the handler right now, and releases
+                    # the claim with a wake so a later pass reconsiders it.
+                    continue
                 if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
                     continue
                 lane = by_room.setdefault(event.room_id, [])

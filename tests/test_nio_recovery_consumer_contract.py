@@ -15,7 +15,7 @@ from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustSta
 from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,6 +32,7 @@ def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCheckpointTrust:
         logger=get_logger(),
         state=state,
         store_generation=_STORE_GENERATION,
+        history_debt_provider=RecordedHistoryDebts,
     )
 
 

@@ -8,7 +8,8 @@ has a direct safety net.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -21,10 +22,19 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import ConversationPage, VisibleMessage
+from mindroom.event_journal import (
+    ConversationPage,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    VisibleMessage,
+)
 from mindroom.logging_config import get_logger
+from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -34,16 +44,16 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
-
-    from mindroom.matrix.conversation_reads import ConversationReader
-    from mindroom.matrix.relation_lookup import RelationLookup
 
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
+_BOT_USER_ID = "@mindroom_general:localhost"
 _EVENT_ID = "$event:localhost"
 _THREAD_ROOT = "$root:localhost"
 _PARENT = "$parent:localhost"
+_CHILD = "$child:localhost"
 
 
 @dataclass(frozen=True)
@@ -444,3 +454,248 @@ async def test_build_ingress_envelope_carries_event_identity(config: Config) -> 
     assert envelope.mentioned_agents == ()
     assert envelope.agent_name == "general"
     assert envelope.source_kind == "message"
+
+
+def _parse(source: dict[str, Any]) -> nio.Event:
+    event = nio.Event.parse_event(source)
+    assert isinstance(event, nio.Event)
+    return event
+
+
+@dataclass
+class _HomeserverWithAThread:
+    """A homeserver holding a thread the journal has never been told about.
+
+    ``$parent`` is relation-free and has one ``m.thread`` child, so it is a
+    real thread root by MSC3440. Nothing about that is knowable locally, which
+    is the whole point: it is what a room looks like before anything has walked
+    the conversation the reply names.
+    """
+
+    _root: dict[str, Any] = field(
+        default_factory=lambda: {
+            "event_id": _PARENT,
+            "sender": _SENDER,
+            "origin_server_ts": 1_000,
+            "type": "m.room.message",
+            "room_id": _ROOM_ID,
+            "content": {"msgtype": "m.text", "body": "thread root"},
+        },
+    )
+    _child: dict[str, Any] = field(
+        default_factory=lambda: {
+            "event_id": _CHILD,
+            "sender": _SENDER,
+            "origin_server_ts": 1_100,
+            "type": "m.room.message",
+            "room_id": _ROOM_ID,
+            "content": {
+                "msgtype": "m.text",
+                "body": "in the thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": _PARENT},
+            },
+        },
+    )
+
+    async def room_get_event(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+        """Return one stored event."""
+        del room_id
+        source = {_PARENT: self._root, _CHILD: self._child}.get(event_id)
+        if source is None:
+            return nio.RoomGetEventError("not found", "M_NOT_FOUND")
+        response = nio.RoomGetEventResponse()
+        response.event = _parse(source)
+        return response
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield the thread's one child."""
+        del room_id, direction, recurse, minimum_recursion_depth
+        if event_id == _PARENT:
+            yield _parse(self._child)
+
+
+@dataclass
+class _HomeserverWithNoThread(_HomeserverWithAThread):
+    """A homeserver whose ``$parent`` is an ordinary message with no children.
+
+    The mirror of ``_HomeserverWithAThread``: the repair must be able to answer
+    "not a thread root" as definitely as it answers the other way, or every
+    reply to a plain message would open a thread on it.
+    """
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Report that nothing relates to the candidate."""
+        del room_id, event_id, direction, recurse, minimum_recursion_depth
+        return
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+
+@dataclass
+class _HomeserverRefusingTheRelationWalk(_HomeserverWithAThread):
+    """A homeserver that serves the event but will not answer for its relations.
+
+    The one case that stays genuinely unprovable: the strict repair runs and
+    still cannot say whether the candidate is a thread root, so the caller must
+    fail closed rather than guess a coalescing scope.
+    """
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Refuse the walk the way nio reports a server that ignored `recurse`."""
+        del room_id, event_id, direction, recurse, minimum_recursion_depth
+        raise nio.InsufficientRecursionDepthError(required=0, reported=None)
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+
+@asynccontextmanager
+async def _resolver_on_a_cold_journal(
+    config: Config,
+    tmp_path: Path,
+    *,
+    client: object | None = None,
+) -> AsyncIterator[ConversationResolver]:
+    """Yield a resolver whose only local knowledge is the inbound reply itself.
+
+    A real store and a real reader rather than the fixed-page doubles the rest
+    of this file uses, because the behaviour under test is what the projection
+    reports about a conversation it holds nothing of. A double that answers a
+    fixed page cannot express the difference between "empty" and "unknown",
+    which is the difference being tested.
+    """
+    store = EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
+    try:
+        principal = store.principal("agent@general")
+        reply = _parse(_reply_event().source)
+        await principal.admit(
+            inbound_event(_ROOM_ID, reply, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(_ROOM_ID, reply, EventKind.MESSAGE, self_sender=_BOT_USER_ID),
+        )
+        runtime = _RuntimeStub(
+            client=cast("nio.AsyncClient", client if client is not None else _HomeserverWithAThread()),
+            config=config,
+        )
+        runtime_paths = runtime_paths_for(config)
+        registry = entity_identity_registry(config, runtime_paths)
+        yield ConversationResolver(
+            ConversationResolverDeps(
+                runtime=runtime,
+                logger=get_logger("test_conversation_resolver"),
+                runtime_paths=runtime_paths,
+                agent_name="general",
+                matrix_id=registry.current_id("general"),
+                relations=RelationLookup(store=principal, runtime=runtime),
+                conversation_reader=ConversationReader(
+                    store=principal,
+                    hydrator=ConversationHydrator(
+                        store=principal,
+                        runtime=runtime,
+                        self_sender=_BOT_USER_ID,
+                    ),
+                ),
+            ),
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_unhydrated_candidate_root_still_gets_a_coalescing_scope(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A plain reply resolves its scope even when nothing has walked that conversation.
+
+    Coalescing reads dispatch-safe, so an unhydrated conversation answers with
+    a page that proves nothing, and an unproven root is INDETERMINATE. Raising
+    there fails the whole turn, and coalescing is the one caller with nothing
+    downstream to correct a wrong key with -- the batch is formed here -- so it
+    repairs the answer with a strict read instead of giving up.
+    """
+    async with _resolver_on_a_cold_journal(config, tmp_path) as resolver:
+        scope = await resolver.coalescing_thread_id(_room(), _reply_event())
+
+    assert scope == _PARENT
+
+
+@pytest.mark.asyncio
+async def test_unhydrated_candidate_root_is_not_demoted_to_room_level(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """The repaired read must answer the real thread, not merely stop raising.
+
+    A repair that resolved room level would keep every reply into an existing
+    thread out of it, which is the failure this whole path exists to prevent.
+    The history proves the answer came from the hydrated thread rather than
+    from the empty page the dispatch-safe read started with.
+    """
+    async with _resolver_on_a_cold_journal(config, tmp_path) as resolver:
+        result = await resolver.extract_dispatch_context(_room(), _reply_event())
+
+    assert result.context.is_thread is True
+    assert result.context.thread_id == _PARENT
+    assert [message.event_id for message in result.context.thread_history] == [_PARENT, _CHILD]
+
+
+@pytest.mark.asyncio
+async def test_unhydrated_childless_candidate_resolves_to_the_room(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """The repair answers "not a thread root" as definitely as it answers the other way.
+
+    Same cold journal, same unproven candidate; only the server's answer
+    differs. A repair that could only ever say "threaded" would open a thread
+    on every plain message anybody replied to.
+    """
+    async with _resolver_on_a_cold_journal(config, tmp_path, client=_HomeserverWithNoThread()) as resolver:
+        scope = await resolver.coalescing_thread_id(_room(), _reply_event())
+
+    assert scope is None
+
+
+@pytest.mark.asyncio
+async def test_coalescing_still_fails_closed_when_the_repair_cannot_prove_the_root(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A repair that cannot answer must not invent a scope.
+
+    The homeserver serves the candidate but refuses the relation walk, so even
+    the strict read cannot say whether it is a thread root. Guessing would put
+    the batch under the wrong key with nothing later to correct it.
+    """
+    async with _resolver_on_a_cold_journal(
+        config,
+        tmp_path,
+        client=_HomeserverRefusingTheRelationWalk(),
+    ) as resolver:
+        with pytest.raises(ThreadMembershipLookupError):
+            await resolver.coalescing_thread_id(_room(), _reply_event())

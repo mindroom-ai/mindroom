@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.event_journal import RoomHistoryDebt
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 
@@ -12,6 +14,24 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncRecoveryOutcome
     from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
+
+
+@dataclass
+class RecordedHistoryDebts:
+    """A history-debt recorder that keeps what certification wrote down.
+
+    Cache trust must be unable to certify past a gap without recording it, so
+    the collaborator is required rather than optional. Tests about the transport
+    still need one; this is the smallest thing that honestly is one.
+    """
+
+    anchor_ts: int = 1_000
+    rooms: list[str] = field(default_factory=list)
+
+    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
+        """Record the history a skipped gap left one room owing."""
+        self.rooms.append(room_id)
+        return RoomHistoryDebt(room_id=room_id, owed_through_ts=self.anchor_ts)
 
 
 def save_sync_token(

@@ -24,11 +24,12 @@ from mindroom.matrix.sync_recovery_escape import (
     SkippedRecoveryGap,
     SyncRecoveryStallTracker,
 )
-from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.event_journal import HistoryDebtRecordView
 
 _STORE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
@@ -39,13 +40,15 @@ _SKIPPED_TO = "s_live_now"
 _REPLAYED = "s_live_replayed"
 
 
-def _trust(tmp_path: Path) -> SyncCheckpointTrust:
+def _trust(tmp_path: Path, *, history_debt: HistoryDebtRecordView | None = None) -> SyncCheckpointTrust:
     """Build one principal's real checkpoint trust over a temporary continuity store."""
+    recorder = RecordedHistoryDebts() if history_debt is None else history_debt
     return SyncCheckpointTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
         logger=get_logger(),
         state=SyncTrustState.PENDING,
         store_generation=_STORE_GENERATION,
+        history_debt_provider=lambda: recorder,
     )
 
 

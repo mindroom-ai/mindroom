@@ -104,6 +104,7 @@ from .event_journal import (
     EventJournalStore,
     EventKind,
     MembershipFence,
+    PrincipalStore,
     SemanticConsumer,
 )
 from .event_journal_open import open_event_journal_store
@@ -410,6 +411,7 @@ class AgentBot:
             # further down, and trusting a saved token means asserting that
             # store already holds every event the token covers.
             store_generation_provider=self._resolve_journal_generation,
+            history_debt_provider=self._journal_principal,
         )
         self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
@@ -450,6 +452,10 @@ class AgentBot:
     async def _resolve_journal_generation(self) -> str | None:
         """Return the event journal's durable identity, minting it on first open."""
         return await self._journal_store.generation(new_generation=uuid.uuid4().hex)
+
+    def _journal_principal(self) -> PrincipalStore:
+        """Return this bot's principal-bound store, once the journal is open."""
+        return self._journal_store.principal(self._journal_principal_id)
 
     def _open_journal_store(self) -> EventJournalStore:
         """Open the durable store this bot's journal, projection, and outbox share.

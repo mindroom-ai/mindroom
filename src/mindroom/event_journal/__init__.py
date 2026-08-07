@@ -8,9 +8,11 @@ Three facts live here, each with exactly one owner:
 """
 
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
+from .history_debt import HistoryDebtOutcome, RoomHistoryDebt
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
+    TURN_BACKED_KINDS,
     AdmissionResult,
     ConversationCursor,
     ConversationPage,
@@ -35,6 +37,7 @@ from .views import (
     ApprovalView,
     ConversationReadView,
     DispatchView,
+    HistoryDebtRecordView,
     HydrationView,
     OutboxView,
     PendingTurnView,
@@ -45,6 +48,7 @@ from .views import (
 )
 
 __all__ = [
+    "TURN_BACKED_KINDS",
     "AdmissionResult",
     "AdmissionView",
     "ApprovalView",
@@ -59,6 +63,8 @@ __all__ = [
     "EventClass",
     "EventJournalStore",
     "EventKind",
+    "HistoryDebtOutcome",
+    "HistoryDebtRecordView",
     "HydrationView",
     "InboundEvent",
     "JournalEvent",
@@ -75,6 +81,7 @@ __all__ = [
     "RefreshRequest",
     "RelationView",
     "ReplayView",
+    "RoomHistoryDebt",
     "SemanticConsumer",
     "SettlementOutcome",
     "StoredApprovalCard",

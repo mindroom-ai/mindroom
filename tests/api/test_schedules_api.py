@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from mindroom.api.schedules import UpdateScheduleRequest, update_schedule
@@ -195,7 +194,6 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
 
 
-@pytest.mark.asyncio
 async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting() -> None:
     """Pure API schedule edits should not construct or resolve an event cache."""
     mock_client = _mock_matrix_client()

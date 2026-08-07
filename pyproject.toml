@@ -496,10 +496,6 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
-[tool.uv.sources]
-# Tracks the branch until mindroom-nio 0.37.0 is released. The recursive
-# relations API it adds is a hard prerequisite for conversation hydration.
-mindroom-nio = { git = "https://github.com/mindroom-ai/mindroom-nio.git", branch = "feat/recursive-relations" }
 
 [tool.ruff]
 target-version = "py312"

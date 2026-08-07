@@ -17,7 +17,7 @@ from mindroom.matrix.sync_certification import (
 from mindroom.matrix.sync_checkpoint_trust import SyncCheckpointTrust
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,6 +36,7 @@ def _trust(
         logger=MagicMock(),
         # The event journal's identity, which the bot resolves at startup.
         store_generation=store_generation,
+        history_debt_provider=RecordedHistoryDebts,
     )
 
 

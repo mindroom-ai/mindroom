@@ -33,6 +33,18 @@ class EventKind(StrEnum):
     DECRYPTION_FAILURE = "decryption_failure"
 
 
+# Kinds whose work outlives its callback, because the callback only starts a
+# turn. Their events stay pending until that turn's answer is durably owed.
+#
+# This lives beside the kinds rather than with the dispatcher that acts on
+# them, because the journal's own reads need it too: a replay guard asking
+# "is there newer unfinished work here" means work that can still answer, and
+# pending alone does not mean that. Thread membership is derived from content
+# for every kind alike, so a pending reaction, approval, or undecryptable
+# message can sit in a thread and be mistaken for an unanswered turn.
+TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
+
+
 class SettlementOutcome(StrEnum):
     """Terminal outcomes for one journal event's semantic work."""
 

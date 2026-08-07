@@ -28,7 +28,6 @@ MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
         "mindroom.custom_tools.attachments",
         "mindroom.interactive",
         "mindroom.matrix.client_delivery",
-        "mindroom.matrix.client_thread_history",
         "mindroom.matrix.client_visible_messages",
         "mindroom.matrix.mentions",
     },
