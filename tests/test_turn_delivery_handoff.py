@@ -18,6 +18,7 @@ restart would resend the frozen answer *and* run the model again for it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -686,3 +687,67 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
 
         assert sends == []
         assert await pending_ids(bot) == []
+
+
+@dataclass
+class _RefusesTheFirstAttempt:
+    """A homeserver that rejects one delivery and then behaves normally.
+
+    Refusing by call order rather than by shape is deliberate. The failed
+    attempt and its recovery resend carry the same frozen payload, so any
+    discriminator built from the content would let the test pass a fix that
+    only distinguished them by accident.
+    """
+
+    delivered: list[str] = field(default_factory=list)
+    refused: bool = False
+
+    async def __call__(
+        self,
+        _client: object,
+        _room_id: str,
+        content: dict[str, Any],
+        **_kwargs: object,
+    ) -> MagicMock | None:
+        if not self.refused:
+            self.refused = True
+            return None
+        event_id = f"$visible{len(self.delivered)}"
+        self.delivered.append(event_id)
+        return MagicMock(event_id=event_id, content_sent=content)
+
+
+class TestAFailedFinalEditLeavesOneOwner:
+    """A failure notice nobody could edit in must not also be owed by the outbox.
+
+    Turning a dispatch setup failure into a visible message goes through the
+    turn's FINAL row, so the notice is recoverable like any other answer. When
+    Matrix refuses that edit, the notice is sent as a plain message instead --
+    and until that send is bound to the row, the room has two owners for one
+    answer: the message just sent, and an attempted-but-unacknowledged FINAL
+    row that the next recovery pass resends as the same text a second time.
+    """
+
+    async def test_a_fallback_after_a_refused_final_edit_survives_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One failed edit, one fallback, one recovery pass, one visible message."""
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        adopt(bot, ["$cause"])
+        homeserver = _RefusesTheFirstAttempt()
+
+        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+            resolution = await bot._turn_controller._finalize_dispatch_failure(
+                target=MessageTarget.resolve(ROOM, None, "$cause"),
+                error=RuntimeError("boom"),
+                existing_event_id="$placeholder",
+                delivery_turn_id="$cause",
+            )
+            assert resolution == "$visible0", "the fallback send is the visible failure notice"
+
+            outcome = await bot._delivery_gateway.recover_deliveries()
+
+        assert outcome.complete, "recovery left work behind"
+        assert homeserver.delivered == ["$visible0"], "recovery sent the failure notice a second time"

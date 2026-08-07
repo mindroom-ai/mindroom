@@ -1758,6 +1758,16 @@ class TurnController:
         payload into the room as a new message. A degraded path that sends the
         right bytes without a durable row beats one that sends the wrong bytes
         with one.
+
+        Staying off the row is not the same as leaving it behind, though. The
+        failed edit left it attempted and unacknowledged, which is the outbox
+        saying it still owes this turn an answer, and the next recovery pass
+        would resend that frozen envelope as a second visible message beside
+        the fallback. So the fallback is adopted as the row's outcome once it
+        has landed, which is the moment the turn goes back to having exactly
+        one owner. Adopting before the send would invert the risk: the FINAL
+        enqueue already handed the journal sources over, so a crash in that
+        window would leave nobody owing the answer at all.
         """
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
@@ -1780,7 +1790,19 @@ class TurnController:
                 extra_content=terminal_extra_content,
             ),
         )
-        if response_event_id is not None and on_visible_response is not None:
+        if response_event_id is None:
+            # Nothing reached the room, so the row is still the only thing that
+            # can answer this turn and recovery has to keep trying it.
+            return None
+        if existing_event_id is not None and delivery_turn_id is not None:
+            # Exactly the condition under which the edit above could have left
+            # a row: no placeholder means no durable edit was attempted, and
+            # nothing this call is answerable for is waiting in the outbox.
+            await self.deps.delivery_gateway.adopt_final_delivery(
+                turn_id=delivery_turn_id,
+                event_id=response_event_id,
+            )
+        if on_visible_response is not None:
             await on_visible_response(response_event_id)
         return response_event_id
 
