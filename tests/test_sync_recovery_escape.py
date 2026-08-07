@@ -9,7 +9,6 @@ stuck, so a recovery that is merely slow is never cut short.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, cast
 
 import nio
@@ -18,14 +17,14 @@ from structlog.testing import capture_logs
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_recovery_escape import (
     _CLASSIC_SYNC_RECOVERY_STALL_LIMIT,
     SkippedRecoveryGap,
     SyncRecoveryStallTracker,
 )
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,18 +87,15 @@ def _sync_response(*, next_batch: str, unrecovered_room_ids: frozenset[str]) -> 
     )
 
 
-def _cache_result(
+def _recovery(
     response: nio.SyncResponse,
     *,
-    complete: bool = True,
-    errors: tuple[BaseException, ...] = (),
-) -> SyncCacheWriteResult:
-    """Build the cache result from the exact typed upstream response."""
-    return SyncCacheWriteResult.from_sync_response(
+    admission_refused: bool = False,
+) -> SyncRecoveryOutcome:
+    """Build the recovery outcome from the exact typed upstream response."""
+    return SyncRecoveryOutcome.from_sync_response(
         response,
-        complete=complete,
-        limited_room_ids=tuple(sorted(response.unrecovered_room_ids)),
-        errors=errors,
+        admission_refused=admission_refused,
     )
 
 
@@ -111,9 +107,10 @@ async def _certify_unrecovered(
 ) -> tuple[SyncTrustState, bool]:
     """Run one full sync response whose named rooms nio could not recover."""
     response = _sync_response(next_batch=next_batch, unrecovered_room_ids=unrecovered_room_ids)
-    decision = await trust.certify_response(
+    decision = await certify_response(
+        trust,
         next_batch=response.next_batch,
-        cache_result=_cache_result(response),
+        recovery=_recovery(response),
     )
     return decision.state, decision.reset_client_token
 
@@ -243,9 +240,10 @@ async def test_a_checkpoint_that_advances_between_failures_never_escapes(tmp_pat
         # A later response closes every gap, so the checkpoint advances and the
         # next failure is measured from a position the room has moved past.
         clean = _sync_response(next_batch=f"s_clean_{attempt}", unrecovered_room_ids=frozenset())
-        certified = await trust.certify_response(
+        certified = await certify_response(
+            trust,
             next_batch=clean.next_batch,
-            cache_result=_cache_result(clean),
+            recovery=_recovery(clean),
         )
         assert certified.state is SyncTrustState.CERTIFIED
 
@@ -270,9 +268,10 @@ async def test_a_wedged_room_does_not_make_a_healthy_room_skip(tmp_path: Path) -
         unrecovered_room_ids=frozenset({_WEDGED_ROOM, _HEALTHY_ROOM}),
     )
     with capture_logs() as logs:
-        decision = await trust.certify_response(
+        decision = await certify_response(
+            trust,
             next_batch=both.next_batch,
-            cache_result=_cache_result(both),
+            recovery=_recovery(both),
         )
 
     # The healthy room's single failure still blocks the checkpoint outright.
@@ -326,9 +325,10 @@ async def test_a_single_transient_failure_still_recovers_without_skipping(tmp_pa
             unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
         )
         replayed = _sync_response(next_batch=_REPLAYED, unrecovered_room_ids=frozenset())
-        certified = await trust.certify_response(
+        certified = await certify_response(
+            trust,
             next_batch=replayed.next_batch,
-            cache_result=_cache_result(replayed),
+            recovery=_recovery(replayed),
         )
 
     assert failed == (SyncTrustState.UNCERTAIN, True)
@@ -340,26 +340,15 @@ async def test_a_single_transient_failure_still_recovers_without_skipping(tmp_pa
     assert checkpoint.token == _REPLAYED
 
 
-@pytest.mark.parametrize(
-    ("complete", "errors", "expected_reason"),
-    [
-        (False, (), "cache_write_incomplete"),
-        (True, (asyncio.CancelledError(),), "cache_write_failed"),
-    ],
-    ids=["incomplete", "cancelled"],
-)
 @pytest.mark.asyncio
-async def test_a_failed_cache_write_never_counts_toward_a_skip(
+async def test_a_refused_admission_never_counts_toward_a_skip(
     tmp_path: Path,
-    *,
-    complete: bool,
-    errors: tuple[BaseException, ...],
-    expected_reason: str,
 ) -> None:
     """A response that never reached its recovery verdict cannot prove a stall.
 
-    Its own certification already fails on the cache write, so counting it would
-    be invisible until a later genuine failure escaped several attempts early.
+    Its own certification already fails on the refused admission, so counting it
+    would be invisible until a later genuine failure escaped several attempts
+    early.
     """
     save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
     trust = _trust(tmp_path)
@@ -370,11 +359,12 @@ async def test_a_failed_cache_write_never_counts_toward_a_skip(
             next_batch=f"s_live_{attempt}",
             unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
         )
-        decision = await trust.certify_response(
+        decision = await certify_response(
+            trust,
             next_batch=inconclusive.next_batch,
-            cache_result=_cache_result(inconclusive, complete=complete, errors=errors),
+            recovery=_recovery(inconclusive, admission_refused=True),
         )
-        assert decision.reason == expected_reason
+        assert decision.reason == "admission_refused"
 
     with capture_logs() as logs:
         conclusive = await _certify_unrecovered(

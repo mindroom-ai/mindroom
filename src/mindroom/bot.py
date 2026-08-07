@@ -54,8 +54,8 @@ from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
-    SyncCacheWriteResult,
     SyncCertificationDecision,
+    SyncRecoveryOutcome,
     SyncTrustState,
 )
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
@@ -1277,32 +1277,18 @@ class AgentBot:
             self._classic_sync_rebuild_attempt = 0
         client.next_batch = sync_token or ""
 
-    async def _certify_sync_response(
-        self,
-        *,
-        next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
-    ) -> SyncCertificationDecision:
-        """Apply cache certification and any requested Matrix client rewind."""
-        decision = await self._sync_cache_trust.certify_response(
-            next_batch=next_batch,
-            cache_result=cache_result,
-        )
-        await self._apply_client_rewind_decision(decision)
-        return decision
-
     async def _apply_sync_response_decision(
         self,
         decision: SyncCertificationDecision,
         *,
-        cache_result: SyncCacheWriteResult,
+        recovery: SyncRecoveryOutcome,
         joined_room_ids: Iterable[str] = (),
     ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
         client = self.client
         applied = await self._sync_cache_trust.apply_response(
             decision,
-            cache_result=cache_result,
+            recovery=recovery,
             joined_room_ids=joined_room_ids,
             publish_record=partial(
                 self._publish_classic_sync_commit,
@@ -1420,7 +1406,7 @@ class AgentBot:
         self,
         decision: SyncCertificationDecision,
         *,
-        cache_result: SyncCacheWriteResult,
+        recovery: SyncRecoveryOutcome,
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
         response: nio.SyncResponse,
     ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
@@ -1431,7 +1417,7 @@ class AgentBot:
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
         applied = await self._apply_sync_response_decision(
             decision,
-            cache_result=cache_result,
+            recovery=recovery,
             joined_room_ids=response.rooms.join,
         )
         if applied.reset_client_token:
@@ -1613,26 +1599,15 @@ class AgentBot:
                 and not first_sync_response
                 and self._sync_cache_trust.retry_token() is not None
             )
-            try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(response)
-            except asyncio.CancelledError as exc:
-                limited_room_ids, validation_errors = self._conversation_cache.limited_sync_timeline_room_ids(
-                    response,
-                )
-                cache_result = SyncCacheWriteResult.from_sync_response(
-                    response,
-                    complete=False,
-                    limited_room_ids=limited_room_ids,
-                    errors=(*validation_errors, exc),
-                )
-                await self._certify_sync_response(
-                    next_batch=response.next_batch,
-                    cache_result=cache_result,
-                )
-                raise
+            # No await between the guarded membership apply above and this plan,
+            # so there is no window in which this response could be abandoned
+            # after durable work and before its verdict. The cancellation branch
+            # that used to certify a fail-closed result here existed for the
+            # cache write, which was the only thing awaited in that gap.
+            recovery = self._sync_cache_trust.observed_recovery(response)
             decision = self._sync_cache_trust.plan_response(
                 next_batch=response.next_batch,
-                cache_result=cache_result,
+                recovery=recovery,
             )
             room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
                 first_sync_response=first_sync_response,
@@ -1656,7 +1631,7 @@ class AgentBot:
                     rejected_response,
                 ) = await self._apply_sync_response_after_dispatch_acceptance(
                     decision,
-                    cache_result=cache_result,
+                    recovery=recovery,
                     room_member_join_hook_plan=room_member_join_hook_plan,
                     response=response,
                 )

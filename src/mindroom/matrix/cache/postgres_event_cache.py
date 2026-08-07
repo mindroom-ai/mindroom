@@ -1070,16 +1070,6 @@ class PostgresEventCache:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
         return self._runtime.pending_gap_room_ids()
 
-    async def flush_pending_durable_writes(self, room_id: str) -> None:
-        """Persist runtime-only writes for one room before certifying a sync token."""
-        await self._operation(
-            room_id,
-            operation="flush_pending_durable_writes",
-            disabled_result=None,
-            callback=_noop_write,
-            allow_departed=True,
-        )
-
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._owns_registry:

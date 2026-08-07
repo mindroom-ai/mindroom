@@ -12,13 +12,13 @@ import pytest
 
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
-    SyncCacheWriteResult,
+    SyncRecoveryOutcome,
     SyncTrustState,
     handle_unknown_pos,
 )
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import certify_response, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,9 +77,10 @@ async def test_startup_uses_only_the_cache_certified_checkpoint(tmp_path: Path) 
     save_sync_token(tmp_path, "code", "s_safe", cache_generation=_GENERATION)
 
     token = await trust.prepare_startup()
-    decision = await trust.certify_response(
+    decision = await certify_response(
+        trust,
         next_batch="s_after",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert token == "s_safe"  # noqa: S105
@@ -174,9 +175,10 @@ async def test_complete_cache_delta_certifies_raw_sync_continuity(tmp_path: Path
     """Exact callback recovery must not poison independently durable raw cache continuity."""
     trust, _cache, _runtime = _trust(tmp_path)
 
-    decision = await trust.certify_response(
+    decision = await certify_response(
+        trust,
         next_batch="s_complete",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert decision.state is SyncTrustState.CERTIFIED
@@ -195,7 +197,7 @@ async def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_pa
 
     decision = trust.plan_response(
         next_batch="s_planned",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert decision.checkpoint_to_save == SyncCheckpoint("s_planned")
@@ -203,7 +205,7 @@ async def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_pa
     assert trust.checkpoint is None
     assert load_sync_checkpoint(tmp_path, "code") is None
 
-    await trust.apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
+    await trust.apply_response(decision, recovery=SyncRecoveryOutcome())
 
     assert trust.state is SyncTrustState.CERTIFIED
     assert trust.checkpoint == SyncCheckpoint("s_planned")
@@ -247,14 +249,14 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
     trust.continuity_store.replace_checkpoint(
         SyncCheckpoint("s_before_cleanup", cache_generation=_GENERATION),
     )
-    cache_result = SyncCacheWriteResult(complete=True)
+    recovery = SyncRecoveryOutcome()
     decision = trust.plan_response(
         next_batch="s_stale_after_cleanup",
-        cache_result=cache_result,
+        recovery=recovery,
     )
 
     assert await trust.invalidate_for_cache_scope_cleanup()
-    applied = await trust.apply_response(decision, cache_result=cache_result)
+    applied = await trust.apply_response(decision, recovery=recovery)
 
     assert applied.state is SyncTrustState.UNCERTAIN
     assert applied.reset_client_token is True
@@ -271,11 +273,12 @@ async def test_cache_scope_invalidation_resets_transient_recovery(tmp_path: Path
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
-    gap = await trust.certify_response(
+    gap = await certify_response(
+        trust,
         next_batch="s_gap",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
+        recovery=SyncRecoveryOutcome(
             unrecovered_room_ids=frozenset({"!gap:localhost"}),
+            admission_refused=True,
         ),
     )
     assert gap.reset_client_token is True
@@ -283,10 +286,10 @@ async def test_cache_scope_invalidation_resets_transient_recovery(tmp_path: Path
     assert await trust.invalidate_for_cache_scope_cleanup()
 
     assert trust.retry_token() is None
-    recovery = await trust.certify_response(
+    recovery = await certify_response(
+        trust,
         next_batch="s_recovered",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
+        recovery=SyncRecoveryOutcome(
             recovered_room_ids=frozenset({"!gap:localhost"}),
         ),
     )
@@ -307,19 +310,19 @@ async def test_stale_gap_plan_resets_after_cache_invalidation(
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
-    cache_result = SyncCacheWriteResult(
-        complete=False,
+    recovery = SyncRecoveryOutcome(
         unrecovered_room_ids=frozenset({"!gap:localhost"}),
+        admission_refused=True,
     )
     decision = trust.plan_response(
         next_batch="s_gap",
-        cache_result=cache_result,
+        recovery=recovery,
     )
 
     assert await trust.invalidate_for_cache_scope_cleanup()
     applied = await trust.apply_response(
         decision,
-        cache_result=cache_result,
+        recovery=recovery,
     )
 
     assert applied.reason == "cache_scope_invalidated"
@@ -334,10 +337,10 @@ async def test_cache_scope_invalidation_serializes_after_inflight_certification(
 ) -> None:
     """Invalidation must clear a certification that already entered its durable write."""
     trust, _cache, _runtime = _trust(tmp_path)
-    cache_result = SyncCacheWriteResult(complete=True)
+    recovery = SyncRecoveryOutcome()
     decision = trust.plan_response(
         next_batch="s_stale",
-        cache_result=cache_result,
+        recovery=recovery,
     )
     write_started = threading.Event()
     release_write = threading.Event()
@@ -361,7 +364,7 @@ async def test_cache_scope_invalidation_serializes_after_inflight_certification(
         side_effect=blocking_accept,
     ):
         apply_task = asyncio.create_task(
-            trust.apply_response(decision, cache_result=cache_result),
+            trust.apply_response(decision, recovery=recovery),
         )
         assert await asyncio.to_thread(write_started.wait, 2)
         invalidate_task = asyncio.create_task(trust.invalidate_for_cache_scope_cleanup())
@@ -440,22 +443,22 @@ async def test_shutdown_persist_without_cache_generation_clears_saved_checkpoint
 
 
 @pytest.mark.asyncio
-async def test_positioned_limited_response_resets_live_cursor_and_preserves_checkpoint(tmp_path: Path) -> None:
-    """A limited response must replay from the last durable checkpoint."""
+async def test_a_refused_response_resets_live_cursor_and_preserves_checkpoint(tmp_path: Path) -> None:
+    """A response nobody took ownership of must replay from the last durable checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
 
-    decision = await trust.certify_response(
+    decision = await certify_response(
+        trust,
         next_batch="s_partial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
 
     assert decision.reset_client_token is True
-    assert decision.reason == "cache_write_incomplete"
+    assert decision.reason == "admission_refused"
     assert trust.state is SyncTrustState.UNCERTAIN
     assert trust.checkpoint is None
     assert trust.retry_token() == "s_before_gap"
@@ -472,19 +475,17 @@ async def test_unrecovered_outcome_rewinds_before_clean_replay(tmp_path: Path) -
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
 
-    unrecovered = await trust.certify_response(
+    unrecovered = await certify_response(
+        trust,
         next_batch="s_unrecovered",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
+        recovery=SyncRecoveryOutcome(
             unrecovered_room_ids=frozenset({"!room:localhost"}),
         ),
     )
-    replayed = await trust.certify_response(
+    replayed = await certify_response(
+        trust,
         next_batch="s_unclassified",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            limited_room_ids=("!room:localhost",),
-        ),
+        recovery=SyncRecoveryOutcome(),
     )
     assert unrecovered.reset_client_token is True
     assert replayed.reset_client_token is False
@@ -503,22 +504,24 @@ async def test_repeated_unrecovered_gap_keeps_rewinding(
     trust, _cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
-    gap_result = SyncCacheWriteResult(
-        complete=True,
+    gap_result = SyncRecoveryOutcome(
         unrecovered_room_ids=frozenset({"!room:localhost"}),
     )
 
-    first = await trust.certify_response(
+    first = await certify_response(
+        trust,
         next_batch="s_after_gap_1",
-        cache_result=gap_result,
+        recovery=gap_result,
     )
-    second = await trust.certify_response(
+    second = await certify_response(
+        trust,
         next_batch="s_after_gap_2",
-        cache_result=gap_result,
+        recovery=gap_result,
     )
-    clean = await trust.certify_response(
+    clean = await certify_response(
+        trust,
         next_batch="s_after_clean_delta",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert first.reset_client_token is True
@@ -540,18 +543,18 @@ async def test_recovered_outcome_settles_prior_gap_and_certifies(tmp_path: Path)
     save_sync_token(tmp_path, "code", "s_before_gap", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_gap"
     room_id = "!room:localhost"
-    await trust.certify_response(
+    await certify_response(
+        trust,
         next_batch="s_after_gap",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
+        recovery=SyncRecoveryOutcome(
             unrecovered_room_ids=frozenset({room_id}),
         ),
     )
 
-    recovered = await trust.certify_response(
+    recovered = await certify_response(
+        trust,
         next_batch="s_after_recovery",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
+        recovery=SyncRecoveryOutcome(
             recovered_room_ids=frozenset({room_id}),
         ),
     )
@@ -570,18 +573,18 @@ async def test_consecutive_cache_failures_keep_rewinding_until_certified(tmp_pat
     save_sync_token(tmp_path, "code", "s_before_failure", cache_generation=_GENERATION)
     assert await trust.prepare_startup() == "s_before_failure"
 
-    first_failure = await trust.certify_response(
+    first_failure = await certify_response(
+        trust,
         next_batch="s1",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            errors=(RuntimeError("first cache write failed"),),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
-    second_failure = await trust.certify_response(
+    second_failure = await certify_response(
+        trust,
         next_batch="s2",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            errors=(RuntimeError("second cache write failed"),),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
 
@@ -595,9 +598,10 @@ async def test_consecutive_cache_failures_keep_rewinding_until_certified(tmp_pat
         cache_generation=_GENERATION,
     )
 
-    success = await trust.certify_response(
+    success = await certify_response(
+        trust,
         next_batch="s3",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert success.reset_client_token is False
@@ -628,7 +632,7 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
         assert release_clear.wait(timeout=2)
         return clear_checkpoint()
 
-    cache_result = SyncCacheWriteResult(complete=False)
+    recovery = SyncRecoveryOutcome(admission_refused=True)
     decision = handle_unknown_pos()
     with patch.object(
         trust.continuity_store,
@@ -636,7 +640,7 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
         side_effect=blocking_clear,
     ):
         apply_task = asyncio.create_task(
-            trust.apply_response(decision, cache_result=cache_result),
+            trust.apply_response(decision, recovery=recovery),
         )
         assert await asyncio.to_thread(clear_started.wait, 2)
         apply_task.cancel()
@@ -662,10 +666,10 @@ async def test_cancelled_certification_publishes_committed_checkpoint_before_esc
 ) -> None:
     """Cancellation must not split committed durability from runtime publication."""
     trust, _cache, _runtime = _trust(tmp_path)
-    cache_result = SyncCacheWriteResult(complete=True)
+    recovery = SyncRecoveryOutcome()
     decision = trust.plan_response(
         next_batch="s_committed",
-        cache_result=cache_result,
+        recovery=recovery,
     )
     write_started = threading.Event()
     release_write = threading.Event()
@@ -689,7 +693,7 @@ async def test_cancelled_certification_publishes_committed_checkpoint_before_esc
         side_effect=blocking_accept,
     ):
         apply_task = asyncio.create_task(
-            trust.apply_response(decision, cache_result=cache_result),
+            trust.apply_response(decision, recovery=recovery),
         )
         assert await asyncio.to_thread(write_started.wait, 2)
         apply_task.cancel()
@@ -717,10 +721,10 @@ async def test_clear_transforms_fresh_store_state_when_cached_checkpoint_is_abse
     SyncContinuityStore(tmp_path, "code").replace_checkpoint(
         SyncCheckpoint("s_concurrent", cache_generation=_GENERATION),
     )
-    cache_result = SyncCacheWriteResult(complete=False)
+    recovery = SyncRecoveryOutcome(admission_refused=True)
     decision = handle_unknown_pos()
 
-    await trust.apply_response(decision, cache_result=cache_result)
+    await trust.apply_response(decision, recovery=recovery)
 
     assert load_sync_checkpoint(tmp_path, "code") is None
 
@@ -731,23 +735,24 @@ async def test_limited_recovery_keeps_rewinding_until_complete_delta_certifies(t
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
-    positioned = await trust.certify_response(
+    positioned = await certify_response(
+        trust,
         next_batch="s_partial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
-    initial = await trust.certify_response(
+    initial = await certify_response(
+        trust,
         next_batch="s_initial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
-    complete = await trust.certify_response(
+    complete = await certify_response(
+        trust,
         next_batch="s_complete",
-        cache_result=SyncCacheWriteResult(complete=True),
+        recovery=SyncRecoveryOutcome(),
     )
 
     assert positioned.reset_client_token is True
@@ -767,11 +772,11 @@ async def test_sustained_limited_responses_keep_rewinding_until_a_delta_certifie
     trust.state = SyncTrustState.CERTIFIED
 
     decisions = [
-        await trust.certify_response(
+        await certify_response(
+            trust,
             next_batch=f"s_partial_{index}",
-            cache_result=SyncCacheWriteResult(
-                complete=False,
-                limited_room_ids=("!room:localhost",),
+            recovery=SyncRecoveryOutcome(
+                admission_refused=True,
             ),
         )
         for index in range(4)
@@ -786,11 +791,11 @@ async def test_cold_limited_initial_window_rewinds_until_certified(tmp_path: Pat
     trust, _cache, _runtime = _trust(tmp_path)
 
     assert await trust.prepare_startup() is None
-    decision = await trust.certify_response(
+    decision = await certify_response(
+        trust,
         next_batch="s_initial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
 
@@ -804,11 +809,11 @@ async def test_unknown_position_limited_window_keeps_rewinding_until_certified(t
     trust, _cache, _runtime = _trust(tmp_path)
 
     unknown = await trust.reject_unknown_pos()
-    initial = await trust.certify_response(
+    initial = await certify_response(
+        trust,
         next_batch="s_initial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
+        recovery=SyncRecoveryOutcome(
+            admission_refused=True,
         ),
     )
 

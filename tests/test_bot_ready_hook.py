@@ -30,7 +30,6 @@ from mindroom.hooks import (
 )
 from mindroom.matrix import journal_ingress
 from mindroom.matrix.client_thread_history import BulkThreadRefreshStats
-from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -487,7 +486,6 @@ async def test_presence_uses_voice_backend_availability(
 @pytest.mark.asyncio
 async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Own departures delivered under rooms.leave reach the lifecycle cleanup path."""
     bot = _agent_bot(tmp_path)
@@ -502,11 +500,6 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
 
     call_manager.on_sync_room_membership = AsyncMock(side_effect=assert_invite_was_forgotten)
     install_call_manager_mock(bot, call_manager)
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_room_membership_section(
@@ -584,7 +577,6 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
 @pytest.mark.asyncio
 async def test_sync_join_section_reaches_call_manager(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A room in the sync join section can clear departed call state."""
     bot = _agent_bot(tmp_path)
@@ -594,11 +586,6 @@ async def test_sync_join_section_reaches_call_manager(
     call_manager = MagicMock()
     call_manager.on_sync_room_membership = AsyncMock()
     install_call_manager_mock(bot, call_manager)
-    monkeypatch.setattr(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
-    )
 
     await bot._on_sync_response(
         _sync_response_with_room_membership_section(

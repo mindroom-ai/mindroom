@@ -245,9 +245,6 @@ class ConversationEventCache(Protocol):
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
 
-    async def flush_pending_durable_writes(self, room_id: str) -> None:
-        """Persist runtime-only writes for one room before certifying a sync token."""
-
 
 @runtime_checkable
 class SharedConversationEventCache(Protocol):

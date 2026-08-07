@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.matrix.sync_certification import (
-    SyncCacheWriteResult,
     SyncCertificationDecision,
+    SyncRecoveryOutcome,
     SyncTrustState,
     certify_sync_response,
     handle_unknown_pos,
-    sync_cache_write_diagnostics,
+    sync_recovery_diagnostics,
 )
 from mindroom.matrix.sync_recovery_escape import SkippedRecoveryGap, SyncRecoveryStallTracker
 from mindroom.matrix.sync_token_values import SyncCheckpoint
@@ -22,6 +22,7 @@ from mindroom.matrix.sync_token_values import SyncCheckpoint
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -175,6 +176,16 @@ class SyncCacheTrust:
         """Latch one source callback rejected before durable ownership."""
         self._dispatch_persist_failure_epoch += 1
 
+    def _dispatch_persist_failed(self) -> bool:
+        """Return whether a refused admission is outstanding, without consuming it.
+
+        Planning a response has to know this, and planning happens before the
+        gate that acts on it. Consuming here would mark the failure observed and
+        leave that gate looking at a clean epoch -- certifying the exact response
+        the failure exists to reject.
+        """
+        return self._dispatch_persist_failure_epoch != self._observed_dispatch_persist_failure_epoch
+
     def consume_dispatch_persist_failure(self) -> bool:
         """Reject certification once for every newly observed failure epoch."""
         failure_epoch = self._dispatch_persist_failure_epoch
@@ -205,42 +216,46 @@ class SyncCacheTrust:
         """Settle source failures irrelevant to non-checkpointed transports."""
         self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
 
-    async def certify_response(
+    def observed_recovery(
         self,
-        *,
-        next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
-    ) -> SyncCertificationDecision:
-        """Apply the certification decision for one completed sync response."""
-        decision = self.plan_response(
-            next_batch=next_batch,
-            cache_result=cache_result,
+        response: nio.SyncResponse | nio.SlidingSyncResponse,
+    ) -> SyncRecoveryOutcome:
+        """Return what this response settled about durable ownership of its events.
+
+        The single constructor callers use, so that ``admission_refused`` can
+        only ever come from the non-consuming peek. Building the outcome at a
+        call site would let one be built from ``consume_dispatch_persist_failure``
+        instead, which marks the failure observed and disarms the gate that acts
+        on it.
+        """
+        return SyncRecoveryOutcome.from_sync_response(
+            response,
+            admission_refused=self._dispatch_persist_failed(),
         )
-        return await self.apply_response(decision, cache_result=cache_result)
 
     def plan_response(
         self,
         *,
         next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
+        recovery: SyncRecoveryOutcome,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
-        skipped = self._observe_recovery_stalls(cache_result)
+        skipped = self._observe_recovery_stalls(recovery)
         decision = certify_sync_response(
             next_batch=next_batch,
-            cache_result=cache_result,
+            recovery=recovery,
             skipped_recovery_room_ids=frozenset(gap.room_id for gap in skipped),
         )
         if skipped and decision.checkpoint_to_save is not None:
             self._report_skipped_recovery_gaps(skipped, skipped_to_token=decision.checkpoint_to_save.token)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
-    def _observe_recovery_stalls(self, cache_result: SyncCacheWriteResult) -> tuple[SkippedRecoveryGap, ...]:
+    def _observe_recovery_stalls(self, recovery: SyncRecoveryOutcome) -> tuple[SkippedRecoveryGap, ...]:
         """Return rooms whose rebuild has stopped converging from this checkpoint."""
-        if not cache_result.recovery_conclusive:
+        if not recovery.recovery_conclusive:
             return ()
         return self._recovery_stalls.observe(
-            unrecovered_room_ids=cache_result.unrecovered_room_ids,
+            unrecovered_room_ids=recovery.unrecovered_room_ids,
             checkpoint_token=self.retry_token(),
         )
 
@@ -264,7 +279,7 @@ class SyncCacheTrust:
         self,
         decision: SyncCertificationDecision,
         *,
-        cache_result: SyncCacheWriteResult,
+        recovery: SyncRecoveryOutcome,
         joined_room_ids: Iterable[str] = (),
         publish_record: Callable[[SyncContinuityRecord], None] | None = None,
     ) -> SyncCertificationDecision:
@@ -287,7 +302,7 @@ class SyncCacheTrust:
                     )
                 record = await self._apply_decision_locked(
                     decision,
-                    cache_result=cache_result,
+                    recovery=recovery,
                     joined_room_ids=joined_room_ids,
                 )
                 if record is not None and publish_record is not None:
@@ -316,7 +331,7 @@ class SyncCacheTrust:
         self,
         decision: SyncCertificationDecision,
         *,
-        cache_result: SyncCacheWriteResult | None = None,
+        recovery: SyncRecoveryOutcome | None = None,
         joined_room_ids: Iterable[str] = (),
     ) -> SyncContinuityRecord | None:
         """Apply one certifier decision while mutation order is serialized."""
@@ -349,7 +364,7 @@ class SyncCacheTrust:
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
         if decision.reason is not None:
-            diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
+            diagnostics = sync_recovery_diagnostics(recovery) if recovery is not None else {}
             self.logger.warning("matrix_sync_certification_uncertain", reason=decision.reason, **diagnostics)
         return record
 

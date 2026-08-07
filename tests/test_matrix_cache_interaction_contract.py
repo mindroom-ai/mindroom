@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import nio
 import pytest
@@ -94,11 +94,12 @@ class _SyncHarness:
 
     async def apply(self, response: _SyncEnvelope) -> None:
         """Apply one sync envelope and require its admitted timeline writes to persist."""
-        result = await self.policy.cache_sync_timeline_for_certification(
+        tasks = self.policy.cache_sync_timeline(
             cast("nio.SyncResponse", response),
+            raise_on_cache_write_failure=True,
         )
-        assert result.complete is True
-        assert result.errors == ()
+        for task in tasks:
+            await task
 
 
 def _event_source(
@@ -978,74 +979,6 @@ async def test_opaque_encrypted_thread_child_leaves_only_its_thread_stale(
 
 
 @pytest.mark.asyncio
-async def test_limited_sync_with_opaque_child_stays_gapped(
-    event_cache: ConversationEventCache,
-) -> None:
-    """A partial encrypted window must leave the thread gapped.
-
-    Two fail-closed reasons used to live in two columns reconciled by precedence. There is one
-    marker now, so the last writer names it; what has to hold is that the thread stays unusable,
-    not which of the two reasons ends up on the marker.
-    """
-    await _seed_thread(event_cache)
-    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
-
-    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
-        cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)], limited=True)),
-    )
-
-    assert result.complete is True
-    assert result.certified is True
-    assert result.limited_room_ids == (_ROOM_ID,)
-    assert result.errors == ()
-    assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
-    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is not None
-    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
-    assert state is not None
-    assert state.gap_reason == "sync_opaque_encrypted_event"
-    assert thread_cache_rejection_reason(state) is not None
-
-
-@pytest.mark.asyncio
-async def test_recovered_limited_sync_certifies_after_nio_callback_success(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Pinned nio recovers only after every non-live callback succeeds."""
-    response = _real_sync_response(
-        limited_room_ids=(_ROOM_ID,),
-        recovered_room_ids=frozenset({_ROOM_ID}),
-    )
-
-    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(response)
-
-    assert result.complete is True
-    assert result.limited_room_ids == (_ROOM_ID,)
-    assert result.recovered_room_ids == frozenset({_ROOM_ID})
-    assert result.unrecovered_room_ids == frozenset()
-    assert result.certified is True
-
-
-@pytest.mark.asyncio
-async def test_cache_seam_preserves_unrecovered_outcome_from_an_earlier_gap(
-    event_cache: ConversationEventCache,
-) -> None:
-    """An outcome for a room absent from this wire window must still block certification."""
-    response = _real_sync_response(
-        unrecovered_room_ids=frozenset({_ROOM_ID}),
-    )
-
-    result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(response)
-
-    assert result.complete is True
-    assert result.limited_room_ids == ()
-    assert result.recovered_room_ids == frozenset()
-    assert result.unrecovered_room_ids == frozenset({_ROOM_ID})
-    assert result.certified is False
-    assert result.runtime_diagnostics is not None
-    assert result.runtime_diagnostics["cache_backend"] in {"postgres", "sqlite"}
-
-
-@pytest.mark.asyncio
 async def test_relationless_ciphertext_and_opaque_reaction_do_not_poison_thread_snapshots(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -1146,32 +1079,6 @@ async def test_mark_thread_gap_upgrades_incremental_reason_to_full_refetch_reaso
         append_failed_reason="sync_append_failed",
     )
     assert non_incremental_append is ThreadAppendOutcome.APPENDED
-
-
-@pytest.mark.asyncio
-async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serving_it(
-    event_cache: ConversationEventCache,
-) -> None:
-    """A failed opaque stale marker must remove the cached snapshot rather than leave it trusted."""
-    await _seed_thread(event_cache)
-    opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
-
-    with patch.object(
-        event_cache,
-        "mark_thread_gap",
-        AsyncMock(side_effect=RuntimeError("stale marker write refused")),
-    ):
-        result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
-            cast("nio.SyncResponse", _sync_response([raw_nio_event(opaque_child)])),
-        )
-
-    assert result.complete is False
-    assert result.errors
-    # The marker write is what failed, so the snapshot is deleted outright instead. That is
-    # strictly stronger than a marker: there is nothing left for a later read to serve.
-    assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
-    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
-    assert state is None
 
 
 def _excluded_sync_response(excluded_events: dict[str, nio.Event]) -> _SyncEnvelope:

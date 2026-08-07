@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -44,7 +43,6 @@ from mindroom.matrix.event_normalization import (
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
 )
-from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
     MutationThreadImpact,
@@ -734,83 +732,3 @@ class ThreadSyncWritePolicy:
             if limited:
                 limited_room_ids.append(room_id)
         return tuple(limited_room_ids), ()
-
-    @staticmethod
-    def _cache_task_errors(results: list[object | BaseException]) -> tuple[BaseException, ...]:
-        """Return task outcomes that prevent cache certification."""
-        errors: list[BaseException] = []
-        current_task = asyncio.current_task()
-        for result in results:
-            if isinstance(result, (KeyboardInterrupt, SystemExit)):
-                raise result
-            if isinstance(result, asyncio.CancelledError):
-                if current_task is not None and current_task.cancelling():
-                    raise result
-                errors.append(result)
-                continue
-            if isinstance(result, BaseException):
-                errors.append(result)
-        return tuple(errors)
-
-    async def cache_sync_timeline_for_certification(
-        self,
-        response: nio.SyncResponse,
-    ) -> SyncCacheWriteResult:
-        """Persist sync timeline data and report whether it certifies the sync token."""
-        limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
-        if validation_errors:
-            return SyncCacheWriteResult.from_sync_response(
-                response,
-                complete=False,
-                errors=validation_errors,
-                runtime_available=self._cache_ops.cache_runtime_available(),
-                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
-            )
-        if not self._cache_ops.cache_runtime_available():
-            return SyncCacheWriteResult.from_sync_response(
-                response,
-                complete=False,
-                limited_room_ids=limited_room_ids,
-                runtime_available=False,
-                task_count=0,
-                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
-            )
-
-        try:
-            tasks = self.cache_sync_timeline(response, raise_on_cache_write_failure=True)
-            tasks.extend(self._cache_ops.queue_pending_durable_write_flushes())
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return SyncCacheWriteResult.from_sync_response(
-                response,
-                complete=False,
-                limited_room_ids=limited_room_ids,
-                errors=(exc,),
-                runtime_available=self._cache_ops.cache_runtime_available(),
-                runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
-            )
-
-        results: list[object | BaseException] = []
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = self._cache_task_errors(results)
-        runtime_available = self._cache_ops.cache_runtime_available()
-        pending_durable_write_room_ids = self._cache_ops.pending_durable_write_room_ids()
-        complete = runtime_available and not errors and not pending_durable_write_room_ids
-        cache_result = SyncCacheWriteResult.from_sync_response(
-            response,
-            complete=complete,
-            limited_room_ids=limited_room_ids,
-            errors=errors,
-            runtime_available=runtime_available,
-            task_count=len(tasks),
-        )
-        if cache_result.certified:
-            return cache_result
-        return replace(
-            cache_result,
-            runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
-        )

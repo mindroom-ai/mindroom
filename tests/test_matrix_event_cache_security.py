@@ -430,45 +430,6 @@ async def test_sqlite_pending_principal_purge_does_not_strand_rejoined_room(tmp_
 
 
 @pytest.mark.asyncio
-async def test_failed_room_purge_blocks_reads_until_recovery(
-    event_cache_factory: Callable[[], ConversationEventCache],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A transient leave cleanup failure must remain pending and flush before later reads."""
-    root = _shared_cache(event_cache_factory)
-    await root.initialize()
-    cache = root.for_principal("@alice:localhost")
-    room_id = "!left:localhost"
-    event_id = "$event"
-    event = _event(event_id, 1)
-    await cache.store_event(event_id, room_id, event)
-
-    if isinstance(cache, SqliteEventCache):
-        module = sqlite_event_cache_events
-    else:
-        assert isinstance(cache, PostgresEventCache)
-        module = postgres_event_cache_events
-    original_purge = module.purge_room_locked
-    failure_reason = "temporary purge failure"
-
-    async def fail_purge(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError(failure_reason)
-
-    try:
-        monkeypatch.setattr(module, "purge_room_locked", fail_purge)
-        with pytest.raises(RuntimeError, match="temporary purge failure"):
-            await cache.purge_room(room_id)
-        assert cache.pending_durable_write_room_ids() == (room_id,)
-
-        monkeypatch.setattr(module, "purge_room_locked", original_purge)
-        await cache.flush_pending_durable_writes(room_id)
-        assert await cache.get_event(room_id, event_id) is None
-        assert cache.pending_durable_write_room_ids() == ()
-    finally:
-        await root.close()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("lookup_kind", ["event", "mxc"])
 async def test_departure_discards_read_that_started_before_fence(
     event_cache_factory: Callable[[], ConversationEventCache],

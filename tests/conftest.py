@@ -1007,7 +1007,6 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.mark_room_departed.side_effect = mark_room_departed
     event_cache.room_departure_epoch.side_effect = lambda room_id: departure_epochs.get(room_id, 0)
     event_cache.room_membership_epoch.return_value = 0
-    event_cache.flush_pending_durable_writes.return_value = None
     event_cache.apply_thread_mutation_append.return_value = ThreadAppendOutcome.APPENDED
     event_cache.redact_event.return_value = False
     event_cache.store_mxc_text.return_value = True

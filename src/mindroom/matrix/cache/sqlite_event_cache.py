@@ -679,17 +679,6 @@ class SqliteEventCache:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
         return self._runtime.pending_room_purge_ids(self.principal_id)
 
-    async def flush_pending_durable_writes(self, room_id: str) -> None:
-        """Persist runtime-only writes for one room before certifying a sync token."""
-        if self._runtime.has_pending_room_purge(self.principal_id, room_id):
-            await self._write_operation(
-                room_id,
-                operation="flush_pending_durable_writes",
-                disabled_result=None,
-                writer=_noop_write,
-                allow_departed=True,
-            )
-
     async def initialize(self) -> None:
         """Open the SQLite database and create the cache schema."""
         await self._runtime.initialize()

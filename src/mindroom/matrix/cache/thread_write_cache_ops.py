@@ -63,33 +63,11 @@ class ThreadMutationCacheOps:
             and self.runtime.event_cache.durable_writes_available
         )
 
-    def cache_runtime_diagnostics(self) -> dict[str, object]:
-        """Return log-safe event-cache runtime diagnostics for sync certification."""
-        if self.runtime.event_cache is None:
-            return {"cache_backend": "none"}
-        return self.runtime.event_cache.runtime_diagnostics()
-
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before sync certification."""
         if self.runtime.event_cache is None:
             return ()
         return self.runtime.event_cache.pending_durable_write_room_ids()
-
-    def queue_pending_durable_write_flushes(self) -> tuple[asyncio.Task[object], ...]:
-        """Queue flushes for runtime-only writes that are not tied to the current sync response."""
-        event_cache = self.runtime.event_cache
-        if event_cache is None or not self.cache_runtime_available():
-            return ()
-        return tuple(
-            (
-                self.queue_room_cache_update(
-                    room_id,
-                    lambda room_id=room_id: event_cache.flush_pending_durable_writes(room_id),
-                    name="matrix_cache_flush_pending_writes",
-                )
-            )
-            for room_id in event_cache.pending_durable_write_room_ids()
-        )
 
     def queue_room_cache_update(
         self,

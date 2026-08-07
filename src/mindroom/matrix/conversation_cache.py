@@ -56,7 +56,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.event_journal import PointLookupView, VisibleMessage
-    from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
 type ThreadReadResult = ThreadHistoryResult
@@ -465,13 +464,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
 
-    def limited_sync_timeline_room_ids(
-        self,
-        response: nio.SyncResponse,
-    ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
-        """Return limited joined-room IDs or validation errors for one sync response."""
-        return self._sync.limited_sync_timeline_room_ids(response)
-
     def cache_sync_timeline(
         self,
         response: nio.SyncResponse,
@@ -483,10 +475,3 @@ class MatrixConversationCache(ConversationCacheProtocol):
             response,
             raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
-
-    async def cache_sync_timeline_for_certification(
-        self,
-        response: nio.SyncResponse,
-    ) -> SyncCacheWriteResult:
-        """Durably persist sync timeline events and report cache-certification status."""
-        return await self._sync.cache_sync_timeline_for_certification(response)
