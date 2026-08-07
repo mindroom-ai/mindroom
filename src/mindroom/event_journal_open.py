@@ -31,7 +31,6 @@ rule can see.
 from __future__ import annotations
 
 import json
-import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -59,7 +58,10 @@ BINDING_FILENAME = "event_journal_binding.json"
 _OPENED_DATABASES: dict[Path, tuple[str, str | None]] = {}
 _OPENED_DATABASES_LOCK = threading.Lock()
 
-_CREDENTIALS_IN_URL = re.compile(r"://[^@]*@")
+# The only connection parameters that go into a description. An allowlist that
+# is missing a field costs an operator some detail; a denylist that is missing
+# one publishes a password.
+_DESCRIBED_CONNECTION_FIELDS = ("host", "port", "dbname")
 
 
 def _opened_database(
@@ -86,6 +88,31 @@ def _opened_database(
         return ("postgres", None)
 
 
+def _describe_postgres_connection(database_url: str) -> str:
+    """Return the safe-to-show part of one PostgreSQL connection string.
+
+    Built from an allowlist of parsed fields rather than by removing the parts
+    that look secret. A PostgreSQL password has at least four spellings -- URI
+    userinfo, a ``password`` query parameter, ``sslpassword``, and a
+    ``password=`` keyword in the non-URI grammar -- and those are two different
+    grammars, not one with variations. Subtracting the spellings somebody
+    thought of is how the fourth one gets written to disk.
+    """
+    try:
+        import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
+        from psycopg.conninfo import conninfo_to_dict  # noqa: PLC0415 - and so does its parser
+    except ImportError:
+        return "postgres (install the postgres extra to read the connection URL)"
+    try:
+        parsed = conninfo_to_dict(database_url)
+    except psycopg.Error:
+        return "postgres (a connection URL that could not be parsed)"
+    shown = " ".join(
+        f"{field}={parsed[field]}" for field in _DESCRIBED_CONNECTION_FIELDS if isinstance(parsed.get(field), str)
+    )
+    return f"postgres {shown}" if shown else "postgres (a connection URL naming no host or database)"
+
+
 def describe_event_journal(
     journal_config: EventJournalConfig,
     runtime_paths: RuntimePaths,
@@ -93,15 +120,15 @@ def describe_event_journal(
     """Return a non-secret description of the database this config opens.
 
     Written to the binding file and quoted in refusals, so it must never carry
-    a password. Host and database name survive, because a refusal an operator
-    cannot act on is not worth printing.
+    a password. Host, port, and database name survive, because a refusal an
+    operator cannot act on is not worth printing.
     """
     backend, database_url = _opened_database(journal_config, runtime_paths)
     if backend != "postgres":
         return "sqlite tracking/event_journal.db"
     if database_url is None:
         return "postgres (no connection URL could be resolved)"
-    return f"postgres {_CREDENTIALS_IN_URL.sub('://<redacted>@', database_url)}"
+    return _describe_postgres_connection(database_url)
 
 
 def record_opened_event_journal(

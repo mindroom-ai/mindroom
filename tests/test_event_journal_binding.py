@@ -34,6 +34,7 @@ from mindroom.event_journal_open import (
     record_opened_event_journal,
     write_event_journal_binding,
 )
+from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,9 +49,27 @@ BASE_CONFIG: dict[str, object] = {
 }
 
 
+# Obviously fake, and distinctive enough that a leak into a file or a message
+# is found by searching for it.
+URI_PASSWORD = "hunter2-not-a-real-password"
+QUERY_PASSWORD = "certsecret-not-a-real-password"
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump(BASE_CONFIG), encoding="utf-8")
+    return resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+
+def _postgres_runtime_paths(tmp_path: Path, database_url: str) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    authored = dict(BASE_CONFIG)
+    authored["event_journal"] = {"backend": "postgres", "database_url": database_url}
+    config_path.write_text(yaml.dump(authored), encoding="utf-8")
     return resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -229,39 +248,119 @@ class TestAdoptCommand:
 class TestNonSecretDescription:
     """What gets written to disk and printed in refusals must not carry a password."""
 
-    def test_a_postgres_password_never_reaches_the_description(self, tmp_path: Path) -> None:
-        """The binding file and the refusal both quote this, so it is the redaction boundary."""
-        config_path = tmp_path / "config.yaml"
-        authored = dict(BASE_CONFIG)
-        authored["event_journal"] = {
-            "backend": "postgres",
-            "database_url": "postgresql://journal_user:hunter2@journal.invalid:5432/mindroom",
-        }
-        config_path.write_text(yaml.dump(authored), encoding="utf-8")
-        runtime_paths = resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path / "storage",
-            process_env={},
-        )
+    @pytest.mark.parametrize(
+        ("database_url", "expected"),
+        [
+            (
+                f"postgresql://journal_user:{URI_PASSWORD}@db.example:5432/journal",
+                "postgres host=db.example port=5432 dbname=journal",
+            ),
+            (
+                f"postgresql://journal_user@db.example:5432/journal?password={URI_PASSWORD}",
+                "postgres host=db.example port=5432 dbname=journal",
+            ),
+            (
+                f"postgresql://db.example/journal?sslpassword={QUERY_PASSWORD}",
+                "postgres host=db.example dbname=journal",
+            ),
+            (
+                f"host=db.example dbname=journal user=journal_user password={URI_PASSWORD}",
+                "postgres host=db.example dbname=journal",
+            ),
+            ("postgresql://db.example/journal", "postgres host=db.example dbname=journal"),
+        ],
+        ids=["userinfo", "password-query", "sslpassword-query", "keyword-string", "no-credentials"],
+    )
+    def test_no_spelling_of_a_password_survives_the_description(
+        self,
+        tmp_path: Path,
+        database_url: str,
+        expected: str,
+    ) -> None:
+        """A password reaches a PostgreSQL DSN four ways, across two different grammars.
+
+        URI userinfo, a ``password`` query parameter, ``sslpassword``, and a
+        ``password=`` keyword are not variations on one spelling -- the last is
+        a different grammar entirely. Any rule that removes the spellings
+        somebody happened to think of publishes the one they did not, so the
+        description is built by naming the fields that may be shown. Compared
+        for equality rather than for absence: that is the only assertion that
+        also catches a field nobody has thought to forbid yet.
+        """
+        runtime_paths = _postgres_runtime_paths(tmp_path, database_url)
 
         description = describe_event_journal(load_config(runtime_paths).event_journal, runtime_paths)
 
-        assert "hunter2" not in description
-        assert "journal_user" not in description
-        assert "<redacted>" in description
-        assert "journal.invalid:5432/mindroom" in description, (
-            "a refusal the operator cannot act on is not worth printing"
-        )
+        assert description == expected
 
     def test_a_written_binding_round_trips(self, tmp_path: Path) -> None:
         """The binding file is read back by the next process, so it has to survive the trip."""
         storage_path = tmp_path / "storage"
-        binding = EventJournalBinding(generation="abc123", database="postgres postgresql://<redacted>@host/db")
+        binding = EventJournalBinding(generation="abc123", database="postgres host=db.example dbname=journal")
 
         write_event_journal_binding(storage_path, binding)
 
         assert read_event_journal_binding(storage_path) == binding
-        assert "<redacted>" in event_journal_binding_path(storage_path).read_text(encoding="utf-8")
+        assert "db.example" in event_journal_binding_path(storage_path).read_text(encoding="utf-8")
+
+
+class TestNoSecretReachesDiskOrAMessage:
+    """The two surfaces a real PostgreSQL password would actually escape through."""
+
+    pytestmark = pytest.mark.asyncio
+
+    @staticmethod
+    def _leaky_dsn(database_url: str) -> str:
+        """Return a connectable DSN carrying a secret that must never be echoed.
+
+        ``sslpassword`` is accepted by libpq, ignored when no client key needs
+        decrypting, and is one of the spellings the old redaction missed -- so
+        it is both harmless to the connection and the exact thing being tested.
+        """
+        separator = "&" if "?" in database_url else "?"
+        return f"{database_url}{separator}sslpassword={QUERY_PASSWORD}"
+
+    async def test_the_binding_file_holds_only_the_fields_that_may_be_shown(
+        self,
+        tmp_path: Path,
+        postgres_journal_url: str,
+    ) -> None:
+        """The binding is persisted, so a password in it outlives the process that wrote it."""
+        dsn = self._leaky_dsn(postgres_journal_schema_url(postgres_journal_url))
+        runtime_paths = _postgres_runtime_paths(tmp_path, dsn)
+
+        await _open_and_bind(runtime_paths)
+
+        written = event_journal_binding_path(runtime_paths.storage_root).read_bytes()
+        assert QUERY_PASSWORD.encode() not in written
+        assert b"sslpassword" not in written
+        binding = read_event_journal_binding(runtime_paths.storage_root)
+        assert binding is not None
+        assert binding.database.startswith("postgres host=")
+        assert "dbname=" in binding.database
+
+    async def test_a_refusal_names_the_database_without_quoting_its_password(
+        self,
+        tmp_path: Path,
+        postgres_journal_url: str,
+    ) -> None:
+        """The refusal is the other place the description is rendered, and it reaches logs."""
+        bound = self._leaky_dsn(postgres_journal_schema_url(postgres_journal_url))
+        runtime_paths = _postgres_runtime_paths(tmp_path, bound)
+        await _open_and_bind(runtime_paths)
+
+        stranger = self._leaky_dsn(postgres_journal_schema_url(postgres_journal_url))
+        runtime_paths.config_path.write_text(
+            yaml.dump({**BASE_CONFIG, "event_journal": {"backend": "postgres", "database_url": stranger}}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(EventJournalBindingError) as exc_info:
+            await _open_and_bind(runtime_paths)
+
+        message = str(exc_info.value)
+        assert QUERY_PASSWORD not in message
+        assert "host=" in message, "a refusal the operator cannot act on is not worth printing"
 
 
 class TestPendingRestart:
