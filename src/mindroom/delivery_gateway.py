@@ -602,19 +602,24 @@ class DeliveryGateway:
             raise _DeliveryRefusedError(msg)
         return delivered
 
-    def _response_delivery(self, send: SendDelivery) -> ResponseDelivery:
-        """Return the outbox writer used by a live delivery.
+    def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> ResponseDelivery:
+        """Return the outbox writer, for a live delivery or for recovery.
 
-        Recovery builds its own without the handoff: it resends rows that
-        already exist, and the source those rows answer was handed over when
-        they were first recorded.
+        Both go through here so they cannot drift. They did: recovery was built
+        separately and silently lacked the terminal-record hook, so a recovered
+        answer acknowledged its row while the turn record stayed ignorant of
+        the event -- the very state the deleted repair pass used to fix.
+
+        The handoff is the one real difference, and recovery passes ``None``:
+        it resends rows that already exist, and the sources those rows answer
+        were handed over when the rows were first recorded.
         """
         return ResponseDelivery(
             store=self.deps.outbox,
             send=send,
             sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
-            handoff=self.deps.turn_handoff,
+            handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
         )
 
@@ -704,12 +709,7 @@ class DeliveryGateway:
             delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
             return delivered.event_id
 
-        return await ResponseDelivery(
-            store=self.deps.outbox,
-            send=send,
-            sending_device_id=self.deps.sending_device_id(),
-            resolve_delivered=self._delivered_under_a_previous_device,
-        ).recover()
+        return await self._response_delivery(send, handoff=None).recover()
 
     async def _send_content(
         self,
@@ -754,7 +754,7 @@ class DeliveryGateway:
             return delivered.event_id
 
         try:
-            event_id = await self._response_delivery(send).deliver(
+            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=request.delivery_stage,
                 room_id=room_id,
@@ -904,7 +904,7 @@ class DeliveryGateway:
             return edited.event_id
 
         try:
-            event_id = await self._response_delivery(send).deliver(
+            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,

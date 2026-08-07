@@ -408,16 +408,31 @@ class HandledTurnLedger:
         not available here: a synchronous method cannot await a database, and
         bridging it to one deadlocks against the same executor the database
         offloads onto.
+
+        The whole sequence runs under the write lock, not just the install.
+        Two sibling ledgers for one agent -- which a hot replacement creates
+        routinely -- would otherwise both pass the unloaded check, both read
+        the same legacy file, and both try to rename it; the loser calls
+        ``Path.replace`` on a path that no longer exists and dies with
+        ``FileNotFoundError`` during startup, having done nothing wrong. The
+        lock also means the second caller finds the state already loaded and
+        returns without touching the database at all.
         """
         with self._state.lock:
             if self._state.loaded:
                 return
+        async with self._state.write_lock:
+            with self._state.lock:
+                if self._state.loaded:
+                    return
+            await self._load_locked()
+
+    async def _load_locked(self) -> None:
+        """Read storage into the shared map, with the write lock already held."""
         stored = await self.records.load_all()
         if imported := await self._import_legacy_ledger({index_event_id for index_event_id, _, _ in stored}):
             stored = imported
         with self._state.lock:
-            if self._state.loaded:
-                return
             self._responses = {
                 index_event_id: record
                 for index_event_id, _anchor_event_id, record_json in stored
@@ -492,7 +507,7 @@ class HandledTurnLedger:
                     anchor_event_id=persisted_record.anchor_event_id,
                     record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
                 )
-            except Exception:
+            except BaseException:
                 # Publishing before the commit is deliberate: it stops a
                 # synchronous reader seeing "not handled" while this turn's
                 # write is in flight and answering the same message twice. What
@@ -501,6 +516,12 @@ class HandledTurnLedger:
                 # reads correctly until a restart and then answers twice.
                 # Undoing the publication keeps the two in step and lets the
                 # failure reach a caller that can retry.
+                #
+                # `BaseException`, not `Exception`, because cancellation is the
+                # likeliest way this write is abandoned -- a cancelled turn, a
+                # shutdown mid-flight -- and `CancelledError` does not derive
+                # from `Exception`. Catching only `Exception` left exactly the
+                # published-but-never-stored state this exists to prevent.
                 self._restore_superseded(persisted_record, superseded)
                 raise
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))

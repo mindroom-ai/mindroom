@@ -311,6 +311,7 @@ def create_bot_for_entity(
             rooms,
             config_path=config_path,
             enable_streaming=enable_streaming,
+            journal_store=journal_store,
         )
 
     msg = f"Entity '{entity_name}' not found in configuration."
