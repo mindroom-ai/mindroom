@@ -125,6 +125,8 @@ class JournalDispatcher:
             store=self.store,
             handle=self._run_event,
             deferral_is_live=self._deferral_is_live,
+            retained_event_ids=self._retained_live_event_ids,
+            release_retained=self._forget_live_events,
         )
         self._ingress = JournalIngress(
             store=self.store,
@@ -138,6 +140,22 @@ class JournalDispatcher:
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Keep the room and event nio already produced, for their callback."""
         self._live_events[event.event_id] = (room, event)
+
+    def _retained_live_event_ids(self) -> frozenset[str]:
+        """Return the events whose parsed objects are still waiting for a run."""
+        return frozenset(self._live_events)
+
+    def _forget_live_events(self, event_ids: frozenset[str]) -> None:
+        """Drop parsed objects for rows the worker proved no run can reach.
+
+        Taking the object out is the last thing a run does, so a row that
+        settles without one leaves it here forever. A membership fence is
+        exactly that: it settles the turn-backed work the departure has made
+        unanswerable, and the worker never sees the row again. What is left
+        behind is a room, an event, and the message text inside it.
+        """
+        for event_id in event_ids:
+            self._live_events.pop(event_id, None)
 
     def register(self, client: nio.AsyncClient) -> None:
         """Install durable admission ahead of every other callback."""

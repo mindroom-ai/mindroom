@@ -53,6 +53,21 @@ type _EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None
 # Whether the owner a deferring handler handed one event to still exists.
 type _DeferralLivenessProbe = Callable[[JournalEvent], bool]
 
+# The events whose parsed Matrix objects a caller is holding for a run that has
+# not happened yet, and the way to tell it a run is never coming.
+type _RetainedEventIds = Callable[[], frozenset[str]]
+type _ReleaseRetained = Callable[[frozenset[str]], None]
+
+
+def _nothing_is_retained() -> frozenset[str]:
+    """Hold nothing, for a worker whose caller keeps no parsed objects."""
+    return frozenset()
+
+
+def _release_nothing(event_ids: frozenset[str]) -> None:
+    """Discard a release for a caller that was holding nothing to begin with."""
+    del event_ids
+
 
 def _assume_owner_is_live(event: JournalEvent) -> bool:
     """Treat every deferral as owned, which is all a worker alone can know.
@@ -83,6 +98,13 @@ class PendingEventWorker:
     # gone is durable work nobody is left to release, so the scan takes it back
     # rather than waiting for a restart to notice.
     deferral_is_live: _DeferralLivenessProbe = _assume_owner_is_live
+    # A parsed Matrix object is given back by the run that uses it, and a row
+    # can stop being pending without any run: a membership fence settles the
+    # turn-backed work it has just made unanswerable. Only a pass that saw the
+    # whole pending set can prove a run is never coming, so only this worker is
+    # in a position to say so.
+    retained_event_ids: _RetainedEventIds = _nothing_is_retained
+    release_retained: _ReleaseRetained = _release_nothing
     deferral_scan_seconds: float = _DEFERRAL_SCAN_SECONDS
     _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
@@ -350,6 +372,8 @@ class PendingEventWorker:
         """
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        retained = self.retained_event_ids()
+        still_pending: set[str] = set(reclaimed)
         origin = self._scan_cursor
         cursor = origin
         wrapped = origin is None
@@ -358,18 +382,17 @@ class PendingEventWorker:
             reached_origin = self._collect_page(
                 page,
                 by_room,
+                still_pending,
                 already_taken=reclaimed,
                 stop_after=origin if wrapped else None,
             )
-            if reached_origin:
+            if reached_origin or (page.reached_end and wrapped):
                 self._scan_cursor = None
+                self._release_events_no_run_can_reach(retained, still_pending)
                 return by_room, False
             if not page.reached_end:
                 cursor = page.resume_after
                 continue
-            if wrapped:
-                self._scan_cursor = None
-                return by_room, False
             # The end of the backlog, reached from part way through it. What
             # came before the resume point has not been looked at, so the rest
             # of the budget goes on it rather than on another pass.
@@ -388,11 +411,14 @@ class PendingEventWorker:
         """
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        retained = self.retained_event_ids()
+        still_pending: set[str] = set(reclaimed)
         cursor: int | None = None
         while True:
             page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
-            self._collect_page(page, by_room, already_taken=reclaimed, stop_after=None)
+            self._collect_page(page, by_room, still_pending, already_taken=reclaimed, stop_after=None)
             if page.reached_end:
+                self._release_events_no_run_can_reach(retained, still_pending)
                 return by_room
             cursor = page.resume_after
 
@@ -400,6 +426,7 @@ class PendingEventWorker:
         self,
         page: Iterable[JournalEvent],
         by_room: dict[str, list[JournalEvent]],
+        still_pending: set[str],
         *,
         already_taken: frozenset[str],
         stop_after: int | None,
@@ -407,11 +434,14 @@ class PendingEventWorker:
         """Group one page's dispatchable events by room, stopping at ``stop_after``.
 
         Returns whether the page ran into that stop, which is how a wrapped
-        pass recognises the position it set out from.
+        pass recognises the position it set out from. Every event on the page
+        is noted as pending regardless of whether this pass may act on it: a
+        turn still running is not a run that will never come.
         """
         for event in page:
             if stop_after is not None and event.receipt_order > stop_after:
                 return True
+            still_pending.add(event.event_id)
             if event.event_id in already_taken:
                 # The reclaim at the top of this pass already took it back.
                 continue
@@ -424,6 +454,27 @@ class PendingEventWorker:
                 continue
             by_room.setdefault(event.room_id, []).append(event)
         return False
+
+    def _release_events_no_run_can_reach(self, retained: frozenset[str], still_pending: set[str]) -> None:
+        """Give back the parsed objects held for rows that are no longer pending.
+
+        The parsed object nio produced is handed back by the run that uses it,
+        and settlement is not always preceded by a run: a membership fence
+        settles the turn-backed work it has just made unanswerable, and the row
+        simply stops being returned. Nothing then asks about that event again,
+        so what stays behind is a room, an event, and the message text inside
+        it, for the life of the process.
+
+        Only a pass that reached the end of the backlog may say this, because
+        only it can distinguish "not pending" from "not in this window". And
+        only for objects already held when the pass began: one handed over
+        while the scan was already past its row is late, not absent.
+        """
+        unreachable = retained - still_pending
+        if not unreachable:
+            return
+        self.release_retained(unreachable)
+        logger.info("pending_event_live_objects_released", count=len(unreachable))
 
     def _reclaim_lost_deferrals(self) -> dict[str, list[JournalEvent]]:
         """Take back every deferral whose owner is gone, wherever it sits.

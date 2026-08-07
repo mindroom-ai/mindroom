@@ -20,7 +20,14 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
+from mindroom.event_journal import (
+    DepartureSource,
+    EventClass,
+    EventKind,
+    SemanticConsumer,
+    SettlementOutcome,
+    VisibleMessage,
+)
 from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
 from mindroom.journal_dispatch import _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -1192,6 +1199,29 @@ class TestDurableAdmission:
 
         assert set(dispatcher._live_events) == {"$m"}
 
+    async def test_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A row can stop being pending with no run, and the run is the only release.
+
+        A message and the departure that fences its room arrive in one sync
+        response. The fence settles the turn-backed work it has just made
+        unanswerable, so the worker is never handed that event -- and the
+        parsed object kept for the run it was going to get stays held for the
+        life of the process, message text and all.
+        """
+        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
+        event = text_event("$m")
+        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+        assert await alice.pending() == (), "the fence settled the work it made unanswerable"
+
+        await dispatcher.drain_once()
+
+        assert dispatcher._live_events == {}
+
     async def test_an_unowned_event_is_neither_admitted_nor_rejected(
         self,
         alice: PrincipalStore,
@@ -1527,7 +1557,11 @@ class TestPendingEventWorker:
             await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), room_id=f"!r{index}:x")
         worker = PendingEventWorker(store=alice, handle=handle)
         worker.start()
-        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
         handled.clear()
 
         await self._admit(alice, text_event("$behind", ts=9_000), room_id="!behind:x")
@@ -1958,7 +1992,11 @@ class TestABoundedScanIsFair:
             await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
         worker = PendingEventWorker(store=alice, handle=handle, deferral_scan_seconds=0.01)
         worker.start()
-        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
         handled.clear()
 
         await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
@@ -2000,7 +2038,11 @@ class TestABoundedScanIsFair:
             deferral_scan_seconds=0.01,
         )
         worker.start()
-        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        # The deferrals, not the handler calls: a handler has appended before
+        # the lane that called it has recorded the deferral, so clearing on the
+        # call count can clear part way through the pass and let a straggler
+        # land in the list the assertion below has to match exactly.
+        await _eventually(lambda: len(worker._deferred) == _BATCH_SIZE)
         handled.clear()
 
         # The very first event of the backlog, which the resume point is now
@@ -2108,6 +2150,36 @@ class TestABoundedScanIsFair:
         by_room, _ = await worker._collect_dispatchable()
 
         assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
+
+    async def test_an_object_handed_over_mid_pass_is_not_read_as_unreachable(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Absent from a scan already past its row is not the same as not pending.
+
+        Releasing on that reading would take back the parsed object for an
+        event admitted moments ago, and the run it then gets replays from the
+        stored payload -- as a recovery would, with nio's decryption state
+        thrown away and a live turn treated as a replayed one.
+        """
+        retained = {"$before"}
+
+        def snapshot() -> frozenset[str]:
+            taken = frozenset(retained)
+            # Admitted while the pass was already underway.
+            retained.add("$during")
+            return taken
+
+        worker = PendingEventWorker(
+            store=alice,
+            handle=_never_called,
+            retained_event_ids=snapshot,
+            release_retained=retained.difference_update,
+        )
+
+        await worker._collect_dispatchable()
+
+        assert retained == {"$during"}
 
 
 class TestADrainSeesTheWholeBacklog:
