@@ -13,6 +13,7 @@ from .identity import decode_thread_id, encode_thread_id
 from .models import (
     ConversationCursor,
     ConversationPage,
+    HydrationCoverage,
     RefreshRequest,
     VisibleMessage,
 )
@@ -273,6 +274,7 @@ def _current_hydration(
         """
         SELECT hydration.membership_epoch AS hydrated_epoch,
                hydration.complete AS complete,
+               hydration.attempted_window_messages AS attempted_window_messages,
                COALESCE(membership.membership_epoch, 0) AS current_epoch,
                debt.owed_through_event_id AS owed_through_event_id,
                COALESCE(debt.history_lost, 0) AS history_lost
@@ -329,29 +331,38 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and not bool(row["history_lost"])
 
 
-def conversation_hydration_reached_its_end(
+def conversation_hydration_coverage(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     thread_id: str | None,
-) -> bool:
-    """Return whether the walk that hydrated this conversation ran out of conversation.
+) -> HydrationCoverage | None:
+    """Return what walks under this membership proved here, or nothing if none did.
 
-    The walk's own account of why it stopped, and nothing else.
-    `conversation_is_complete` is this *and* the absence of history lost to a
-    skipped sync gap, which is the right question for a reader deciding whether
-    a conversation is whole and the wrong one for deciding whether to walk it
-    again. The two differ exactly where it matters: lost history sits behind
-    what the server still holds, so no further walk can recover it, and a
-    hydrator that re-walked on that answer would pay for a whole walk on every
-    read and change nothing.
+    Everything a caller needs to decide whether walking again could change
+    anything, and nothing else -- notably not history a skipped sync gap lost,
+    which is what `conversation_is_complete` adds. That distinction is the
+    difference between a reader deciding whether a conversation is whole and a
+    hydrator deciding whether to walk it again, and conflating them made a
+    lost-history room re-walk on every read to reach the same answer every
+    time.
+
+    Read as a whole record rather than as a predicate because the two facts in
+    it answer to different owners. Whether a walk reached the start is a fact
+    about the conversation; whether a bound has already been spent here is a
+    fact about the caller's own bounds, and only the caller knows those.
 
     Asked only by a caller that needs completeness. A prompt is served by the
     hydration marker alone, which is what keeps its warm reads free.
     """
     row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
-    return row is not None and bool(row["complete"])
+    if row is None:
+        return None
+    return HydrationCoverage(
+        reached_its_end=bool(row["complete"]),
+        attempted_window_messages=int(row["attempted_window_messages"]),
+    )
 
 
 def conversation_hydration_was_truncated(
@@ -390,12 +401,30 @@ def mark_conversation_hydrated(
     room_id: str,
     thread_id: str | None,
     complete: bool,
+    attempted_window_messages: int,
     expected_membership_epoch: int,
 ) -> bool:
     """Record a completed hydration, unless membership moved under it.
 
     Hydration and this record commit together, so a conversation is never
     marked hydrated against events that a rejoin has already invalidated.
+
+    Coverage only ever grows within one membership epoch, in both of the things
+    it records. Two hydrators walk this principal -- a prompt's, bounded to its
+    context window, and an export's, bounded far wider -- and nothing sequences
+    them, deliberately, because a lock between them would put a stall on every
+    warm prompt read. They can therefore finish in either order, and the
+    narrower one finishing last used to overwrite the marker with its own
+    smaller answer while the wider walk's rows were all still projected. The
+    projection is additive and a walk reads backwards from the tip, so coverage
+    is a suffix that only ever extends: reaching the start of the conversation
+    is a fact about the conversation rather than about the walk that proved it,
+    and the deepest bound anyone has spent here only ever gets deeper. A later
+    walk can fail to re-prove either; it cannot make either untrue.
+
+    A later epoch is a different room membership and clears both. They are
+    monotonic within an epoch and only within one, which is why each carry
+    forward is conditioned on the stored epoch rather than applied outright.
     """
     row = transaction.fetchone(
         """
@@ -409,13 +438,33 @@ def mark_conversation_hydrated(
         return False
     transaction.execute(
         """
-        INSERT INTO conversation_hydration (principal_id, room_id, thread_id, membership_epoch, complete)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO conversation_hydration (
+            principal_id, room_id, thread_id, membership_epoch, complete, attempted_window_messages
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
-            complete = excluded.complete
+            complete = CASE
+                WHEN conversation_hydration.membership_epoch = excluded.membership_epoch
+                     AND conversation_hydration.complete <> 0
+                THEN conversation_hydration.complete
+                ELSE excluded.complete
+            END,
+            attempted_window_messages = CASE
+                WHEN conversation_hydration.membership_epoch = excluded.membership_epoch
+                     AND conversation_hydration.attempted_window_messages > excluded.attempted_window_messages
+                THEN conversation_hydration.attempted_window_messages
+                ELSE excluded.attempted_window_messages
+            END
         """,
-        (principal_id, room_id, encode_thread_id(thread_id), current_epoch, int(complete)),
+        (
+            principal_id,
+            room_id,
+            encode_thread_id(thread_id),
+            current_epoch,
+            int(complete),
+            attempted_window_messages,
+        ),
     )
     return True
 

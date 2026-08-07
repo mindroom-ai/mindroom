@@ -803,8 +803,41 @@ async def test_lost_history_does_not_make_a_strict_caller_walk_the_room_forever(
     # The two questions that must not be conflated. The walk did reach the end
     # of what the server still holds, which is why walking again is pointless;
     # the room is still not whole, which is why a strict caller still refuses.
-    assert await alice.conversation_hydration_reached_its_end(room_id=ROOM, thread_id=None)
+    coverage = await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None)
+    assert coverage is not None
+    assert coverage.reached_its_end
     assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+
+
+async def test_a_repayment_counts_as_the_deeper_walk_on_later_reads_too(
+    alice: PrincipalStore,
+) -> None:
+    """The mirror of the case above, for a repayment that stopped at a ceiling.
+
+    A repayment satisfies the window as well as the debt, so it is the deeper
+    walk a strict caller was owed, and the loop that launched it has always
+    treated it that way. Only the current call knew, though: nothing durable
+    said which bound had been spent, so every later read of the same room
+    walked the whole thing again and reached the same ceiling. It has to hold
+    across calls, because a strict caller builds a new hydrator every time.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+    await alice.record_room_history_debt(ROOM)
+    # A room deeper than the walk's request ceiling, so the repayment stops
+    # short of both the anchor and the start of the room.
+    client = FakeClient(endless=True)
+    bounds = {"prompt_window_messages": 1, "max_requests": 3}
+
+    await hydrator(alice, client, require_complete=True, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+    walked = client.calls
+    assert walked == 3
+
+    await hydrator(alice, client, require_complete=True, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    assert client.calls == walked
+    # Not re-walked, and still honestly short: a strict caller refuses on this.
+    assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
 
 
 # --- Ordering against the checkpoint ----------------------------------------

@@ -304,6 +304,42 @@ def edited_thread(answers: int, edits: int) -> FakeClient:
     return FakeClient(events={"$root": raw("$root", "root", ts=500)}, relations={"$root": relations})
 
 
+@dataclass
+class HeldFirstWalk(FakeClient):
+    """A homeserver that holds the first thread walk open until the test lets it go.
+
+    Two hydrators walk one principal and nothing sequences them, so which of
+    them installs last is a real degree of freedom rather than a scheduling
+    accident. Holding the first walk at the server picks that order outright,
+    which is the only way to state it without a timing guess.
+    """
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield stored relations, parking the first caller at the gate."""
+        if not self.started.is_set():
+            self.started.set()
+            await self.release.wait()
+        async for event in super().room_get_event_relations(
+            room_id=room_id,
+            event_id=event_id,
+            direction=direction,
+            recurse=recurse,
+            minimum_recursion_depth=minimum_recursion_depth,
+        ):
+            yield event
+
+
 async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) -> None:
     """Admit raw events as live traffic."""
     for source in sources:
@@ -855,6 +891,13 @@ class TestCompletenessRequirement:
         the same ceiling for the same marker, and the epoch-retry budget would
         turn one unexportable thread into three full walks of it. The record
         stays honestly truncated, which is what lets the caller refuse.
+
+        Once means once across calls and not merely within one, which is where
+        this has to be measured: a strict caller builds a fresh hydrator every
+        time it runs, so a requirement discharged in a local variable is
+        discharged for nobody. Asked twice here for exactly that reason. At the
+        real export allowance the repeat is millions of fetched events, paid on
+        every read of a thread that will never satisfy it.
         """
         client = edited_thread(answers=4, edits=1)
         strict = hydrator(alice, client, prompt_window_messages=2, require_complete=True)
@@ -863,6 +906,92 @@ class TestCompletenessRequirement:
 
         assert client.relation_calls == 1
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+        await hydrator(alice, client, prompt_window_messages=2, require_complete=True).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+
+        assert client.relation_calls == 1
+        # Still refused, which is the other half: not re-walking must not
+        # become quietly calling a truncated thread whole.
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
+    async def test_a_narrower_walk_finishing_last_does_not_unsay_a_wider_one(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Coverage only grows inside a membership, whatever order the walks land in.
+
+        The two callers own separate hydrators over one durable principal --
+        that sharing is the whole reason a warm export costs no Matrix calls --
+        and nothing sequences them, deliberately, because a lock between them
+        would put a stall on every warm prompt read. So the narrower walk can
+        finish last, and its install used to overwrite the wider walk's marker
+        with its own smaller answer while every message that walk installed was
+        still projected: the rows were right and the marker lied about them.
+        Whoever read it next either failed a thread it was holding whole or
+        paid for the whole larger walk again.
+        """
+        thread = edited_thread(answers=5, edits=1)
+        client = HeldFirstWalk(events=thread.events, relations=thread.relations)
+        prompt = hydrator(alice, client, prompt_window_messages=2)
+        export = hydrator(alice, client, prompt_window_messages=50, require_complete=True)
+
+        bounded = asyncio.create_task(prompt.ensure_hydrated(room_id=ROOM, thread_id="$root"))
+        await client.started.wait()
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+        client.release.set()
+        await bounded
+
+        assert await bodies(alice, "$root") == [
+            "root",
+            "answer 0 v0",
+            "answer 1 v0",
+            "answer 2 v0",
+            "answer 3 v0",
+            "answer 4 v0",
+        ]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
+    async def test_a_narrower_walk_finishing_last_does_not_unspend_a_wider_bound(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The same race, for the other thing the marker remembers.
+
+        When the wider walk also stops short there is no completeness for the
+        narrower one to overwrite, and what it would take back instead is the
+        record of which bound has been spent here. The next caller at the wider
+        bound would then pay for the identical walk again -- the permanent
+        re-walk this record exists to prevent, arrived at through the race
+        rather than through a second call.
+        """
+        thread = edited_thread(answers=5, edits=1)
+        client = HeldFirstWalk(events=thread.events, relations=thread.relations)
+        prompt = hydrator(alice, client, prompt_window_messages=2)
+        export = hydrator(alice, client, prompt_window_messages=3, require_complete=True)
+
+        bounded = asyncio.create_task(prompt.ensure_hydrated(room_id=ROOM, thread_id="$root"))
+        await client.started.wait()
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        client.release.set()
+        await bounded
+        walked = client.relation_calls
+
+        await hydrator(alice, client, prompt_window_messages=3, require_complete=True).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+
+        assert client.relation_calls == walked
+        # Neither walk reached the start, so the thread is still honestly
+        # short and a strict caller still refuses it.
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
 

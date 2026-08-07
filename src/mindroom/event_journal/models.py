@@ -176,6 +176,36 @@ class VisibleMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class HydrationCoverage:
+    """What the walks under one membership have proven about one conversation.
+
+    Two facts rather than one, because a single boolean cannot carry both and
+    the two defects that follow from dropping either are mirror images. A walk
+    that ran out of conversation proved something permanent about the
+    conversation; without recording that, a narrower walk finishing later
+    un-says it. A walk that ran out of allowance proved something about the
+    bound it ran under; without recording *which* bound, a caller cannot tell
+    an untried conversation from one where its own bound has already been
+    spent, and pays for the identical walk on every read forever.
+
+    Neither field says anything about history a skipped sync gap lost. That is
+    a fact about the room and it is deliberately kept out of here: it is the
+    one truncation no walk can repair, so a walk decision that consulted it
+    would re-walk that room forever to reach the same answer.
+    """
+
+    # Whether some walk reached the start of the conversation. Monotonic within
+    # a membership epoch: it is a fact about the conversation, not about the
+    # walk that happened to prove it.
+    reached_its_end: bool
+    # The logical-message window of the widest walk attempted so far, which is
+    # the bound that names a caller's grade -- a prompt's and an export's
+    # ceilings all move together. Also monotonic within an epoch, and read as
+    # "a walk at least this wide has already been tried here and failed".
+    attempted_window_messages: int
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationCursor:
     """A stable position in one conversation's chronological order."""
 

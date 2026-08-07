@@ -25,6 +25,12 @@ correctness is completeness rather than recency asks a strictly harder
 question, reads the same principal's projection, and always arrives second --
 so `require_complete` lets it walk past a marker earned under smaller bounds
 rather than inherit an answer to a question it did not ask.
+
+The marker therefore records how wide the widest walk here was allowed to be,
+not only whether one reached the start. Without that, "walk past a marker
+earned under smaller bounds" becomes "walk again on every read" the moment the
+bounds already spent are this caller's own, which for a permanently oversized
+thread is the entire maximum walk, every time, forever.
 """
 
 from __future__ import annotations
@@ -32,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING
 
 import nio
@@ -304,20 +309,18 @@ class ConversationHydrator:
 
         ``require_complete`` adds the one other reason to walk a conversation
         that already has a marker: the marker vouches for a bounded walk and
-        this caller cannot use a suffix. That is owed exactly once. A second
-        pass would re-read the same ceiling and reinstall the same marker, and
-        the two cases it cannot tell apart -- a thread past even the larger
-        bounds, and a room whose history a skipped sync gap lost for good --
-        are both permanent. Whether the deeper walk reached the start is then a
-        fact for the caller to judge, not a reason to walk again.
+        this caller cannot use a suffix. That is owed exactly once, and once is
+        counted durably rather than in a local variable, because a strict
+        caller arrives in a fresh process and a fresh hydrator every time it
+        runs. A second pass would re-read the same ceiling and reinstall the
+        same marker, and the two cases it cannot tell apart -- a thread past
+        even the larger bounds, and a room whose history a skipped sync gap
+        lost for good -- are both permanent. Whether the deeper walk reached
+        the start is then a fact for the caller to judge, not a reason to walk
+        again.
         """
-        complete_required = self.require_complete
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
-            if await self._hydration_stands(
-                room_id=room_id,
-                thread_id=thread_id,
-                complete_required=complete_required,
-            ):
+            if await self._hydration_stands(room_id=room_id, thread_id=thread_id):
                 return
             debt = await self.store.room_history_debt(room_id)
             if debt is not None:
@@ -332,54 +335,51 @@ class ConversationHydrator:
                 if thread_id is None:
                     # The repayment walked the room conversation and installed
                     # it, under this hydrator's own bounds, so it is also the
-                    # deeper walk a strict caller was owed. Walking it again
-                    # here would fetch the same pages a second time to reach the
-                    # same rows. The loop still verifies the marker landed.
-                    complete_required = False
+                    # deeper walk a strict caller was owed -- and it recorded
+                    # those bounds, so the loop's own check sees that. Walking
+                    # it again here would fetch the same pages a second time to
+                    # reach the same rows.
                     continue
             await self._shared(
                 self._in_flight,
                 (room_id, thread_id),
-                # Bound eagerly rather than closed over: the requirement is
-                # cleared below, and a lambda would read the cleared value.
-                partial(
-                    self._hydrate,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    complete_required=complete_required,
-                ),
+                lambda: self._hydrate(room_id=room_id, thread_id=thread_id),
                 name=f"hydrate_conversation_{room_id}",
             )
-            complete_required = False
         if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
             return
         msg = f"Conversation hydration kept losing its membership epoch for {room_id} thread {thread_id}"
         raise _HydrationError(msg)
 
-    async def _hydration_stands(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        complete_required: bool,
-    ) -> bool:
+    async def _hydration_stands(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether the stored marker already answers what this caller asked.
 
         A prompt asks for recency, and any marker for the current membership
-        answers it. A caller that needs the whole conversation asks whether the
-        walk behind that marker ran out of conversation rather than out of
-        allowance. Either way it is one store read.
+        answers it. A caller that needs the whole conversation asks a strictly
+        harder question, and it is satisfied two ways: a walk ran out of
+        conversation, or a walk at least this wide already ran and did not.
+        Either way it is one store read.
 
-        The strict question is the walk's own outcome and deliberately not
-        `conversation_is_complete`, which also answers no when a skipped sync
-        gap lost history behind the walk. That loss is real and export must
-        still refuse on it, but it is not something walking again can repair --
-        asking the stronger question here would re-walk the whole conversation
-        on every read of such a room and reach the same answer every time.
+        The second half is what keeps "owed exactly once" true across calls.
+        Without it a thread past even this caller's bounds is walked to the
+        same ceiling on every single read -- at export's allowance, millions of
+        fetched events each time -- because nothing durable distinguishes a
+        conversation whose deepest walk has already been spent from one nobody
+        walked deeply at all.
+
+        Neither half is `conversation_is_complete`, which also answers no when
+        a skipped sync gap lost history behind the walk. That loss is real and
+        export must still refuse on it, but it is not something walking again
+        can repair, and asking the stronger question here would re-walk the
+        whole conversation on every read of such a room -- the same permanent
+        re-walk, arrived at from the other side.
         """
-        if complete_required:
-            return await self.store.conversation_hydration_reached_its_end(room_id=room_id, thread_id=thread_id)
-        return await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id)
+        if not self.require_complete:
+            return await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id)
+        coverage = await self.store.conversation_hydration_coverage(room_id=room_id, thread_id=thread_id)
+        if coverage is None:
+            return False
+        return coverage.reached_its_end or coverage.attempted_window_messages >= self.prompt_window_messages
 
     async def _shared[Key](
         self,
@@ -400,12 +400,8 @@ class ConversationHydrator:
             if running.get(key) is task and task.done():
                 del running[key]
 
-    async def _hydrate(self, *, room_id: str, thread_id: str | None, complete_required: bool = False) -> None:
-        if await self._hydration_stands(
-            room_id=room_id,
-            thread_id=thread_id,
-            complete_required=complete_required,
-        ):
+    async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
+        if await self._hydration_stands(room_id=room_id, thread_id=thread_id):
             # A concurrent reader finished this walk while this one was still on
             # its way here. `ensure_hydrated` checks the marker before it awaits
             # anything, but it awaits twice afterwards, and `_shared` can only
@@ -428,6 +424,7 @@ class ConversationHydrator:
             thread_id=thread_id,
             events=walk.events,
             complete=walk.complete,
+            attempted_window_messages=self.prompt_window_messages,
             expected_membership_epoch=epoch,
         )
         if not installed:
@@ -464,6 +461,7 @@ class ConversationHydrator:
             events=walk.events,
             complete=walk.complete,
             saw_anchor=walk.saw_anchor,
+            attempted_window_messages=self.prompt_window_messages,
             expected_membership_epoch=epoch,
         )
         log = logger.info

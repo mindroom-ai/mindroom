@@ -1494,6 +1494,38 @@ class TestMembershipEpoch:
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
+    async def test_rejoining_clears_a_conversation_the_last_membership_proved_whole(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Coverage carries forward inside a membership and never across one.
+
+        Inside one, a walk that ran out of conversation proved something about
+        the conversation rather than about itself, so a later narrower walk
+        cannot take it back. A rejoin is a different membership over a slice of
+        history the bot may never have seen, and nothing the previous one
+        proved is allowed to speak for it.
+        """
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(message("$whole")[1],),
+            complete=True,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        await alice.advance_membership_epoch(ROOM)
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(message("$suffix")[1],),
+            complete=False,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
+
     async def test_rejoining_drops_answers_the_previous_membership_never_sent(
         self,
         alice: PrincipalStore,
