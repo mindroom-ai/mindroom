@@ -465,14 +465,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
 
-    async def cache_historical_event(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.Event,
-    ) -> None:
-        """Durably cache one nio-recovered history event before admission."""
-        await self._sync.cache_historical_event(room.room_id, event)
-
     def limited_sync_timeline_room_ids(
         self,
         response: nio.SyncResponse,

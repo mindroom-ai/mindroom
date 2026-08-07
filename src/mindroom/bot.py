@@ -120,7 +120,6 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import MatrixSyncStorage, PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
-from .matrix.joined_room_history import cache_fenced_world_readable_join_history
 from .matrix.journal_ingress import event_is_live as journal_event_is_live
 from .matrix.relation_lookup import RelationLookup
 from .matrix.room_member_joins import (
@@ -606,7 +605,6 @@ class AgentBot:
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
             ),
             room_for_id=self._room_for_journal_event,
-            cache_historical_event=self._conversation_cache.cache_historical_event,
             on_persist_failure=self._record_dispatch_persist_failure,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
@@ -1604,12 +1602,6 @@ class AgentBot:
         with track_matrix_sync_cache_write(self.agent_name):
             try:
                 await self._apply_own_room_membership_from_sync(response)
-                await cache_fenced_world_readable_join_history(
-                    cast("nio.AsyncClient", self.client),
-                    response,
-                    room_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
-                    cache_event=self._conversation_cache.cache_historical_event,
-                )
             except BaseException:
                 await self._handle_pre_certification_failure()
                 raise

@@ -101,7 +101,6 @@ class JournalDispatcher:
     room_for_id: Callable[[str], nio.MatrixRoom]
     on_persist_failure: Callable[[], None] | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
-    cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] | None = None
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -129,11 +128,6 @@ class JournalDispatcher:
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
             on_persist_failure=self.on_persist_failure or (lambda: None),
-            **(
-                {"cache_historical_event": self.cache_historical_event}
-                if self.cache_historical_event is not None
-                else {}
-            ),
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:

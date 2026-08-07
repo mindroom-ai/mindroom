@@ -9,7 +9,6 @@ inferences are what the recovery bugs were made of.
 
 from __future__ import annotations
 
-import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
@@ -29,7 +28,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_e
 from mindroom.matrix.transport_progress import is_transport_progress_revision
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.event_journal import AdmissionView, JournalEvent
 
@@ -42,10 +41,6 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
 type _MatrixEvent = nio.Event | nio.InviteEvent
-
-
-async def _ignore_historical_event(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-    """Do nothing with a historical event."""
 
 
 class JournalCorruptionError(RuntimeError):
@@ -317,10 +312,6 @@ class JournalIngress:
     # ready for them, which the timeline callback cannot decide for itself.
     room_lifecycle_enabled: Callable[[], bool] = lambda: False
     on_event_admitted: Callable[[nio.MatrixRoom, nio.Event], None] = lambda _room, _event: None
-    # Conversation content that did not arrive live still has to reach the
-    # conversation store before admission returns, so a reader that follows
-    # this sync response sees the history it was given.
-    cache_historical_event: Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]] = _ignore_historical_event
     # A refused admission must also stop the sync checkpoint advancing past the
     # event, or the next process would never see it again.
     on_persist_failure: Callable[[], None] = lambda: None
@@ -366,14 +357,6 @@ class JournalIngress:
             # Declining is exactly when a later consumer needs the verdict:
             # nothing else in the response will have written it down.
             self.timeline_member_provenance.record(event.event_id, provenance)
-        if provenance is not nio.TimelineEventProvenance.LIVE:
-            try:
-                await self.cache_historical_event(room, event)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                self.on_persist_failure()
-                raise nio.CallbackNotAcceptedError(str(error)) from error
         kind = self.admission_kind(event)
         if kind is None:
             return
