@@ -1164,6 +1164,75 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_cancellation_after_the_send_still_records_and_expires_the_card(tmp_path: Path) -> None:
+    """A cancelled request must not leave a clickable card with no row behind it.
+
+    The card is already in the room by this point. Without a durable row no
+    restart can expire it and a click finds neither a live waiter nor a stored
+    card, so it stays clickable forever and answers nobody.
+
+    The cancelled-*send* path always handled this shape. This is the same shape
+    arriving one step later -- after the send returned, while the row was being
+    written -- and it had no handler. Recording happens before the expiry edit
+    so the row and the room cannot disagree.
+    """
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    real_remember = cards.remember_approval_card
+    first_call = True
+
+    async def gated_remember(*args: object, **kwargs: object) -> object:
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            write_started.set()
+            await release_write.wait()
+        return await real_remember(*args, **kwargs)
+
+    cards.remember_approval_card = gated_remember  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(write_started.wait(), timeout=5)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release_write.set()
+
+    for _ in range(200):
+        if editor.await_args is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    # Recorded, then expired -- so it is no longer pending, which is the whole
+    # point: a restart has nothing left to recover because the card is settled.
+    assert editor.await_args is not None, "the orphaned card was never taken back"
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+
+
+@pytest.mark.asyncio
 async def test_request_approval_cancel_after_event_id_before_sender_return_emits_expired_edit(tmp_path: Path) -> None:
     event_committed = asyncio.Event()
     release_sender = asyncio.Event()

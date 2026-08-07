@@ -290,6 +290,9 @@ class _ApprovalManager:
         self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
+        # Recovery that outlived the request that started it, held so it is
+        # not garbage collected mid-flight.
+        self._detached_card_writes: set[asyncio.Future[None]] = set()
         self._shutdown_reason: str | None = None
 
     async def request_approval(  # noqa: C901, PLR0911
@@ -609,7 +612,24 @@ class _ApprovalManager:
                 approval_id=approval_id,
                 sent_event=sent_event,
             )
-            if not await self._remember_card(waiter):
+            try:
+                recorded = await self._remember_card(waiter)
+            except asyncio.CancelledError:
+                # The card is already in the room and the caller is going away.
+                # The cancelled-send path below has always handled this shape by
+                # recording the card and then expiring it, detached so the
+                # caller's cancellation cannot interrupt it; this path had no
+                # equivalent, so a cancellation arriving after the send returned
+                # left a clickable card with no row -- no restart could expire
+                # it, and a click found neither a live waiter nor a stored card.
+                #
+                # Detached rather than shielded on purpose. Shielding lets the
+                # write finish but delivers the cancellation first, so the
+                # expiry runs before the row exists and a cancelled approval is
+                # recorded as an approved one.
+                self._schedule_bound_waiter_cancellation(waiter)
+                raise
+            if not recorded:
                 await self._retire_unrecoverable_card(waiter)
                 raise ToolApprovalTransportError(_DEFAULT_UNRECORDABLE_CARD_REASON)
             shutdown_reason = self._current_shutdown_reason()
@@ -656,6 +676,29 @@ class _ApprovalManager:
         finally:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+    def _schedule_bound_waiter_cancellation(self, waiter: _LiveApprovalWaiter) -> None:
+        """Record and expire one already-sent card after its caller was cancelled.
+
+        Runs detached, for the same reason the cancelled-send cleanup does: the
+        work outlives the request that started it, and it must not inherit that
+        request's cancellation. Recording comes first so the expiry edit and the
+        durable row cannot disagree.
+        """
+
+        async def recover() -> None:
+            try:
+                if not await self._remember_card(waiter):
+                    await self._retire_unrecoverable_card(waiter)
+                    return
+                await self._settle_bound_waiter_as_cancelled(waiter)
+            finally:
+                with self._live_lock:
+                    self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+        cleanup_future = asyncio.ensure_future(recover())
+        self._detached_card_writes.add(cleanup_future)
+        cleanup_future.add_done_callback(self._detached_card_writes.discard)
 
     def _bind_live_waiter(
         self,
