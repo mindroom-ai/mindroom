@@ -307,3 +307,20 @@ _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 _.chat  # LiveKit LLM adapter override (src/mindroom/matrix_rtc/voice_agent.py)
 _.asearch  # agno Agent knowledge retrieval calls it dynamically (src/mindroom/strict_knowledge.py)
 _.get_thread_event_ids  # thread-membership row set; edit-sender rule coverage in tests/test_thread_read_collapse.py (src/mindroom/matrix/cache/event_cache.py)
+INITIAL  # unused variable (src/mindroom/event_journal/models.py)
+FINAL  # unused variable (src/mindroom/event_journal/models.py)
+
+# The event-journal owners, which are complete and tested but not yet wired
+# into `bot.py`. Each entry disappears as its call site replaces the owner it
+# supersedes; none of them are dynamic entry points.
+wake  # unused method (src/mindroom/pending_event_worker.py)
+drain_once  # unused method (src/mindroom/pending_event_worker.py)
+PendingEventWorker  # unused class (src/mindroom/pending_event_worker.py)
+open_sqlite  # unused method (src/mindroom/event_journal/store.py)
+open_postgres  # unused method (src/mindroom/event_journal/store.py)
+principal  # unused method (src/mindroom/event_journal/store.py)
+load_delivery  # unused method (src/mindroom/event_journal/store.py)
+parse_journal_event  # unused function (src/mindroom/matrix/journal_ingress.py)
+JournalIngress  # unused class (src/mindroom/matrix/journal_ingress.py)
+read_strict  # unused method (src/mindroom/matrix/conversation_reads.py)
+ConversationReader  # unused class (src/mindroom/matrix/conversation_reads.py)
