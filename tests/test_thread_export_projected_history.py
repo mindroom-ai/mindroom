@@ -20,6 +20,8 @@ from mindroom.config.main import Config
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.thread_export.projected_history import (
+    ProjectedThreadReader,
+    ThreadExportIncompleteError,
     export_conversation_reader,
     fetch_projected_thread_history,
 )
@@ -29,7 +31,6 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_reads import ConversationReader
 
 pytestmark = pytest.mark.asyncio
 
@@ -145,13 +146,23 @@ class FakeHomeserver:
         *,
         room_id: str,
         event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield every stored relation of one event."""
+        """Yield one event's relations in the order the caller asked for.
+
+        Newest first is what the bounded walk rests on, so the fake honours the
+        direction rather than accepting and ignoring it.
+        """
         del room_id, recurse, minimum_recursion_depth
         self.relation_calls += 1
-        for source in self.relations.get(event_id, []):
+        sources = sorted(
+            self.relations.get(event_id, []),
+            key=lambda source: (source["origin_server_ts"], source["event_id"]),
+            reverse=direction is nio.MessageDirection.back,
+        )
+        for source in sources:
             yield parse(source)
 
     async def room_messages(self, *args: object, **kwargs: object) -> nio.RoomMessagesResponse:
@@ -175,8 +186,8 @@ def router(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal(PRINCIPAL)
 
 
-def reader_for(store: PrincipalStore, homeserver: FakeHomeserver) -> ConversationReader:
-    """Return the reader one export login would build for this homeserver."""
+def reader_for(store: PrincipalStore, homeserver: FakeHomeserver) -> ProjectedThreadReader:
+    """Return the projection view one export login would build for this homeserver."""
     return export_conversation_reader(
         client=homeserver,  # type: ignore[arg-type]
         config=Config(),
@@ -204,9 +215,9 @@ def serve_thread(homeserver: FakeHomeserver, root: dict[str, Any], relations: li
     homeserver.relations[root["event_id"]] = relations
 
 
-async def export(reader: ConversationReader, **kwargs: int) -> list[ResolvedVisibleMessage]:
+async def export(projection: ProjectedThreadReader, **kwargs: int) -> list[ResolvedVisibleMessage]:
     """Read one thread the way the export writer does."""
-    return await fetch_projected_thread_history(reader, room_id=ROOM, thread_id=ROOT, **kwargs)
+    return await fetch_projected_thread_history(projection, room_id=ROOM, thread_id=ROOT, **kwargs)
 
 
 def bodies(messages: list[ResolvedVisibleMessage]) -> list[str]:
@@ -542,3 +553,49 @@ async def test_one_principals_warm_projection_does_not_serve_another(
     await export(reader_for(other, homeserver))
 
     assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+
+
+async def test_a_thread_hydration_could_not_finish_fails_rather_than_exporting_a_suffix(
+    router: PrincipalStore,
+) -> None:
+    """The bounded-walk reconciliation, from export's side.
+
+    Hydration has one bound and prompts accept it: a shorter conversation is a
+    shorter prompt. Export cannot, because the file it writes carries a
+    ``message_count`` and reads as the whole thread. Nothing in a page says
+    which of the two it is -- a truncated walk leaves an entirely warm marker --
+    so the completeness marker is what decides, and this one thread fails.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [raw(f"$reply-{index}:example.org", f"message-{index}", ts=200 + index, thread_id=ROOT) for index in range(5)],
+    )
+    projection = reader_for(router, homeserver)
+    # The bound the prompt path carries, set low enough that this thread trips it.
+    projection.reader.hydrator.prompt_window_messages = 2
+
+    with pytest.raises(ThreadExportIncompleteError, match="rather than to its start"):
+        await export(projection)
+
+
+async def test_a_thread_that_fits_the_window_is_complete_and_exports(router: PrincipalStore) -> None:
+    """The mirror of the bound: reaching the end of the relations is what completeness means.
+
+    Without this the failure above would also pass if export simply refused
+    every thread, which is the mistake a completeness gate is most likely to
+    make.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [raw(f"$reply-{index}:example.org", f"message-{index}", ts=200 + index, thread_id=ROOT) for index in range(5)],
+    )
+    projection = reader_for(router, homeserver)
+    projection.reader.hydrator.prompt_window_messages = 50
+
+    messages = await export(projection)
+
+    assert bodies(messages) == ["root", "message-0", "message-1", "message-2", "message-3", "message-4"]

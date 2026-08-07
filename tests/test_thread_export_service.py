@@ -607,6 +607,7 @@ async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_write
             targets=(ThreadExportTarget(tmp_path / "exports"),),
         )
 
-    reader = export_group.await_args.kwargs["reader"]
-    assert reader.store.principal_id == "router@@agent_router:localhost"
-    assert reader.hydrator.self_sender == "@agent_router:localhost"
+    projection = export_group.await_args.kwargs["reader"]
+    assert projection.reader.store.principal_id == "router@@agent_router:localhost"
+    assert projection.completeness.principal_id == "router@@agent_router:localhost"
+    assert projection.reader.hydrator.self_sender == "@agent_router:localhost"

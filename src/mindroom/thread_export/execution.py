@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
 logger = get_logger(__name__)
@@ -56,7 +56,7 @@ async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset
 
 
 async def _fetch_thread_payload(
-    reader: ConversationReader,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_id: str,
     *,
@@ -114,7 +114,7 @@ async def _authorized_room_accumulators(
 
 async def _write_thread_to_targets(
     *,
-    reader: ConversationReader,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_id: str,
     trusted_sender_ids: frozenset[str],
@@ -192,7 +192,7 @@ def _finish_room_exports(
 async def export_threads_for_targets_for_client(
     *,
     client: nio.AsyncClient,
-    reader: ConversationReader,
+    reader: ProjectedThreadReader,
     config: Config,
     runtime_paths: RuntimePaths,
     rooms: Sequence[ThreadExportRoom],
@@ -244,7 +244,7 @@ async def export_threads_for_targets_for_client(
 
 async def _export_enumerated_room_threads(
     *,
-    reader: ConversationReader,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
     truncated: bool,

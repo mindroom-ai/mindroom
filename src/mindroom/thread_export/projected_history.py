@@ -15,12 +15,19 @@ The reader is bound to an *active* bot's principal, because a projection is
 only warm for a principal something is syncing. A warm thread therefore costs
 zero Matrix history calls; a thread nobody has read yet costs exactly one
 hydration, and never again under the same membership.
+
+Prompts and export want opposite things from that hydration -- a prompt wants a
+bounded window, export wants the whole thread -- and this does not resolve that
+by asking for a second, unbounded walk. There is one walk with one bound, and
+the two callers differ only in how they react to hitting it: a prompt accepts a
+shorter conversation, and export refuses to write a file that claims to be a
+whole thread and is not.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader, projected_visible_messages
@@ -39,6 +46,24 @@ if TYPE_CHECKING:
 EXPORT_PAGE_MESSAGES = 500
 
 
+class ThreadExportIncompleteError(RuntimeError):
+    """A thread's hydration stopped at a ceiling rather than at its end."""
+
+
+class SupportsConversationCompleteness(Protocol):
+    """Asking whether a conversation's one hydration walk reached its end.
+
+    The narrow slice export needs and no other reader does, declared here
+    rather than widened into the shared read protocol: a prompt has no use for
+    it, and a protocol every collaborator satisfies is how a boundary stops
+    being one.
+    """
+
+    async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether the walk that hydrated this conversation ran to its end."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class _ExportClientRuntime:
     """The client-and-config view hydration asks for, for one export login.
@@ -52,32 +77,48 @@ class _ExportClientRuntime:
     config: Config
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectedThreadReader:
+    """One export login's view of the projection.
+
+    Both halves are of the same principal, which is why they are built together
+    rather than passed around separately: a completeness answer about one bot's
+    conversation says nothing about another's.
+    """
+
+    reader: ConversationReader
+    completeness: SupportsConversationCompleteness
+
+
 def export_conversation_reader(
     *,
     client: nio.AsyncClient,
     config: Config,
     store: PrincipalStore,
     self_sender: str,
-) -> ConversationReader:
-    """Return the reader one export login uses for thread bodies.
+) -> ProjectedThreadReader:
+    """Return the projection view one export login uses for thread bodies.
 
     ``self_sender`` is the Matrix user ID this export logged in as, and must be
     the same account whose principal ``store`` is bound to: hydration drops that
     sender's in-flight streaming edits, exactly as live admission did, so a
     refetched conversation reduces to what the live projection holds.
     """
-    return ConversationReader(
-        store=store,
-        hydrator=ConversationHydrator(
+    return ProjectedThreadReader(
+        reader=ConversationReader(
             store=store,
-            runtime=_ExportClientRuntime(client=client, config=config),
-            self_sender=self_sender,
+            hydrator=ConversationHydrator(
+                store=store,
+                runtime=_ExportClientRuntime(client=client, config=config),
+                self_sender=self_sender,
+            ),
         ),
+        completeness=store,
     )
 
 
 async def fetch_projected_thread_history(
-    reader: ConversationReader,
+    projection: ProjectedThreadReader,
     *,
     room_id: str,
     thread_id: str,
@@ -85,39 +126,58 @@ async def fetch_projected_thread_history(
 ) -> list[ResolvedVisibleMessage]:
     """Return one thread's complete current history, oldest first.
 
-    Paging runs backwards, because that is the direction the projection is
-    indexed in, and each page is prepended so the result stays in the thread's
-    own order across page boundaries. The cursor is strictly decreasing by
-    construction, so the loop cannot revisit a page or fail to terminate.
-
     Every page is a strict read: the conversation is hydrated once if it has
     never been built under this membership, and any message owing a point
-    refetch is repaired before the page is returned. A page that still cannot
-    be completed raises, which fails this one thread rather than writing a file
-    that looks whole and is not.
+    refetch is repaired before the page is returned.
+
+    Completeness is asked once, after that first read, and it is a different
+    question from freshness. Hydration is bounded, so a thread longer than the
+    window leaves a perfectly warm marker over a partial conversation, and
+    nothing in a page distinguishes "this is all of it" from "this is the end
+    of it". A prompt is right to accept the suffix. An export is not: a file
+    that says ``message_count`` and means "the last few hundred" is worse than
+    a failure, so the thread fails and the pass records it. There is no deeper
+    walk to ask for -- hydration runs once per membership -- which makes this
+    terminal for that membership rather than something a retry fixes.
+
+    After that, paging runs backwards, because that is the direction the
+    projection is indexed in, and each page is prepended so the result stays in
+    the thread's own order across page boundaries. The cursor is strictly
+    decreasing by construction, so the loop cannot revisit a page or fail to
+    terminate.
 
     The root is a member of the room conversation rather than of its own
     thread, so the projection merges it into whichever page its timestamp falls
     in — once, because the cursor that page hands back excludes it from the
     next.
     """
-    messages: list[ResolvedVisibleMessage] = []
-    cursor: ConversationCursor | None = None
-    while True:
-        page = await reader.read_strict(
+    page = await projection.reader.read_strict(room_id=room_id, thread_id=thread_id, limit=page_messages)
+    if not await projection.completeness.conversation_is_complete(room_id=room_id, thread_id=thread_id):
+        msg = (
+            f"Thread {thread_id} in {room_id} was hydrated up to a ceiling rather than to its "
+            f"start, so exporting it would write a suffix as if it were the whole thread"
+        )
+        raise ThreadExportIncompleteError(msg)
+
+    messages = projected_visible_messages(page)
+    cursor: ConversationCursor | None = page.next_cursor
+    while cursor is not None:
+        page = await projection.reader.read_strict(
             room_id=room_id,
             thread_id=thread_id,
             limit=page_messages,
             before=cursor,
         )
         messages[:0] = projected_visible_messages(page)
-        if page.next_cursor is None:
-            return messages
         cursor = page.next_cursor
+    return messages
 
 
 __all__ = [
     "EXPORT_PAGE_MESSAGES",
+    "ProjectedThreadReader",
+    "SupportsConversationCompleteness",
+    "ThreadExportIncompleteError",
     "export_conversation_reader",
     "fetch_projected_thread_history",
 ]
