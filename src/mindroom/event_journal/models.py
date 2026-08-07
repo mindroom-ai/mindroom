@@ -161,7 +161,9 @@ class JournalEvent:
     semantic_consumer: SemanticConsumer | None = None
 
 
-class PendingPage(tuple[JournalEvent, ...]):
+# A non-empty ``__slots__`` is a TypeError on a subtype of a variable-length
+# built-in, so SLOT001 cannot be satisfied by a tuple that carries anything.
+class PendingPage(tuple[JournalEvent, ...]):  # noqa: SLOT001
     """One bounded pass over the pending backlog, and where that pass stopped.
 
     A page *is* the events it found, which is the only thing most callers ever

@@ -479,7 +479,7 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
 
         dispatcher.release_delivered_turn_sources(("$cause",))
 
-        assert dispatcher._worker._deferred == set()
+        assert dispatcher._worker._deferred == {}
 
 
 class TestTheHandoffCarriesTheWholeTurn:

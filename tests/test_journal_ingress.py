@@ -1496,7 +1496,12 @@ class TestPendingEventWorker:
 
         await self._admit(alice, text_event("$late", ts=2_000))
         worker.wake()
-        await asyncio.sleep(0)
+        # Waited on rather than yielded to: the point of the test is that the
+        # busy room was noted as still owing work *before* its lane finished,
+        # because that note is the only thing that arranges the second look. A
+        # bare yield cannot fail -- a second lane over one room is impossible
+        # either way -- so it proved the wakeup without exercising it.
+        await _eventually(lambda: worker._rooms_with_more == {ROOM})
         released.set()
 
         await _eventually(lambda: handled == ["$slow", "$late"])
@@ -1911,6 +1916,12 @@ class TestUnsettledLifecycleIdentities:
             await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
 
 
+async def _never_called(event: JournalEvent) -> SettlementOutcome:
+    """Fail loudly, for a worker whose scan is under test rather than its lanes."""
+    msg = f"no handler should have run for {event.event_id}"
+    raise AssertionError(msg)
+
+
 class TestABoundedScanIsFair:
     """A page budget bounds how much one pass looks at, not what it can reach."""
 
@@ -2022,7 +2033,16 @@ class TestABoundedScanIsFair:
 
         count = max(_BATCH_SIZE, _MAX_UNREADABLE_ROWS_PER_PAGE)
         for index in range(count):
-            await self._admit(alice, text_event(f"$corrupt{index:04d}", ts=1_000 + index), ROOM)
+            # Unprojected: nothing will ever read these rows as conversation,
+            # and a page of this size is expensive enough to build already.
+            await alice.admit(
+                inbound_event(
+                    ROOM,
+                    text_event(f"$corrupt{index:04d}", ts=1_000 + index),
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                ),
+            )
         await corrupt(alice, *(f"$corrupt{index:04d}" for index in range(count)))
         await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
 
@@ -2032,6 +2052,128 @@ class TestABoundedScanIsFair:
             await _eventually(lambda: handled == ["$behind"], seconds=10)
         finally:
             await worker.stop()
+
+    async def test_a_wrapped_pass_stops_at_the_position_it_set_out_from(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One revolution, not an unbounded lap of a circle.
+
+        A pass resumed part way through the backlog runs to the end and then
+        starts again at the front, and nothing stopped it running past its own
+        origin and collecting what it had already collected pages earlier. The
+        room's lane is handed that list as it stands, and a handler that defers
+        rather than settling is not saved by the pending recheck in front of
+        it: it runs a second time on one source.
+
+        Asked of the scan rather than of a lane, because the duplicate is in
+        the list the scan produces and reading it there is exact -- through a
+        lane it is a race between two dispatches of one event.
+        """
+        for index in range(5):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
+        admitted = await alice.pending(limit=5)
+        worker = PendingEventWorker(store=alice, handle=_never_called)
+        worker._scan_cursor = admitted[2].receipt_order
+
+        by_room, more_remains = await worker._collect_dispatchable()
+
+        assert [event.event_id for event in by_room[ROOM]] == ["$e3", "$e4", "$e0", "$e1", "$e2"]
+        assert not more_remains
+        assert worker._scan_cursor is None
+
+    async def test_a_lost_owner_behind_the_window_is_still_taken_back(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The reclaim's question is about the deferrals, not about the window.
+
+        A backlog too large for one pass keeps the scan's window ahead of a
+        deferral sitting behind it -- the pages stay full, so the pass never
+        reaches the end and never wraps to the front. Reclaiming only what the
+        window happens to cover then leaves that deferral's dead owner
+        unnoticed for as long as the overload lasts, which is the unbounded
+        outage the reclaim exists to replace.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        for index in range(3):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
+        admitted = await alice.pending(limit=3)
+        worker = PendingEventWorker(store=alice, handle=_never_called, deferral_is_live=lambda _event: False)
+        worker._deferred[admitted[0].event_id] = admitted[0]
+        worker._scan_cursor = admitted[0].receipt_order
+
+        by_room, _ = await worker._collect_dispatchable()
+
+        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
+
+
+class TestADrainSeesTheWholeBacklog:
+    """A drain loops until nothing moves, so every pass has to see the same set."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
+        await store.admit(
+            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    async def test_a_backlog_of_failures_larger_than_one_pass_still_returns(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Otherwise recovery never finishes and every later one queues behind it.
+
+        The drain ends when a pass brings back exactly what the last one did,
+        so the two passes have to be looking at the same thing. Reading through
+        the pump's bounded window instead gave each pass a different slice of a
+        backlog this size, and with anything in it that keeps failing the
+        comparison could never come true.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            msg = f"nothing can run {event.event_id}"
+            raise RuntimeError(msg)
+
+        for index in range(5):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+
+        try:
+            drained = await asyncio.wait_for(worker.drain_once(), timeout=10)
+        finally:
+            await worker.stop()
+
+        assert drained == 5
+
+    async def test_a_drain_does_not_move_the_pump_off_its_own_position(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pump's resume point is the pump's, and a drain runs beside it."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+
+        async def handle(_event: JournalEvent) -> SettlementOutcome:
+            return SettlementOutcome.SUCCEEDED
+
+        for index in range(5):
+            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle)
+        admitted = await alice.pending(limit=5)
+        worker._scan_cursor = admitted[3].receipt_order
+
+        drained = await asyncio.wait_for(worker.drain_once(), timeout=10)
+
+        assert drained == 5
+        assert await alice.pending() == ()
+        assert worker._scan_cursor == admitted[3].receipt_order
 
 
 @dataclass

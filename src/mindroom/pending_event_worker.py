@@ -91,10 +91,12 @@ class PendingEventWorker:
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
-    # Events handed to a turn that is still running. They stay pending durably
-    # so a crash replays them, but dispatching them again while their turn is
-    # alive would answer the same message twice.
-    _deferred: set[str] = field(default_factory=set, init=False, repr=False)
+    # Events handed to a turn that is still running, kept whole rather than by
+    # id. They stay pending durably so a crash replays them, but dispatching
+    # one again while its turn is alive would answer the same message twice --
+    # and asking whether that turn still exists is a question about this set,
+    # not about wherever the scan's window currently sits.
+    _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
     # Rooms a pass found work for but could not dispatch, because their lane
     # was still busy. Their lane wakes the pump when it finishes.
     _rooms_with_more: set[str] = field(default_factory=set, init=False, repr=False)
@@ -123,7 +125,8 @@ class PendingEventWorker:
         Callable from any thread, because a turn can become terminal on one.
         It only mutates memory; the pump does the I/O on its own loop.
         """
-        self._deferred.difference_update(event_ids)
+        for event_id in event_ids:
+            self._deferred.pop(event_id, None)
 
     @contextmanager
     def sole_handler(self, event_id: str) -> Iterator[None]:
@@ -190,11 +193,21 @@ class PendingEventWorker:
         lane over one room is not a faster drain: it puts two handlers inside
         one event and lets event three overtake event two, which are the two
         things a lane exists to make impossible.
+
+        It scans the whole backlog from the front and owns no resume point, and
+        both halves of that matter. Borrowing the pump's bounded, rotating
+        window gave consecutive passes different slices, so the comparison that
+        ends this loop -- the same events came back untouched -- could not
+        converge on a backlog larger than one pass with anything in it that
+        keeps failing: the drain never returned, and every later recovery for
+        every bot queued behind the one that was still going. Borrowing the
+        pump's cursor also moved it, so a drain rewound the pump's position or
+        skipped it forward past work the pump had not looked at yet.
         """
         drained = 0
         attempted: frozenset[str] = frozenset()
         while True:
-            by_room, _ = await self._collect_dispatchable()
+            by_room = await self._collect_whole_backlog()
             if not by_room:
                 return drained
             ids = frozenset(event.event_id for events in by_room.values() for event in events)
@@ -328,20 +341,29 @@ class PendingEventWorker:
         page rather than from the last event on it: taken from the events, a
         page that decoded nothing would leave the cursor where it was and every
         later pass would spend its whole budget re-reading the same corruption.
+
+        Wrapping to the front is a revolution, not a fresh start, so the pass
+        ends where it began. Without that stop it kept spending budget past its
+        own origin and collected the events it had already collected a few
+        pages earlier -- and a room's lane is handed that list verbatim, so a
+        handler that defers rather than settling runs twice on one source.
         """
-        by_room: dict[str, list[JournalEvent]] = {}
-        cursor = self._scan_cursor
-        wrapped = cursor is None
+        by_room = self._reclaim_lost_deferrals()
+        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        origin = self._scan_cursor
+        cursor = origin
+        wrapped = origin is None
         for _ in range(_MAX_SCAN_PAGES):
             page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
-            for event in page:
-                if event.event_id in self._running_off_lane:
-                    # Its caller is inside the handler right now, and releases
-                    # the claim with a wake so a later pass reconsiders it.
-                    continue
-                if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
-                    continue
-                by_room.setdefault(event.room_id, []).append(event)
+            reached_origin = self._collect_page(
+                page,
+                by_room,
+                already_taken=reclaimed,
+                stop_after=origin if wrapped else None,
+            )
+            if reached_origin:
+                self._scan_cursor = None
+                return by_room, False
             if not page.reached_end:
                 cursor = page.resume_after
                 continue
@@ -355,8 +377,56 @@ class PendingEventWorker:
         self._scan_cursor = cursor
         return by_room, True
 
-    def _reclaim_lost_deferral(self, event: JournalEvent) -> bool:
-        """Return whether one deferred event is dispatchable again already.
+    async def _collect_whole_backlog(self) -> dict[str, list[JournalEvent]]:
+        """Group every pending event this worker may act on, front to back.
+
+        What a drain asks for, and the reason it cannot borrow the pump's scan.
+        A page budget exists to bound how long one pump pass keeps the loop,
+        and a drain has no such need -- it already loops until the backlog
+        stops moving, and it is that loop, not one pass of it, that has to see
+        every event.
+        """
+        by_room = self._reclaim_lost_deferrals()
+        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
+        cursor: int | None = None
+        while True:
+            page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
+            self._collect_page(page, by_room, already_taken=reclaimed, stop_after=None)
+            if page.reached_end:
+                return by_room
+            cursor = page.resume_after
+
+    def _collect_page(
+        self,
+        page: Iterable[JournalEvent],
+        by_room: dict[str, list[JournalEvent]],
+        *,
+        already_taken: frozenset[str],
+        stop_after: int | None,
+    ) -> bool:
+        """Group one page's dispatchable events by room, stopping at ``stop_after``.
+
+        Returns whether the page ran into that stop, which is how a wrapped
+        pass recognises the position it set out from.
+        """
+        for event in page:
+            if stop_after is not None and event.receipt_order > stop_after:
+                return True
+            if event.event_id in already_taken:
+                # The reclaim at the top of this pass already took it back.
+                continue
+            if event.event_id in self._running_off_lane:
+                # Its caller is inside the handler right now, and releases the
+                # claim with a wake so a later pass reconsiders it.
+                continue
+            if event.event_id in self._deferred:
+                # Handed to an owner the reclaim found still alive.
+                continue
+            by_room.setdefault(event.room_id, []).append(event)
+        return False
+
+    def _reclaim_lost_deferrals(self) -> dict[str, list[JournalEvent]]:
+        """Take back every deferral whose owner is gone, wherever it sits.
 
         Deferral is a promise that some owner will call ``release``. Nothing
         makes that owner keep the promise, and the event is durably pending the
@@ -364,17 +434,26 @@ class PendingEventWorker:
         admission and no retry will ever reveal. Asking whether the owner still
         exists turns that into a bounded outage instead of one that lasts until
         the process restarts.
+
+        Asked of the deferrals themselves rather than of whatever the scan's
+        window happens to cover, because those are different sets. A backlog
+        too large for one pass keeps the window ahead of a deferral sitting
+        behind it for as long as the overload lasts, and the outage this is
+        supposed to bound then lasts exactly as long as the one it replaced.
         """
-        if self.deferral_is_live(event):
-            return False
-        self._deferred.discard(event.event_id)
-        logger.warning(
-            "pending_event_deferral_owner_lost",
-            event_id=event.event_id,
-            kind=event.kind.value,
-            room_id=event.room_id,
-        )
-        return True
+        by_room: dict[str, list[JournalEvent]] = {}
+        for event in tuple(self._deferred.values()):
+            if self.deferral_is_live(event):
+                continue
+            self._deferred.pop(event.event_id, None)
+            logger.warning(
+                "pending_event_deferral_owner_lost",
+                event_id=event.event_id,
+                kind=event.kind.value,
+                room_id=event.room_id,
+            )
+            by_room.setdefault(event.room_id, []).append(event)
+        return by_room
 
     async def _run_lane(self, events: list[JournalEvent]) -> None:
         """Run one room's events in receipt order, stopping at the first failure.
@@ -395,13 +474,13 @@ class PendingEventWorker:
         for event in events:
             try:
                 if not await self.store.is_pending(event.event_id):
-                    self._deferred.discard(event.event_id)
+                    self._deferred.pop(event.event_id, None)
                     continue
                 outcome = await self.handle(event)
                 if outcome is None:
-                    self._deferred.add(event.event_id)
+                    self._deferred[event.event_id] = event
                     continue
-                self._deferred.discard(event.event_id)
+                self._deferred.pop(event.event_id, None)
                 await self.store.settle(event.event_id, outcome)
             except asyncio.CancelledError:
                 raise

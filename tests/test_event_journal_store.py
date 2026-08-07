@@ -674,14 +674,14 @@ class TestRedaction:
 
 
 async def corrupt(store: PrincipalStore, *event_ids: str) -> None:
-    """Make some admitted rows' replay payloads undecodable."""
-    for event_id in event_ids:
-        await store._backend.write(
-            lambda transaction, event_id=event_id: transaction.execute(
-                "UPDATE journal_events SET source_json = ? WHERE event_id = ?",
-                ("{", event_id),
-            ),
-        )
+    """Make some admitted rows' replay payloads undecodable, in one transaction."""
+    placeholders = ", ".join("?" for _ in event_ids)
+    await store._backend.write(
+        lambda transaction: transaction.execute(
+            f"UPDATE journal_events SET source_json = ? WHERE event_id IN ({placeholders})",  # noqa: S608
+            ("{", *event_ids),
+        ),
+    )
 
 
 class TestUnreadableRowsDoNotEndTheBacklog:
