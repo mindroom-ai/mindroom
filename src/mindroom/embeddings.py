@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 import importlib
+import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS, SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.knowledge.embedder.base import Embedder
 
     from mindroom.constants import RuntimePaths
 
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
+
+#: One torch model per process is shared by every indexing thread, and torch's
+#: Metal shader-library caches (``libMap``, ``cplMap``, ``kernelCache`` in
+#: ``at::native::mps::MetalShaderLibrary``) are plain ``std::unordered_map``
+#: instances with no lock. Torch drops the GIL inside those calls, so two
+#: threads embedding at once can corrupt a bucket chain: the process then
+#: either spins forever in a cache lookup or dies with SIGSEGV. Local
+#: embedding runs one call at a time. Nothing is lost by serializing, because
+#: the work already funnels through a single GPU queue.
+_LOCAL_EMBEDDING_LOCK = threading.Lock()
 
 
 def _default_dimensions(model: str) -> int | None:
@@ -71,6 +84,25 @@ def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> No
     ensure_optional_deps(_SENTENCE_TRANSFORMERS_DEPENDENCIES, _SENTENCE_TRANSFORMERS_EXTRA, runtime_paths)
 
 
+def _serialized_sentence_transformers_class() -> Callable[..., Embedder]:
+    """Return the local embedder class with its torch calls serialized."""
+    module = importlib.import_module("agno.knowledge.embedder.sentence_transformer")
+    base_class = cast("Any", module.SentenceTransformerEmbedder)
+
+    class SerializedSentenceTransformerEmbedder(base_class):  # type: ignore[misc, valid-type]
+        """Local embedder that admits one thread at a time into torch."""
+
+        def get_embedding(self, text: str) -> list[float]:
+            with _LOCAL_EMBEDDING_LOCK:
+                return cast("list[float]", super().get_embedding(text))
+
+        def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+            with _LOCAL_EMBEDDING_LOCK:
+                return cast("tuple[list[float], dict[str, Any] | None]", super().get_embedding_and_usage(text))
+
+    return cast("Callable[..., Embedder]", SerializedSentenceTransformerEmbedder)
+
+
 def create_sentence_transformers_embedder(
     runtime_paths: RuntimePaths,
     model: str = SENTENCE_TRANSFORMERS_DEFAULT,
@@ -79,8 +111,7 @@ def create_sentence_transformers_embedder(
 ) -> Embedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
     ensure_sentence_transformers_dependencies(runtime_paths)
-    module = importlib.import_module("agno.knowledge.embedder.sentence_transformer")
-    embedder_class = cast("Any", module.SentenceTransformerEmbedder)
+    embedder_class = _serialized_sentence_transformers_class()
     if dimensions is None:
-        return cast("Embedder", embedder_class(id=model))
-    return cast("Embedder", embedder_class(id=model, dimensions=dimensions))
+        return embedder_class(id=model)
+    return embedder_class(id=model, dimensions=dimensions)

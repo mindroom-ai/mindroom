@@ -41,6 +41,10 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.constants import (
+    DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
+    KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
+)
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
@@ -5868,6 +5872,87 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
     assert state is not None
     assert state.refresh_job == "idle"
     assert state.reason == "refresh_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that never exits is killed and reported, instead of being awaited forever."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            knowledge_registry.mark_published_index_refresh_running(key)
+            await asyncio.Event().wait()
+            raise AssertionError
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        process.returncode = -9
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_subprocess_timeout_seconds", lambda: 0.05)
+
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.05s"):
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    assert terminated.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+    assert state.last_error is not None
+    assert "timed out after 0.05s" in state.last_error
+
+
+def test_refresh_subprocess_timeout_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh watchdog window is operator-tunable and falls back to the default."""
+    monkeypatch.delenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, raising=False)
+    assert (
+        knowledge_refresh_runner._refresh_subprocess_timeout_seconds()
+        == DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "12.5")
+    assert knowledge_refresh_runner._refresh_subprocess_timeout_seconds() == 12.5
+
+    monkeypatch.setenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV, "0")
+    with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
+        knowledge_refresh_runner._refresh_subprocess_timeout_seconds()
 
 
 @pytest.mark.asyncio
