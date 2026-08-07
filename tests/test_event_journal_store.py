@@ -855,6 +855,52 @@ class TestLatestVisibleEvent:
 class TestSchemaUpgrade:
     """A database that predates a column has to gain it, not fail on it."""
 
+    async def test_a_database_with_the_predecessor_indexes_is_upgraded(self, tmp_path: Path) -> None:
+        """A widened index has to replace its predecessor, not sit beside it.
+
+        `CREATE INDEX IF NOT EXISTS` cannot redefine an existing index, so
+        widening one means giving it a new name -- and then the old, narrower
+        index survives every upgrade unless it is dropped by name. It would
+        still be maintained on every write while being unusable for the
+        ordering it was widened to serve.
+        """
+        from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements  # noqa: PLC0415
+
+        database = sqlite3.connect(tmp_path / "predecessor.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            if "CREATE INDEX" in statement or "DROP INDEX" in statement:
+                continue
+            database.execute(statement)
+        # Exactly what an earlier revision of this branch created.
+        database.execute(
+            "CREATE INDEX response_outbox_unacknowledged ON response_outbox (principal_id, created_at_ns) "
+            "WHERE acknowledged_event_id IS NULL",
+        )
+        database.execute("CREATE INDEX approval_cards_room ON approval_cards (principal_id, room_id, created_at_ns)")
+
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+
+        indexes = {
+            row[0]
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'",
+            )
+        }
+        assert not indexes & {"response_outbox_unacknowledged", "approval_cards_room"}
+        assert {"response_outbox_unacknowledged_scan", "approval_cards_room_scan"} <= indexes
+        # And the upgraded database really uses the replacement for its ordering.
+        plan = " | ".join(
+            row[-1]
+            for row in database.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM response_outbox WHERE principal_id=? "
+                "AND acknowledged_event_id IS NULL ORDER BY created_at_ns, turn_id, stage LIMIT 50",
+                ("principal",),
+            )
+        )
+        assert "response_outbox_unacknowledged_scan" in plan
+        assert "TEMP B-TREE" not in plan
+
     async def test_a_database_without_a_later_column_is_upgraded(self, tmp_path: Path) -> None:
         """`CREATE TABLE IF NOT EXISTS` leaves an existing table untouched.
 
