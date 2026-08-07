@@ -756,7 +756,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 

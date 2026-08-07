@@ -93,6 +93,7 @@ class _WatchedOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
@@ -103,6 +104,7 @@ class _WatchedOutbox:
             thread_id=thread_id,
             payload=payload,
             edits_event_id=edits_event_id,
+            settle_source_event_ids=settle_source_event_ids,
         )
 
     async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:

@@ -188,7 +188,14 @@ class HydrationView(Protocol):
 
 
 class OutboxView(Protocol):
-    """Delivering what was generated, with no access to the journal behind it."""
+    """Delivering what was generated, plus the one journal fact delivery owns.
+
+    That exception is the handoff, and it is narrower than it looks: the only
+    thing this view may say about the journal is "these sources are answered
+    now", and it may only say it in the same breath as recording the answer.
+    Nothing here can read the journal, replay it, or settle a source that no
+    delivery accounts for.
+    """
 
     async def enqueue_delivery(
         self,
@@ -199,8 +206,9 @@ class OutboxView(Protocol):
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
-        """Record delivery intent, or refuse it as an answer to a membership that ended."""
+        """Record delivery intent and settle what it answers, or refuse both."""
         ...
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:

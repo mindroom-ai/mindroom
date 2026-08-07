@@ -2999,6 +2999,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
+    "mindroom.response_delivery",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",

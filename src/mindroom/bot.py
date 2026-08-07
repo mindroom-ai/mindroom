@@ -64,6 +64,7 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.response_delivery import TurnHandoff
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -559,7 +560,11 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
-                on_final_delivery_enqueued=self._settle_delivered_turn_sources,
+                turn_handoff=TurnHandoff(
+                    sources_for_turn=self._delivered_turn_source_ids,
+                    # Resolved late: the dispatcher is built after the gateway.
+                    released=lambda event_ids: self._journal_dispatcher.release_delivered_turn_sources(event_ids),
+                ),
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -2531,8 +2536,8 @@ class AgentBot:
             suppress_notice=self._room_lifecycle.decrypt_notice_is_fenced(room.room_id),
         )
 
-    async def _settle_delivered_turn_sources(self, turn_id: str) -> None:
-        """Hand one turn's journal sources over once its answer is durably owed.
+    def _delivered_turn_source_ids(self, turn_id: str) -> tuple[str, ...]:
+        """Return every journal source one turn's answer discharges.
 
         The turn is named by its anchor event, which is what the outbox keys
         on, but a coalesced batch answers several sources at once and all of
@@ -2541,8 +2546,7 @@ class AgentBot:
         that has already been answered.
         """
         record = self._turn_store.get_turn_record(turn_id)
-        source_event_ids = record.indexed_event_ids if record is not None else (turn_id,)
-        await self._journal_dispatcher.settle_delivered_turn_sources(source_event_ids)
+        return record.indexed_event_ids if record is not None else (turn_id,)
 
     async def _handle_decryption_failure_event(
         self,
