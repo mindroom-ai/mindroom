@@ -206,6 +206,7 @@ class _RecordingDeliveryGateway:
 
     sent: list[SendTextRequest] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
+    adopted: list[tuple[str, str]] = field(default_factory=list)
     edit_succeeds: bool = True
 
     async def send_text(self, request: SendTextRequest) -> str | None:
@@ -215,6 +216,9 @@ class _RecordingDeliveryGateway:
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
         return self.edit_succeeds
+
+    async def adopt_final_delivery(self, *, turn_id: str, event_id: str) -> None:
+        self.adopted.append((turn_id, event_id))
 
 
 @dataclass
@@ -3082,6 +3086,11 @@ async def test_interactive_selection_failure_persists_fallback_before_terminal_r
     assert pending_turn is not None
     assert pending_turn.completed is False
     assert pending_turn.response_event_id == "$sent-2:localhost"
+    # The fallback went out off the outbox, so the FINAL row it bypassed is
+    # still attempted and unacknowledged. Unless it is adopted, the next
+    # recovery pass resends that frozen edit and the room shows the same
+    # failure twice.
+    assert [event_id for _, event_id in harness.gateway.adopted] == ["$sent-2:localhost"]
 
 
 @pytest.mark.asyncio
