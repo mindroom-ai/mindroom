@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from dataclasses import replace
+import threading
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
@@ -38,10 +39,12 @@ from mindroom.event_journal.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import OutboxDelivery, PrincipalStore
+    from mindroom.event_journal.backend import Backend, Operation, Transaction
+    from mindroom.event_journal.schema import Dialect
 
 pytestmark = pytest.mark.asyncio
 
@@ -49,6 +52,12 @@ ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
+
+# How long a claimer that is already inside its transaction waits for a second
+# claimer to reach its own first statement. Generous next to the sub-millisecond
+# round trip it covers, and only ever paid when the second claimer is blocked --
+# which is the fix working.
+_CONTENDED_CLAIM_WAIT_SECONDS = 0.5
 
 
 @pytest.fixture
@@ -70,6 +79,80 @@ def edit(target: str, body: str) -> dict[str, object]:
         "m.new_content": {"msgtype": "m.text", "body": body},
         "m.relates_to": {"rel_type": "m.replace", "event_id": target},
     }
+
+
+class _PausingTransaction:
+    """One real transaction that runs a hook after its first statement.
+
+    Only the first, because the hook is how one caller is held mid-transaction
+    while another starts, and holding it again at every later statement would
+    just pay the same wait twice.
+    """
+
+    def __init__(self, inner: Transaction, hook: Callable[[], object]) -> None:
+        self._inner = inner
+        self._hook = hook
+        self._paused = False
+
+    @property
+    def dialect(self) -> Dialect:
+        """Return the wrapped transaction's spelling."""
+        return self._inner.dialect
+
+    def _pause(self) -> None:
+        if not self._paused:
+            self._paused = True
+            self._hook()
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> None:
+        """Run one statement, then pause."""
+        self._inner.execute(sql, params)
+        self._pause()
+
+    def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
+        """Run one query, then pause."""
+        row = self._inner.fetchone(sql, params)
+        self._pause()
+        return row
+
+    def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+        """Run one query, then pause."""
+        rows = self._inner.fetchall(sql, params)
+        self._pause()
+        return rows
+
+
+@dataclass(frozen=True, slots=True)
+class _PausingBackend:
+    """A real backend whose writes pause partway through their transaction.
+
+    The races the outbox guards against need one caller to still be inside its
+    transaction when another starts, and the public API offers nowhere to stand
+    between two statements of the same operation. Wrapping the transaction opens
+    that window without substituting anything for the SQL under test.
+    """
+
+    inner: Backend
+    after_first_statement: Callable[[], object]
+
+    @property
+    def dialect(self) -> Dialect:
+        """Return the wrapped backend's spelling."""
+        return self.inner.dialect
+
+    async def write[T](self, operation: Operation[T]) -> T:
+        """Run one write, pausing inside its transaction."""
+        return await self.inner.write(
+            lambda transaction: operation(_PausingTransaction(transaction, self.after_first_statement)),
+        )
+
+    async def read[T](self, operation: Operation[T]) -> T:
+        """Run one read, unpaused."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Close the wrapped backend."""
+        await self.inner.close()
 
 
 def sidecar(content: dict[str, object]) -> dict[str, object]:
@@ -1524,6 +1607,62 @@ class TestOutbox:
             "the losing caller rewrote the terminal record beside the row it did not win"
         )
 
+    async def test_only_one_of_two_concurrent_claims_may_see_an_unattempted_row(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """Being told a row is unattempted is permission to send without asking.
+
+        Delivery reads ``attempted`` off what the claim reports and treats a
+        blank row as proof the homeserver has never seen this transaction ID, so
+        it sends straight away instead of reading the room first. Tell two
+        callers that and both send; if they are logged in as different devices
+        the shared transaction ID deduplicates neither, and one message gets two
+        visible answers.
+
+        Reading the row and then marking it allowed exactly that. Against one
+        PostgreSQL database both claims came back unattempted, every time.
+        SQLite never showed it, because ``BEGIN IMMEDIATE`` holds a write lock
+        across the whole transaction there -- which is why this runs on both.
+        The guarantee has to come from the statement, not from one backend
+        happening to serialize.
+
+        The claimer that gets inside first waits for the other to reach its own
+        first statement, which under a correct claim never happens: the other is
+        blocked on the winner's row lock. So the wait is bounded and expiring is
+        the fix working. A machine slow enough to expire it early could only make
+        this test pass when it should have failed, never the reverse, because a
+        claim that reports ownership from its own write has one winner at every
+        interleaving.
+        """
+        principal = "agent@alice"
+        first = journal_database()
+        second = journal_database()
+        await first.principal(principal).enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        reached_first_statement = threading.Event()
+
+        def contend(store: EventJournalStore, hook: Callable[[], object]) -> Awaitable[OutboxDelivery | None]:
+            paused = EventJournalStore(backend=_PausingBackend(store.backend, hook))
+            return paused.principal(principal).claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+
+        claims = await asyncio.gather(
+            contend(first, lambda: reached_first_statement.wait(_CONTENDED_CLAIM_WAIT_SECONDS)),
+            contend(second, reached_first_statement.set),
+        )
+
+        assert all(claimed is not None for claimed in claims)
+        unattempted = [claimed for claimed in claims if claimed is not None and not claimed.attempted]
+        assert len(unattempted) == 1, (
+            f"{len(unattempted)} of two concurrent claims were told the row was unattempted, "
+            "and every one of them would have sent without reading the room first"
+        )
+
     async def test_the_transaction_id_is_derived_not_random(self) -> None:
         """The transaction id is derived not random."""
         first = delivery_transaction_id("agent@alice", "turn-1", "final")
@@ -1607,10 +1746,10 @@ class TestOutbox:
         """Everything that goes on the wire is frozen; the claim state is not.
 
         The payload and the transaction ID are the reason claiming exists, and
-        a second claim must reproduce them exactly. The two columns the claim
-        itself writes are the opposite: they describe who took the row and
-        when, so the second claim reports the first one's work rather than
-        repeating the blank state it started from.
+        a second claim must reproduce them exactly. The attempt and the device
+        are the opposite: they describe who took the row and from where, so the
+        second claim reports the first one's work rather than repeating the
+        blank state it started from.
         """
         await alice.enqueue_delivery(
             turn_id="turn-1",

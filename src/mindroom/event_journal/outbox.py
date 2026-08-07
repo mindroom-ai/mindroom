@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
@@ -120,13 +121,30 @@ def claim(
     homeserver can only ever be retried with the identical payload and
     transaction ID.
 
-    The row is read *before* it is marked, and that pre-claim view is what
-    comes back. Every other column is immutable once attempted, so the only
-    difference is the two this write touches -- and those two are exactly what
-    the caller needs to see the state it is taking over from: whether anyone
-    has sent this before, and from which device. Reading them after the update
-    would report this attempt back to itself and make every resend look like a
-    first one.
+    What comes back describes the row as it stood *before* this call, which is
+    what the caller needs to see the state it is taking over from: whether
+    anyone has sent this before, and from which device. Reporting this attempt
+    back to itself would make every resend look like a first one, and a first
+    one skips the room lookup that stops a changed device posting a second
+    answer.
+
+    Reading the row and then marking it is the obvious way to get that view and
+    it is wrong, for the same reason it was wrong in ``acknowledge``: two
+    processes against one PostgreSQL database can both read ``attempted = 0``,
+    and both then believe they are the first sender and send. Reproduced with
+    two stores on one database -- both claims came back unattempted, both would
+    have gone straight to the wire. SQLite never showed it, because
+    ``BEGIN IMMEDIATE`` holds a write lock across the whole transaction, so a
+    read followed by a write there is already atomic. A rule that holds on only
+    one backend is not one this codebase has.
+
+    So the marking statement reports the pre-claim state itself. No portable
+    SQL hands back pre-update values -- ``RETURNING`` is post-update on both
+    backends, and PostgreSQL's self-join trick for the old row is rejected by
+    SQLite -- but none is needed, because ``attempted`` is the only column this
+    write touches and a conditional update tells you exactly what it was: the
+    row was unattempted if and only if this statement is the one that flipped
+    it. Everything else is read afterwards unchanged.
 
     The sending device is deliberately *not* written here. Claiming freezes the
     payload; it does not mean this device is going to send. When the recorded
@@ -137,6 +155,14 @@ def claim(
     ``record_sending_device`` is called once the send is actually about to
     happen.
     """
+    marked = transaction.fetchone(
+        """
+        UPDATE response_outbox SET attempted = 1
+        WHERE principal_id = ? AND turn_id = ? AND stage = ? AND attempted = 0
+        RETURNING turn_id
+        """,
+        (principal_id, turn_id, stage.value),
+    )
     row = transaction.fetchone(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM response_outbox
@@ -146,14 +172,7 @@ def claim(
     )
     if row is None:
         return None
-    transaction.execute(
-        """
-        UPDATE response_outbox SET attempted = 1
-        WHERE principal_id = ? AND turn_id = ? AND stage = ?
-        """,
-        (principal_id, turn_id, stage.value),
-    )
-    return _delivery(row)
+    return replace(_delivery(row), attempted=marked is None)
 
 
 def record_sending_device(

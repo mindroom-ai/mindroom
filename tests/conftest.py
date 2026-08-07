@@ -600,20 +600,28 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
 
 
 @pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-async def journal_store(
+async def journal_database(
     request: pytest.FixtureRequest,
     tmp_path: Path,
-) -> AsyncGenerator["EventJournalStore", None]:
-    """Return one open event-journal store per supported backend.
+) -> AsyncGenerator[Callable[[], "EventJournalStore"], None]:
+    """Return an opener onto one empty database, per supported backend.
 
     Parametrized rather than duplicated so a rule can only be proven for one
     backend by also proving it for the other.
+
+    An opener rather than a store, because a store is one process's connections
+    and not the database itself. Whether two bots sharing a database can step on
+    each other is a question only a second store over the same database can ask,
+    and every store this hands out is closed when the test ends.
     """
     from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
 
     backend = str(request.param)
     if backend == "sqlite":
-        store = EventJournalStore.open_sqlite(tmp_path / "event_journal.db")
+        database_path = tmp_path / "event_journal.db"
+
+        def connect() -> EventJournalStore:
+            return EventJournalStore.open_sqlite(database_path)
     else:
         import psycopg  # noqa: PLC0415
         from psycopg import sql  # noqa: PLC0415
@@ -623,13 +631,29 @@ async def journal_store(
         with psycopg.connect(database_url, autocommit=True) as db:
             db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         separator = "&" if "?" in database_url else "?"
-        store = EventJournalStore.open_postgres(
-            f"{database_url}{separator}options=-csearch_path%3D{schema}",
-        )
+        scoped_url = f"{database_url}{separator}options=-csearch_path%3D{schema}"
+
+        def connect() -> EventJournalStore:
+            return EventJournalStore.open_postgres(scoped_url)
+
+    opened: list[EventJournalStore] = []
+
+    def opener() -> EventJournalStore:
+        store = connect()
+        opened.append(store)
+        return store
+
     try:
-        yield store
+        yield opener
     finally:
-        await store.close()
+        for store in opened:
+            await store.close()
+
+
+@pytest_asyncio.fixture
+def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "EventJournalStore":
+    """Return one open event-journal store per supported backend."""
+    return journal_database()
 
 
 _LEGACY_TABLE_DDL = (
