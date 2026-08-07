@@ -155,9 +155,13 @@ Giving the journal backends a dedicated executor breaks the cycle -- verified wi
 
 So the honest shape of step 2 is an async conversion, not a bridge. `update_handled_turn` becomes awaitable and the queue, the barrier futures, the retry timer, the dedicated executor and `wait_for_persist` all delete with it -- awaiting *is* the durability wait, which is roughly 300 lines removed rather than ten added. The cost the earlier note omitted: 32 call sites across 9 public writers, of which only 5 are already inside `asyncio.to_thread`, plus sync callbacks (`turn_controller.py:1796-1804`, `edit_regenerator.py:333`) that are handed to the response machinery and would have to become async callbacks, changing the signatures that invoke them on the hottest path in the runtime.
 
-That is a phase, not a step, and it is the one place where being wrong answers a user twice. It should land on its own, with the live fuzz's `canonical_agent_replies` count as the gate. What is *not* affected by any of this is the table itself: `turn_records` has the same shape under either write path, so step 1 stands rather than being reverted.
+That is a phase, not a step, and it is the one place where being wrong answers a user twice. It should land on its own, gated on the live fuzz's `_assert_no_wrong_replies` -- see the note below on which number actually catches a duplicate. What is *not* affected by any of this is the table itself: `turn_records` has the same shape under either write path, and it ships empty, so a shape the consuming phase disagrees with is a drop and recreate rather than a migration. Step 1 stands rather than being reverted.
 
-Why it must land atomically: a half-migrated dedupe substrate answers users twice. The live fuzz's `canonical_agent_replies` count is the check that catches it.
+Why it must land atomically: a half-migrated dedupe substrate answers users twice.
+
+**Which fuzz number catches that is not the obvious one, and an earlier version of this note named the wrong one.** `canonical_agent_replies` reads like a count of replies the agents produced; it is `len(oracle.expected_sources)` (`fuzz_live_matrix.py:2853`), the number of reply-*expecting* prompts the scenario issued. It moves with the seed, the profile and how many operations landed between restarts, so comparing it across two runs measures the scenario rather than the runtime. A branch run reporting 17 against `main`'s 16 was read here as a possible duplicate answer; it is not one, and nothing about it is a defect.
+
+The check that actually catches a duplicate is `_assert_no_wrong_replies` (`:2160`), which runs after every batch and fails on any source with more than one reply, on any stray reply to a source nothing expected, and -- at the end of a saturation run -- on any expected source with no reply at all. Exactly-one-reply-per-source is the invariant; the count is telemetry.
 
 **Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization.
 
