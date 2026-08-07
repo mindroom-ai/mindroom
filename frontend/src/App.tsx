@@ -523,9 +523,9 @@ function AppContent() {
 
         {configJournalPendingRestart && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
-            The saved <code>event_journal</code> names a different database
-            from the one this process has open. It is read once, when the store
-            is opened, so the change takes effect at the next restart — and
+            The saved <code>event_journal</code> names a different database from
+            the one this process has open. It is read once, when the store is
+            opened, so the change takes effect at the next restart — and
             MindRoom refuses to start against a journal it is not bound to, so
             run <code>mindroom journal adopt</code> first if the move is
             deliberate.

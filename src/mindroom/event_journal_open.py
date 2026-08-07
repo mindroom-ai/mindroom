@@ -83,7 +83,7 @@ _DESCRIBED_CONNECTION_FIELDS = ("host", "port", "dbname")
 
 @dataclass
 class _InUseClaim:
-    """This process's declaration that it has a journal open on one storage root."""
+    """One process's declaration that it has a journal open on one storage root."""
 
     handle: TextIO
     holders: int

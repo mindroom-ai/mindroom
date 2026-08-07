@@ -58,8 +58,8 @@ BASE_CONFIG: dict[str, object] = {
 
 # Obviously fake, and distinctive enough that a leak into a file or a message
 # is found by searching for it.
-URI_PASSWORD = "hunter2-not-a-real-password"
-QUERY_PASSWORD = "certsecret-not-a-real-password"
+URI_PASSWORD = "hunter2-not-a-real-password"  # noqa: S105 - a fake secret is the point of the test
+QUERY_PASSWORD = "certsecret-not-a-real-password"  # noqa: S105 - and so is this one
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -241,7 +241,7 @@ class TestPublishingABindingIsOneStep:
             ready.wait()
             try:
                 write_event_journal_binding(storage_path, binding)
-            except Exception as exc:  # noqa: BLE001 - the assertion below is what reports it
+            except Exception as exc:
                 failures.append(exc)
 
         writers = [threading.Thread(target=publish, args=(binding,)) for binding in published]
@@ -431,7 +431,7 @@ class TestAdoptCommand:
         assert binding.generation == adopted
 
     async def test_a_failed_adoption_leaves_the_install_exactly_as_usable(self, tmp_path: Path) -> None:
-        """This is the repair tool. It may not be the thing that breaks the install.
+        """The repair tool may not be the thing that breaks the install.
 
         Adoption used to delete the known-good binding before it had so much as
         tried to open the candidate, so anything that went wrong next -- an
