@@ -513,6 +513,46 @@ class TestModelIsNotRerun:
         assert runtime.homeserver.visible_messages == 1
         assert runtime.model_runs == 1
 
+    async def test_a_rejoin_after_a_send_that_never_arrived_delivers_the_old_answer(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The other rejoin branch, and the one that costs something.
+
+        Its sibling above covers the send Matrix accepted. This is the send
+        that never arrived: the row was claimed, the network failed, and the
+        server holds nothing. The bot then leaves and rejoins, and recovery
+        resends -- so an answer authored for the previous membership appears
+        inside the new one, late.
+
+        Nothing in the row can distinguish this case from the accepted one.
+        Both are `attempted` with an unknown network outcome, and the two want
+        opposite things: resending is the only convergent move if the send
+        landed, and is a stale delivery if it did not. The fence is drawn by
+        `attempted` and the choice is to resend, because answering a question
+        that really was asked, slightly late, in a room the bot has rejoined,
+        is a smaller harm than posting the answer twice or leaving the durable
+        record and the room permanently disagreeing.
+
+        So this asserts the cost rather than guarding against it. An
+        unattempted row is the opposite case and is deleted by the fence: it
+        was written for a conversation the bot has left and nothing outside
+        this process has seen it.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.fail_next_send = True
+        await runtime.worker().drain_once()
+        # The claim committed and the send did not, so the server holds nothing.
+        assert runtime.homeserver.visible_messages == 0
+
+        await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.delivery.recover()
+
+        # The deliberate cost: the previous membership's answer lands in the new one.
+        assert runtime.homeserver.visible_messages == 1
+        # Still exactly one, and still one model run -- late, not duplicated.
+        assert runtime.model_runs == 1
+
     async def test_recovery_after_acknowledgement_sends_nothing(
         self,
         runtime: TurnRuntime,
