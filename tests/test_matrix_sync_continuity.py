@@ -1179,73 +1179,6 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
 
 
 @pytest.mark.asyncio
-async def test_leave_cleanup_restart_purges_only_current_sqlite_principal(tmp_path: Path) -> None:
-    """A restart after leave cleanup interruption must discard only the departed principal."""
-    principal_id = "@mindroom_code:localhost"
-    other_principal_id = "@mindroom_other:localhost"
-    room_id = "!room:localhost"
-    event_id = "$stale"
-    event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 1,
-        "type": "m.room.message",
-        "content": {"body": "stale", "msgtype": "m.text"},
-    }
-    root = SqliteEventCache(tmp_path / "event-cache.db")
-    await root.initialize()
-    principal_cache = root.for_principal(principal_id)
-    other_cache = root.for_principal(other_principal_id)
-    await principal_cache.store_event(event_id, room_id, event)
-    await other_cache.store_event(event_id, room_id, event)
-    bot = _agent_bot(tmp_path)
-    bot.event_cache = principal_cache
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_leave")
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_leave",
-        cache_generation=principal_cache.cache_generation,
-    )
-    leave_response = MagicMock(spec=nio.SyncResponse)
-    leave_response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
-    interrupted_cleanup = asyncio.CancelledError("process stopped during leave cleanup")
-    with (
-        patch.object(bot._conversation_cache, "purge_rooms", AsyncMock(side_effect=interrupted_cleanup)),
-        pytest.raises(asyncio.CancelledError, match="process stopped"),
-    ):
-        await bot._apply_own_room_membership_from_sync(leave_response)
-    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    await root.close()
-
-    reopened_root = SqliteEventCache(tmp_path / "event-cache.db")
-    await reopened_root.initialize()
-    principal_cache = reopened_root.for_principal(principal_id)
-    other_cache = reopened_root.for_principal(other_principal_id)
-    bot.event_cache = principal_cache
-    client = make_matrix_client_mock(user_id=principal_id)
-    client.next_batch = None
-
-    try:
-        with (
-            patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
-        ):
-            await bot.start()
-
-        assert await principal_cache.get_event(room_id, event_id) is None
-        assert await other_cache.get_event(room_id, event_id) == event
-    finally:
-        await reopened_root.close()
-
-
-@pytest.mark.asyncio
 async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path) -> None:
     """Authenticated identity replacement must not retain the old principal's cache view."""
     old_principal_id = "@mindroom_code:localhost"
@@ -1304,58 +1237,6 @@ async def test_authoritative_leave_clears_checkpoint_before_cache_cleanup(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_leave_fence_rejects_delayed_write_before_new_checkpoint(tmp_path: Path) -> None:
-    """Certification after leave must not preserve a delayed callback's recreated rows."""
-    principal_id = "@mindroom_code:localhost"
-    room_id = "!left:localhost"
-    event_id = "$event"
-    event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 1,
-        "type": "m.room.message",
-        "content": {"body": "stale", "msgtype": "m.text"},
-    }
-    root = SqliteEventCache(tmp_path / "event-cache.db")
-    await root.initialize()
-    cache = root.for_principal(principal_id)
-    await cache.store_event(event_id, room_id, event)
-    bot = _agent_bot(tmp_path)
-    bot.event_cache = cache
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_leave")
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_leave",
-        cache_generation=cache.cache_generation,
-    )
-    response = MagicMock(spec=nio.SyncResponse)
-    response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
-    try:
-        await bot._apply_own_room_membership_from_sync(response)
-        await cache.store_event("$late", room_id, {**event, "event_id": "$late"})
-        await bot._sync_cache_trust.certify_response(
-            next_batch="s_after_leave",
-            cache_result=SyncCacheWriteResult(complete=True),
-        )
-
-        assert await cache.get_event(room_id, "$late") is None
-        assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_leave"
-    finally:
-        await root.close()
-
-    reopened_root = SqliteEventCache(tmp_path / "event-cache.db")
-    await reopened_root.initialize()
-    try:
-        reopened_cache = reopened_root.for_principal(principal_id)
-        assert await reopened_cache.get_event(room_id, event_id) is None
-        assert await reopened_cache.get_event(room_id, "$late") is None
-    finally:
-        await reopened_root.close()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "call_cleanup_failure",
     [
@@ -1363,7 +1244,7 @@ async def test_leave_fence_rejects_delayed_write_before_new_checkpoint(tmp_path:
         asyncio.CancelledError("call cleanup interrupted"),
     ],
 )
-async def test_leave_purges_before_failing_call_reconciliation(
+async def test_leave_fences_before_failing_call_reconciliation(
     tmp_path: Path,
     call_cleanup_failure: BaseException,
 ) -> None:
@@ -1381,8 +1262,13 @@ async def test_leave_purges_before_failing_call_reconciliation(
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
     operation_order: list[str] = []
 
-    async def purge_rooms(_room_ids: object) -> None:
-        operation_order.append("purge")
+    class RecordingStore:
+        """Record that the fence ran before call cleanup."""
+
+        async def advance_membership_epoch(self, _room_id: str) -> int:
+            """Record one invalidation."""
+            operation_order.append("fence")
+            return 1
 
     async def fail_call_cleanup(**_kwargs: object) -> None:
         operation_order.append("call")
@@ -1391,75 +1277,15 @@ async def test_leave_purges_before_failing_call_reconciliation(
     bot._call_manager = MagicMock()
     bot._call_manager.on_sync_room_membership = AsyncMock(side_effect=fail_call_cleanup)
 
-    with (
-        patch.object(bot._conversation_cache, "purge_rooms", side_effect=purge_rooms),
-        pytest.raises(type(call_cleanup_failure), match="call cleanup interrupted"),
-    ):
+    bot._membership_fence.store = RecordingStore()
+
+    with pytest.raises(type(call_cleanup_failure), match="call cleanup interrupted"):
         await bot._apply_own_room_membership_from_sync(response)
 
-    assert operation_order == ["purge", "call"]
+    assert operation_order == ["fence", "call"]
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(tmp_path: Path) -> None:
-    """A failed checkpoint unlink must preserve old durable rows and disable cache use."""
-    principal_id = "@mindroom_code:localhost"
-    room_id = "!left:localhost"
-    event_id = "$stale"
-    event = {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": 1,
-        "type": "m.room.message",
-        "content": {"body": "stale", "msgtype": "m.text"},
-    }
-    root = SqliteEventCache(tmp_path / "event-cache.db")
-    await root.initialize()
-    principal_cache = root.for_principal(principal_id)
-    await principal_cache.store_event(event_id, room_id, event)
-    bot = _agent_bot(tmp_path)
-    bot.event_cache = principal_cache
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_leave")
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_leave",
-        cache_generation=principal_cache.cache_generation,
-    )
-    response = MagicMock(spec=nio.SyncResponse)
-    response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
-    clear_failure = OSError("checkpoint directory unavailable")
-
-    with patch.object(bot._sync_continuity_store, "clear_checkpoint", side_effect=clear_failure):
-        await bot._apply_own_room_membership_from_sync(response)
-
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_leave"
-    await root.close()
-
-    reopened_root = SqliteEventCache(tmp_path / "event-cache.db")
-    await reopened_root.initialize()
-    reopened_cache = reopened_root.for_principal(principal_id)
-    bot.event_cache = reopened_cache
-    bot.client = make_matrix_client_mock(user_id=principal_id)
-    bot.client.next_batch = None
-    try:
-        bot.client.next_batch = await bot._sync_cache_trust.prepare_startup()
-
-        assert bot.client.next_batch == "s_before_leave"
-        assert await reopened_cache.get_event(room_id, event_id) == event
-
-        await bot._apply_own_room_membership_from_sync(response)
-
-        assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-        assert await reopened_cache.get_event(room_id, event_id) is None
-    finally:
-        await reopened_root.close()
 
 
 @pytest.mark.asyncio
@@ -2972,7 +2798,6 @@ async def test_nio_limited_recovery_caches_history_before_dispatch(tmp_path: Pat
     bot.client = client
     client.next_batch = "s_before_gap"
     room_id = "!room:localhost"
-    await bot._conversation_cache.mark_room_joined(room_id)
     history_text = _text_event("$history-text", "old text", 1)
     history_image = _image_event("$history-image", "old image", 2)
     client._recovery_room_messages = AsyncMock(
@@ -3039,7 +2864,6 @@ async def test_nio_recovered_gap_mention_reaches_the_real_response_runner(tmp_pa
     bot.client = client
     client.next_batch = "s_before_gap"
     room_id = "!room:localhost"
-    await bot._conversation_cache.mark_room_joined(room_id)
     mention = bot.agent_user.user_id
     gap_mention = _mention_event("$gap-mention", f"{mention}: ping", mention)
     client._recovery_room_messages = AsyncMock(
@@ -3100,7 +2924,6 @@ async def test_nio_bounded_exhaustion_answers_the_events_it_recovered(tmp_path: 
     bot.client = client
     client.next_batch = "s_before_gap"
     room_id = "!room:localhost"
-    await bot._conversation_cache.mark_room_joined(room_id)
     history_text = _text_event("$unproven-text", "old text", 1)
     history_image = _image_event("$unproven-image", "old image", 2)
     # No end token: the server has no more history to give inside this gap.
@@ -3156,7 +2979,6 @@ async def test_nio_retries_recovered_event_when_cache_admission_fails(
     bot.client = client
     client.next_batch = "s_before_gap"
     room_id = "!room:localhost"
-    await bot._conversation_cache.mark_room_joined(room_id)
     history_text = _text_event("$history-retry", "old text", 1)
     client._recovery_room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(

@@ -1661,37 +1661,24 @@ async def _assert_sliding_cache_progress_stays_fresh(
     bot: AgentBot,
     response: nio.SlidingSyncResponse,
     *,
-    purge_started: asyncio.Event,
-    allow_purge_finish: asyncio.Event,
-    mark_joined_started: asyncio.Event,
-    allow_mark_joined_finish: asyncio.Event,
+    fence_started: asyncio.Event,
+    allow_fence_finish: asyncio.Event,
 ) -> None:
-    """Observe one response across both durable membership cache phases."""
+    """Observe one response while its membership phase is still in flight."""
     response_task = asyncio.create_task(bot._on_sync_response(response))
     try:
-        await asyncio.wait_for(purge_started.wait(), timeout=1.0)
-        purge_progress = bot.sync_cache_write_progress()
-        purge_health = get_matrix_sync_health_snapshot(
+        await asyncio.wait_for(fence_started.wait(), timeout=1.0)
+        progress = bot.sync_cache_write_progress()
+        health = get_matrix_sync_health_snapshot(
             cache_write_grace_seconds=600.0,
         )
-        assert purge_progress is not None
-        assert purge_health.stale_entities == ()
+        assert progress is not None
+        assert health.stale_entities == ()
 
-        allow_purge_finish.set()
-        await asyncio.wait_for(mark_joined_started.wait(), timeout=1.0)
-        joined_progress = bot.sync_cache_write_progress()
-        joined_health = get_matrix_sync_health_snapshot(
-            cache_write_grace_seconds=600.0,
-        )
-        assert joined_progress is not None
-        assert joined_progress.started_monotonic == purge_progress.started_monotonic
-        assert joined_health.stale_entities == ()
-
-        allow_mark_joined_finish.set()
+        allow_fence_finish.set()
         await asyncio.wait_for(response_task, timeout=1.0)
     finally:
-        allow_purge_finish.set()
-        allow_mark_joined_finish.set()
+        allow_fence_finish.set()
         await asyncio.gather(response_task, return_exceptions=True)
         reset_matrix_sync_health()
 
@@ -1700,25 +1687,22 @@ async def _assert_sliding_cache_progress_stays_fresh(
 async def test_sliding_sync_remote_departure_fences_and_purges(
     tmp_path: Path,
 ) -> None:
-    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
-    purge_started = asyncio.Event()
-    allow_purge_finish = asyncio.Event()
-    mark_joined_started = asyncio.Event()
-    allow_mark_joined_finish = asyncio.Event()
-    purged_room_ids: list[set[str]] = []
-    marked_joined_room_ids: list[str] = []
+    """A sliding response reporting a kick must fence it and notify the call manager."""
+    fence_started = asyncio.Event()
+    allow_fence_finish = asyncio.Event()
+    fenced_room_ids: list[str] = []
     invalidation_count = 0
     membership_updates: list[tuple[set[str], set[str]]] = []
 
-    async def delayed_purge(room_ids: set[str]) -> None:
-        purged_room_ids.append(room_ids)
-        purge_started.set()
-        await allow_purge_finish.wait()
+    class BlockingStore:
+        """Hold the fence open so the tracked membership phase stays in flight."""
 
-    async def delayed_mark_joined(room_id: str) -> None:
-        marked_joined_room_ids.append(room_id)
-        mark_joined_started.set()
-        await allow_mark_joined_finish.wait()
+        async def advance_membership_epoch(self, room_id: str) -> int:
+            """Record the fenced room, then wait to be released."""
+            fenced_room_ids.append(room_id)
+            fence_started.set()
+            await allow_fence_finish.wait()
+            return len(fenced_room_ids)
 
     async def invalidate() -> bool:
         nonlocal invalidation_count
@@ -1751,35 +1735,22 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
         bot.agent_name,
         datetime.now(UTC) - timedelta(seconds=400),
     )
-    with (
-        patch.object(
-            bot._sync_cache_trust,
-            "invalidate_for_cache_scope_cleanup",
-            new=invalidate,
-        ),
-        patch.object(
-            bot._conversation_cache,
-            "purge_rooms",
-            new=delayed_purge,
-        ),
-        patch.object(
-            bot._conversation_cache,
-            "mark_room_joined",
-            new=delayed_mark_joined,
-        ),
+    bot._membership_fence.store = BlockingStore()
+
+    with patch.object(
+        bot._sync_cache_trust,
+        "invalidate_for_cache_scope_cleanup",
+        new=invalidate,
     ):
         await _assert_sliding_cache_progress_stays_fresh(
             bot,
             response,
-            purge_started=purge_started,
-            allow_purge_finish=allow_purge_finish,
-            mark_joined_started=mark_joined_started,
-            allow_mark_joined_finish=allow_mark_joined_finish,
+            fence_started=fence_started,
+            allow_fence_finish=allow_fence_finish,
         )
 
     assert invalidation_count == 1
-    assert purged_room_ids == [{"!kicked:localhost"}]
-    assert marked_joined_room_ids == ["!joined:localhost"]
+    assert fenced_room_ids == ["!kicked:localhost"]
     assert membership_updates == [
         ({"!joined:localhost"}, {"!kicked:localhost"}),
     ]
