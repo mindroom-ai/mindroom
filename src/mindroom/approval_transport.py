@@ -10,14 +10,12 @@ import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_delivery import (
     can_send_to_encrypted_room,
     resolve_room_encryption_for_delivery,
     send_room_event_result,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
-from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
@@ -32,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 logger = get_logger(__name__)
 
@@ -43,7 +41,6 @@ class _ApprovalTransportBot(Protocol):
     agent_name: str
     running: bool
     client: nio.AsyncClient | None
-    event_cache: ConversationEventCache
 
     @property
     def approval_room_ids(self) -> frozenset[str]:
@@ -118,9 +115,8 @@ class ApprovalMatrixTransport:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
-    event_cache_provider: Callable[[], ConversationEventCache]
+    cards_provider: Callable[[], ApprovalView | None]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
@@ -142,9 +138,10 @@ class ApprovalMatrixTransport:
             self.runtime_paths,
             sender=self.send_approval_event,
             editor=self.edit_approval_event,
-            event_cache=self.event_cache_provider(),
+            cards=self.cards_provider(),
             approval_room_ids=self.configured_approval_room_ids,
             transport_sender=self.transport_sender_id,
+            sending_device=self.transport_device_id,
         )
 
     async def _run_on_runtime_loop(
@@ -203,10 +200,11 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
         return await self._run_on_runtime_loop(
-            lambda: self.send_approval_event_now(room_id, thread_id, content),
+            lambda: self.send_approval_event_now(room_id, thread_id, content, transaction_id),
         )
 
     async def send_approval_event_now(
@@ -214,8 +212,14 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
-        """Send one custom approval event on the current loop."""
+        """Send one custom approval event on the current loop.
+
+        The transaction is the caller's, not a fresh one per attempt, so a send
+        repeated after a crash collapses onto the event the homeserver already
+        accepted instead of putting a second card in the room.
+        """
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
@@ -236,6 +240,7 @@ class ApprovalMatrixTransport:
             room_id,
             "io.mindroom.tool_approval",
             send_content,
+            transaction_id=transaction_id,
             operation="send_approval_event",
         )
         if isinstance(response, nio.RoomSendResponse):
@@ -247,7 +252,6 @@ class ApprovalMatrixTransport:
                     thread_id=thread_id,
                     agent_name=bot.agent_name,
                 )
-            self.track_cache_write(bot, room_id, str(response.event_id))
             return SentApprovalEvent(event_id=str(response.event_id), sent_content=send_content)
         logger.warning(
             "Failed to send approval Matrix event",
@@ -301,6 +305,18 @@ class ApprovalMatrixTransport:
         user_id = bot.client.user_id
         return user_id if isinstance(user_id, str) and user_id else None
 
+    def transport_device_id(self) -> str | None:
+        """Return the Matrix device that sends approval cards for this runtime.
+
+        The transaction IDs the recovery pass relies on belong to this device,
+        so a card claimed under a different one cannot be presented again.
+        """
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is None or bot.client is None:
+            return None
+        device_id = bot.client.device_id
+        return device_id if isinstance(device_id, str) and device_id else None
+
     def configured_approval_room_ids(self) -> set[str]:
         """Return rooms currently served by the router approval transport."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
@@ -336,56 +352,7 @@ class ApprovalMatrixTransport:
                 response=str(response),
             )
             return False
-        await self.cache_approval_event_now(bot, room_id, str(response.event_id))
         return True
-
-    def track_cache_write(self, bot: _ApprovalTransportBot, room_id: str, event_id: str) -> None:
-        """Cache an outbound approval event in the background."""
-        task = asyncio.create_task(
-            self.cache_approval_event_now(bot, room_id, event_id),
-            name=f"approval_cache_write_{event_id}",
-        )
-        self._cache_write_tasks.add(task)
-        task.add_done_callback(self._finish_cache_write)
-
-    def _finish_cache_write(self, task: asyncio.Task[None]) -> None:
-        self._cache_write_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except Exception as exc:
-            logger.warning("approval_cache_write_failed", error=str(exc))
-
-    async def cache_approval_event_now(
-        self,
-        bot: _ApprovalTransportBot,
-        room_id: str,
-        event_id: str,
-    ) -> None:
-        """Store a freshly sent approval event after Matrix assigns canonical event fields."""
-        if bot.client is None:
-            return
-        try:
-            membership_epoch = await bot.event_cache.room_membership_epoch(room_id)
-            if membership_epoch is None:
-                membership_epoch = UNCERTIFIED_MEMBERSHIP_EPOCH
-            response = await bot.client.room_get_event(room_id, event_id)
-            if not isinstance(response, nio.RoomGetEventResponse):
-                return
-            await bot.event_cache.store_event(
-                event_id,
-                room_id,
-                normalize_nio_event_for_cache(response.event, event_id=event_id),
-                expected_membership_epoch=membership_epoch,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to cache outbound approval event",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
 
     async def send_notice(
         self,

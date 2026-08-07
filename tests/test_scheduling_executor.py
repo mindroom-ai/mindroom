@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -81,11 +81,10 @@ def _workflow(
     )
 
 
-def _conversation_cache(*, latest_thread_event_id: str | None = None) -> AsyncMock:
-    access = AsyncMock()
-    access.get_latest_thread_event_id_if_needed.return_value = latest_thread_event_id
-    access.notify_outbound_message = Mock()
-    return access
+def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncMock:
+    reader = AsyncMock()
+    reader.latest_thread_event_id.return_value = latest_thread_event_id
+    return reader
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:
@@ -114,10 +113,10 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
     """Firing a task targeting a known agent delivers the automated message into the thread."""
     config = _agent_config(tmp_path)
     workflow = _workflow("@research Summarize today's AI news")
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -125,7 +124,7 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
             workflow,
             config,
             runtime_paths_for(config),
-            conversation_cache,
+            conversation_reader,
             task_id="task-1",
         )
 
@@ -149,10 +148,10 @@ async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: 
     """A per-schedule history limit rides on the fired message so dispatch can cap that turn."""
     config = _agent_config(tmp_path)
     workflow = _workflow("@research Poll the queue", history_limit=history_limit)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -160,7 +159,7 @@ async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: 
             workflow,
             config,
             runtime_paths_for(config),
-            conversation_cache,
+            conversation_reader,
             task_id="task-1",
         )
 
@@ -176,10 +175,10 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, sta
     """new_thread tasks deliver a relation-free root even when a stale thread_id is persisted."""
     config = _config(tmp_path)
     workflow = _workflow("Kick off the weekly report", thread_id=stale_thread_id, new_thread=True)
-    conversation_cache = _conversation_cache()
+    conversation_reader = _conversation_reader()
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -187,11 +186,11 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, sta
             workflow,
             config,
             runtime_paths_for(config),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert outcome.delivered is True
-    conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    conversation_reader.latest_thread_event_id.assert_not_awaited()
     content = mock_send.await_args.args[2]
     assert "⏰ [Automated Task]" not in content["body"]
     assert "m.relates_to" not in content
@@ -205,7 +204,7 @@ async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path
     workflow = _workflow("Check the shared queue", thread_id=None, new_thread=False)
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -213,7 +212,7 @@ async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path
             workflow,
             config,
             runtime_paths_for(config),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     assert outcome.delivered is True
@@ -228,13 +227,13 @@ async def test_fire_task_without_room_id_is_typed_failure(tmp_path: Path) -> Non
     config = _config(tmp_path)
     workflow = _workflow("Orphaned task", room_id=None, thread_id=None)
 
-    with patch("mindroom.hooks.sender._send_message_result", new=AsyncMock()) as mock_send:
+    with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
             workflow,
             config,
             runtime_paths_for(config),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     assert outcome.delivered is False
@@ -247,10 +246,10 @@ async def test_delivery_returning_none_yields_failure_and_notice(tmp_path: Path)
     """A send that returns no delivered event produces a failure outcome plus a visible notice."""
     config = _config(tmp_path)
     workflow = _workflow("Check the queue depth")
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=[None, None]),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -258,7 +257,7 @@ async def test_delivery_returning_none_yields_failure_and_notice(tmp_path: Path)
             workflow,
             config,
             runtime_paths_for(config),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert outcome.delivered is False
@@ -278,7 +277,7 @@ async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path)
     workflow = _workflow("Check the queue depth")
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -286,7 +285,7 @@ async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path)
             workflow,
             config,
             runtime_paths_for(config),
-            _conversation_cache(latest_thread_event_id="$latest"),
+            _conversation_reader(latest_thread_event_id="$latest"),
         )
 
     assert outcome.delivered is False
@@ -308,7 +307,7 @@ async def test_hook_emission_fires_with_task_context(tmp_path: Path) -> None:
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [rewrite])]))
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -316,7 +315,7 @@ async def test_hook_emission_fires_with_task_context(tmp_path: Path) -> None:
             _workflow("Prepare the agenda"),
             config,
             runtime_paths_for(config),
-            _conversation_cache(latest_thread_event_id="$latest"),
+            _conversation_reader(latest_thread_event_id="$latest"),
             task_id="task-hooked",
         )
 
@@ -336,13 +335,13 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
     config = _config(tmp_path)
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
 
-    with patch("mindroom.hooks.sender._send_message_result", new=AsyncMock()) as mock_send:
+    with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send"),
             config,
             runtime_paths_for(config),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     assert outcome.delivered is False
@@ -355,10 +354,10 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     """Runner failure notices follow the workflow thread and reply to its latest event."""
     workflow = _workflow("Recurring job")
     target = MessageTarget.for_scheduled_task(workflow)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.hooks.sender._send_message_result",
+        "mindroom.scheduling_executor.send_matrix_message",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
     ) as mock_send:
         await send_scheduled_failure_notice(
@@ -366,7 +365,7 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
             workflow,
             target,
             "❌ Recurring task failed: executor test task\nTask ID: task-9\nError: boom",
-            conversation_cache,
+            conversation_reader,
         )
 
     mock_send.assert_awaited_once()

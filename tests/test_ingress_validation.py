@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import nio
+import pytest
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
@@ -23,7 +24,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_path: Path) -> None:
     """Trusted relays should preserve human requesters without trusting outsiders."""
     config = bind_runtime_paths(
         Config(
@@ -43,8 +45,6 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     turn_store = MagicMock()
     turn_store.is_handled.return_value = False
@@ -106,7 +106,7 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
     )
     room = nio.MatrixRoom("!room:localhost", agent_id.full_id)
 
-    assert validator.precheck_event(room, event) == human_sender
+    assert await validator.precheck_event(room, event) == human_sender
     ingress_metadata = DispatchIngressMetadata(source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND)
     router_event = nio.RoomMessageText.from_dict(
         {

@@ -24,7 +24,7 @@ from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_handoff import PreparedTextEvent, payload_metadata_from_source
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
@@ -404,7 +404,7 @@ class VisibleVoiceEchoLifecycle:
                 return existing_event_id
             existing_event_id = await self._recover_visible_echo_event_id(request)
             if existing_event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
@@ -419,7 +419,7 @@ class VisibleVoiceEchoLifecycle:
                 ),
             )
             if event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
                 _publish_echo_barrier(barrier, event_id)
             return event_id
 
@@ -448,7 +448,7 @@ class VisibleVoiceEchoLifecycle:
             if event_id is None:
                 event_id = await self._recover_visible_echo_event_id(request)
                 if event_id is not None:
-                    self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                    await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             if event_id is None:
                 event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
@@ -460,7 +460,7 @@ class VisibleVoiceEchoLifecycle:
                 )
                 if event_id is None:
                     return None
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             else:
                 edited = await self.deps.delivery_gateway.edit_text(
                     EditTextRequest(
@@ -474,7 +474,7 @@ class VisibleVoiceEchoLifecycle:
                 if not edited:
                     return None
 
-            self.deps.turn_store.record_finalized_visible_echo(
+            await self.deps.turn_store.record_finalized_visible_echo(
                 request.source_event_id,
                 event_id,
                 is_fallback=is_fallback,

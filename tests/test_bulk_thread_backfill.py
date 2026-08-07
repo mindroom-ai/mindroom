@@ -1,26 +1,32 @@
-"""Tests for the bulk thread-cache backfill scan."""
+"""Tests for the bulk thread backfill room scan."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock
+import inspect
+from typing import Any
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.matrix.client_thread_history import (
+from mindroom.matrix.room_history_reads import (
     OpaqueEncryptedThreadHistoryError,
-    bulk_refresh_room_thread_histories,
     fetch_thread_event_sources_via_room_messages,
+    fetch_thread_messages_from_source,
     find_response_event_ids_via_room_messages,
-    thread_ids_needing_refill,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
-from tests.event_cache_test_support import raw_nio_event, replace_thread_unconditionally
 
-if TYPE_CHECKING:
-    from mindroom.matrix.cache import ConversationEventCache
+
+def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
+    """Return a typed nio event that preserves one exact raw source payload."""
+    event_type = event_source.get("type")
+    if not isinstance(event_type, str):
+        msg = "Test Matrix event is missing type"
+        raise TypeError(msg)
+    return nio.UnknownEvent(event_source, event_type)
+
 
 _ROOM_ID = "!room:localhost"
 
@@ -245,138 +251,6 @@ async def test_response_recovery_scan_rejects_repeated_pagination_token() -> Non
 
 
 @pytest.mark.asyncio
-async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
-    """One backward walk should recover and store every requested thread's rows root-first."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response(
-                [
-                    _edit_event(
-                        "$a1-edit:localhost",
-                        "$a1:localhost",
-                        timestamp=5000,
-                        thread_root_id="$a:localhost",
-                    ),
-                    _message_event("$b1:localhost", "reply b", timestamp=4000, thread_root_id="$b:localhost"),
-                    _message_event("$a1:localhost", "reply a", timestamp=3000, thread_root_id="$a:localhost"),
-                ],
-                end="t1",
-            ),
-            _messages_response(
-                [
-                    _message_event("$b:localhost", "root b", timestamp=2000),
-                    _message_event("$a:localhost", "root a", timestamp=1000),
-                    _message_event("$solo:localhost", "no thread", timestamp=500),
-                ],
-                end="t2",
-            ),
-        ],
-    )
-    event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread = AsyncMock(side_effect=[True, True])
-
-    stats = await bulk_refresh_room_thread_histories(
-        client,
-        _ROOM_ID,
-        event_cache,
-        thread_root_ids=["$a:localhost", "$b:localhost"],
-        caller_label="test",
-    )
-
-    assert client.room_messages.await_count == 2
-    assert stats.requested_threads == 2
-    assert stats.usable_threads == 2
-    assert stats.missing_root_ids == frozenset()
-    assert stats.room_scan_pages == 2
-
-    stored = {
-        call.args[1]: [source["event_id"] for source in call.args[2]]
-        for call in event_cache.replace_thread.await_args_list
-    }
-    assert stored == {
-        "$a:localhost": ["$a:localhost", "$a1:localhost", "$a1-edit:localhost"],
-        "$b:localhost": ["$b:localhost", "$b1:localhost"],
-    }
-    assert all(call.kwargs["expected_membership_epoch"] == 7 for call in event_cache.replace_thread.await_args_list)
-
-
-@pytest.mark.asyncio
-async def test_bulk_refresh_reports_missing_roots_without_storing_partial_threads() -> None:
-    """Roots absent from a drained scan must be reported and never stored."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response(
-                [
-                    _message_event("$a1:localhost", "reply a", timestamp=3000, thread_root_id="$a:localhost"),
-                    _message_event("$a:localhost", "root a", timestamp=1000),
-                ],
-                end=None,
-            ),
-        ],
-    )
-    event_cache = AsyncMock()
-    event_cache.room_departure_epoch = Mock(return_value=3)
-    event_cache.replace_thread = AsyncMock(return_value=True)
-
-    stats = await bulk_refresh_room_thread_histories(
-        client,
-        _ROOM_ID,
-        event_cache,
-        thread_root_ids=["$a:localhost", "$ghost:localhost"],
-        caller_label="test",
-    )
-
-    assert stats.usable_threads == 1
-    assert stats.missing_root_ids == frozenset({"$ghost:localhost"})
-    event_cache.replace_thread.assert_awaited_once()
-    assert event_cache.replace_thread.await_args.args[1] == "$a:localhost"
-
-
-@pytest.mark.asyncio
-async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaining_roots() -> None:
-    """A capped startup scan should preserve partial success without reading another page."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response(
-                [
-                    _message_event("$b1:localhost", "reply b", timestamp=3000, thread_root_id="$b:localhost"),
-                    _message_event("$a:localhost", "root a", timestamp=1000),
-                ],
-                end="t1",
-            ),
-            _messages_response(
-                [_message_event("$b:localhost", "root b", timestamp=500)],
-                end=None,
-            ),
-        ],
-    )
-    event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread = AsyncMock(return_value=True)
-
-    stats = await bulk_refresh_room_thread_histories(
-        client,
-        _ROOM_ID,
-        event_cache,
-        thread_root_ids=["$a:localhost", "$b:localhost"],
-        caller_label="test",
-        max_scan_pages=1,
-    )
-
-    client.room_messages.assert_awaited_once()
-    assert stats.usable_threads == 1
-    assert stats.missing_root_ids == frozenset({"$b:localhost"})
-    assert stats.room_scan_pages == 1
-    assert stats.scan_truncated is True
-    event_cache.replace_thread.assert_awaited_once()
-    assert event_cache.replace_thread.await_args.args[1] == "$a:localhost"
-
-
-@pytest.mark.asyncio
 async def test_scan_failure_log_names_the_acting_client() -> None:
     """A rejected scan must name the client whose credentials the homeserver refused.
 
@@ -391,17 +265,8 @@ async def test_scan_failure_log_names_the_acting_client() -> None:
             _ROOM_ID,
         ),
     )
-    event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
-
     with capture_logs() as logs, pytest.raises(RuntimeError, match="bulk room scan failed"):
-        await bulk_refresh_room_thread_histories(
-            client,
-            _ROOM_ID,
-            event_cache,
-            thread_root_ids=["$a:localhost"],
-            caller_label="test",
-        )
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$a:localhost")
 
     failures = [entry for entry in logs if entry["event"] == "Failed bulk thread history scan"]
     assert len(failures) == 1
@@ -464,80 +329,58 @@ async def test_unresolved_opaque_scan_log_names_the_acting_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bulk_refresh_unresolved_opaque_log_names_the_acting_client() -> None:
-    """The bulk path gap-marks the whole room on opaque relations, so it needs the identity too."""
+async def test_thread_messages_from_source_resolves_edits_without_touching_a_store() -> None:
+    """The freshness readers get resolved messages, and no local store is consulted.
+
+    Both callers exist to observe a write another runtime just made, so a
+    result assembled with any help from local state would defeat them. The
+    assertion that matters is the second one: this client has no cache
+    attached at all, and the read still produces the edited body.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
     client = AsyncMock()
-    client.user_id = "@agent:localhost"
     client.room_messages = AsyncMock(
-        return_value=_messages_response(
-            [
-                _opaque_reply_event("$opaque:localhost", replies_to="$unscanned:localhost", timestamp=2000),
-                _message_event("$root:localhost", "root", timestamp=1000),
-            ],
-            end=None,
-        ),
+        side_effect=[
+            _messages_response(
+                [
+                    _edit_event("$reply-edit:localhost", reply_id, timestamp=4000, thread_root_id=root_id),
+                    _message_event("first draft", "first draft", timestamp=3000, thread_root_id=root_id),
+                    _message_event(reply_id, "first draft", timestamp=2000, thread_root_id=root_id),
+                    _message_event(root_id, "the question", timestamp=1000),
+                ],
+                end=None,
+            ),
+        ],
     )
-    event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
 
-    with capture_logs() as logs:
-        stats = await bulk_refresh_room_thread_histories(
-            client,
-            _ROOM_ID,
-            event_cache,
-            thread_root_ids=["$root:localhost"],
-            caller_label="test",
-        )
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
 
-    assert stats.usable_threads == 0
-    event_cache.replace_thread.assert_not_awaited()
-    opaque = [entry for entry in logs if "opaque encrypted relations with unresolved impact" in entry["event"]]
-    assert len(opaque) == 1
-    assert opaque[0]["user_id"] == "@agent:localhost"
-    assert opaque[0]["unresolved_opaque_event_ids"] == ["$opaque:localhost"]
-
-
-def _cached_message_source(event_id: str) -> dict[str, Any]:
-    return {
-        "event_id": event_id,
-        "sender": "@alice:localhost",
-        "origin_server_ts": 1_000,
-        "room_id": _ROOM_ID,
-        "type": "m.room.message",
-        "content": {"body": event_id, "msgtype": "m.text"},
-    }
+    assert next(message.event_id for message in messages) == root_id
+    edited = next(message for message in messages if message.event_id == reply_id)
+    assert edited.body == "edited reply"
+    # Structural, not incidental: the reader takes no store to consult. An
+    # `AsyncMock` client would satisfy any assertion phrased about attributes,
+    # so the parameter list is the thing worth pinning.
+    parameters = inspect.signature(fetch_thread_messages_from_source).parameters
+    assert not [name for name in parameters if "cache" in name or "store" in name]
 
 
 @pytest.mark.asyncio
-async def test_prewarm_probe_selects_cold_threads_as_well_as_gapped_ones(
-    event_cache: ConversationEventCache,
-) -> None:
-    """The probe that drives startup prewarm must not read a never-cached thread as warm.
+async def test_thread_messages_from_source_raises_rather_than_returning_a_partial_thread() -> None:
+    """A scan that never finds the root must raise, not answer with what it saw.
 
-    Two independent ways a thread fails to serve, and only one of them writes a marker. A probe that
-    asks about the marker alone answers "warm" for every thread that was never cached, so prewarm
-    selects nothing on a cold start and quietly does no work at all. Nothing downstream notices,
-    because live reads still refill on demand - they just each pay for it.
+    The auto-resume freshness check dropped its explicit completeness guard
+    because this raises. If it returned the partial page instead, a thread
+    whose root scrolled past the scan window would look like it had no newer
+    human activity, and a stale turn would resume on top of one.
     """
-    warm_thread_id = "$warm:localhost"
-    gapped_thread_id = "$gapped:localhost"
-    cold_thread_id = "$cold:localhost"
-
-    for thread_id in (warm_thread_id, gapped_thread_id):
-        await replace_thread_unconditionally(
-            event_cache,
-            _ROOM_ID,
-            thread_id,
-            [_cached_message_source(thread_id)],
-        )
-    await event_cache.mark_thread_gap(_ROOM_ID, gapped_thread_id, reason="live_thread_mutation")
-
-    needs_refill = await thread_ids_needing_refill(
-        event_cache,
-        _ROOM_ID,
-        [warm_thread_id, gapped_thread_id, cold_thread_id],
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([_message_event("$unrelated:localhost", "hi", timestamp=1000)], end=None),
+        ],
     )
 
-    assert needs_refill == (gapped_thread_id, cold_thread_id), (
-        "startup prewarm would skip the cold thread and warm nothing"
-    )
+    with pytest.raises(ThreadRoomScanRootNotFoundError):
+        await fetch_thread_messages_from_source(client, _ROOM_ID, "$missing-root:localhost")

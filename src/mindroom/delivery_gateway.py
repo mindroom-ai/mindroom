@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from html import escape as html_escape
@@ -12,7 +13,9 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.event_journal import OutboxDelivery, OutboxView, TerminalTurnWrite
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -31,12 +34,30 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
+    build_edit_event_content,
+    edit_message_result,
+    send_message_result,
+)
+from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.response_delivery import (
+    DeliveryStage,
+    RecoveryOutcome,
+    ResponseDelivery,
+    SendDelivery,
+    TurnHandoff,
+)
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
+    FinalTextTransform,
     StreamingResponse,
+    TerminalEdit,
+    TerminalSend,
     build_cancelled_response_update,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -80,6 +101,10 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
         "terminal_update_exception:",
     )
+
+
+class _DeliveryRefusedError(RuntimeError):
+    """Matrix declined one outbox delivery, leaving it unacknowledged."""
 
 
 @dataclass(frozen=True)
@@ -200,6 +225,18 @@ class SendTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
+    # The turn this send belongs to, when it belongs to one. Present, the send
+    # goes through the outbox and carries a transaction ID derived from this
+    # value, so a resend after a crash collapses onto the event the homeserver
+    # already accepted. Absent, the send is not a turn -- a voice echo, a
+    # command confirmation -- and takes the direct path, because a synthetic
+    # turn ID would put a row in the outbox that recovery cannot reason about.
+    delivery_turn_id: str | None = None
+    # Which of a turn's two durable delivery points this is. A streamed answer
+    # creates its visible message once, as a placeholder, and reaches its final
+    # text by editing that message; the placeholder is therefore the delivery
+    # whose duplication a reader would see, and it is the initial stage.
+    delivery_stage: DeliveryStage = DeliveryStage.FINAL
 
 
 @dataclass(frozen=True)
@@ -210,6 +247,10 @@ class EditTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
+    # Set when this edit is a turn's final answer. Once a placeholder exists
+    # the answer reaches the room as an edit of it, so this is the delivery
+    # whose loss leaves a user looking at "Thinking..." for good.
+    delivery_turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -299,8 +340,15 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
+    # The turn this stream answers, when it has one. Its terminal edit is the
+    # delivery that makes the answer visible, so it becomes durable; every
+    # earlier edit stays transport.
+    delivery_turn_id: str | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    # Carried so the final-answer transform runs before the terminal payload is
+    # built, rather than as a second edit after it was frozen and delivered.
+    identity: ResponseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +362,27 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
+    outbox: OutboxView
+    # Contract 2's handoff: the journal owns an actionable source until the
+    # turn's answer is durably owed to a room, and this is where that becomes
+    # true. Everything after it is the outbox's to recover.
+    turn_handoff: TurnHandoff
+    # The Matrix device this process sends as, asked for rather than held: the
+    # gateway is built before login, and a re-login replaces it. ``None`` means
+    # no login has completed, which the outbox reads as "device unknown".
+    sending_device_id: Callable[[], str | None] = lambda: None
+    # The terminal turn record a FINAL acknowledgement should commit with it,
+    # asked for only once the event ID exists. Returning ``None`` means there
+    # is nothing to bind -- no record for the turn, or one that already knows
+    # its response event. Without this the acknowledgement and the record are
+    # two commits, and a crash between them leaves a delivered answer whose
+    # record cannot be edited.
+    terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None
+    # Told after an acknowledgement bound its row, so the record that commit
+    # wrote is re-asserted through the ledger's own write ordering. Skipping
+    # that leaves the row open to a mutation that derived before the commit and
+    # lands after it, which erases the event the answer is stored under.
+    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -385,6 +454,19 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
+    async def _visible_notice_is_current(self, identity: ResponseIdentity, room_id: str) -> bool:
+        """Return whether a terminal notice still belongs in the room it names.
+
+        Terminal notices -- cancellations, failure updates, suppression
+        cleanup -- are direct transport. They carry no answer, so they never
+        reach the outbox, and the durable refusal that protects a turn's
+        answer does not protect them.
+        """
+        return await self.deps.outbox.turn_membership_is_current(
+            turn_id=identity.response_envelope.source_event_id,
+            room_id=room_id,
+        )
+
     async def _redact_visible_response_event(
         self,
         *,
@@ -396,6 +478,11 @@ class DeliveryGateway:
         propagate_cancelled: bool = False,
     ) -> str | None:
         """Redact one visible event, optionally propagating cancellation, and return any cleanup failure."""
+        if not await self._visible_notice_is_current(identity, room_id):
+            # The event this would tidy up belonged to a membership that has
+            # ended, and the fence has already dropped everything derived from
+            # it. There is nothing left here to clean up, and no failure.
+            return None
         self.deps.logger.warning(
             "Visible response was already delivered before suppression; attempting cleanup",
             response_kind=identity.response_kind,
@@ -433,7 +520,10 @@ class DeliveryGateway:
         """Best-effort terminal error edit for a visible placeholder."""
         failure_extra_content = dict(request.extra_content or {})
         failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
-        edited = await self.edit_text(
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
             EditTextRequest(
                 target=request.target,
                 event_id=request.event_id,
@@ -472,9 +562,228 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    async def _acknowledged_delivery(
+        self,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        fallback: dict[str, Any],
+    ) -> DeliveredMatrixEvent:
+        """Return what was actually delivered for an already-acknowledged row.
+
+        The payload comes from the row, not from this caller. A rerun turn can
+        arrive with regenerated text, and reporting that as what is in the room
+        would tell every downstream consumer that the event says something it
+        does not -- under the event ID of the message that really was sent.
+        """
+        row = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        content = dict(row.payload) if row is not None else fallback
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
+
+    async def _send_claimed(
+        self,
+        claimed: OutboxDelivery,
+        *,
+        retry_sync_recovery: bool,
+    ) -> DeliveredMatrixEvent:
+        """Send one claimed delivery exactly as it was frozen.
+
+        The payload comes from the row, never from whatever the caller happens
+        to be holding. A turn that ran twice sends what its first attempt
+        froze: content regenerated after a claim would go out under a
+        transaction ID the homeserver has already seen, be dropped as a
+        duplicate, and leave the durable result and the room disagreeing
+        forever.
+        """
+        delivered = await send_message_result(
+            self._client(),
+            claimed.room_id,
+            dict(claimed.payload),
+            retry_sync_recovery=retry_sync_recovery,
+            transaction_id=claimed.transaction_id,
+        )
+        if delivered is None:
+            msg = f"Matrix refused delivery for turn {claimed.turn_id!r} stage {claimed.stage.value!r}"
+            raise _DeliveryRefusedError(msg)
+        return delivered
+
+    def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> ResponseDelivery:
+        """Return the outbox writer, for a live delivery or for recovery.
+
+        Both go through here so they cannot drift. They did: recovery was built
+        separately and silently lacked the terminal-record hook, so a recovered
+        answer acknowledged its row while the turn record stayed ignorant of
+        the event -- the very state the deleted repair pass used to fix.
+
+        The handoff is the one real difference, and recovery passes ``None``:
+        it resends rows that already exist, and the sources those rows answer
+        were handed over when the rows were first recorded.
+        """
+        return ResponseDelivery(
+            store=self.deps.outbox,
+            send=send,
+            sending_device_id=self.deps.sending_device_id(),
+            resolve_delivered=self._delivered_under_a_previous_device,
+            handoff=handoff,
+            terminal_turn_for=self._terminal_turn_write,
+            terminal_turn_committed=self.deps.terminal_turn_committed,
+        )
+
+    def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
+        """Turn the terminal record for one delivered answer into a journal row.
+
+        The turn store produces the record and stops at its own boundary; this
+        layer already owns the journal's types, so the conversion belongs here
+        rather than reaching across.
+        """
+        if self.deps.terminal_turn_for is None:
+            return None
+        record = self.deps.terminal_turn_for(turn_id, event_id)
+        if record is None or record.anchor_event_id is None:
+            return None
+        return TerminalTurnWrite(
+            agent_name=self.deps.agent_name,
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=record.anchor_event_id,
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+        )
+
+    async def _delivered_under_a_previous_device(self, claimed: OutboxDelivery) -> str | None:
+        """Return the answer an earlier device already put in the room, if it did.
+
+        Reached only when the frozen transaction ID has stopped being proof,
+        which is a re-login between the attempt and the retry. The room itself
+        is then the only witness, so it is read the same way replayed turns
+        read it: find a message from this bot replying to the sources this turn
+        answers.
+
+        The turn's sources come from the durable ledger rather than from
+        anything this process remembers, because the process that made the
+        first attempt is gone. A turn the ledger has never heard of resolves to
+        its own anchor event, which is the right question for the uncoalesced
+        case and the only one available for the rest.
+
+        This finds answers, not every message. The scan matches a genuine
+        reply -- ``is_falling_back`` false, pointing at a source -- which is
+        what an agent answering a user sends. A delivery with no source to
+        reply to, a scheduled message or a hook-emitted notice, matches
+        nothing and reads as "not delivered", so it is sent. That is the same
+        blind resend as before this guard existed: unchanged for the cases it
+        cannot see, and correct for the ones it can.
+        """
+        client = self._client()
+        response_sender = client.user_id
+        if not response_sender:
+            return None
+        source_event_ids = self.deps.turn_handoff.sources_for_turn(claimed.turn_id)
+        delivered = await find_response_event_ids_via_room_messages(
+            client,
+            claimed.room_id,
+            response_sender=response_sender,
+            source_event_ids=source_event_ids,
+        )
+        if len(delivered) > 1:
+            # Two visible answers to the same sources is the duplicate this
+            # lookup exists to prevent, already committed. Adopting one at
+            # random would bind every later edit to a coin flip, so the row
+            # stays unacknowledged and a human-visible error is raised rather
+            # than a third answer sent.
+            msg = (
+                f"Turn {claimed.turn_id!r} has {len(delivered)} visible answers in {claimed.room_id}, "
+                f"so no single one can be adopted after the sending device changed"
+            )
+            raise RuntimeError(msg)
+        return next(iter(delivered), None)
+
+    async def recover_deliveries(self) -> RecoveryOutcome:
+        """Resend every delivery whose Matrix outcome this process cannot know.
+
+        A delivery the homeserver already accepted is resent under the same
+        transaction ID and collapses back onto the same event, so recovery
+        cannot duplicate a visible answer -- which is what makes resending
+        unconditionally the safe choice over trying to work out what happened.
+        That holds for as long as the device holding the transaction ID's
+        namespace is the one retrying, so this pass carries the current device
+        and the room lookup that covers the case where it is not.
+
+        A send that fails again leaves its row unacknowledged and is counted in
+        the returned outcome, which is how the caller knows to come back.
+        Nothing escapes here.
+        """
+
+        async def send(claimed: OutboxDelivery) -> str:
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
+            return delivered.event_id
+
+        return await self._response_delivery(send, handoff=None).recover()
+
+    async def _send_content(
+        self,
+        request: SendTextRequest,
+        room_id: str,
+        content: dict[str, Any],
+    ) -> DeliveredMatrixEvent | None:
+        """Send one built message, through the outbox when it belongs to a turn.
+
+        A send with no turn behind it -- a voice echo, a command confirmation,
+        a reconciliation notice -- takes the direct path. It has no identity
+        that survives a restart, so there is nothing for recovery to key on and
+        a durable row would only be a row nobody can resolve.
+        """
+        client = self._client()
+        if request.delivery_turn_id is None:
+            return await send_message_result(
+                client,
+                room_id,
+                content,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        # Prepared before the row is written, so the frozen payload is the one
+        # that goes on the wire. Uploading the sidecar after the claim left the
+        # row holding the oversized original while Matrix received an MXC
+        # reference, and a recovery resend would upload again -- minting a new
+        # MXC, and new encrypted-file keys, under a transaction ID the
+        # homeserver had already accepted. Preparing twice is harmless: an
+        # already-prepared payload is below the size limit, so this is a no-op
+        # for it, including on the recovery path.
+        content = await self._prepared_for_the_wire(
+            room_id,
+            content,
+            turn_id=request.delivery_turn_id,
+            stage=request.delivery_stage,
+        )
+        delivered: DeliveredMatrixEvent | None = None
+
+        async def send(claimed: OutboxDelivery) -> str:
+            nonlocal delivered
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
+            return delivered.event_id
+
+        try:
+            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+                turn_id=request.delivery_turn_id,
+                stage=request.delivery_stage,
+                room_id=room_id,
+                thread_id=request.target.resolved_thread_id,
+                payload=content,
+            )
+        except _DeliveryRefusedError:
+            return None
+        if event_id is None:
+            # The membership this turn answered has ended. The room it was
+            # answering is not the room the bot is in now, so there is nothing
+            # to send and nothing to recover.
+            return None
+        if delivered is not None:
+            return delivered
+        # The delivery was already acknowledged, so nothing was sent and the
+        # callback never ran. That is a turn re-running after its answer
+        # reached the room; reporting it as a failed send would make a
+        # delivered answer look lost and invite a duplicate.
+        return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
-        client = self._client()
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -491,13 +800,10 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = (
-                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-                    resolved_target.room_id,
-                    effective_thread_id,
-                    resolved_target.reply_to_event_id,
-                    caller_label="delivery_send_text",
-                )
+            latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
+                room_id=resolved_target.room_id,
+                thread_id=effective_thread_id,
+                reply_to_event_id=resolved_target.reply_to_event_id,
             )
             content = format_message_with_mentions(
                 config,
@@ -513,21 +819,11 @@ class DeliveryGateway:
             content[SKIP_MENTIONS_KEY] = True
         failure_reason = "send_message_result returned None"
         try:
-            delivered = await send_message_result(
-                client,
-                resolved_target.room_id,
-                content,
-                retry_sync_recovery=request.retry_sync_recovery,
-            )
+            delivered = await self._send_content(request, resolved_target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the send"
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                resolved_target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
         self.deps.logger.error(
@@ -537,9 +833,105 @@ class DeliveryGateway:
         )
         return None
 
+    async def _edit_content(
+        self,
+        request: EditTextRequest,
+        room_id: str,
+        content: dict[str, Any],
+    ) -> DeliveredMatrixEvent | None:
+        """Apply one edit, through the outbox when it carries a turn's answer.
+
+        Once a turn has a placeholder, its answer reaches the room as an edit
+        of that message rather than a new one, so this is where the answer
+        becomes visible and where losing it leaves the user reading
+        "Thinking..." with nothing durable to recover.
+
+        Edits that are not a turn's answer -- streaming progress, cancellation
+        notices, failure updates -- take the direct path. They are transport,
+        and a durable row per streamed revision would put a claim-before-send
+        round trip inside the streaming loop.
+        """
+        client = self._client()
+        if request.delivery_turn_id is None:
+            return await edit_message_result(
+                client,
+                room_id,
+                request.event_id,
+                content,
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        # What is stored is the finished wire event, not the text it was built
+        # from. Recovery sends the row exactly as frozen and has no request to
+        # rebuild from, so anything reconstructed at send time -- the replace
+        # envelope, the fallback body -- would be missing on the one path that
+        # matters, and the answer would come back as a second message with the
+        # placeholder still above it.
+        envelope = build_edit_event_content(
+            event_id=request.event_id,
+            new_content=content,
+            new_text=request.new_text,
+        )
+        # Prepared before the row is written, for the same reason the envelope
+        # is built here: the row has to hold the finished wire event. A sidecar
+        # uploaded after the claim would leave the row holding the oversized
+        # original while Matrix received an MXC reference, and a resend would
+        # upload again under a transaction ID already accepted. Preparing an
+        # already-prepared payload is a no-op, so the recovery path is safe.
+        envelope = await self._prepared_for_the_wire(
+            room_id,
+            envelope,
+            turn_id=request.delivery_turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+        delivered: DeliveredMatrixEvent | None = None
+
+        async def send(claimed: OutboxDelivery) -> str:
+            # The frozen row, not the request that produced it. `edit_message_result`
+            # would rebuild the envelope from the current closure, which is the same
+            # bytes on a first attempt and the wrong ones on a second: a row is frozen
+            # once attempted, so a regenerated answer would go out under a transaction
+            # ID the homeserver has already seen -- dropped as a duplicate if the first
+            # attempt landed, visible while the durable row says otherwise if it did
+            # not. The stored envelope already is what that helper would build.
+            nonlocal delivered
+            edited = await send_message_result(
+                client,
+                claimed.room_id,
+                dict(claimed.payload),
+                operation="edit_message",
+                retry_sync_recovery=request.retry_sync_recovery,
+                transaction_id=claimed.transaction_id,
+            )
+            if edited is None:
+                msg = f"Matrix refused the final edit for turn {claimed.turn_id!r}"
+                raise _DeliveryRefusedError(msg)
+            delivered = edited
+            return edited.event_id
+
+        try:
+            event_id = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver(
+                turn_id=request.delivery_turn_id,
+                stage=DeliveryStage.FINAL,
+                room_id=room_id,
+                thread_id=request.target.resolved_thread_id,
+                payload=envelope,
+                edits_event_id=request.event_id,
+            )
+        except _DeliveryRefusedError:
+            return None
+        if event_id is None:
+            # The membership this turn answered has ended, so its answer is
+            # not this bot's to give in the room it is in now.
+            return None
+        if delivered is not None:
+            return delivered
+        # Already acknowledged: this turn's answer reached the room on an
+        # earlier run, so nothing was sent and the callback never ran.
+        return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
+
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
-        client = self._client()
         config = self.deps.runtime.config
         target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
@@ -553,23 +945,11 @@ class DeliveryGateway:
 
         failure_reason = "edit_message_result returned None"
         try:
-            delivered = await edit_message_result(
-                client,
-                target.room_id,
-                request.event_id,
-                content,
-                request.new_text,
-                retry_sync_recovery=request.retry_sync_recovery,
-            )
+            delivered = await self._edit_content(request, target.room_id, content)
         except SendRetryError:
             delivered = None
             failure_reason = "matrix timeline recovery still blocked the edit"
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
@@ -713,6 +1093,7 @@ class DeliveryGateway:
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
+                    delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                 ),
             )
@@ -755,6 +1136,10 @@ class DeliveryGateway:
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
                 retry_sync_recovery=True,
+                # The Matrix event that caused this turn. The handled-turn
+                # ledger already keys on it, and it re-derives to the same
+                # value after a restart, which a generated ID would not.
+                delivery_turn_id=request.identity.response_envelope.source_event_id,
             ),
         )
         if event_id is None:
@@ -784,7 +1169,13 @@ class DeliveryGateway:
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
-        edited = await self.edit_text(
+        # A cancellation note is transport, not a turn's answer, so it never
+        # reaches the outbox and nothing else would keep it out of a room this
+        # bot has left.
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
             EditTextRequest(
                 target=request.target,
                 event_id=request.event_id,
@@ -884,11 +1275,6 @@ class DeliveryGateway:
         )
         delivered = await send_message_result(self._client(), target.room_id, content)
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Sent compaction lifecycle notice", event_id=delivered.event_id, **target.log_context)
             return delivered.event_id
         self.deps.logger.error("Failed to send compaction lifecycle notice", **target.log_context)
@@ -983,11 +1369,6 @@ class DeliveryGateway:
             body,
         )
         if delivered is not None:
-            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             self.deps.logger.info("Edited compaction lifecycle notice", event_id=event_id, **target.log_context)
             return
         self.deps.logger.error("Failed to edit compaction lifecycle notice", event_id=event_id, **target.log_context)
@@ -999,12 +1380,11 @@ class DeliveryGateway:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
-        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-            request.target.room_id,
-            request.target.resolved_thread_id,
-            request.target.reply_to_event_id,
-            request.existing_event_id,
-            caller_label="delivery_stream",
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
+            room_id=request.target.room_id,
+            thread_id=request.target.resolved_thread_id,
+            reply_to_event_id=request.target.reply_to_event_id,
+            existing_event_id=request.existing_event_id,
         )
         return await send_streaming_response(
             client,
@@ -1022,52 +1402,170 @@ class DeliveryGateway:
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
-            conversation_cache=self.deps.resolver.deps.conversation_cache,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
+            terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
+            terminal_send=self._durable_terminal_send(request.delivery_turn_id, request.target),
+            final_text_transform=self._final_text_transform(request.identity),
+            transport_is_current=self._stream_transport_gate(request.delivery_turn_id, request.target.room_id),
         )
 
-    async def _finalize_visible_replacement_edit(
+    def _stream_transport_gate(
         self,
+        turn_id: str | None,
+        room_id: str,
+    ) -> Callable[[], Awaitable[bool]] | None:
+        """Return the check that stops a stream editing into an ended membership.
+
+        Progressive edits never reach the outbox, so the durable refusal that
+        protects the terminal delivery does not protect them. Without this, a
+        turn that began before a fence keeps writing into a conversation the
+        fence deleted, for as long as the model keeps producing text.
+        """
+        if turn_id is None:
+            return None
+
+        async def transport_is_current() -> bool:
+            return await self.deps.outbox.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
+
+        return transport_is_current
+
+    def _durable_terminal_send(self, turn_id: str | None, target: MessageTarget) -> TerminalSend | None:
+        """Return a sender that records a stream's terminal *send* before making it.
+
+        A stream normally edits a placeholder, but there is not always one to
+        edit: a queued forced compaction suppresses it deliberately, and its
+        own send can simply fail. The answer is then the stream's first
+        visible event, and without this it would reach the room with no
+        durable row behind it -- the one thing the outbox exists to prevent.
+        """
+        if turn_id is None:
+            return None
+
+        async def terminal_send(
+            client: nio.AsyncClient,
+            room_id: str,
+            content: dict[str, Any],
+            display_text: str,
+            *,
+            retry_sync_recovery: bool = False,
+        ) -> DeliveredMatrixEvent | None:
+            del client, room_id
+            if display_text == PROGRESS_PLACEHOLDER:
+                # Same reasoning as the terminal edit: a stream that ends
+                # reading "Thinking..." has not answered, and recording that
+                # as the turn's final delivery would settle it with a
+                # placeholder and leave `deliver_final` nothing to do.
+                return await send_message_result(
+                    self._client(),
+                    target.room_id,
+                    content,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
+            return await self._send_content(
+                SendTextRequest(
+                    target=target,
+                    response_text="",
+                    retry_sync_recovery=retry_sync_recovery,
+                    delivery_turn_id=turn_id,
+                    delivery_stage=DeliveryStage.FINAL,
+                ),
+                target.room_id,
+                content,
+            )
+
+        return terminal_send
+
+    async def _prepared_for_the_wire(
+        self,
+        room_id: str,
+        content: dict[str, Any],
         *,
-        target: MessageTarget,
-        event_id: str | None,
-        response_text: str,
-        canonical_body_candidate: str | None = None,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-        failure_reason: str | None = None,
-    ) -> FinalDeliveryOutcome | None:
-        if event_id is None:
+        turn_id: str,
+        stage: DeliveryStage,
+    ) -> dict[str, Any]:
+        """Prepare a payload for the wire, unless a frozen one already exists.
+
+        Preparation can upload a sidecar, so it must not run for a turn whose
+        answer is already acknowledged. That row is what `flush` returns, its
+        payload is frozen and `enqueue` refuses to overwrite it, so preparing
+        again would upload an attachment nothing can ever reference -- or fail,
+        and take down a rerun whose answer is already durable and visible.
+        """
+        existing = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        if existing is not None and existing.acknowledged_event_id is not None:
+            return content
+        return await prepare_large_message(self._client(), room_id, content)
+
+    def _final_text_transform(self, identity: ResponseIdentity | None) -> FinalTextTransform | None:
+        """Return the hook that shapes the answer before its terminal payload is built.
+
+        Applying it here keeps the durable row and the room in agreement: the
+        payload is frozen from the transformed text, so there is no later edit
+        to lose to a crash.
+        """
+        if identity is None:
             return None
-        interactive_response = interactive_response_for_visible_body(
-            response_text,
-            canonical_body_candidate=canonical_body_candidate,
-        )
-        edited = await self.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=event_id,
-                new_text=interactive_response.formatted_text,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
-        if not edited:
+
+        async def transform(response_text: str) -> str:
+            draft = await self.deps.response_hooks._apply_final_response_transform(
+                identity=identity,
+                response_text=response_text,
+            )
+            return draft.response_text
+
+        return transform
+
+    def _durable_terminal_edit(self, turn_id: str | None, target: MessageTarget) -> TerminalEdit | None:
+        """Return a sender that records a stream's terminal edit before making it.
+
+        Nothing extra is sent. The edit the stream was going to make anyway is
+        enqueued first and acknowledged after, so an unacknowledged row means
+        exactly "the terminal edit never landed" -- which is the condition
+        startup recovery should act on, and the only one.
+        """
+        if turn_id is None:
             return None
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id=event_id,
-            is_visible_response=True,
-            final_visible_body=interactive_response.formatted_text,
-            delivery_kind="edited",
-            failure_reason=failure_reason,
-            tool_trace=tuple(tool_trace or ()),
-            extra_content=extra_content,
-            interactive_metadata=interactive_response.interactive_metadata,
-        )
+
+        async def terminal_edit(
+            client: nio.AsyncClient,
+            room_id: str,
+            event_id: str,
+            content: dict[str, Any],
+            display_text: str,
+            *,
+            retry_sync_recovery: bool = False,
+        ) -> DeliveredMatrixEvent | None:
+            del client, room_id
+            if display_text == PROGRESS_PLACEHOLDER:
+                # A stream that ends still reading "Thinking..." has not
+                # answered. Recording that as the turn's final delivery would
+                # settle it with a placeholder, and `deliver_final` -- which
+                # delivers the answer in exactly this case -- would then find
+                # its own delivery already acknowledged and send nothing.
+                return await edit_message_result(
+                    self._client(),
+                    target.room_id,
+                    event_id,
+                    content,
+                    display_text,
+                    retry_sync_recovery=retry_sync_recovery,
+                )
+            return await self._edit_content(
+                EditTextRequest(
+                    target=target,
+                    event_id=event_id,
+                    new_text=display_text,
+                    retry_sync_recovery=retry_sync_recovery,
+                    delivery_turn_id=turn_id,
+                ),
+                target.room_id,
+                content,
+            )
+
+        return terminal_edit
 
     async def _finalize_placeholder_only_stream_error(
         self,
@@ -1350,60 +1848,21 @@ class DeliveryGateway:
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            try:
-                if stream_outcome.failure_reason is not None:
-                    failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=visible_stream_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                final_transform_draft = await self.deps.response_hooks._apply_final_response_transform(
-                    identity=request.identity,
-                    response_text=final_body_candidate,
+            if stream_outcome.failure_reason is not None:
+                failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=visible_stream_event_id,
+                    is_visible_response=True,
+                    final_visible_body=streamed_text,
+                    failure_reason=failure_reason,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
                 )
-                if (
-                    final_transform_draft.response_text != final_body_candidate
-                    and final_transform_draft.response_text.strip()
-                ):
-                    try:
-                        final_outcome = await self._finalize_visible_replacement_edit(
-                            target=request.target,
-                            event_id=streamed_event_id,
-                            response_text=final_transform_draft.response_text,
-                            canonical_body_candidate=final_body_candidate,
-                            tool_trace=request.tool_trace,
-                            extra_content=request.extra_content,
-                            failure_reason=stream_outcome.failure_reason,
-                        )
-                    except asyncio.CancelledError:
-                        self.deps.logger.warning(
-                            "Final streamed-response transform edit cancelled; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    except Exception:
-                        self.deps.logger.exception(
-                            "Final streamed-response transform edit failed; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    else:
-                        if final_outcome is not None:
-                            return final_outcome
-            except asyncio.CancelledError:
-                self.deps.logger.warning(
-                    "Final streamed-response transform cancelled; preserving streamed success",
-                    correlation_id=request.identity.correlation_id,
-                )
-            except Exception:
-                self.deps.logger.exception(
-                    "Final streamed-response transform failed; preserving streamed success",
-                    correlation_id=request.identity.correlation_id,
-                )
-
+            # The transform already ran against the answer text, before the
+            # terminal payload was built, so the durable outbox row and the
+            # room carry the same body. A second edit here is what made them
+            # disagree, and losing it to a crash left the room showing raw text.
             assert streamed_event_id is not None
             interactive_response = interactive_response_for_visible_body(
                 streamed_text,

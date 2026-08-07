@@ -59,9 +59,9 @@ def _stop_test_agent_user(config: Config) -> AgentMatrixUser:
     )
 
 
-def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
+async def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
     """Mirror the durable response intent that owns every real stop button."""
-    bot._turn_store.record_pending_turn(
+    await bot._turn_store.record_pending_turn(
         TurnRecord.create(
             [f"{message_id}-source"],
             response_event_id=message_id,
@@ -72,7 +72,7 @@ def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarg
         ),
     )
     bot._delivery_gateway.finalize_user_stopped_response = AsyncMock(return_value=True)
-    bot._dispatch_obligation_runner.receipt_order = AsyncMock(return_value=1)
+    bot._journal_dispatcher.receipt_order = AsyncMock(return_value=1)
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
             target=target,
             task=task,
         )
-        _record_pending_response(bot, "$message:example.com", target)
+        await _record_pending_response(bot, "$message:example.com", target)
 
         # A second physical reaction reaches the same STOP target.
         active_reaction_event = nio.ReactionEvent.from_dict(
@@ -210,7 +210,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
         task=task,
         run_id="run-123",
     )
-    _record_pending_response(bot, "$message:example.com", target)
+    await _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await dispatch_reaction_durably(bot, room, reaction_event)
@@ -267,7 +267,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
         task=task,
         run_id="run-123",
     )
-    _record_pending_response(bot, "$message:example.com", target)
+    await _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await dispatch_reaction_durably(bot, room, reaction_event)
@@ -312,62 +312,6 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not completed.is_set()
-
-
-@pytest.mark.asyncio
-async def test_stop_manager_add_and_remove_button_notifies_cache_bookkeeping() -> None:
-    """Stop-button add/remove should preserve cache bookkeeping for the synthetic reaction."""
-    stop_manager = StopManager()
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = "@agent:example.com"
-    client.rooms = {
-        "!test:example.com": nio.MatrixRoom("!test:example.com", "@agent:example.com"),
-    }
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(room_id="!test:example.com", event_id="$reaction:example.com"),
-    )
-    client.room_redact = AsyncMock(return_value=MagicMock())
-    notify_outbound_event = MagicMock()
-    notify_outbound_redaction = MagicMock()
-    task = MagicMock()
-    task.done = MagicMock(return_value=False)
-    stop_manager.set_current(
-        message_id="$message:example.com",
-        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
-        task=task,
-    )
-
-    added_event_id = await stop_manager.add_stop_button(
-        client,
-        "$message:example.com",
-        notify_outbound_event=notify_outbound_event,
-    )
-
-    assert added_event_id == "$reaction:example.com"
-    notify_outbound_event.assert_called_once_with(
-        "!test:example.com",
-        {
-            "type": "m.reaction",
-            "room_id": "!test:example.com",
-            "event_id": "$reaction:example.com",
-            "sender": "@agent:example.com",
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$message:example.com",
-                    "key": "🛑",
-                },
-            },
-        },
-    )
-
-    await stop_manager.remove_stop_button(
-        client,
-        "$message:example.com",
-        notify_outbound_redaction=notify_outbound_redaction,
-    )
-
-    notify_outbound_redaction.assert_called_once_with("!test:example.com", "$reaction:example.com")
 
 
 @pytest.mark.asyncio

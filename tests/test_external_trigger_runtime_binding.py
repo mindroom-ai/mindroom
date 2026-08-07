@@ -72,7 +72,7 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path:
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.running = True
     router_bot.client = object()
-    router_bot._conversation_cache = object()
+    router_bot._conversation_reader = object()
     bots = {ROUTER_AGENT_NAME: router_bot}
 
     with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
@@ -81,7 +81,7 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path:
     mock_bind.assert_called_once()
     assert mock_bind.call_args.args == (api_main.app,)
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
-    assert mock_bind.call_args.kwargs["conversation_cache"] is router_bot._conversation_cache
+    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot._conversation_reader
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 

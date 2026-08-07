@@ -95,20 +95,19 @@ config:
   data: ""
 
 eventCache:
-  # The runtime chart defaults to PostgreSQL because Kubernetes deployments need a restart-safe cache backend.
-  # Set this to sqlite for lightweight installs.
+  # Backs the durable Matrix event journal. The chart defaults to PostgreSQL
+  # because Kubernetes deployments need a restart-safe store; set this to
+  # sqlite for lightweight installs.
+  #
+  # The value keys keep their `eventCache` name so that upgrading this chart
+  # does not rename the managed database, its Secret, or its PersistentVolumeClaim.
   backend: postgres
-  # Logical namespace for rows in a shared PostgreSQL event-cache database.
-  # Defaults to the Helm release namespace.
-  namespace: ""
   databaseUrlEnv: MINDROOM_EVENT_CACHE_DATABASE_URL
   databaseUrl:
     # Use this for an externally managed PostgreSQL database, or when adopting an existing Secret for a chart-managed database.
     # The secret should contain a full psycopg-compatible connection string.
     existingSecret: ""
     key: ""
-  sqlite:
-    dbPath: ""
   postgres:
     create: true
     nameOverride: ""

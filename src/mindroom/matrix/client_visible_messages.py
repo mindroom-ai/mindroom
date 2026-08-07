@@ -18,10 +18,8 @@ from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_b
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
-    from mindroom.matrix.message_content import SidecarHydrationBatch
 
-_VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 
 
 @dataclass(slots=True)
@@ -37,6 +35,17 @@ class ResolvedVisibleMessage:
     latest_event_id: str
     stream_status: str | None = None
     edited_timestamp: int | None = None
+    thread_id_known: bool = True
+    """Whether ``thread_id`` is a fact about this message rather than an absence of one.
+
+    A message reconstructed from an edit alone has never been read: its thread lives on the
+    original event's ``m.relates_to``, which the replacement inherits rather than restates, so no
+    window that lacks the original contains it. A replacement that does write a relation into its
+    ``m.new_content`` has not supplied it either, because applying ``m.new_content`` ignores every
+    relation found there. ``False`` says the placement is unknown, which is not the statement
+    ``thread_id=None`` makes - the canonical thread rules call an unavailable original
+    indeterminate, never room level.
+    """
 
     @classmethod
     def from_message_data(
@@ -93,10 +102,14 @@ class ResolvedVisibleMessage:
         body: str,
         timestamp: int,
         latest_event_id: str,
-        thread_id: str | None,
         content: dict[str, Any] | None,
     ) -> None:
         """Apply the newest visible edit state to this message.
+
+        ``thread_id`` is deliberately absent. Applying ``m.new_content`` keeps the original event's
+        relation and ignores every ``m.relates_to`` written inside the replacement, so an edit has
+        nothing to say about where the message it edits lives. Letting one speak would let anyone
+        who can send an edit drag a known message into a thread of their choosing.
 
         ``timestamp`` deliberately stays the original event's. It is the thread's ordering key, and
         an edit is a correction to a message rather than a new position in the conversation - a
@@ -109,8 +122,6 @@ class ResolvedVisibleMessage:
         self.body = body
         self.edited_timestamp = timestamp
         self.latest_event_id = latest_event_id
-        if thread_id is not None:
-            self.thread_id = thread_id
         if content is not None:
             self.content = content
         self.refresh_stream_status()
@@ -127,13 +138,16 @@ class ResolvedVisibleMessage:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the resolved message back to the public dictionary shape."""
-        message_data = {
+        message_data: dict[str, Any] = {
             "sender": self.sender,
             "body": self.body,
             "timestamp": self.timestamp,
             "event_id": self.event_id,
             "content": self.content,
-            "thread_id": self.thread_id,
+            # An unplaced message reports that its thread is unknown instead of reporting no
+            # thread. A reader told a threaded reply sits at room level answers it in the room,
+            # outside the thread it belongs to.
+            **({"thread_id": self.thread_id} if self.thread_id_known else {"thread_id_unknown": True}),
             "latest_event_id": self.latest_event_id,
         }
         # Position and edit time are separate facts now that an edit no longer moves the message.
@@ -174,16 +188,12 @@ async def extract_visible_message(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Extract one visible message using runtime-derived sender trust."""
     return await extract_and_resolve_message(
         event,
         client,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
@@ -194,16 +204,12 @@ async def extract_visible_edit_body(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract one visible edit body using runtime-derived sender trust."""
     return await extract_edit_body(
         event_source,
         client,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
@@ -215,18 +221,11 @@ async def resolve_visible_event_source(
     fallback_body: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    resolved_event_source = await resolve_event_source_content(
-        normalized_event_source,
-        client,
-        event_cache=event_cache,
-        room_id=room_id,
-    )
+    resolved_event_source = await resolve_event_source_content(normalized_event_source, client)
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
         fallback_body,
@@ -275,19 +274,12 @@ async def bundled_replacement_body(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in _bundled_replacement_candidates(event_source):
-        resolved_candidate = await resolve_event_source_content(
-            candidate,
-            client,
-            event_cache=event_cache,
-            room_id=room_id,
-        )
+        resolved_candidate = await resolve_event_source_content(candidate, client)
         body = bundled_visible_body_preview(
             resolved_candidate,
             trusted_sender_ids=trusted_sender_ids,
@@ -299,7 +291,7 @@ async def bundled_replacement_body(
 
 def _event_fallback_body(event: nio.Event) -> str:
     """Return one best-effort Matrix body for preview fallback."""
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         return event.body
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content")
@@ -316,8 +308,6 @@ async def thread_root_body_preview(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str:
     """Return the canonical preview body for one thread root event."""
@@ -330,8 +320,6 @@ async def thread_root_body_preview(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     if replacement_body is not None:
@@ -342,8 +330,6 @@ async def thread_root_body_preview(
         fallback_body=_event_fallback_body(event),
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     return message_preview(visible_body)
@@ -380,6 +366,10 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
     return status if isinstance(status, str) else None
 
 
+# One replacement event plus the thread its ``m.new_content`` claims, which is a claim and never a
+# placement: Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
+# every ``m.relates_to`` inside the replacement. The claim is only ever used to decide whether an
+# edit is worth resolving for a given thread read.
 type _EditCandidate = tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]
 
 
@@ -476,10 +466,6 @@ async def apply_latest_edits_to_messages(
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,
     required_thread_id: str | None = None,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
-    expected_membership_epoch: int | None = None,
-    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
@@ -492,20 +478,18 @@ async def apply_latest_edits_to_messages(
         # A replacement from anyone but the original's sender is not an edit of that message.
         if winner is None:
             continue
-        edit_event, edit_thread_id = winner
+        edit_event, claimed_thread_id = winner
 
         # Ignore missing originals unrelated to this thread before resolving
-        # potentially large edit payloads from sidecar storage.
-        if existing_message is None and required_thread_id is not None and edit_thread_id != required_thread_id:
+        # potentially large edit payloads from sidecar storage. This is the one thing the
+        # replacement's own thread claim decides: whether the edit is worth reading at all for this
+        # thread. It never decides where the resulting message is said to live.
+        if existing_message is None and required_thread_id is not None and claimed_thread_id != required_thread_id:
             continue
 
         edited_body, edited_content = await extract_edit_body(
             edit_event.source,
             client,
-            event_cache=event_cache,
-            room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
         if edited_body is None:
@@ -516,19 +500,31 @@ async def apply_latest_edits_to_messages(
                 body=edited_body,
                 timestamp=edit_event.server_timestamp,
                 latest_event_id=edit_event.event_id,
-                thread_id=edit_thread_id,
                 content=edited_content,
             )
             continue
 
+        # Everything this message is made of came from the replacement, because the message it
+        # replaces is outside the window. Matrix keeps an edited message's thread on the original
+        # alone - a replacement inherits the relation rather than restating it, and applying
+        # ``m.new_content`` ignores any relation written inside it - so nothing here can place this
+        # message, whether or not the edit named a thread. The placement stays unknown until the
+        # original event or another authoritative source is read, which is not the same statement
+        # as room level.
+        #
+        # The revision's time stands in for a creation time nothing here can see, and is reported
+        # as the edit time as well, so a reader can tell that this message's position is a
+        # revision's rather than the original's.
         synthesized_message = ResolvedVisibleMessage(
             sender=edit_event.sender,
             body=edited_body,
             timestamp=edit_event.server_timestamp,
             event_id=original_event_id,
             content=edited_content if edited_content is not None else {},
-            thread_id=edit_thread_id,
+            thread_id=None,
             latest_event_id=edit_event.event_id,
+            edited_timestamp=edit_event.server_timestamp,
+            thread_id_known=False,
         )
         synthesized_message.refresh_stream_status()
         messages_by_event_id[original_event_id] = synthesized_message
@@ -577,6 +573,7 @@ async def resolve_latest_visible_messages(
 
 
 __all__ = [
+    "VISIBLE_ROOM_MESSAGE_EVENT_TYPES",
     "ResolvedVisibleMessage",
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",

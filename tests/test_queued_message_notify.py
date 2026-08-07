@@ -61,8 +61,9 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
@@ -86,14 +87,14 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
+    install_runtime_journal_support,
+    make_conversation_reader_mock,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
     request_envelope,
     runtime_paths_for,
+    serve_conversation_reader,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -157,7 +158,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -840,16 +841,14 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
     deps = support.build_deps(
         room_id="!room:localhost",
@@ -864,7 +863,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
-    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -902,10 +901,10 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
-        "!room:localhost",
-        "$thread",
-        caller_label="thread_summary_background",
+    conversation_reader.read_strict.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
     mock_generate.assert_awaited_once_with(
         thread_history,
@@ -922,7 +921,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         "Summary",
         5,
         "default",
-        conversation_cache,
+        conversation_reader,
         initial_enrichment_complete=None,
     )
 
@@ -941,16 +940,14 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
@@ -965,7 +962,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
-    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(

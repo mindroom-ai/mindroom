@@ -19,26 +19,38 @@ import httpx
 import pytest
 import yaml
 
-from mindroom.dispatch_obligations import DispatchObligationStore
-from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
-from mindroom.matrix.sync_certification import SyncCheckpoint
+from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
+from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.sync_continuity import SyncContinuityStore
+from mindroom.matrix.sync_token_values import SyncCheckpoint
+from scripts.testing import fuzz_live_matrix
 from scripts.testing.fuzz_live_matrix import (
+    DEFAULT_ROOT_FANOUT,
     ORDERLY_SHUTDOWN_MARKER,
     PROJECT_ROOT,
     RESTART_SHUTDOWN_FAILURE_MARKER,
     ExactReplyOracle,
+    ExactReplyTimeoutError,
+    HostLoadReport,
+    JournalRow,
     LiveFuzzRunner,
     LiveFuzzScenario,
     LiveMatrixClient,
     LiveOperation,
     LiveOperationKind,
     ManagedTuwunelStack,
+    MissingReplyStage,
+    OutboxRow,
     RestartRegressionObservation,
+    SlowWaitNotice,
+    TurnLatencyMonitor,
+    WaitBudget,
     _log_count,
     _ModelHandler,
     _restart_prompt_observation,
     _semantic_ingress_markers,
+    classify_missing_reply,
+    collect_host_load_report,
     evaluate_restart_regression,
     live_scenario_from_seed,
     restart_regression_scenario,
@@ -102,26 +114,12 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
             self.order.append("durable-callback")
         return True
 
-    def wait_for_cached_restart_event_pairs(
-        self,
-        room_id: str,
-        event_ids: tuple[str, str],
-        *,
-        minimum: int,
-        timeout: float,
-    ) -> bool:
-        assert room_id == "!restart:example"
-        assert event_ids == ("$restart-old-text", "$restart-old-media")
-        assert minimum == 4
-        assert timeout == 1
-        return True
-
-    def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+    def projected_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         assert room_id == "!restart:example"
         assert event_ids == ("$restart-old-text", "$restart-old-media")
         return 4
 
-    def wait_for_restart_dispatch_obligation_state(
+    def wait_for_restart_journal_event_state(
         self,
         event_id: str,
         *,
@@ -129,7 +127,7 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
         timeout: float,
     ) -> bool:
         assert event_id == "$restart-fresh"
-        assert expected == frozenset({"pending", "deferred"})
+        assert expected == frozenset({"pending"})
         assert timeout == 1
         self.order.append("obligation-pending")
         return True
@@ -171,7 +169,9 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
         return RestartRegressionObservation(
             historical_output_counts=(0, 0),
             historical_callback_counts=(0, 0),
-            cached_event_pair_count=4,
+            projected_after_answer_count=0,
+            context_only_count=4,
+            historical_projected_on_room_read=0,
             fresh_agent_output_count=1,
             fresh_router_output_count=0,
             fresh_response_complete=True,
@@ -183,6 +183,17 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
             historical_in_fresh_prompt=False,
             orderly_drain_completed=True,
         )
+
+    async def _read_historical_room_projection(
+        self,
+        *,
+        room_id: str,
+        historical_event_ids: tuple[str, str],
+    ) -> int:
+        assert room_id == "!restart:example"
+        assert historical_event_ids == ("$restart-old-text", "$restart-old-media")
+        cast("_RestartBoundaryStack", self.stack).order.append("room-read")
+        return 2
 
 
 @pytest.mark.asyncio
@@ -261,8 +272,8 @@ def seeded_restart_observation_stack(
     stack = ManagedTuwunelStack()
     stop_calls: list[float] = []
     stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-    monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-    monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+    monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+    monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
 
     def record_stop(*, timeout: float = 20) -> bool:
         stop_calls.append(timeout)
@@ -441,7 +452,9 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     passing = RestartRegressionObservation(
         historical_output_counts=(0, 0),
         historical_callback_counts=(0, 0),
-        cached_event_pair_count=4,
+        projected_after_answer_count=0,
+        context_only_count=4,
+        historical_projected_on_room_read=2,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
         fresh_response_complete=True,
@@ -461,7 +474,9 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
-            cached_event_pair_count=0,
+            projected_after_answer_count=0,
+            context_only_count=0,
+            historical_projected_on_room_read=0,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_response_complete=False,
@@ -475,13 +490,13 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
-    assert any("invariant=historical_event_pairs_cached" in failure for failure in failures)
+    assert any("invariant=historical_events_projected_on_room_read" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
     assert any("invariant=fresh_semantic_ingress_replayed_after_restart" in failure for failure in failures)
     assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
-    assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
+    assert any("invariant=fresh_journal_event_recovered" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=orderly_drain_completed" in failure for failure in failures)
 
@@ -585,12 +600,16 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart() -
 
         await runner._run_restart_regression()
 
+        # The room read is last on purpose: hydration writes to the projection,
+        # so a read that ran any earlier would manufacture the evidence the
+        # other invariants are supposed to find on their own.
         assert stack.order == [
             "durable-callback",
             "obligation-pending",
             "model-in-flight",
             "sync-checkpoint",
             "hard-restart",
+            "room-read",
         ]
     finally:
         stack.close()
@@ -621,16 +640,27 @@ async def test_restart_regression_refuses_hard_kill_before_fresh_checkpoint() ->
 
 
 @pytest.mark.asyncio
-async def test_restart_regression_does_not_send_fresh_event_before_historical_cache_boundary(
+async def test_restart_regression_releases_fresh_event_without_waiting_for_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lifecycle completion alone must not release the fresh event."""
+    """The fresh event follows the replacement boundary with no historical wait.
+
+    Hydration is lazy, so nothing fetches this room's history until something
+    reads it. A pre-condition wait for that history would never be satisfied,
+    which is why the profile releases the fresh event straight after the
+    lifecycle boundary and reads the room afterwards instead.
+    """
     stack = ManagedTuwunelStack()
+    history_reads: list[object] = []
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         monkeypatch.setattr(stack, "apply_replacement_config", lambda _room_id: None)
         monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda *_args, **_kwargs: 3)
+        monkeypatch.setattr(
+            stack,
+            "projected_restart_event_pair_count",
+            lambda *args: history_reads.append(args) or 0,
+        )
         dormant = _RecordingDormantClient()
         runner = LiveFuzzRunner(
             stack,
@@ -640,10 +670,15 @@ async def test_restart_regression_does_not_send_fresh_event_before_historical_ca
             settle_seconds=0,
         )
 
-        with pytest.raises(AssertionError, match="historical_event_pairs_cached"):
+        with pytest.raises(AssertionError, match="fresh_dispatch_obligation_unsettled_before_restart"):
             await runner._run_restart_regression()
 
-        assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+        assert dormant.sent_txn_ids == [
+            "restart-old-text",
+            "restart-old-media",
+            "restart-fresh",
+        ]
+        assert not history_reads
     finally:
         stack.close()
 
@@ -674,47 +709,307 @@ def test_restart_log_wait_handles_ansi_and_multiple_markers() -> None:
         stack.close()
 
 
-def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
+def test_restart_regression_projection_evidence_uses_production_schema_and_exact_filters() -> None:
     """Principal, room, and event filters must reject plausible distractor rows."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.storage_path.mkdir()
-        database_path = stack.storage_path / "event_cache.db"
-        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
-        asyncio.run(database.close())
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        store = EventJournalStore.open_sqlite(database_path)
+        asyncio.run(store.close())
         rows = (
-            ("@agent:example", "$old-text", "!target:example"),
-            ("@agent:example", "$old-media", "!target:example"),
-            ("@router:example", "$old-text", "!target:example"),
-            ("@router:example", "$old-media", "!target:example"),
-            ("@wrong:example", "$old-text", "!target:example"),
-            ("@wrong:example", "$old-media", "!target:example"),
-            ("@agent:example", "$wrong-event", "!target:example"),
-            ("@router:example", "$wrong-event", "!target:example"),
-            ("@agent:example", "$old-text", "!wrong:example"),
+            ("general@@agent:example", "!target:example", "$old-text"),
+            ("general@@agent:example", "!target:example", "$old-media"),
+            ("router@@router:example", "!target:example", "$old-text"),
+            ("router@@router:example", "!target:example", "$old-media"),
+            ("general@@wrong:example", "!target:example", "$old-text"),
+            ("general@@wrong:example", "!target:example", "$old-media"),
+            ("general@@agent:example", "!target:example", "$wrong-event"),
+            ("router@@router:example", "!target:example", "$wrong-event"),
+            ("general@@agent:example", "!wrong:example", "$old-text"),
         )
         with closing(sqlite3.connect(database_path)) as fixture_database:
             fixture_database.executemany(
                 """
-                INSERT INTO events(
+                INSERT INTO visible_messages(
                     principal_id,
-                    event_id,
                     room_id,
-                    origin_server_ts,
-                    event_json,
+                    logical_event_id,
+                    thread_id,
                     sender,
-                    cached_at,
-                    write_seq
-                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, ?)
+                    created_ts,
+                    revision_event_id,
+                    revision_ts,
+                    content_json,
+                    membership_epoch
+                ) VALUES (?, ?, ?, '', '@sender:example', 1, ?, 1, '{}', 0)
                 """,
-                ((*row, write_seq) for write_seq, row in enumerate(rows, start=1)),
+                ((*row, row[2]) for row in rows),
             )
             fixture_database.commit()
 
         event_ids = ("$old-text", "$old-media")
-        assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 4
+        assert stack.projected_restart_event_pair_count("!target:example", event_ids) == 4
     finally:
+        stack.close()
+
+
+def _seed_journal_event(
+    stack: ManagedTuwunelStack,
+    *,
+    principal: str,
+    event_id: str,
+    room_id: str,
+    event_class: str = "context_only",
+    state: str = "settled",
+    outcome: str | None = None,
+) -> None:
+    """Write one journal row through the production schema."""
+    database_path = stack.storage_path / "tracking" / "event_journal.db"
+    EventJournalStore.open_sqlite(database_path)
+    with closing(sqlite3.connect(database_path)) as fixture_database:
+        fixture_database.execute(
+            """
+            INSERT INTO journal_events(
+                principal_id,
+                event_id,
+                room_id,
+                thread_id,
+                kind,
+                event_class,
+                sender,
+                origin_server_ts,
+                source_json,
+                membership_epoch,
+                created_at_ns,
+                state,
+                outcome
+            ) VALUES (?, ?, ?, '', 'message', ?, '@sender:example', 1, '{}', 0, 1, ?, ?)
+            """,
+            (principal, event_id, room_id, event_class, state, outcome),
+        )
+        fixture_database.commit()
+
+
+def _seed_qualifying_restart_history(stack: ManagedTuwunelStack, **overrides: object) -> None:
+    """Seed the four qualifying rows, optionally spoiling exactly one.
+
+    Spoiling one row is what isolates a clause: ``(principal_id, event_id)`` is
+    unique, so a clause can only be probed by making a row that would otherwise
+    count stop counting.
+    """
+    rows = (
+        ("general@@agent:example", "$old-text"),
+        ("general@@agent:example", "$old-media"),
+        ("router@@router:example", "$old-text"),
+        ("router@@router:example", "$old-media"),
+    )
+    for index, (principal, event_id) in enumerate(rows):
+        _seed_journal_event(
+            stack,
+            principal=principal,
+            event_id=event_id,
+            room_id="!target:example",
+            **(cast("Any", overrides) if index == 0 else {}),
+        )
+
+
+def test_restart_context_only_measurement_uses_production_schema_and_exact_filters() -> None:
+    """Principal, room, and event filters must reject plausible distractor rows."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        _seed_qualifying_restart_history(stack)
+        _seed_journal_event(
+            stack,
+            principal="general@@wrong:example",
+            event_id="$old-text",
+            room_id="!target:example",
+        )
+        _seed_journal_event(
+            stack,
+            principal="general@@agent:example",
+            event_id="$wrong-event",
+            room_id="!target:example",
+        )
+
+        event_ids = ("$old-text", "$old-media")
+        assert stack.context_only_restart_event_pair_count("!target:example", event_ids) == 4
+        # The room filter cannot be probed with a colliding row, because
+        # (principal_id, event_id) is unique. Ask a different room instead.
+        assert stack.context_only_restart_event_pair_count("!wrong:example", event_ids) == 0
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize(
+    ("spoiled", "reason"),
+    [
+        ({"event_class": "actionable"}, "an actionable event is the turn this measurement excludes"),
+        ({"outcome": "succeeded"}, "an outcome means a turn ran"),
+        ({"state": "pending"}, "an unsettled event has not finished being nothing"),
+    ],
+)
+def test_restart_context_only_measurement_requires_every_clause(
+    spoiled: dict[str, str],
+    reason: str,
+) -> None:
+    """Class, outcome, and settlement must each independently drop the count."""
+    assert reason
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        _seed_qualifying_restart_history(stack, **spoiled)
+
+        assert stack.context_only_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 3
+    finally:
+        stack.close()
+
+
+def _seed_visible_message(
+    stack: ManagedTuwunelStack,
+    *,
+    principal: str,
+    room_id: str,
+    logical_event_id: str,
+    thread_id: str = "",
+) -> None:
+    """Write one projection row through the production schema."""
+    database_path = stack.storage_path / "tracking" / "event_journal.db"
+    EventJournalStore.open_sqlite(database_path)
+    with closing(sqlite3.connect(database_path)) as fixture_database:
+        fixture_database.execute(
+            """
+            INSERT INTO visible_messages(
+                principal_id,
+                room_id,
+                logical_event_id,
+                thread_id,
+                sender,
+                created_ts,
+                revision_event_id,
+                revision_ts,
+                content_json,
+                membership_epoch
+            ) VALUES (?, ?, ?, ?, '@sender:example', 1, ?, 1, '{}', 0)
+            """,
+            (principal, room_id, logical_event_id, thread_id, logical_event_id),
+        )
+        fixture_database.commit()
+
+
+async def _no_network_hydration(
+    _self: ConversationHydrator,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> None:
+    """Stand in for hydration so the read runs against exactly the seeded rows."""
+    assert room_id
+    del thread_id
+
+
+@pytest.mark.asyncio
+async def test_restart_room_read_finds_history_the_answer_never_projected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The room read must reach main-timeline history, not the fresh thread.
+
+    This is the whole content of the assertion. Answering the fresh event
+    hydrates the fresh *thread*, and the pre-gap history is not in it, so a
+    read pointed at that thread finds nothing. Pointing the read at the room
+    conversation is what separates "the history is gone" from "the history
+    appears when something asks".
+    """
+    stack = ManagedTuwunelStack()
+    room, thread = "!target:example", "$fresh-root"
+    runner = None
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        agent = f"general@{stack.agent_id}"
+        for logical_event_id in ("$old-text", "$old-media"):
+            _seed_visible_message(stack, principal=agent, room_id=room, logical_event_id=logical_event_id)
+        _seed_visible_message(
+            stack,
+            principal=agent,
+            room_id=room,
+            logical_event_id="$fresh-reply",
+            thread_id=thread,
+        )
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            "accounts:\n  agent_general:\n    username: general\n    access_token: token\n    device_id: DEVICE\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(ConversationHydrator, "ensure_hydrated", _no_network_hydration)
+        runner = LiveFuzzRunner(
+            stack,
+            (LiveMatrixClient("http://matrix.invalid", room),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        assert (
+            await runner._read_historical_room_projection(
+                room_id=room,
+                historical_event_ids=("$old-text", "$old-media"),
+            )
+            == 2
+        )
+    finally:
+        if runner is not None:
+            await asyncio.gather(*(client.close() for client in runner.clients))
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_room_read_without_persisted_credentials_fails_the_invariant() -> None:
+    """A run that never persisted the agent account must not read as a quiet success."""
+    stack = ManagedTuwunelStack()
+    runner = None
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        runner = LiveFuzzRunner(
+            stack,
+            (LiveMatrixClient("http://matrix.invalid", "!target:example"),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        observed = await runner._read_historical_room_projection(
+            room_id="!target:example",
+            historical_event_ids=("$old-text", "$old-media"),
+        )
+
+        assert observed == 0
+        assert any(
+            "invariant=historical_events_projected_on_room_read" in failure
+            for failure in evaluate_restart_regression(
+                RestartRegressionObservation(
+                    historical_output_counts=(0, 0),
+                    historical_callback_counts=(0, 0),
+                    projected_after_answer_count=0,
+                    context_only_count=4,
+                    historical_projected_on_room_read=observed,
+                    fresh_agent_output_count=1,
+                    fresh_router_output_count=0,
+                    fresh_response_complete=True,
+                    fresh_semantic_ingress_count_before_restart=1,
+                    fresh_semantic_ingress_count=2,
+                    recovered_generation_response_observed=True,
+                    fresh_obligation_recovered=True,
+                    fresh_prompt_observed=True,
+                    historical_in_fresh_prompt=False,
+                    orderly_drain_completed=True,
+                ),
+            )
+        )
+    finally:
+        if runner is not None:
+            await asyncio.gather(*(client.close() for client in runner.clients))
         stack.close()
 
 
@@ -747,54 +1042,57 @@ def test_combined_response_count_includes_every_configured_sender() -> None:
     )
 
 
-def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> None:
-    """Missing runtime cache state must not be converted into an empty SQLite database."""
+def test_restart_regression_projection_probe_does_not_create_an_empty_database() -> None:
+    """Missing runtime journal state must not be converted into an empty SQLite database."""
     stack = ManagedTuwunelStack()
     try:
-        database_path = stack.storage_path / "event_cache.db"
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
 
-        assert stack.cached_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
+        assert stack.projected_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
         assert not database_path.exists()
     finally:
         stack.close()
 
 
 def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> None:
-    """The hard-restart boundary must be beyond the fresh event's cached response."""
+    """The hard-restart boundary must be beyond the fresh event's projected response."""
     stack = ManagedTuwunelStack()
     writer: threading.Thread | None = None
     try:
         stack.agent_id = "@agent:example"
         stack.storage_path.mkdir()
-        database_path = stack.storage_path / "event_cache.db"
-        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
-        asyncio.run(database.close())
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        store = EventJournalStore.open_sqlite(database_path)
+        asyncio.run(store.close())
         with closing(sqlite3.connect(database_path)) as fixture_database:
             fixture_database.execute(
                 """
-                INSERT INTO events(
+                INSERT INTO visible_messages(
                     principal_id,
-                    event_id,
                     room_id,
-                    origin_server_ts,
-                    event_json,
+                    logical_event_id,
+                    thread_id,
                     sender,
-                    cached_at,
-                    write_seq
-                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, 1)
+                    created_ts,
+                    revision_event_id,
+                    revision_ts,
+                    content_json,
+                    membership_epoch
+                ) VALUES (?, ?, ?, '', '@sender:example', 1, ?, 1, '{}', 0)
                 """,
-                (stack.agent_id, "$fresh", "!target:example"),
+                (f"general@{stack.agent_id}", "!target:example", "$fresh", "$fresh"),
             )
             fixture_database.commit()
         continuity_store = SyncContinuityStore(stack.storage_path, "general")
         continuity_store.replace_checkpoint(
-            SyncCheckpoint("s_before", cache_generation="generation"),
+            SyncCheckpoint("s_before", store_generation="generation"),
         )
 
         def advance_checkpoint() -> None:
             time.sleep(0.1)
             continuity_store.replace_checkpoint(
-                SyncCheckpoint("s_after", cache_generation="generation"),
+                SyncCheckpoint("s_after", store_generation="generation"),
             )
 
         writer = threading.Thread(target=advance_checkpoint)
@@ -811,63 +1109,47 @@ def test_restart_regression_waits_for_checkpoint_later_than_fresh_event() -> Non
         stack.close()
 
 
-def test_restart_regression_reads_exact_durable_obligation_state() -> None:
-    """The recovery oracle must follow the exact agent message obligation."""
+def test_restart_regression_reads_exact_durable_journal_state() -> None:
+    """The recovery oracle must follow the exact agent message journal row."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id = "@agent:example"
-        store = DispatchObligationStore(
-            tracking_path=stack.storage_path / "tracking",
-            principal_id=stack.agent_id,
-            entity_name="general",
-        )
-        database_path = store._database_path
-        with closing(sqlite3.connect(database_path)) as database:
-            database.execute(
-                """
-                INSERT INTO dispatch_obligations(
-                    principal_id,
-                    entity_name,
-                    source_event_id,
-                    callback_kind,
-                    room_id,
-                    event_source_json,
-                    state,
-                    created_at_ns,
-                    settled_at_ns
-                ) VALUES (?, 'general', '$fresh', 'message', '!room:example', '{}', 'pending', 1, NULL)
-                """,
-                (stack.agent_id,),
-            )
-            database.commit()
+        store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
+        principal_id = f"general@{stack.agent_id}"
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
 
-        assert stack.restart_dispatch_obligation_state("$fresh") == "pending"
-        assert stack.restart_dispatch_obligation_state("$other") is None
-        assert stack.wait_for_restart_dispatch_obligation_state(
+        async def admit() -> None:
+            await store.principal(principal_id).admit(
+                InboundEvent(
+                    event_id="$fresh",
+                    room_id="!room:example",
+                    thread_id=None,
+                    kind=EventKind.MESSAGE,
+                    event_class=EventClass.ACTIONABLE,
+                    sender="@user:example",
+                    origin_server_ts=1,
+                    source={"event_id": "$fresh"},
+                ),
+            )
+
+        asyncio.run(admit())
+
+        assert stack.restart_journal_event_state("$fresh") == "pending"
+        assert stack.restart_journal_event_state("$other") is None
+        assert stack.wait_for_restart_journal_event_state(
             "$fresh",
-            expected=frozenset({"pending", "deferred"}),
+            expected="pending",
             timeout=0.01,
         )
 
+        # A settled row reports its outcome, which is the fact the oracle needs.
         with closing(sqlite3.connect(database_path)) as database:
             database.execute(
-                "UPDATE dispatch_obligations SET state = 'deferred'",
+                "UPDATE journal_events SET state = 'settled', outcome = 'succeeded', settled_at_ns = 2",
             )
             database.commit()
 
-        assert stack.wait_for_restart_dispatch_obligation_state(
-            "$fresh",
-            expected=frozenset({"pending", "deferred"}),
-            timeout=0.01,
-        )
-
-        with closing(sqlite3.connect(database_path)) as database:
-            database.execute(
-                "UPDATE dispatch_obligations SET state = 'succeeded', settled_at_ns = 2",
-            )
-            database.commit()
-
-        assert stack.restart_dispatch_obligation_state("$fresh") == "succeeded"
+        assert stack.restart_journal_event_state("$fresh") == "succeeded"
     finally:
         stack.close()
 
@@ -1393,7 +1675,7 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
     )
 
     assert stop_calls == [0]
-    assert observation.cached_event_pair_count == 4
+    assert observation.projected_after_answer_count == 4
     assert observation.fresh_agent_output_count == 1
     assert observation.fresh_response_complete
     assert observation.fresh_semantic_ingress_count == 2
@@ -1522,8 +1804,8 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             "Preparing agent and prompt agent=general $fresh\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+        monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
         dormant = DormantClient()
 
         def drain_callbacks(*, timeout: float = 20) -> bool:
@@ -1675,3 +1957,529 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
         oracle._assert_no_wrong_replies()
     finally:
         await client.close()
+
+
+class _FakeClock:
+    """A monotonic clock the harness tests advance on purpose."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the current fake time."""
+        return self.now
+
+
+class _ScriptedSyncClient:
+    """A Matrix client whose sync drives a fake clock and scripted replies."""
+
+    room_id = "!room:example"
+
+    def __init__(
+        self,
+        clock: _FakeClock,
+        *,
+        tick: float,
+        deliveries: tuple[tuple[float, str], ...] = (),
+    ) -> None:
+        self.clock = clock
+        self.tick = tick
+        self._deliveries = sorted(deliveries)
+        self._delivered = 0
+
+    async def sync(self, since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        """Advance the clock one poll and hand back whatever is due."""
+        del since, timeout_ms
+        await asyncio.sleep(0)
+        self.clock.now += self.tick
+        events: list[dict[str, Any]] = []
+        while self._delivered < len(self._deliveries) and self._deliveries[self._delivered][0] <= self.clock.now:
+            _due_at, source_event_id = self._deliveries[self._delivered]
+            self._delivered += 1
+            events.append(
+                {
+                    "event_id": f"{source_event_id}-reply",
+                    "sender": "@agent:example",
+                    "type": "m.room.message",
+                    "content": {
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root",
+                            "m.in_reply_to": {"event_id": source_event_id},
+                        },
+                    },
+                },
+            )
+        return {
+            "next_batch": f"s{self.clock.now}",
+            "rooms": {"join": {self.room_id: {"timeline": {"limited": False, "events": events}}}},
+        }
+
+
+def _scripted_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tick: float,
+    sources: tuple[str, ...],
+    deliveries: tuple[tuple[float, str], ...] = (),
+) -> tuple[ExactReplyOracle, _FakeClock]:
+    """Build an oracle whose only clock and traffic come from the test."""
+    clock = _FakeClock()
+    monkeypatch.setattr(fuzz_live_matrix, "time", clock)
+    client = _ScriptedSyncClient(clock, tick=tick, deliveries=deliveries)
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", client), "@agent:example")
+    for index, source_event_id in enumerate(sources):
+        oracle.expect(f"op:{index}", source_event_id)
+    return oracle, clock
+
+
+def test_wait_budget_scales_with_the_work_and_keeps_the_single_turn_floor() -> None:
+    """A wait for many sequential turns must not share a one-turn deadline."""
+    single = WaitBudget(turns=1, per_turn_seconds=2.0, settle_seconds=0.75, floor_seconds=60.0)
+    many = WaitBudget(turns=45, per_turn_seconds=2.0, settle_seconds=0.75, floor_seconds=60.0)
+
+    assert single.seconds == pytest.approx(60.75)
+    assert many.seconds == pytest.approx(45 * 2.0 * 3.0 + 0.75)
+    assert many.seconds > single.seconds
+    # An unmeasured machine falls back to exactly the operator's deadline.
+    assert WaitBudget(turns=45, per_turn_seconds=0.0, settle_seconds=0.75, floor_seconds=60.0).seconds == pytest.approx(
+        60.75,
+    )
+
+
+def test_wait_budget_derives_the_stall_window_from_measured_latency() -> None:
+    """Silence long enough to cover several turns is a wedge, not slowness."""
+    fast = WaitBudget(turns=45, per_turn_seconds=2.0, settle_seconds=0.0, floor_seconds=1.0)
+    slow = WaitBudget(turns=45, per_turn_seconds=30.0, settle_seconds=0.0, floor_seconds=1.0)
+
+    assert fast.stall_seconds == pytest.approx(8.0)
+    assert slow.stall_seconds == pytest.approx(120.0)
+    # The wedge detector always fires long before the whole-batch deadline.
+    assert fast.stall_seconds < fast.seconds
+    assert slow.stall_seconds < slow.seconds
+
+
+def test_turn_latency_monitor_keeps_the_slowest_observed_turn() -> None:
+    """Budgets must follow the machine's worst turn, not its luckiest."""
+    monitor = TurnLatencyMonitor()
+
+    assert monitor.per_turn_seconds == 0.0
+
+    monitor.observe(turns=8, elapsed_seconds=8.0)
+    assert monitor.per_turn_seconds == pytest.approx(1.0)
+
+    monitor.observe(turns=4, elapsed_seconds=12.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+    monitor.observe(turns=10, elapsed_seconds=1.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+    # Waits that drove no turn and impossible durations teach nothing.
+    monitor.observe(turns=0, elapsed_seconds=99.0)
+    monitor.observe(turns=5, elapsed_seconds=-1.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+
+class _ChatteringSyncClient:
+    """A client whose bots keep answering each other after the work is done."""
+
+    room_id = "!room:example"
+
+    def __init__(self, clock: _FakeClock, *, tick: float) -> None:
+        self.clock = clock
+        self.tick = tick
+        self._round = 0
+
+    async def sync(self, since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        """Emit one fresh router prompt and one fresh agent answer per poll."""
+        del since, timeout_ms
+        await asyncio.sleep(0)
+        self.clock.now += self.tick
+        self._round += 1
+        relay = f"$relay{self._round}"
+        events: list[dict[str, Any]] = [
+            {"event_id": relay, "sender": "@router:example", "type": "m.room.message", "content": {"body": "again"}},
+            {
+                "event_id": f"{relay}-answer",
+                "sender": "@agent:example",
+                "type": "m.room.message",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": relay},
+                    },
+                },
+            },
+        ]
+        if self._round == 1:
+            events.append(
+                {
+                    "event_id": "$a-reply",
+                    "sender": "@agent:example",
+                    "type": "m.room.message",
+                    "content": {
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root",
+                            "m.in_reply_to": {"event_id": "$a"},
+                        },
+                    },
+                },
+            )
+        return {
+            "next_batch": f"s{self.clock.now}",
+            "rooms": {"join": {self.room_id: {"timeline": {"limited": False, "events": events}}}},
+        }
+
+
+@pytest.mark.asyncio
+async def test_wait_fails_when_the_room_never_goes_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bots looping at each other must fail the wait, not extend it forever."""
+    clock = _FakeClock()
+    monkeypatch.setattr(fuzz_live_matrix, "time", clock)
+    client = _ChatteringSyncClient(clock, tick=0.1)
+    oracle = ExactReplyOracle(
+        cast("LiveMatrixClient", client),
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    oracle.expect("op:0", "$a")
+    budget = WaitBudget(turns=1, per_turn_seconds=0.0, settle_seconds=0.5, floor_seconds=2.0)
+
+    with pytest.raises(AssertionError, match="never went quiet"):
+        await oracle.wait_until_exact(budget)
+
+    assert clock.now == pytest.approx(budget.stall_seconds, abs=0.2)
+
+
+@pytest.mark.asyncio
+async def test_wait_reports_a_silent_runtime_as_wedged_long_before_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot that answers nothing must fail fast, not run out its whole budget."""
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.05, sources=("$a", "$b", "$c"))
+    budget = WaitBudget(turns=3, per_turn_seconds=10.0, settle_seconds=0.0, floor_seconds=1.0)
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget)
+
+    assert failure.value.wedged is True
+    assert failure.value.waited_seconds == pytest.approx(budget.stall_seconds, abs=0.1)
+    assert failure.value.waited_seconds < budget.seconds
+    assert set(failure.value.missing) == {"$a", "$b", "$c"}
+    assert "wedged rather than slow" in str(failure.value)
+    assert clock.now == pytest.approx(failure.value.waited_seconds, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_wait_extends_its_deadline_while_replies_are_still_arriving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow machine that keeps finishing turns must be allowed to finish."""
+    sources = tuple(f"$s{index}" for index in range(6))
+    deliveries = tuple((1.5 * (index + 1), source) for index, source in enumerate(sources))
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.1, sources=sources, deliveries=deliveries)
+    budget = WaitBudget(turns=6, per_turn_seconds=0.3, settle_seconds=0.0, floor_seconds=2.0)
+    notices: list[SlowWaitNotice] = []
+
+    elapsed = await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert budget.seconds == pytest.approx(5.4)
+    assert elapsed > budget.seconds
+    assert clock.now == pytest.approx(9.0, abs=0.2)
+    assert [notice.extension for notice in notices] == [1]
+    assert "slow machine" in notices[0].render()
+    assert not oracle.outstanding()
+
+
+@pytest.mark.asyncio
+async def test_wait_stops_extending_for_a_reply_stream_that_never_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A livelock that dribbles one reply at a time must still fail."""
+    sources = tuple(f"$s{index}" for index in range(200))
+    deliveries = tuple((1.5 * (index + 1), source) for index, source in enumerate(sources))
+    oracle, _clock = _scripted_oracle(monkeypatch, tick=0.1, sources=sources, deliveries=deliveries)
+    budget = WaitBudget(turns=200, per_turn_seconds=0.009, settle_seconds=0.0, floor_seconds=2.0)
+    notices: list[SlowWaitNotice] = []
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert [notice.extension for notice in notices] == [1, 2, 3]
+    assert failure.value.wedged is False
+    assert "deadline extensions were exhausted" in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_wait_never_extends_a_window_that_produced_no_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget shorter than its own stall window must not buy a wedge more time."""
+    oracle, _clock = _scripted_oracle(monkeypatch, tick=0.1, sources=("$a",))
+    # A one-turn budget that expires before the silence detector would.
+    budget = WaitBudget(turns=1, per_turn_seconds=1.0, settle_seconds=0.0, floor_seconds=3.0)
+    notices: list[SlowWaitNotice] = []
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert budget.seconds == pytest.approx(3.0)
+    assert budget.stall_seconds == pytest.approx(4.0)
+    assert notices == []
+    assert failure.value.wedged is True
+    assert failure.value.waited_seconds == pytest.approx(3.0, abs=0.15)
+
+
+@pytest.mark.asyncio
+async def test_wait_fails_immediately_when_the_managed_runtime_has_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead MindRoom process must never be waited out as a slow one."""
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.05, sources=("$a",))
+    budget = WaitBudget(turns=1, per_turn_seconds=100.0, settle_seconds=0.0, floor_seconds=100.0)
+
+    def died() -> None:
+        msg = "MindRoom exited with code 1 while the harness was waiting for replies"
+        raise AssertionError(msg)
+
+    with pytest.raises(AssertionError, match="MindRoom exited with code 1"):
+        await oracle.wait_until_exact(budget, liveness=died)
+
+    assert clock.now == pytest.approx(0.05)
+
+
+class _ExitedProcess:
+    """A managed child that has already exited."""
+
+    returncode = 3
+
+    def poll(self) -> int:
+        """Report the recorded exit status."""
+        return self.returncode
+
+
+def test_require_runtime_alive_reports_an_exited_child() -> None:
+    """The liveness probe must read the managed child's real exit status."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.require_runtime_alive()
+
+        stack._mindroom_process = cast("subprocess.Popen[str]", _ExitedProcess())
+        with pytest.raises(AssertionError, match="MindRoom exited with code 3"):
+            stack.require_runtime_alive()
+    finally:
+        stack.close()
+
+
+def _journal_row(*, state: str, outcome: str | None) -> JournalRow:
+    """Build one durable journal row for the classifier."""
+    return JournalRow(
+        principal_id="general@@agent:example",
+        kind="message",
+        event_class="actionable",
+        state=state,
+        outcome=outcome,
+        semantic_consumer=None,
+        receipt_order=12,
+    )
+
+
+def _outbox_row(*, acknowledged_event_id: str | None) -> OutboxRow:
+    """Build one staged response row for the classifier."""
+    return OutboxRow(
+        principal_id="general@@agent:example",
+        stage="initial",
+        attempted=1,
+        acknowledged_event_id=acknowledged_event_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("journal_rows", "outbox_rows", "expected_stage"),
+    [
+        ((), (), MissingReplyStage.NOT_ADMITTED),
+        (
+            (_journal_row(state="pending", outcome=None),),
+            (),
+            MissingReplyStage.ADMITTED_NEVER_DISPATCHED,
+        ),
+        (
+            (_journal_row(state="settled", outcome="intentionally_ignored"),),
+            (),
+            MissingReplyStage.SETTLED_WITHOUT_REPLY,
+        ),
+        (
+            (_journal_row(state="pending", outcome=None),),
+            (_outbox_row(acknowledged_event_id=None),),
+            MissingReplyStage.DISPATCHED_NEVER_SENT,
+        ),
+        (
+            (_journal_row(state="settled", outcome="succeeded"),),
+            (_outbox_row(acknowledged_event_id="$reply"),),
+            MissingReplyStage.SENT_BUT_UNOBSERVED,
+        ),
+    ],
+    ids=[
+        "never-admitted",
+        "admitted-never-dispatched",
+        "settled-without-reply",
+        "dispatched-never-sent",
+        "sent-but-unobserved",
+    ],
+)
+def test_classify_missing_reply_names_the_durable_position(
+    journal_rows: tuple[JournalRow, ...],
+    outbox_rows: tuple[OutboxRow, ...],
+    expected_stage: MissingReplyStage,
+) -> None:
+    """Each durable position is a different failure with a different owner."""
+    stage, detail = classify_missing_reply(journal_rows, outbox_rows)
+
+    assert stage is expected_stage
+    assert detail
+
+
+def test_missing_reply_diagnosis_reads_the_production_journal_schema() -> None:
+    """The failure report must query the schema MindRoom actually writes."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id = "@agent:example"
+        principal_id = f"general@{stack.agent_id}"
+        store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
+
+        async def seed() -> None:
+            principal = store.principal(principal_id)
+            for event_id in ("$stuck", "$staged"):
+                await principal.admit(
+                    InboundEvent(
+                        event_id=event_id,
+                        room_id="!room:example",
+                        thread_id=None,
+                        kind=EventKind.MESSAGE,
+                        event_class=EventClass.ACTIONABLE,
+                        sender="@user:example",
+                        origin_server_ts=1,
+                        source={"event_id": event_id},
+                    ),
+                )
+            await principal.enqueue_delivery(
+                turn_id="$staged",
+                stage=DeliveryStage.INITIAL,
+                room_id="!room:example",
+                thread_id=None,
+                payload={"body": "hello"},
+            )
+
+        asyncio.run(seed())
+
+        report = stack.diagnose_missing_replies({"$stuck": "op:1", "$staged": "op:2", "$never": "op:3"})
+
+        assert "journal: pending per room !room:example=2" in report
+        assert "oldest pending receipt_order=1 event_id=$stuck" in report
+        assert f"op:1 ($stuck): {MissingReplyStage.ADMITTED_NEVER_DISPATCHED.value}" in report
+        assert f"op:2 ($staged): {MissingReplyStage.DISPATCHED_NEVER_SENT.value}" in report
+        assert f"op:3 ($never): {MissingReplyStage.NOT_ADMITTED.value}" in report
+        assert principal_id in report
+    finally:
+        stack.close()
+
+
+def test_missing_reply_diagnosis_survives_a_run_with_no_journal_yet() -> None:
+    """A failure before the runtime writes anything must still report cleanly."""
+    stack = ManagedTuwunelStack()
+    try:
+        report = stack.diagnose_missing_replies({"$one": "op:1"})
+
+        assert "journal: no pending events" in report
+        assert MissingReplyStage.NOT_ADMITTED.value in report
+        assert not (stack.storage_path / "tracking" / "event_journal.db").exists()
+    finally:
+        stack.close()
+
+
+def test_host_load_report_warns_only_about_a_contended_machine() -> None:
+    """A run competing with other work must say so before it starts."""
+    quiet = HostLoadReport(
+        cpu_count=16,
+        load_average=(1.0, 1.0, 1.0),
+        docker_cpus=4,
+        docker_memory_bytes=8 * 1024**3,
+        competing_test_processes=0,
+    )
+    busy = replace(quiet, load_average=(24.0, 30.0, 40.0), competing_test_processes=4)
+
+    assert quiet.contended is False
+    assert "WARNING" not in quiet.render()
+    assert "docker 4 cpus / 8 GiB" in quiet.render()
+    assert busy.contended is True
+    assert busy.load_per_cpu == pytest.approx(1.5)
+    assert "WARNING" in busy.render()
+    assert "4 competing test processes" in busy.render()
+    assert busy.as_dict()["host_load_per_cpu"] == pytest.approx(1.5)
+    # A machine with spare cores is still contended while tests share it.
+    assert replace(quiet, competing_test_processes=1).contended is True
+
+
+def test_collect_host_load_report_measures_the_real_machine() -> None:
+    """The preflight report must read this host rather than guess."""
+    report = collect_host_load_report()
+
+    assert report.cpu_count >= 1
+    assert len(report.load_average) == 3
+    assert report.competing_test_processes >= 0
+    assert report.as_dict()["host_cpu_count"] == report.cpu_count
+
+
+class _WaveRecordingRunner(LiveFuzzRunner):
+    """Record how many roots each wave leaves outstanding, then satisfy them."""
+
+    waves: list[int]
+
+    async def _await_replies(self) -> None:
+        outstanding = self.oracle.outstanding()
+        self.waves.append(len(outstanding))
+        for event_id in outstanding:
+            self.oracle.response_ids[event_id].add(f"{event_id}-reply")
+
+
+def _wave_runner(*, root_fanout: int) -> _WaveRecordingRunner:
+    """Build a root-fan-out runner with no live dependencies."""
+    stack = ManagedTuwunelStack()
+    stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+    runner = _WaveRecordingRunner(
+        stack,
+        (cast("LiveMatrixClient", _RecordingDormantClient()),),
+        live_scenario_from_seed(1, steps=1, thread_count=25, max_batch_size=1, restart_interval=0),
+        reply_timeout=1,
+        settle_seconds=0,
+        root_fanout=root_fanout,
+    )
+    runner.waves = []
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_send_roots_releases_waves_sized_to_the_single_room_lane() -> None:
+    """Roots are setup, so no wait should have to explain the whole fan-out."""
+    runner = _wave_runner(root_fanout=DEFAULT_ROOT_FANOUT)
+    try:
+        await runner._send_roots(range(25))
+
+        assert runner.waves == [8, 8, 8, 1]
+        assert len(runner.event_ids) == 25
+    finally:
+        runner.stack.close()
+
+
+@pytest.mark.asyncio
+async def test_send_roots_keeps_the_simultaneous_fan_out_reachable() -> None:
+    """The old all-at-once behaviour stays available behind an explicit flag."""
+    runner = _wave_runner(root_fanout=0)
+    try:
+        await runner._send_roots(range(25))
+
+        assert runner.waves == [25]
+    finally:
+        runner.stack.close()

@@ -8,14 +8,13 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
-from mindroom.matrix.sync_certification import SyncCheckpoint
-from mindroom.matrix.sync_token_values import normalize_sync_token
+from mindroom.matrix.sync_token_values import SyncCheckpoint, normalize_sync_token
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
-_RECORD_VERSION = "mindroom-sync-continuity-v2"
+_RECORD_VERSION = "mindroom-sync-continuity-v3"
 
 
 @dataclass(frozen=True)
@@ -141,10 +140,10 @@ class SyncContinuityStore:
             checkpoint = None
         elif isinstance(raw_checkpoint, dict):
             token = normalize_sync_token(raw_checkpoint.get("token"))
-            cache_generation = normalize_sync_token(raw_checkpoint.get("cache_generation"))
-            if token is None or cache_generation is None or set(raw_checkpoint) != {"cache_generation", "token"}:
+            store_generation = normalize_sync_token(raw_checkpoint.get("store_generation"))
+            if token is None or store_generation is None or set(raw_checkpoint) != {"store_generation", "token"}:
                 raise _format_error(self._path, "invalid checkpoint")
-            checkpoint = SyncCheckpoint(token=token, cache_generation=cache_generation)
+            checkpoint = SyncCheckpoint(token=token, store_generation=store_generation)
         else:
             raise _format_error(self._path, "invalid checkpoint")
 
@@ -176,7 +175,7 @@ def _record_payload(record: SyncContinuityRecord) -> dict[str, object]:
         checkpoint_payload = None
     else:
         checkpoint_payload = {
-            "cache_generation": cast("str", checkpoint.cache_generation),
+            "store_generation": cast("str", checkpoint.store_generation),
             "token": checkpoint.token,
         }
     return {
@@ -189,11 +188,11 @@ def _record_payload(record: SyncContinuityRecord) -> dict[str, object]:
 
 def _normalize_checkpoint(checkpoint: SyncCheckpoint) -> SyncCheckpoint:
     token = normalize_sync_token(checkpoint.token)
-    cache_generation = normalize_sync_token(checkpoint.cache_generation)
-    if token is None or cache_generation is None:
-        msg = "Sync continuity checkpoints require a token and cache generation"
+    store_generation = normalize_sync_token(checkpoint.store_generation)
+    if token is None or store_generation is None:
+        msg = "Sync continuity checkpoints require a token and store generation"
         raise ValueError(msg)
-    return SyncCheckpoint(token=token, cache_generation=cache_generation)
+    return SyncCheckpoint(token=token, store_generation=store_generation)
 
 
 def _normalize_room_id(room_id: str) -> str:

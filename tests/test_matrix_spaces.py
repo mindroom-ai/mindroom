@@ -807,7 +807,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     router_bot.enable_streaming = True
     router_bot.running = True
     router_bot._set_presence_with_model_info = AsyncMock()
-    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (
@@ -820,7 +820,6 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
             new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
         ) as mock_rooms,
         patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
         updated = await orchestrator.config_reload._update_config()

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
-    from mindroom.matrix.cache import AgentMessageSnapshot
+    from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
@@ -61,10 +61,8 @@ if TYPE_CHECKING:
             room_id: str,
             thread_id: str | None,
             sender: str,
-            *,
-            runtime_started_at: float | None,
         ) -> Awaitable[AgentMessageSnapshot | None]:
-            """Read the latest visible cached sender message for one room or thread scope."""
+            """Read the latest visible sender message for one room or thread scope."""
 
 
 def _resolve_plugin_state_root(
@@ -384,7 +382,7 @@ class HookContext:
         *,
         thread_id: str | None = None,
     ) -> AgentMessageSnapshot | None:
-        """Return the latest visible cached sender message when a reader is available."""
+        """Return the latest visible sender message when a reader is available."""
         if self.agent_message_snapshot_reader is None:
             self.logger.warning("No agent-message snapshot reader available")
             return None
@@ -392,7 +390,6 @@ class HookContext:
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,
-            runtime_started_at=self.runtime_started_at,
         )
 
     async def put_room_state(

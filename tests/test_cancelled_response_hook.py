@@ -49,8 +49,10 @@ from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    ignore_final_delivery_handoff,
+    install_runtime_journal_support,
     make_matrix_client_mock,
+    make_outbox_mock,
     message_origin,
     replace_edit_regenerator_deps,
     request_envelope,
@@ -157,7 +159,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
     return bot
 
@@ -517,6 +519,8 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -648,6 +652,8 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -729,6 +735,8 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -811,6 +819,8 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -883,6 +893,8 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 

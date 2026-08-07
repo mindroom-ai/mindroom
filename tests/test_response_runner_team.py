@@ -23,7 +23,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
@@ -38,11 +37,9 @@ from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
     _configured_team_user,
-    _empty_full_thread_history,
     _handled_response_event_id,
     _hook_envelope,
     _hook_plugin,
-    _install_runtime_cache_support,
     _make_matrix_client_mock,
     _noop_typing_indicator,
     _visible_message,
@@ -112,7 +109,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -148,8 +144,13 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert mock_send_message.await_args.args[2]["body"] == "🤝 Team Response: Thinking..."
-        assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
+        # Both the placeholder and its edit go out through the outbox now, so
+        # they are the two calls on one mock: the first is the placeholder, the
+        # second the frozen replace envelope.
+        placeholder, edit = (call.args[2] for call in mock_send_message.await_args_list)
+        assert placeholder["body"] == "🤝 Team Response: Thinking..."
+        assert edit["m.new_content"]["body"] == "Team reply [hooked]"
+        assert mock_edit_message.await_count == 0
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
     @pytest.mark.asyncio
@@ -163,7 +164,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -211,7 +211,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -270,7 +269,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -338,7 +336,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -362,14 +359,8 @@ class TestAgentBot(AgentBotTestBase):
                 source_kind=MESSAGE_SOURCE_KIND,
             ),
         )
-        history = ThreadHistoryResult([], is_full_history=True)
 
         with (
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest:localhost"),
-            ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
@@ -394,14 +385,15 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert len(sent_contents) == 1
-        content = sent_contents[0]
+        # Two sends now: the placeholder, then its frozen replace envelope.
+        assert len(sent_contents) == 2
+        content, edit = sent_contents
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
-        mock_edit_message.assert_awaited_once()
-        assert mock_edit_message.await_args.args[2] == "$team"
-        assert mock_edit_message.await_args.args[4] == "Team reply"
+        assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$team"}
+        assert edit["m.new_content"]["body"] == "Team reply"
+        assert mock_edit_message.await_count == 0
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(
@@ -421,7 +413,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -494,7 +485,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
 
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(
@@ -582,7 +572,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -681,8 +670,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
-        history = _empty_full_thread_history()
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -707,7 +694,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
             patch.object(bot._response_runner, "generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             pytest.raises(RuntimeError, match="boom"),
@@ -780,13 +766,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
         )
-        refreshed_history = ThreadHistoryResult(list(thread_history), is_full_history=True)
 
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -814,11 +798,6 @@ class TestAgentBot(AgentBotTestBase):
                 bot._response_runner,
                 "generate_team_response_helper",
                 new=AsyncMock(return_value="$response"),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                AsyncMock(return_value=refreshed_history),
             ),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
@@ -904,14 +883,12 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
         )
-        history = _empty_full_thread_history()
         resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[team_member],
@@ -939,7 +916,6 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(side_effect=fake_send_streaming_response),
@@ -1038,10 +1014,8 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         mock_team_response = AsyncMock()
-        history = _empty_full_thread_history()
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
@@ -1054,7 +1028,6 @@ class TestAgentBot(AgentBotTestBase):
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1120,12 +1093,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -1133,7 +1104,6 @@ class TestAgentBot(AgentBotTestBase):
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1187,12 +1157,10 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
-        history = _empty_full_thread_history()
 
         with (
             patch_response_runner_module(
@@ -1200,7 +1168,6 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 team_response=AsyncMock(return_value="Team handled"),
             ),
-            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(

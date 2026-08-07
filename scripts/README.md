@@ -7,7 +7,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 ### 🧪 Testing
 - **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 - **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
-- **`testing/fuzz_matrix_event_cache.py`** - Replay deterministic randomized mutations directly against both cache backends
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
@@ -44,15 +43,38 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
 
-### Fuzz Matrix cache behavior
+### Fuzz live Matrix behavior
 ```bash
-uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 ```
 
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
+
+#### Making a red run mean the product is broken
+
+Every event in one Matrix room is handled by a single sequential lane, so a batch that asks forty-five threads for a reply is asking for forty-five agent turns back to back.
+Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
+
+- `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger deadline; it is no longer applied flat to a whole batch.
+- A wait for N outstanding replies gets `N x measured-turn-latency x 3`, floored at `--reply-timeout`.
+  The turn latency is measured from the warm-up exchange and from every completed wait after it, keeping the slowest observation, so nothing new is hardcoded.
+- Silence, not the deadline, is what identifies a wedge.
+  A wait that sees no new reply for four measured turn latencies (floored at `--reply-timeout`) fails immediately as wedged, well before the whole-batch deadline expires.
+- A deadline that arrives while replies are still landing is extended up to three times, and each extension prints a `slow machine:` line to stderr.
+  An extension is only granted to a window that actually produced a reply, so a wedged runtime can never extend its way out of failing.
+- A managed MindRoom child that has exited fails the wait on the next poll instead of being waited out.
+
+When a wait does fail, the harness reads the run's own `mindroom_data/tracking/event_journal.db` and reports where each missing reply's source event actually stopped: `not_admitted`, `admitted_never_dispatched`, `dispatched_never_sent`, `settled_without_reply`, or `sent_but_unobserved`.
+The report also names the per-room pending depth and the event at the head of the blocked lane.
+
+Every run prints a preflight line describing the contention it is competing with (host cores and load average, Docker CPU and memory limits, and the number of other test processes running), and repeats it at failure.
+The same figures appear in the run's result JSON alongside `measured_turn_seconds` and `slow_wait_extensions`.
+
+`--root-fanout` controls how many thread roots are released simultaneously per wave; it defaults to 8 because the single per-room lane serialises them anyway, and a smaller wave means a failure names the turn that stopped instead of reporting forty-four missing replies.
+Pass `--root-fanout 0` to restore the original single simultaneous fan-out.
+The `--threads` and `--max-batch-size` defaults are unchanged.
 
 #### Restart-recovery regression profile
 

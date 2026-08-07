@@ -61,8 +61,9 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 
 ```text
 Matrix sync callback
+  -> matrix/journal_ingress.py                             (pre-fanout admission: commit the event before nio is told it was accepted)
   -> bot.py (AgentBot/TeamBot runtime shell)
-  -> dispatch_obligations/                                 (durable exact callback acceptance and restart recovery)
+  -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
@@ -96,20 +97,20 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
-| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
-| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
 | `sync_restart_retry.py` | Exact sources with committed replacement or orderly terminal interruptions, available to replacement or next-startup recovery |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
 | `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
-| `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
+| `response_attempt.py` | Runs one visible response attempt with stop tracking |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
@@ -146,9 +147,9 @@ Matrix sync callback
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
-| `matrix/sync_cache_trust.py` | Sync-checkpoint persistence, cache-generation trust, and cold-start principal cleanup |
+| `matrix/sync_checkpoint_trust.py` | Sync-checkpoint persistence and the journal generation a checkpoint is certified against |
 | `matrix/sync_continuity.py` | Crash-atomic checkpoint and pending join-fence persistence |
-| `cold_history_fence.py` | Callback admission from exact Matrix transport recovery outcomes |
+| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
@@ -591,6 +592,10 @@ just cluster-helm-lint            # Lint platform chart
 - **DO NOT** manually edit the CLI help messages in `README.md`. They are auto-generated.
 - **NEVER** use `git add .`.
 - **NEVER** claim a task is done without passing all `pytest` tests.
+- **NEVER** run `sleep <guessed duration>` in a Bash tool call to wait for something.
+  This rule is about how you drive your own terminal, not about MindRoom's runtime code: `asyncio.sleep` in `src/` is unaffected.
+  A guessed duration is always wrong: too short and you read a half-written result, too long and you burn wall-clock doing nothing.
+  Poll the real condition instead (process exit, a line in the output file, an HTTP health check, a file appearing), or start the command in the background and react to its completion notification.
 
 ## 4. Interacting with MindRoom Agents via Matty CLI
 

@@ -7,7 +7,7 @@ import tempfile
 from collections import defaultdict, deque
 from pathlib import Path
 from threading import Lock
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -17,15 +17,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.matrix.thread_mutation_impact import MutationThreadImpactState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
-    make_event_cache_mock,
+    make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -39,7 +39,8 @@ def _reset_matrix_api_rate_limit() -> None:
 def _make_context(
     *,
     room_id: str = "!room:localhost",
-    conversation_cache: object | None = None,
+    threads: dict[str, str | None] | None = None,
+    relations: object | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -51,18 +52,16 @@ def _make_context(
     client.room_get_state_event = AsyncMock()
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
-    client.room_get_event = AsyncMock()
-    client._send = AsyncMock()
-    resolved_conversation_cache = make_conversation_cache_mock() if conversation_cache is None else conversation_cache
-    resolved_conversation_cache.get_event = AsyncMock(
+    # The relation lookup resolves an unadmitted target through the homeserver,
+    # which is where the default answer for this room's target event now lives.
+    client.room_get_event = AsyncMock(
         return_value=_event_response(
             event_id="$target:localhost",
             room_id=room_id,
             content={"body": "message", "msgtype": "m.text"},
         ),
     )
-    resolved_conversation_cache.notify_outbound_message = Mock()
-    resolved_conversation_cache.notify_outbound_redaction = Mock()
+    client._send = AsyncMock()
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -74,8 +73,8 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=resolved_conversation_cache,
-        event_cache=make_event_cache_mock(),
+        relations=(make_relation_lookup(threads=threads, client=client) if relations is None else relations),
+        conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=runtime_root,
     )
@@ -245,7 +244,7 @@ async def test_matrix_api_send_event_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_records_threaded_room_message() -> None:
-    """send_event should write successful threaded room messages through the conversation cache."""
+    """send_event should send successful threaded room messages with their thread relation."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -283,11 +282,6 @@ async def test_matrix_api_send_event_records_threaded_room_message() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
@@ -320,16 +314,11 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
         content=content,
         ignore_unverified_devices=True,
     )
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send() -> None:
-    """A successful send_event should delegate advisory bookkeeping through the cache facade."""
+async def test_matrix_api_send_event_reports_the_event_it_sent() -> None:
+    """A successful send_event reports the event the homeserver accepted."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -358,21 +347,13 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
 
     assert payload["status"] == "ok"
     assert payload["event_id"] == "$send:localhost"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thread_bookkeeping() -> None:
     """Plain replies to threaded targets should reuse the shared inherited-thread rule."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
-    )
+    ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
     content = {
         "body": "bridged reply",
         "msgtype": "m.text",
@@ -393,16 +374,11 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_delegates_thread_classification_to_shared_helper() -> None:
-    """send_event should call the shared thread-membership helper instead of inlining cache policy."""
+    """send_event should call the shared thread-membership helper instead of inlining thread policy."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_send.return_value = nio.RoomSendResponse(
@@ -413,7 +389,7 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
     with (
         patch(
             "mindroom.custom_tools.matrix_api.resolve_event_thread_impact_for_client",
-            new=AsyncMock(return_value=MutationThreadImpact.threaded("$thread:localhost")),
+            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
         ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),
     ):
@@ -455,14 +431,13 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeeping() -> None:
+async def test_matrix_api_send_event_room_mode_edit_stays_room_level() -> None:
     """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$room-message",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "room message", "msgtype": "m.text"},
     )
     ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -503,19 +478,17 @@ async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeep
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
-        ctx.room_id,
-        "$send:localhost",
-        content,
-    )
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_room_mode_edit_errors_when_thread_lookup_fails() -> None:
     """Room-mode edits should fail closed when thread classification cannot be resolved."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = RuntimeError("db broken")
+    # The journal is unreadable, so nothing local can classify the target.
+    broken = make_relation_lookup()
+    broken.store.failure = RuntimeError("db broken")  # type: ignore[attr-defined]
+    ctx = _make_context(relations=broken)
+    ctx.client.room_get_event.side_effect = RuntimeError("db broken")
     content = {
         "body": "* updated",
         "msgtype": "m.text",
@@ -552,8 +525,7 @@ async def test_matrix_api_send_event_errors_when_thread_classification_fails() -
     """send_event should fail closed when threaded classification cannot be resolved."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.side_effect = RuntimeError("lookup boom")
+    ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
     content = {
         "body": "bridged reply",
         "msgtype": "m.text",
@@ -578,7 +550,6 @@ async def test_matrix_api_send_event_errors_when_thread_classification_fails() -
         "tool": "matrix_api",
     }
     ctx.client.room_send.assert_not_awaited()
-    ctx.conversation_cache.notify_outbound_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -653,13 +624,12 @@ async def test_matrix_api_put_state_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_happy_path() -> None:
-    """Threaded redactions should call room_redact and notify threaded cache bookkeeping."""
+    """Threaded redactions should call room_redact after proving the target's thread."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "threaded message", "msgtype": "m.text"},
     )
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
@@ -693,12 +663,11 @@ async def test_matrix_api_redact_happy_path() -> None:
         event_id="$target:localhost",
         reason="cleanup",
     )
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$target:localhost")
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_delegates_thread_classification_to_shared_helper() -> None:
-    """Redact should call the shared thread-membership helper instead of inlining cache policy."""
+    """Redact should call the shared thread-membership helper instead of inlining thread policy."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
@@ -709,7 +678,7 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
     with (
         patch(
             "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact_for_client",
-            new=AsyncMock(return_value=MutationThreadImpact.threaded("$thread:localhost")),
+            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
         ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),
     ):
@@ -730,10 +699,9 @@ async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeepi
     """Room-level redactions should delete local point-cache rows before the sync echo."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "room message", "msgtype": "m.text"},
     )
     ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -771,10 +739,6 @@ async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeepi
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
 
 
 @pytest.mark.asyncio
@@ -782,8 +746,7 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
     """Redact should fail closed when thread classification cannot be resolved."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.side_effect = RuntimeError("lookup boom")
+    ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -803,21 +766,18 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
         "tool": "matrix_api",
     }
     ctx.client.room_redact.assert_not_awaited()
-    ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() -> None:
-    """Threaded redaction detection should prefer conversation_cache over direct event_cache access."""
+async def test_matrix_api_redact_thread_lookup_uses_the_journal_relation_view() -> None:
+    """Threaded redaction detection resolves the thread through the journal, not a cache index."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "threaded message", "msgtype": "m.text"},
     )
-    ctx.event_cache.get_thread_id_for_event.side_effect = AssertionError("unexpected direct event_cache lookup")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -831,10 +791,7 @@ async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() 
 
     assert payload["status"] == "ok"
     assert payload["dry_run"] is True
-    ctx.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
+    assert ctx.relations.store.asked == [(ctx.room_id, "$target:localhost")]
 
 
 @pytest.mark.asyncio
@@ -842,19 +799,6 @@ async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> N
     """Reaction redactions should not require thread bookkeeping just because the reaction targets a thread."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.return_value = _event_response(
-        event_id="$reaction:localhost",
-        event_type="m.reaction",
-        room_id=ctx.room_id,
-        content={
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": "$thread-reply:localhost",
-                "key": "👍",
-            },
-        },
-    )
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -874,11 +818,8 @@ async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> N
 async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bookkeeping() -> None:
     """Transitive-threaded redactions should reuse the shared resolver instead of cache-only lookup rows."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
-    )
-    ctx.conversation_cache.get_event.side_effect = lambda room_id, event_id: _event_response(
+    ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
+    ctx.client.room_get_event.side_effect = lambda room_id, event_id: _event_response(
         event_id=event_id,
         room_id=room_id,
         sender="@bridge:localhost",
@@ -908,16 +849,14 @@ async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bo
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.get_event.assert_any_await(ctx.room_id, "$plain-two")
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(ctx.room_id, "$plain-two")
+    ctx.client.room_get_event.assert_any_await(ctx.room_id, "$plain-two")
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact() -> None:
-    """A successful threaded redact should delegate advisory bookkeeping through the cache facade."""
+async def test_matrix_api_redact_reports_the_redaction_it_sent() -> None:
+    """A successful threaded redact reports the redaction event the homeserver accepted."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
         event_id="$redaction:localhost",
         room_id=ctx.room_id,
@@ -934,22 +873,13 @@ async def test_matrix_api_redact_ignores_cache_failure_after_successful_redact()
 
     assert payload["status"] == "ok"
     assert payload["redaction_event_id"] == "$redaction:localhost"
-    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_get_event_happy_path() -> None:
-    """get_event should return the raw Matrix event even when conversation cache is available."""
+    """get_event should return the raw Matrix event the homeserver holds."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_event.return_value = _event_response(
-        room_id=ctx.room_id,
-        content={"body": "edited view", "msgtype": "m.text"},
-        origin_server_ts=999,
-    )
     ctx.client.room_get_event.return_value = _event_response(
         room_id=ctx.room_id,
         content={"body": "raw body", "msgtype": "m.text"},
@@ -978,7 +908,6 @@ async def test_matrix_api_get_event_happy_path() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.conversation_cache.get_event.assert_not_awaited()
     ctx.client.room_get_event.assert_awaited_once_with(ctx.room_id, "$evt:localhost")
 
 
@@ -1658,7 +1587,6 @@ async def test_matrix_api_get_event_maps_not_found_to_found_false() -> None:
         "status": "ok",
         "tool": "matrix_api",
     }
-    ctx.conversation_cache.get_event.assert_not_awaited()
     ctx.client.room_get_event.assert_awaited_once_with(ctx.room_id, "$missing:localhost")
 
 
@@ -1887,7 +1815,6 @@ async def test_matrix_api_cross_room_access_is_denied(action: str, kwargs: dict[
     ctx.client.room_put_state.assert_not_awaited()
     ctx.client.room_redact.assert_not_awaited()
     ctx.client.room_get_event.assert_not_awaited()
-    ctx.conversation_cache.get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1996,7 +1923,6 @@ async def test_matrix_api_cross_room_get_event_uses_target_room_id() -> None:
 
     assert payload["status"] == "ok"
     assert payload["room_id"] == "!other:localhost"
-    ctx.conversation_cache.get_event.assert_not_awaited()
     ctx.client.room_get_event.assert_awaited_once_with("!other:localhost", "$evt:localhost")
 
 

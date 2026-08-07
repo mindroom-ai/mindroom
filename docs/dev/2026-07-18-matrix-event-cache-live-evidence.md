@@ -112,4 +112,5 @@ The harness rejects an existing strict-cache path, rejects the service-cache pat
 
 The harness also rejects unpaired invite identity/token configuration and any missing or cache-only event accounting.
 
-The exact command and safety procedure are documented in `docs/dev/matrix-event-cache-interaction-contract.md`.
+This is a record of one audit run, not a live procedure.
+The subsystem it measured, the contract document that specified the run, and the harness itself were all removed when the event cache was replaced by the event journal and the visible-message projection.

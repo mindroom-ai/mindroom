@@ -39,8 +39,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
+    from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -69,8 +70,8 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
-    event_cache: ConversationEventCache
-    conversation_cache: ConversationCacheProtocol
+    conversation_reader: ConversationReader
+    relations: RelationLookup
     transport_agent_name: str | None = None
     active_model_name: str | None = None
     room: nio.MatrixRoom | None = None
@@ -227,9 +228,6 @@ class ToolRuntimeSupport:
         client = self.runtime.client
         if client is None:
             return None
-        event_cache = self.runtime.event_cache
-        if event_cache is None:
-            return None
         return ToolRuntimeContext(
             agent_name=agent_name or self.agent_name,
             target=target,
@@ -237,8 +235,8 @@ class ToolRuntimeSupport:
             client=client,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
-            conversation_cache=self.resolver.deps.conversation_cache,
-            event_cache=event_cache,
+            conversation_reader=self.resolver.deps.conversation_reader,
+            relations=self.resolver.deps.relations,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
             room=self.resolver.cached_room(target.room_id),
@@ -431,8 +429,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_cache=context.conversation_cache,
-        event_cache=context.event_cache,
+        conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
     )
 

@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -28,11 +29,10 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
-    thread_history_result,
 )
 
 if TYPE_CHECKING:
@@ -377,14 +377,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         # Access the bots
         helper_bot = orchestrator.agent_bots["helper"]
         calc_bot = orchestrator.agent_bots["calculator"]
-        empty_thread_history = thread_history_result([], is_full_history=True)
         empty_thread_snapshot = thread_history_result([], is_full_history=False)
-        helper_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
-        helper_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
-        helper_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
-        calc_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
-        calc_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
-        calc_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
+        helper_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+            return_value=empty_thread_snapshot,
+        )
+        calc_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
 
         # Ensure calculator bot has streaming disabled for this test
         calc_bot.enable_streaming = False
@@ -614,7 +611,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             rooms=["!test:localhost"],
             enable_streaming=False,
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         await bot.start()
 
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)

@@ -7,6 +7,13 @@ decide the winner.
 Invariant: a Matrix replacement is applied only when it preserves one immutable event identity,
 comes from the sender of the event it replaces, and - among equally-timestamped candidates from
 that sender - is the one with the lexicographically greatest event ID.
+
+Invariant: a message reconstructed from a replacement alone claims only what the replacement
+proves. Its thread is not one of those things, so it is reported as unknown rather than as absent.
+
+Invariant: a replacement never places anything. Applying ``m.new_content`` keeps the original
+event's relation and ignores every ``m.relates_to`` inside the replacement, so a thread named there
+is a claim: it neither moves a message that was read nor places one that was reconstructed.
 """
 
 from __future__ import annotations
@@ -144,6 +151,153 @@ class TestReplacementSenderRule:
 
         assert messages[_ORIGINAL_ID].sender == _IMPOSTOR
         assert messages[_ORIGINAL_ID].body == "orphaned"
+
+
+class TestSynthesizedMessagePlacement:
+    """Where a message reconstructed from a replacement alone is said to live."""
+
+    @pytest.mark.asyncio
+    async def test_silent_edit_leaves_the_synthesized_placement_unknown(self) -> None:
+        """An edit that says nothing about a thread must not place the message in the room.
+
+        A replacement inherits the original's ``m.relates_to`` instead of restating it, so a
+        threaded reply's edit carries no thread and neither does the window once the original has
+        scrolled out of it. Reporting ``thread_id=None`` there tells a reader the reply was posted
+        at room level, and the reader answers it in the room rather than in its thread.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages: dict[str, ResolvedVisibleMessage] = {}
+
+        await _apply(candidates, messages)
+
+        synthesized = messages[_ORIGINAL_ID]
+        assert "thread_id" not in synthesized.to_dict()
+        assert synthesized.to_dict()["thread_id_unknown"] is True
+        assert synthesized.thread_id_known is False
+        assert synthesized.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_edit_that_names_a_thread_still_leaves_the_synthesized_placement_unknown(self) -> None:
+        """An edit that does name a thread has still not proven where its original lives.
+
+        Applying ``m.new_content`` keeps the original event's relation and ignores every
+        ``m.relates_to`` written inside the replacement, so a thread named there is a claim no rule
+        turns into a fact. Believing it lets anyone who can send an edit file the message it
+        reconstructs under a thread of their choosing.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+                new_thread_id="$root",
+            ),
+        )
+        messages: dict[str, ResolvedVisibleMessage] = {}
+
+        await _apply(candidates, messages)
+
+        synthesized = messages[_ORIGINAL_ID]
+        assert "thread_id" not in synthesized.to_dict()
+        assert synthesized.to_dict()["thread_id_unknown"] is True
+        assert synthesized.thread_id_known is False
+        assert synthesized.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_message_read_with_its_edit_keeps_its_own_thread_and_position(self) -> None:
+        """A message that was read is placed by itself, whatever its edit does or does not say."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        original = _original_message()
+        original.thread_id = "$root"
+        messages = {_ORIGINAL_ID: original}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] == "$root"
+        assert messages[_ORIGINAL_ID].timestamp == 1_000
+        assert messages[_ORIGINAL_ID].edited_timestamp == 2_000
+
+    @pytest.mark.asyncio
+    async def test_edit_naming_another_thread_does_not_move_the_message_it_edits(self) -> None:
+        """A replacement cannot relocate a message that was actually read.
+
+        The original's own ``m.relates_to`` is the only thing that places it, and an edit inherits
+        that relation rather than restating it. An edit that names a different thread is therefore
+        either a client bug or an attempt to drag a conversation somewhere its participants cannot
+        see it, and both answers are the same: leave the message where its own event put it.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+                new_thread_id="$attacker-thread",
+            ),
+        )
+        original = _original_message()
+        original.thread_id = "$root"
+        messages = {_ORIGINAL_ID: original}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] == "$root"
+        assert messages[_ORIGINAL_ID].body == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_edit_naming_a_thread_does_not_file_a_room_level_message_into_it(self) -> None:
+        """A room-level message stays at room level however its edit is decorated."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+                new_thread_id="$attacker-thread",
+            ),
+        )
+        messages = {_ORIGINAL_ID: _original_message()}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] is None
+        assert messages[_ORIGINAL_ID].thread_id_known is True
+        assert messages[_ORIGINAL_ID].body == "final answer"
 
 
 class TestReplacementWinnerSelection:

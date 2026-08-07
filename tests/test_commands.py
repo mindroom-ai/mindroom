@@ -23,7 +23,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
-from tests.conftest import make_event_cache_mock
+from tests.conftest import make_conversation_reader_mock
 from tests.identity_helpers import persist_entity_accounts
 
 WELCOME_QUICK_COMMAND_LINES = [
@@ -457,10 +457,9 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!adhoc:localhost", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=send_response,
     )
@@ -512,10 +511,9 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,
@@ -581,10 +579,9 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,

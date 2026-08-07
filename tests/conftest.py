@@ -22,10 +22,11 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, LiteralString, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -40,6 +41,7 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.bot  # noqa: F401
+import mindroom.handled_turns as handled_turns_module
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
@@ -51,7 +53,20 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.event_journal import (
+    ConversationPage,
+    DeliveryAcknowledgement,
+    DeliveryStage,
+    JournalEvent,
+    OutboxDelivery,
+    OutboxView,
+    PendingTurnView,
+    RelationView,
+    TerminalTurnWrite,
+    VisibleMessage,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
     ScopeSessionContext,
     _resolve_history_scope,
@@ -70,25 +85,22 @@ from mindroom.history.types import (
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
-from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_delivery import TurnHandoff
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -108,15 +120,24 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
-    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.backend import Backend, Operation
+    from mindroom.event_journal.schema import Dialect
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
-_POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
-_POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
 _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
+
+# The event journal orders text in SQL, in SQLite, and in Python, and those
+# three must agree. An Alpine image cannot show a disagreement: every musl
+# locale sorts like C, so a missing `COLLATE "C"` looks correct there and
+# breaks against a glibc server. The journal's server is therefore glibc.
+_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
+_POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
+_POSTGRES_JOURNAL_IMAGE = "postgres:16"
+_POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
 
 
 def _configure_quiet_structlog() -> None:
@@ -158,7 +179,7 @@ __all__ = [
     "FakeCredentialsManager",
     "agent_response_should_respond",
     "aioresponse",
-    "bind_mock_config_cache",
+    "bind_mock_config_event_journal",
     "bind_runtime_paths",
     "build_private_template_dir",
     "bypass_authorization",
@@ -167,25 +188,19 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
-    "event_cache",
-    "event_cache_factory",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
-    "install_runtime_cache_support",
+    "install_runtime_journal_support",
     "install_send_response_mock",
     "install_shutdown_drain_mocks",
     "load_config_yaml",
-    "make_conversation_cache_mock",
-    "make_event_cache_mock",
-    "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
     "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
-    "postgres_event_cache_url",
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
@@ -486,9 +501,37 @@ def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
     raise RuntimeError(msg)
 
 
-def _postgres_container_name(run_id: str) -> str:
+def _wait_for_conflicting_postgres_container(docker: str, container_name: str) -> str:
+    """Return the state of the container that already holds ``container_name``.
+
+    Docker reserves a container's name when ``create`` starts and registers the
+    container itself only when ``create`` finishes. Every worker that loses the
+    race to create the shared server therefore sees ``Conflict`` from ``run``
+    and ``no such object`` from ``inspect`` until the winner's create completes
+    -- a window that widens under load, which is precisely when the whole suite
+    is running. One inspect samples that window and reads a race as a broken
+    machine. The name is known to be taken, so wait for the container behind it.
+    """
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
+    last_error = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        last_error = result.stderr.strip()
+        time.sleep(0.05)
+    msg = f"Postgres journal container {container_name} never became inspectable: {last_error}"
+    raise RuntimeError(msg)
+
+
+def _postgres_container_name(run_id: str, prefix: str) -> str:
     """Return the deterministic disposable Postgres container name for one test run."""
-    return f"{_POSTGRES_CONTAINER_PREFIX}{run_id}"
+    return f"{prefix}{run_id}"
 
 
 def _remove_postgres_container(docker: str, container_name: str) -> None:
@@ -507,8 +550,10 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
 
 def pytest_configure_node(node: "WorkerController") -> None:
     """Remember the shared Postgres container name in the xdist controller."""
-    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
-        node.workerinput["testrunuid"],
+    run_id = node.workerinput["testrunuid"]
+    node.config.stash[_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
+        run_id,
+        _POSTGRES_JOURNAL_CONTAINER_PREFIX,
     )
 
 
@@ -516,73 +561,65 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     """Remove the shared Postgres container after every xdist worker has finished."""
     if hasattr(session.config, "workerinput"):
         return
-    container_name = session.config.stash.get(_POSTGRES_CONTAINER_NAME_STASH_KEY, None)
     docker = shutil.which("docker")
-    if container_name is not None and docker is not None:
-        try:
-            _remove_postgres_container(docker, container_name)
-        except RuntimeError as exc:
-            warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
-            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    if docker is None:
+        return
+    container_name = session.config.stash.get(_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY, None)
+    if container_name is None:
+        return
+    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
+        # The fixture skipped on this same condition, so nothing was ever created.
+        return
+    try:
+        _remove_postgres_container(docker, container_name)
+    except RuntimeError as exc:
+        warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(scope="session")
-def postgres_event_cache_url(
-    worker_id: str,
-    testrun_uid: str,
-) -> Iterator[str]:
-    """Start or reuse one disposable Postgres server for the current test run."""
+def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
+    """Start or reuse one glibc Postgres server for event-journal parity tests.
+
+    Only a machine that cannot run Docker at all skips. Every other failure
+    raises, because a skip here silently deletes the PostgreSQL half of a suite
+    whose entire claim is that its rules hold on both backends, and a suite that
+    proves half of what it says it proves still exits 0.
+    """
     docker = shutil.which("docker")
     if docker is None:
-        pytest.skip("Docker is required for Postgres event-cache integration tests")
-
-    info_result = subprocess.run(
-        [docker, "info"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if info_result.returncode != 0:
-        pytest.skip("Docker daemon is unavailable for Postgres event-cache integration tests")
+        pytest.skip("Docker is required for Postgres event-journal parity tests")
+    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
+        pytest.skip("Docker daemon is unavailable for Postgres event-journal parity tests")
 
     shared_across_workers = worker_id != "master"
     run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
-    container_name = _postgres_container_name(run_id)
+    container_name = _postgres_container_name(run_id, _POSTGRES_JOURNAL_CONTAINER_PREFIX)
     run_result = subprocess.run(
         [
-            docker,
-            "run",
-            "--rm",
-            "-d",
-            "--name",
-            container_name,
-            "--label",
-            f"mindroom.pytest.run={run_id}",
-            "-e",
-            "POSTGRES_USER=cache",
-            "-e",
-            "POSTGRES_PASSWORD=test",
-            "-e",
-            "POSTGRES_DB=mindroom",
-            "-p",
-            "127.0.0.1::5432",
-            "postgres:15-alpine",
+            docker, "run", "--rm", "-d",
+            "--name", container_name,
+            "--label", f"mindroom.pytest.run={run_id}",
+            "-e", "POSTGRES_USER=cache",
+            "-e", "POSTGRES_PASSWORD=test",
+            "-e", "POSTGRES_DB=mindroom",
+            "-e", f"LANG={_POSTGRES_JOURNAL_LOCALE}",
+            "-e", f"POSTGRES_INITDB_ARGS=--locale={_POSTGRES_JOURNAL_LOCALE}",
+            "-p", "127.0.0.1::5432",
+            _POSTGRES_JOURNAL_IMAGE,
         ],
         check=False,
         capture_output=True,
         text=True,
-    )
-    if run_result.returncode != 0:
-        inspect_result = subprocess.run(
-            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if not shared_across_workers or inspect_result.returncode != 0:
-            pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
-        if inspect_result.stdout.strip() in {"dead", "exited"}:
-            msg = f"Shared Postgres test container is {inspect_result.stdout.strip()}"
+    )  # fmt: skip
+    created_container = run_result.returncode == 0
+    if not created_container:
+        if "is already in use by container" not in run_result.stderr:
+            msg = f"Could not start Postgres journal container: {run_result.stderr.strip()}"
+            raise RuntimeError(msg)
+        status = _wait_for_conflicting_postgres_container(docker, container_name)
+        if status in {"dead", "exited"}:
+            msg = f"Shared Postgres journal container is {status}"
             raise RuntimeError(msg)
 
     try:
@@ -592,41 +629,144 @@ def postgres_event_cache_url(
             database_url = _create_postgres_worker_database(database_url, worker_id)
         yield database_url
     finally:
-        if not shared_across_workers:
+        # Only the run that created the container may destroy it.
+        if created_container and not shared_across_workers:
             _remove_postgres_container(docker, container_name)
 
 
-@pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-def event_cache_factory(
+def postgres_journal_schema_url(database_url: str) -> str:
+    """Return a DSN onto one fresh, empty schema of ``database_url``.
+
+    The Postgres server is shared by every test in a worker, so isolation has
+    to come from somewhere. A private schema pinned into the DSN gives it
+    without a private server, and because the pin travels with the DSN rather
+    than with a connection, two stores opened from the same string see the
+    same tables -- which is what a test about two connections racing needs.
+    """
+    import psycopg  # noqa: PLC0415
+    from psycopg import sql  # noqa: PLC0415
+
+    schema = f"journal_{uuid.uuid4().hex}"
+    with psycopg.connect(database_url, autocommit=True) as db:
+        db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    separator = "&" if "?" in database_url else "?"
+    return f"{database_url}{separator}options=-csearch_path%3D{schema}"
+
+
+@pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
+async def journal_database(
     request: pytest.FixtureRequest,
     tmp_path: Path,
-) -> Callable[[], "ConversationEventCache"]:
-    """Return a cache factory for backend-neutral event-cache contract tests."""
+) -> AsyncGenerator[Callable[[], "EventJournalStore"], None]:
+    """Return an opener onto one empty database, per supported backend.
+
+    Parametrized rather than duplicated so a rule can only be proven for one
+    backend by also proving it for the other.
+
+    An opener rather than a store, because a store is one process's connections
+    and not the database itself. Whether two bots sharing a database can step on
+    each other is a question only a second store over the same database can ask,
+    and every store this hands out is closed when the test ends.
+    """
+    from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
+
     backend = str(request.param)
     if backend == "sqlite":
-        db_path = tmp_path / "event_cache.db"
-        return lambda: SqliteEventCache(db_path)
-    if backend == "postgres":
-        from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache  # noqa: PLC0415
+        database_path = tmp_path / "event_journal.db"
 
-        database_url = request.getfixturevalue("postgres_event_cache_url")
-        namespace = f"test_{uuid.uuid4().hex}"
-        return lambda: PostgresEventCache(database_url=database_url, namespace=namespace)
-    msg = f"Unsupported event cache backend fixture: {backend}"
-    raise AssertionError(msg)
+        def connect() -> EventJournalStore:
+            return EventJournalStore.open_sqlite(database_path)
+    else:
+        scoped_url = postgres_journal_schema_url(request.getfixturevalue("postgres_journal_url"))
 
+        def connect() -> EventJournalStore:
+            return EventJournalStore.open_postgres(scoped_url)
 
-@pytest_asyncio.fixture
-async def event_cache(
-    event_cache_factory: Callable[[], "ConversationEventCache"],
-) -> AsyncGenerator["ConversationEventCache", None]:
-    """Return one initialized event cache backend for backend-neutral contract tests."""
-    cache = event_cache_factory()
-    await cache.initialize()
+    opened: list[EventJournalStore] = []
+
+    def opener() -> EventJournalStore:
+        store = connect()
+        opened.append(store)
+        return store
+
     try:
-        yield cache
+        yield opener
     finally:
-        await cache.close()
+        for store in opened:
+            await store.close()
+
+
+@pytest.fixture
+def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "EventJournalStore":
+    """Return one open event-journal store per supported backend.
+
+    Opening is synchronous and closing belongs to ``journal_database``, so this
+    is a plain fixture. The store is still parametrized over both backends,
+    because that comes from the fixture it asks for.
+    """
+    return journal_database()
+
+
+_LEGACY_TABLE_DDL = (
+    """
+    CREATE TABLE room_membership (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id)
+    )
+    """,
+    """
+    CREATE TABLE response_outbox (
+        principal_id TEXT NOT NULL, turn_id TEXT NOT NULL, stage TEXT NOT NULL,
+        room_id TEXT NOT NULL, thread_id TEXT NOT NULL, transaction_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL, edits_event_id TEXT,
+        attempted INTEGER NOT NULL DEFAULT 0, acknowledged_event_id TEXT,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, turn_id, stage)
+    )
+    """,
+    """
+    CREATE TABLE conversation_hydration (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, thread_id)
+    )
+    """,
+)
+
+
+@pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
+async def legacy_journal_store(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> AsyncGenerator["EventJournalStore", None]:
+    """Return a store opened onto tables that predate their later columns.
+
+    `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it is, so
+    a later column arrives only if the upgrade path runs. Both backends have
+    their own upgrade path and neither can vouch for the other.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
+
+    if str(request.param) == "sqlite":
+        database_path = tmp_path / "legacy_event_journal.db"
+        with sqlite3.connect(database_path) as connection:
+            for statement in _LEGACY_TABLE_DDL:
+                connection.execute(statement)
+        store = EventJournalStore.open_sqlite(database_path)
+    else:
+        import psycopg  # noqa: PLC0415
+
+        schema_url = postgres_journal_schema_url(request.getfixturevalue("postgres_journal_url"))
+        with psycopg.connect(schema_url, autocommit=True) as db:
+            for statement in _LEGACY_TABLE_DDL:
+                db.execute(cast("LiteralString", statement))
+        store = EventJournalStore.open_postgres(schema_url)
+    try:
+        yield store
+    finally:
+        await store.close()
 
 
 async def _empty_async_iterator() -> AsyncGenerator[object, None]:
@@ -717,6 +857,9 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = user_id
+    # A logged-in client always has one, and delivery records it on every claim
+    # so a resend can tell whether its frozen transaction ID still deduplicates.
+    client.device_id = "TESTDEVICE"
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
@@ -799,91 +942,495 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
     return _deliver
 
 
-def make_event_cache_mock() -> AsyncMock:
-    """Return an async mock shaped like the event cache protocol."""
-    event_cache = AsyncMock(spec=SqliteEventCache)
-    event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.cache_generation = "test-cache-generation"
-    event_cache.durable_writes_available = True
-    event_cache.get_event.return_value = None
-    event_cache.get_latest_edit.return_value = None
-    event_cache.get_mxc_text.return_value = None
-    event_cache.get_mxc_texts.return_value = {}
-    event_cache.get_recent_room_events.return_value = []
-    event_cache.get_recent_room_thread_ids.return_value = []
-    event_cache.get_thread_events.return_value = None
-
-    async def has_thread_snapshot(room_id: str, thread_id: str) -> bool:
-        return await event_cache.get_thread_events(room_id, thread_id) is not None
-
-    event_cache.has_thread_snapshot.side_effect = has_thread_snapshot
-    event_cache.get_thread_cache_gap.return_value = None
-    event_cache.get_thread_id_for_event.return_value = None
-    event_cache.get_latest_agent_message_snapshot.return_value = None
-    event_cache.pending_durable_write_room_ids.return_value = ()
-    event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
-    departure_epochs: dict[str, int] = {}
-
-    def mark_room_departed(room_id: str) -> int:
-        epoch = departure_epochs.get(room_id, 0) + 1
-        departure_epochs[room_id] = epoch
-        return epoch
-
-    event_cache.mark_room_departed.side_effect = mark_room_departed
-    event_cache.room_departure_epoch.side_effect = lambda room_id: departure_epochs.get(room_id, 0)
-    event_cache.room_membership_epoch.return_value = 0
-    event_cache.flush_pending_durable_writes.return_value = None
-    event_cache.apply_thread_mutation_append.return_value = ThreadAppendOutcome.APPENDED
-    event_cache.redact_event.return_value = False
-    event_cache.store_mxc_text.return_value = True
-    event_cache.replace_thread.return_value = True
-    return event_cache
-
-
-def make_conversation_cache_mock() -> AsyncMock:
-    """Return an async mock shaped like the conversation cache protocol."""
-    conversation_cache = AsyncMock(spec=ConversationCacheProtocol)
-    conversation_cache.get_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
+def serve_conversation_reader(
+    reader: ConversationReader,
+    messages: Sequence[ResolvedVisibleMessage],
+    *,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+) -> None:
+    """Point one stub reader at these messages, as the projection would serve them."""
+    page = ConversationPage(
+        messages=tuple(
+            VisibleMessage(
+                logical_event_id=message.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=message.sender,
+                # `or ordinal` would rewrite a real timestamp of 0.
+                created_ts=ordinal if message.timestamp is None else message.timestamp,
+                revision_event_id=message.event_id,
+                revision_ts=ordinal if message.timestamp is None else message.timestamp,
+                content=dict(message.content),
+            )
+            for ordinal, message in enumerate(messages, start=1)
+        ),
+        refresh_pending=(),
+        next_cursor=None,
     )
-    conversation_cache.get_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
-        return_value=thread_history_result([], is_full_history=False),
-    )
-    conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    conversation_cache.get_strict_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-
-    conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
-    conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
-    conversation_cache.append_live_event = AsyncMock()
-    conversation_cache.notify_outbound_message = MagicMock()
-    conversation_cache.notify_outbound_event = MagicMock()
-    conversation_cache.notify_outbound_redaction = MagicMock()
-    return conversation_cache
+    reader.read.return_value = page
+    reader.read_strict.return_value = page
 
 
-def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> EventCacheWriteCoordinator:
-    """Return a coordinator-shaped runtime helper with the real synchronous queue contract."""
-    return EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=object() if owner is None else owner,
+class FakeOutbox:
+    """An in-memory outbox with the real claim-before-send semantics.
+
+    A plain mock would let a test pass while the delivery never went through
+    the outbox at all. This keeps the two rules that matter: a claimed row's
+    payload is frozen, and an acknowledged row replays its recorded event ID
+    instead of sending again.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        # What each acknowledgement carried alongside it, so a test can
+        # assert the terminal record and the acknowledgement are one write.
+        self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
+        self.attempted: set[tuple[str, str]] = set()
+        # Turns whose membership has ended, as the journal would report it.
+        self.ended_membership_turn_ids: set[str] = set()
+        # The journal sources each FINAL enqueue handed over, in order.
+        self.handed_over: list[tuple[str, ...]] = []
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        del room_id
+        return turn_id not in self.ended_membership_turn_ids
+
+    async def enqueue_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        """Record intent, leaving an already-attempted row's payload alone.
+
+        An unattempted row is rewritten, exactly as the real `ON CONFLICT DO
+        UPDATE ... WHERE attempted = 0` does. Refusing that too would make this
+        double stricter than production and hide a same-turn re-enqueue -- a
+        continuation replacing the answer it has not sent yet -- behind a stale
+        payload no real deployment would serve.
+
+        An attempted row is exempt from the membership check for the same
+        reason production exempts it: its outcome is unknown, so the retry has
+        to go out under the frozen transaction rather than strand whatever it
+        may already have made visible.
+
+        The handed-over sources are kept rather than dropped, because they are
+        a durable effect of this call in production and a double that swallowed
+        them would let a lost handoff pass unnoticed. There is no journal here
+        to settle them in; whether the settlement really shares this
+        transaction is pinned against the real backends.
+        """
+        if settle_source_event_ids:
+            self.handed_over.append(settle_source_event_ids)
+        key = (turn_id, stage.value)
+        existing = self.rows.get(key)
+        if existing is not None:
+            if key in self.attempted:
+                return existing.transaction_id
+            self.rows[key] = replace(
+                existing,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=dict(payload),
+                edits_event_id=edits_event_id,
+            )
+            return existing.transaction_id
+        if turn_id in self.ended_membership_turn_ids:
+            return None
+        transaction_id = f"tx-{turn_id}-{stage.value}"
+        self.rows[key] = OutboxDelivery(
+            turn_id=turn_id,
+            stage=stage,
+            room_id=room_id,
+            thread_id=thread_id,
+            transaction_id=transaction_id,
+            payload=dict(payload),
+            edits_event_id=edits_event_id,
+            acknowledged_event_id=None,
+            created_at_ns=len(self.rows),
+        )
+        return transaction_id
+
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before any network call, returning its prior state.
+
+        The pre-claim row is what comes back, exactly as the real outbox does:
+        a caller has to be able to see whether *someone else* attempted this
+        and from which device, and reading after the mark would report this
+        attempt back to itself. The device is not written here -- claiming does
+        not mean this device is going to send.
+        """
+        key = (turn_id, stage.value)
+        row = self.rows.get(key)
+        if row is None:
+            return None
+        self.attempted.add(key)
+        self.rows[key] = replace(row, attempted=True)
+        return row
+
+    async def record_sending_device(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        key = (turn_id, stage.value)
+        if key in self.rows:
+            self.rows[key] = replace(self.rows[key], sending_device_id=device_id)
+
+    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Return one delivery without claiming it."""
+        return self.rows.get((turn_id, stage.value))
+
+    async def acknowledge_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> DeliveryAcknowledgement:
+        """Record the Matrix event one claimed delivery produced, and the turn it completes.
+
+        The terminal record is kept rather than discarded so a test can assert
+        it travelled *with* the acknowledgement. Dropping it here would let the
+        two drift apart again without anything noticing.
+        """
+        key = (turn_id, stage.value)
+        already = self.rows[key].acknowledged_event_id
+        if already is not None:
+            # First-writer-wins, like the real store: a loser is told the event
+            # the row already names rather than its own, and told it bound
+            # nothing -- which stays true even when the two events are equal.
+            return DeliveryAcknowledgement(settled_event_id=already, bound=False)
+        self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
+        self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
+        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
+
+    async def unacknowledged_deliveries(
+        self,
+        *,
+        limit: int = 256,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[OutboxDelivery, ...]:
+        """Return deliveries whose Matrix outcome is unknown, oldest first.
+
+        The cursor is honoured, because recovery relies on it to make
+        progress: a row it visits but does not acknowledge -- a failure, or a
+        placeholder its answer overtook -- must not come back on the next
+        page, or the scan never ends.
+        """
+        pending = sorted(
+            (row for row in self.rows.values() if row.acknowledged_event_id is None),
+            key=lambda row: (row.created_at_ns, row.turn_id, row.stage.value),
+        )
+        if after is not None:
+            pending = [row for row in pending if (row.created_at_ns, row.turn_id, row.stage.value) > after]
+        return tuple(pending[:limit])
+
+
+def make_outbox_mock() -> OutboxView:
+    """Return an outbox a delivery test can actually send through."""
+    return cast("OutboxView", FakeOutbox())
+
+
+class CrashError(RuntimeError):
+    """The process died here."""
+
+
+@dataclass
+class DiesAfterNextWriteCommit:
+    """An event-journal backend whose process ends as its next write commits.
+
+    The window a two-commit handoff opens is *between* commits, so a probe for
+    it has to sit at the commit boundary. A wrapper one layer up can only stop
+    between whole store calls, and would step straight over a store method that
+    quietly runs two write transactions of its own -- passing while the very
+    ordering it was written to forbid is back in production.
+    """
+
+    inner: "Backend"
+    armed: bool = False
+    # How many write transactions have committed through this view, so a test
+    # can say which side of a commit something else happened on.
+    commits: int = 0
+
+    @property
+    def dialect(self) -> "Dialect":
+        """Return the SQL spelling the wrapped backend uses."""
+        return self.inner.dialect
+
+    async def write[T](self, operation: "Operation[T]") -> T:
+        """Commit one write transaction, then die if this was the armed one."""
+        result = await self.inner.write(operation)
+        self.commits += 1
+        if self.armed:
+            self.armed = False
+            msg = "crashed the instant a write committed"
+            raise CrashError(msg)
+        return result
+
+    async def read[T](self, operation: "Operation[T]") -> T:
+        """Run one read transaction."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Do nothing: the wrapped backend outlives this view of it."""
+
+
+@dataclass
+class DiesAfterAcknowledgement:
+    """One principal's outbox, whose process ends as an outcome is recorded.
+
+    Only useful for boundaries that are one store call and one write, which
+    acknowledgement is. A crash between two writes inside a single store call
+    is invisible from here, so probing for that needs
+    ``DiesAfterNextWriteCommit`` instead.
+    """
+
+    inner: OutboxView
+
+    async def enqueue_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        """Record delivery intent."""
+        return await self.inner.enqueue_delivery(
+            turn_id=turn_id,
+            stage=stage,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            edits_event_id=edits_event_id,
+            settle_source_event_ids=settle_source_event_ids,
+        )
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
+
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before network I/O and return what to send."""
+        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+
+    async def record_sending_device(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        await self.inner.record_sending_device(turn_id=turn_id, stage=stage, device_id=device_id)
+
+    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Return one delivery without claiming it."""
+        return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
+
+    async def acknowledge_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> DeliveryAcknowledgement:
+        """Record the Matrix outcome, then die before anything else can run."""
+        await self.inner.acknowledge_delivery(
+            turn_id=turn_id,
+            stage=stage,
+            event_id=event_id,
+            terminal_turn=terminal_turn,
+        )
+        msg = "crashed the instant the outcome was recorded"
+        raise CrashError(msg)
+
+    async def unacknowledged_deliveries(
+        self,
+        *,
+        limit: int = 256,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[OutboxDelivery, ...]:
+        """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        return await self.inner.unacknowledged_deliveries(limit=limit, after=after)
+
+
+# Drops contract 2's journal handoff, for tests that are not about it. Named
+# rather than a bare lambda so a reader can see that the handoff was
+# deliberately stubbed here, not forgotten. Tests that care what the handoff
+# settles use a real journal store instead.
+ignore_final_delivery_handoff = TurnHandoff(
+    sources_for_turn=lambda _turn_id: (),
+    released=lambda _event_ids: None,
+)
+
+
+@dataclass
+class FakePendingTurnStore:
+    """A journal holding no unfinished work, for tests that are not about the replay guard.
+
+    The empty answer is the one that changes nothing: the degraded replay
+    guard acts only on positive proof, so a store with nothing pending never
+    suppresses a turn. Tests that are about the guard admit into a real journal
+    instead, because the filtering they exercise happens in SQL.
+    """
+
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,  # noqa: ARG002 - part of the view's shape
+        thread_id: str,  # noqa: ARG002 - part of the view's shape
+        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
+        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
+        limit: int = 256,  # noqa: ARG002 - part of the view's shape
+    ) -> tuple[JournalEvent, ...]:
+        """Return no unsettled events in this thread."""
+        return ()
+
+
+def make_pending_turn_view() -> PendingTurnView:
+    """Return a journal view that reports no unfinished work in any conversation."""
+    return cast("PendingTurnView", FakePendingTurnStore())
+
+
+@dataclass
+class FakeRelationStore:
+    """The journal's answer about which events it admitted, and their threads."""
+
+    threads: dict[str, str | None] = field(default_factory=dict)
+    asked: list[tuple[str, str]] = field(default_factory=list)
+    failure: Exception | None = None
+
+    async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+        """Return whether one event was admitted, and the thread it belongs to."""
+        self.asked.append((room_id, event_id))
+        if self.failure is not None:
+            raise self.failure
+        if event_id not in self.threads:
+            return False, None
+        return True, self.threads[event_id]
+
+
+def install_relation_lookup(
+    bot: object,
+    *,
+    threads: dict[str, str | None] | None = None,
+    client: object | None = None,
+    failure: Exception | None = None,
+) -> FakeRelationStore:
+    """Point one bot's resolver at a relation lookup a test controls.
+
+    Returns the journal stand-in so a test can assert what was asked of it.
+    `RelationLookup` is frozen, so the whole collaborator is replaced rather
+    than patched.
+    """
+    store = FakeRelationStore(threads=dict(threads or {}), failure=failure)
+    # The bot's own client unless a test says otherwise, so mocks a test already
+    # placed on it keep answering and keep being observable.
+    resolved_client = SimpleNamespace(client=client if client is not None else bot.client)  # type: ignore[attr-defined]
+    lookup = RelationLookup(
+        store=cast("RelationView", store),
+        runtime=resolved_client,  # type: ignore[arg-type]
+    )
+    bot._relations = lookup  # type: ignore[attr-defined]
+    # Tests wrap collaborators in a proxy, and setting `deps` on the wrapper
+    # would leave the resolver that actually runs holding its old ones.
+    resolver = unwrap_extracted_collaborator(bot._conversation_resolver)  # type: ignore[attr-defined]
+    resolver.deps = replace(resolver.deps, relations=lookup)
+    return store
+
+
+def make_relation_lookup(
+    *,
+    threads: dict[str, str | None] | None = None,
+    client: object | None = None,
+) -> RelationLookup:
+    """Return a real relation lookup over an in-memory set of admitted events.
+
+    The real object rather than a mock, so a caller that starts relying on the
+    journal-before-homeserver order, or on the per-turn memo, is tested against
+    the behaviour it will actually get. Without an explicit ``client`` the
+    homeserver serves a plain text event for any ID, which is what the old
+    cache double did.
+    """
+    resolved_client = SimpleNamespace(client=client) if client is not None else _serving_client()
+    return RelationLookup(
+        store=cast("RelationView", FakeRelationStore(threads=dict(threads or {}))),
+        runtime=resolved_client,  # type: ignore[arg-type]
     )
 
 
-def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
-    """Attach required cache runtime support to one test bot."""
-    if bot._runtime_view.event_cache is None:
-        bot.event_cache = make_event_cache_mock()
-    if bot._runtime_view.event_cache_write_coordinator is None:
-        bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
-    if bot._runtime_view.startup_thread_prewarm_registry is None:
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+def _serving_client() -> SimpleNamespace:
+    """Return a runtime whose homeserver answers any point lookup."""
+    client = MagicMock()
+    client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
+    return SimpleNamespace(client=client)
+
+
+def make_latest_thread_event_id_mock(projected: str | None = None) -> AsyncMock:
+    """Return a reply-fallback stand-in that follows the real precedence.
+
+    A double that answered one fixed value would let a caller stop passing
+    ``known_latest_thread_event_id`` -- or start passing one where a deliberate
+    reply target already decided the answer -- and still pass. ``projected`` is
+    what the projection would report; without it, an empty thread answers with
+    its own root, exactly as the real reader does.
+    """
+
+    async def _answer(
+        *,
+        room_id: str,  # noqa: ARG001 - part of the signature under test
+        thread_id: str | None,
+        reply_to_event_id: str | None = None,
+        existing_event_id: str | None = None,
+        known_latest_thread_event_id: str | None = None,
+    ) -> str | None:
+        if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
+            return None
+        return known_latest_thread_event_id or projected or thread_id
+
+    return AsyncMock(side_effect=_answer)
+
+
+def make_conversation_reader_mock() -> ConversationReader:
+    """Return a reader shaped like the projection one, serving an empty conversation."""
+    page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
+            read=AsyncMock(return_value=page),
+            read_strict=AsyncMock(return_value=page),
+            latest_thread_event_id=AsyncMock(return_value=None),
+        ),
+    )
+
+
+def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
+    """Pin the journal identity a test bot certifies its sync checkpoints against.
+
+    The real generation is a fresh UUID per database, so a test that saves a
+    checkpoint and restarts would exercise the first-open mint rejecting it
+    rather than the token logic it means to test.
+    """
+    bot._sync_checkpoint_trust.store_generation = "test-store-generation"
     sync_bot_runtime_state(bot)
     return bot
 
@@ -1092,12 +1639,9 @@ def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) 
     persist_entity_accounts(config, runtime_paths)
 
 
-def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:
-    """Give a config mock the cache path contract used by orchestrator init."""
-    cache_path = runtime_root / "event_cache.db"
-    mock_config.cache.backend = "sqlite"
-    mock_config.cache.resolve_db_path.return_value = cache_path
-    return cache_path
+def bind_mock_config_event_journal(mock_config: MagicMock) -> None:
+    """Give a config mock the durable-store contract the bot runtime reads."""
+    mock_config.event_journal.backend = "sqlite"
 
 
 def runtime_paths_for(config: Config) -> RuntimePaths:
@@ -1329,7 +1873,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
     """Rebuild the edit regenerator after swapping captured collaborators."""
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator_field_names = set(regenerator.deps.__dataclass_fields__)
     rebuilt_changes = {
@@ -1371,7 +1915,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     controller_field_names = set(controller.deps.__dataclass_fields__)
     rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
     default_collaborators = {
-        "conversation_cache": "_conversation_cache",
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
         "command_executor": "_command_turn_executor",
@@ -1449,7 +1992,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             "runtime_paths",
             "agent_name",
             "normalizer",
-            "conversation_cache",
             "turn_policy",
             "turn_store",
             "visible_responses",
@@ -1463,7 +2005,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
             agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
             normalizer=rebuilt_changes["normalizer"],
-            conversation_cache=rebuilt_changes["conversation_cache"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
             visible_responses=rebuilt_changes["visible_responses"],
@@ -1493,7 +2034,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         agent_name=rebuilt.deps.agent_name,
         turn_policy=rebuilt.deps.turn_policy,
         turn_store=rebuilt.deps.turn_store,
-        conversation_cache=rebuilt.deps.conversation_cache,
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=rebuilt.deps.ingress,
         stop_manager=bot.stop_manager,
@@ -1736,6 +2276,55 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+_LEDGER_LOADING_TEST_MODULES = frozenset(
+    {
+        "test_handled_turns.py",
+        "test_turn_store.py",
+        "test_user_stop_convergence.py",
+    },
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_handled_turn_ledger_state(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Give every test a cold handled-turn map, pre-warmed where startup is skipped.
+
+    The map is process-global and ``load`` fills it once per process. Left over
+    from a previous test it would satisfy that check, so a ledger opened onto a
+    fresh database would answer from the previous test's records and never read
+    its own.
+
+    Production warms the ledger during startup and every read refuses until it
+    has. Most tests build a bot and drive its callbacks directly without ever
+    reaching startup, and their database is empty, so starting the map loaded
+    is exactly the state warming it would produce.
+
+    A test whose database is *not* empty must opt out, with the
+    ``ledger_loads_from_disk`` marker or by living in one of the modules
+    below, and warm for real -- pre-warming would leave it answering from an
+    empty map while the rows it cares about sit unread.
+    """
+    _reset_handled_turn_ledger_runtime()
+    loads_from_disk = (
+        request.node.path.name in _LEDGER_LOADING_TEST_MODULES
+        or request.node.get_closest_marker("ledger_loads_from_disk") is not None
+    )
+    if not loads_from_disk:
+        shared_ledger_state = handled_turns_module._shared_ledger_state
+
+        def pre_warmed_ledger_state(*state_key: str) -> handled_turns_module._LedgerState:
+            state = shared_ledger_state(*state_key)
+            state.loaded = True
+            return state
+
+        monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
+    yield
+    _reset_handled_turn_ledger_runtime()
 
 
 @pytest.fixture(autouse=True)

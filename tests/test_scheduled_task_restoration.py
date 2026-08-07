@@ -16,7 +16,7 @@ from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -38,7 +38,7 @@ class TestScheduledTaskRestoration:
 
     @staticmethod
     def _install_runtime_support(bot: AgentBot) -> AgentBot:
-        return install_runtime_cache_support(bot)
+        return install_runtime_journal_support(bot)
 
     @pytest.mark.asyncio
     async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
@@ -109,8 +109,7 @@ class TestScheduledTaskRestoration:
                 "lobby",
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot._conversation_reader,
             )
 
     @pytest.mark.asyncio
@@ -210,8 +209,7 @@ class TestScheduledTaskRestoration:
             "lobby",
             config,
             runtime_paths_for(config),
-            router_bot.event_cache,
-            router_bot._conversation_cache,
+            router_bot._conversation_reader,
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
@@ -254,8 +252,7 @@ class TestScheduledTaskRestoration:
                 router_bot.client,
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot._conversation_reader,
             )
 
             await router_bot._on_sync_response(MagicMock())
