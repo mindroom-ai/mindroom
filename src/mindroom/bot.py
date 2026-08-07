@@ -131,7 +131,6 @@ from .matrix.room_member_joins import (
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
-from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -346,7 +345,6 @@ class AgentBot:
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
-    _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
     _visible_voice_echo: VisibleVoiceEchoLifecycle
     _tool_runtime_support: ToolRuntimeSupport
@@ -675,12 +673,6 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 turn_store=self._turn_store,
                 turn_policy=self._turn_policy,
-            ),
-        )
-        self._redacted_turn_cleanup = RedactedTurnCleanup(
-            RedactedTurnCleanupDeps(
-                conversation_cache=self._conversation_cache,
-                turn_store=self._turn_store,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
@@ -2406,10 +2398,15 @@ class AgentBot:
             if early_reservation_owner is not None:
                 await early_reservation_owner.release()
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
-        """Persist one redaction before updating advisory cache state."""
+    async def _on_redaction(self, _room: nio.MatrixRoom, event: nio.Event) -> None:
+        """Tombstone the redacted source so no replay reruns the turn it started.
+
+        The projection learns about the redaction through journal admission, so
+        this owes only the durable tombstone. Raising leaves the callback
+        unaccepted and the source available for sync to redeliver.
+        """
         assert isinstance(event, nio.RedactionEvent)
-        await self._redacted_turn_cleanup.handle(room, event)
+        await asyncio.to_thread(self._turn_store.mark_source_redacted, event.redacts)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""

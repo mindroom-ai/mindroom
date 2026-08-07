@@ -2947,7 +2947,6 @@ depends_on = [
     "mindroom.memory",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
-    "mindroom.redacted_turn_cleanup",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling",
@@ -2965,11 +2964,6 @@ depends_on = [
     "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
-
-[[modules]]
-path = "mindroom.redacted_turn_cleanup"
-depends_on = []
-visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.cli"

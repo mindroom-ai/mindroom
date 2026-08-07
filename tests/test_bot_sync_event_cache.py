@@ -1631,86 +1631,40 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert event_cache.store_events_batch.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_live_redaction_callback_removes_persisted_lookup_event(self, bot: AgentBot) -> None:
-        """Live redaction callbacks should remove point-lookup cache entries."""
-        support = await _bind_owned_runtime_support(bot)
-        assert bot.event_cache
-
-        try:
-            await bot.event_cache.store_event(
-                "$thread_msg:localhost",
-                "!test:localhost",
-                {
-                    "event_id": "$thread_msg:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
-                    },
-                },
-            )
-            room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
-            redaction_event = MagicMock(spec=nio.RedactionEvent)
-            redaction_event.event_id = "$redaction:localhost"
-            redaction_event.redacts = "$thread_msg:localhost"
-            redaction_event.sender = "@user:localhost"
-            redaction_event.server_timestamp = 1234567891
-            redaction_event.source = {
-                "content": {},
-                "event_id": "$redaction:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567891,
-                "redacts": "$thread_msg:localhost",
-                "room_id": "!test:localhost",
-                "type": "m.room.redaction",
-            }
-
-            await bot._on_redaction(room, redaction_event)
-            cached_event = await bot.event_cache.get_event("!test:localhost", "$thread_msg:localhost")
-        finally:
-            await _close_bound_runtime_support(bot, support)
-
-        assert cached_event is None
-
-    @pytest.mark.asyncio
-    async def test_live_redaction_callback_delegates_to_cleanup(self, bot: AgentBot) -> None:
-        """The bot should await durable tombstoning and advisory cache cleanup."""
+    async def test_live_redaction_tombstones_the_source_it_names(self, bot: AgentBot) -> None:
+        """The redaction callback owes exactly one thing: the durable tombstone."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.redacts = "$source:localhost"
 
         with patch.object(
-            bot._redacted_turn_cleanup,
-            "handle",
-            AsyncMock(),
-        ) as handle:
+            bot._turn_store,
+            "mark_source_redacted",
+        ) as mark_source_redacted:
             await bot._on_redaction(room, redaction_event)
 
-        handle.assert_awaited_once_with(room, redaction_event)
+        mark_source_redacted.assert_called_once_with("$source:localhost")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure", [RuntimeError("persist failed"), RuntimeError("cache failed")])
     async def test_live_redaction_failure_does_not_rewind_raw_sync_position(
         self,
         bot: AgentBot,
-        failure: RuntimeError,
     ) -> None:
         """Durable exact work, not raw token rewind, owns redaction retry."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
+        redaction_event.redacts = "$source:localhost"
         _save_certified_sync_token(bot, "s_before_redaction")
         bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_redaction")
         bot.client.next_batch = "s_after_redaction"
 
         with (
             patch.object(
-                bot._redacted_turn_cleanup,
-                "handle",
-                AsyncMock(side_effect=failure),
+                bot._turn_store,
+                "mark_source_redacted",
+                side_effect=RuntimeError("persist failed"),
             ),
-            pytest.raises(RuntimeError, match=str(failure)),
+            pytest.raises(RuntimeError, match="persist failed"),
         ):
             await bot._on_redaction(room, redaction_event)
 
