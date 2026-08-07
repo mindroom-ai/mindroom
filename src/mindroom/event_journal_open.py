@@ -36,9 +36,10 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom import constants
+from mindroom.durable_write import write_json_file_durable
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.probe import probe_postgres_generation, probe_sqlite_generation
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 BINDING_FILENAME = "event_journal_binding.json"
+BINDING_LOCK_FILENAME = "event_journal_binding.lock"
 
 # Keyed by config path rather than by the whole runtime context: the runtime
 # context carries the resolution environment, which is not part of which
@@ -177,6 +179,19 @@ def event_journal_binding_path(storage_path: Path) -> Path:
     return storage_path / "tracking" / BINDING_FILENAME
 
 
+def event_journal_binding_lock_path(storage_path: Path) -> Path:
+    """Return the lock that makes deciding and publishing a binding one step.
+
+    Reading the binding, minting a generation, and publishing it are three
+    operations against two different stores, and a first bind awaits a database
+    write in the middle. Two processes interleaving there both come back
+    successful, each certain of a different generation, and only the binding
+    written last survives -- so the loser spends its life writing into a
+    database this install is not bound to.
+    """
+    return storage_path / "tracking" / BINDING_LOCK_FILENAME
+
+
 def read_event_journal_binding(storage_path: Path) -> EventJournalBinding | None:
     """Return the recorded binding, or ``None`` when this install has never bound one.
 
@@ -207,15 +222,29 @@ def read_event_journal_binding(storage_path: Path) -> EventJournalBinding | None
 
 
 def write_event_journal_binding(storage_path: Path, binding: EventJournalBinding) -> None:
-    """Record the journal this install is bound to, replacing any previous binding."""
-    path = event_journal_binding_path(storage_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps({"generation": binding.generation, "database": binding.database}, indent=2) + "\n",
-        encoding="utf-8",
+    """Publish the journal this install is bound to, replacing any previous binding.
+
+    Durable rather than merely renamed. A binding that comes back from a crash
+    truncated is refused at startup, which turns a power cut during a bind into
+    an install that will not start, so the content reaches the disk before the
+    rename that publishes it and the rename reaches the disk before this
+    returns. The temporary file gets a unique name for the same reason a lock
+    exists: a fixed one is shared state, and two processes publishing at once
+    would each rename whatever the other had half-written into it.
+
+    Assumes the storage root behaves like a POSIX filesystem: ``rename`` over
+    an existing name is atomic, and ``fsync`` reaches stable storage. That
+    holds for local disks and for an NFSv4 mount. It does not assume more than
+    one machine writes this file -- the advisory lock that serializes
+    read-decide-publish is per host, so two hosts sharing one storage root over
+    a network filesystem are outside what this guarantees.
+    """
+    write_json_file_durable(
+        event_journal_binding_path(storage_path),
+        {"generation": binding.generation, "database": binding.database},
+        indent=2,
+        trailing_newline=True,
     )
-    constants.safe_replace(tmp_path, path)
 
 
 def clear_event_journal_binding(storage_path: Path) -> bool:
@@ -344,29 +373,32 @@ async def bind_event_journal(
     async moment here, so this is where they find out.
     """
     description = describe_event_journal(journal_config, runtime_paths)
-    binding = read_event_journal_binding(storage_path)
-    if binding is None:
-        generation = await store.generation(new_generation=uuid.uuid4().hex)
-        write_event_journal_binding(
-            storage_path,
-            EventJournalBinding(generation=generation, database=description),
+    async with async_exclusive_file_lock(event_journal_binding_lock_path(storage_path)):
+        binding = read_event_journal_binding(storage_path)
+        if binding is None:
+            generation = await store.generation(new_generation=uuid.uuid4().hex)
+            write_event_journal_binding(
+                storage_path,
+                EventJournalBinding(generation=generation, database=description),
+            )
+            logger.info("event_journal_bound", database=description)
+            return generation
+        return _refuse_foreign_generation(
+            await store.existing_generation(),
+            binding=binding,
+            description=description,
         )
-        logger.info("event_journal_bound", database=description)
-        return generation
-    return _refuse_foreign_generation(
-        await store.existing_generation(),
-        binding=binding,
-        description=description,
-    )
 
 
 __all__ = [
     "BINDING_FILENAME",
+    "BINDING_LOCK_FILENAME",
     "EventJournalBinding",
     "EventJournalBindingError",
     "bind_event_journal",
     "clear_event_journal_binding",
     "describe_event_journal",
+    "event_journal_binding_lock_path",
     "event_journal_binding_path",
     "event_journal_sqlite_path",
     "open_event_journal_store",

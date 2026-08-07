@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -194,6 +195,84 @@ class TestBindingRefusal:
 
         with pytest.raises(EventJournalBindingError):
             await _open_and_bind(runtime_paths)
+
+
+class TestPublishingABindingIsOneStep:
+    """Deciding and publishing must not be two steps with a database write between them."""
+
+    @pytest.mark.parametrize("attempt", range(5))
+    def test_concurrent_publishers_do_not_share_a_temporary_file(self, tmp_path: Path, attempt: int) -> None:
+        """The advisory lock is per host and advisory; the write has to stand on its own.
+
+        A publisher that stages its content through one fixed temporary name
+        shares that name with every other publisher. They truncate each other's
+        half-written file, and then rename whatever is left over the real one --
+        which leaves either an exception or a binding no one can parse, and an
+        unparseable binding is refused at the next start.
+        """
+        del attempt
+        storage_path = tmp_path / "storage"
+        published = [
+            EventJournalBinding(generation=f"generation-{index}" * 20, database=f"database-{index}" * 20)
+            for index in range(6)
+        ]
+        failures: list[Exception] = []
+        # Started together rather than merely started, so the overlap being
+        # tested does not depend on how the scheduler feels about this machine.
+        ready = threading.Barrier(len(published))
+
+        def publish(binding: EventJournalBinding) -> None:
+            ready.wait()
+            try:
+                write_event_journal_binding(storage_path, binding)
+            except Exception as exc:  # noqa: BLE001 - the assertion below is what reports it
+                failures.append(exc)
+
+        writers = [threading.Thread(target=publish, args=(binding,)) for binding in published]
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            writer.join()
+
+        assert failures == [], "a publisher must not be tripped by another publisher's temporary file"
+        assert read_event_journal_binding(storage_path) in published
+
+    @pytest.mark.asyncio
+    async def test_two_first_binds_racing_cannot_both_come_back_bound(self, tmp_path: Path) -> None:
+        """Reading no binding, minting, and publishing has an await in the middle.
+
+        Two starts that reach that await together each read "unbound", each
+        mint their own generation, and each publish. Both are told they may
+        proceed, only the last binding survives, and the loser then spends its
+        life writing into a database this install is not bound to. One of them
+        has to lose, and has to be told.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        journal_config = load_config(runtime_paths).event_journal
+        first = EventJournalStore.open_sqlite(tmp_path / "first.db")
+        second = EventJournalStore.open_sqlite(tmp_path / "second.db")
+
+        async def bind(store: EventJournalStore) -> str:
+            return await bind_event_journal(
+                store,
+                journal_config=journal_config,
+                runtime_paths=runtime_paths,
+                storage_path=runtime_paths.storage_root,
+            )
+
+        try:
+            outcomes = await asyncio.gather(bind(first), bind(second), return_exceptions=True)
+        finally:
+            await first.close()
+            await second.close()
+
+        bound = [outcome for outcome in outcomes if isinstance(outcome, str)]
+        refused = [outcome for outcome in outcomes if isinstance(outcome, EventJournalBindingError)]
+        assert len(bound) == 1, f"exactly one of two racing first binds may succeed, got {outcomes}"
+        assert len(refused) == 1, f"the loser has to hear about it, got {outcomes}"
+        binding = read_event_journal_binding(runtime_paths.storage_root)
+        assert binding is not None
+        assert binding.generation == bound[0], "the published binding must be the one the winner returned"
 
 
 def _identity_only_sqlite(database_path: Path, generation: str) -> None:

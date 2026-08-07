@@ -133,7 +133,12 @@ visibility = [
 
 [[modules]]
 path = "mindroom.event_journal_open"
-depends_on = ["mindroom.constants", "mindroom.event_journal", "mindroom.logging_config"]
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.event_journal",
+    "mindroom.file_locks",
+    "mindroom.logging_config",
+]
 visibility = [
     "mindroom.api.config_lifecycle",
     "mindroom.bot",
