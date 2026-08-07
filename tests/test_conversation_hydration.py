@@ -497,6 +497,31 @@ class TestThreadHydration:
 
         assert client.relation_calls == 1
 
+    async def test_a_reader_that_reaches_the_walk_late_does_not_walk_again(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reader that arrives at the walk after another finished it does not walk again.
+
+        The sibling above races five readers and so only catches this when the
+        scheduler happens to cooperate. This one reproduces the losing ordering
+        directly. ``ensure_hydrated`` checks the marker before it awaits, but it
+        awaits twice more before starting the walk, and ``_shared`` can only join
+        a task it can still see -- a finished one has already been dropped. So the
+        last arrival reaches the walk itself, and the durable marker is what has
+        to stop it.
+        """
+        client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": []})
+        hydrate = hydrator(alice, client)
+
+        await hydrate.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert client.relation_calls == 1
+
+        await hydrate._hydrate(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls == 1
+        assert await bodies(alice, "$root") == ["root"]
+
     async def test_a_server_that_ignores_recurse_fails_the_read(
         self,
         alice: PrincipalStore,

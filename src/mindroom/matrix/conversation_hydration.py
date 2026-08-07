@@ -293,6 +293,16 @@ class ConversationHydrator:
                 del running[key]
 
     async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
+        if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
+            # A concurrent reader finished this walk while this one was still on
+            # its way here. `ensure_hydrated` checks the marker before it awaits
+            # anything, but it awaits twice afterwards, and `_shared` can only
+            # join a task it can still see -- a finished one has already been
+            # dropped. So the durable marker is rechecked here, where it is the
+            # last word, rather than trusting arrival order to a walk that costs
+            # server requests. This is the contract, not an optimization: a
+            # conversation is hydrated at most once per membership epoch.
+            return
         epoch = await self.store.membership_epoch(room_id)
         walk = (
             await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
