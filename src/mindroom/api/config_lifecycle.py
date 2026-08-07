@@ -27,6 +27,7 @@ from mindroom.config.yaml_includes import (
     partial_source_files,
     source_files_fingerprint,
 )
+from mindroom.event_journal_change import refuses_event_journal_change
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -472,6 +473,24 @@ def _published_snapshot(
     )
 
 
+def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> None:
+    """Reject a write that moves the journal this process already opened.
+
+    Told rather than dropped: the write also persists the config file, so
+    silently ignoring the journal field would save a file the runtime disagrees
+    with and report success for a change that never happened.
+    """
+    if not refuses_event_journal_change(current.runtime_config, candidate, refused_by="api_config_write"):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "event_journal cannot change while MindRoom is running. "
+            "Stop the process, change event_journal, then start it again."
+        ),
+    )
+
+
 def _stale_snapshot_error() -> HTTPException:
     """Return the shared stale-write error used when state changed mid-request."""
     return HTTPException(
@@ -530,6 +549,7 @@ def _commit_mutated_snapshot[T](
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
+        _raise_if_event_journal_changed(current, validated_config)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -589,6 +609,7 @@ def _commit_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
+        _raise_if_event_journal_changed(current, validated_config)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -623,6 +644,7 @@ def _commit_raw_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
+        _raise_if_event_journal_changed(current, validated_config)
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
@@ -769,6 +791,16 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
+        if runtime_config is not None and refuses_event_journal_change(
+            current.runtime_config,
+            runtime_config,
+            refused_by="api_config_publish",
+        ):
+            # Publishing it would advance the generation for a change the
+            # orchestrator refuses to apply, and everything bound to the
+            # generation it was published at -- external trigger delivery --
+            # would start rejecting work against a runtime that never changed.
+            return False
         same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
         # A failed load publishes the union of the last good source set and the
         # files the failed attempt read, so the watcher never loses last-good
@@ -795,7 +827,14 @@ def _publish_runtime_config_into_app(
     runtime_paths: constants.RuntimePaths,
     api_app: FastAPI,
 ) -> bool:
-    """Publish one already-validated runtime config into one API app's committed cache."""
+    """Publish one already-validated runtime config into one API app's committed cache.
+
+    No event-journal rule here, unlike the disk loader and the write paths: this
+    publishes what the orchestrator has already adopted, so the journal it names
+    is the one actually open. Refusing it would reject the very publish that
+    makes the API agree with the runtime after a startup where the two read the
+    config file at different moments.
+    """
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()

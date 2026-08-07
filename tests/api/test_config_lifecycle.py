@@ -8,7 +8,7 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 import copy
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -363,6 +363,101 @@ class TestExternalWriterPublishing:
         assert after.config_data["agents"]["test_agent"]["role"] == "Updated by an external writer"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk == after.config_data
+
+
+class TestEventJournalChangeRefusal:
+    """A journal move must be refused by every config authority in the process, not just one."""
+
+    JOURNAL_MOVE: ClassVar[dict[str, str]] = {
+        "backend": "postgres",
+        "database_url": "postgresql://localhost/journal",
+    }
+
+    @staticmethod
+    async def _never_ready(_delivery_snapshot: object) -> bool:
+        return False
+
+    def _bind_trigger_runtime(self, api_app: FastAPI) -> config_lifecycle.ExternalTriggerRuntime:
+        """Bind trigger delivery exactly as the orchestrator does, pinning today's generation."""
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.bind_external_trigger_runtime(
+            api_app,
+            client=object(),
+            conversation_reader=object(),
+            is_trigger_snapshot_ready=self._never_ready,
+        )
+        runtime = config_lifecycle.app_state(api_app).external_trigger_runtime
+        assert runtime is not None
+        return runtime
+
+    def test_refused_journal_change_leaves_trigger_runtime_on_the_live_generation(
+        self,
+        loaded_app: FastAPI,
+    ) -> None:
+        """The API publisher refuses the same journal move the orchestrator refuses.
+
+        The orchestrator keeps the store it opened and returns without
+        resyncing or rebinding the API. If this loader published the change
+        anyway, the generation would advance past the runtime binding and every
+        external trigger would 503 until the next successful reload or a
+        restart.
+        """
+        before = _snapshot(loaded_app)
+        bound = self._bind_trigger_runtime(loaded_app)
+        assert bound.config_generation == before.generation
+
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = dict(self.JOURNAL_MOVE)
+        _write_config(before.runtime_paths.config_path, moved)
+
+        published = config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app)
+
+        after = _snapshot(loaded_app)
+        assert after.generation == bound.config_generation, (
+            "the API published a generation for a journal change the runtime refused, "
+            "stranding external trigger delivery on the old binding"
+        )
+        assert published is False
+        assert after.runtime_config is before.runtime_config
+        assert after.runtime_config is not None
+        assert after.runtime_config.event_journal.backend == "sqlite"
+
+    def test_committed_write_that_moves_the_journal_is_rejected(self, loaded_app: FastAPI) -> None:
+        """A dashboard save carrying a journal move is refused instead of silently dropped."""
+        before = _snapshot(loaded_app)
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = dict(self.JOURNAL_MOVE)
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_committed_config(
+                _request_for(loaded_app),
+                moved,
+                error_prefix="test replace",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert _snapshot(loaded_app) is before
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
+
+    def test_raw_source_write_that_moves_the_journal_is_rejected(self, loaded_app: FastAPI) -> None:
+        """The raw YAML editor is the widest door onto event_journal, so it carries the rule too."""
+        before = _snapshot(loaded_app)
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = dict(self.JOURNAL_MOVE)
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_raw_config_source(
+                _request_for(loaded_app),
+                yaml.dump(moved),
+                error_prefix="test raw replace",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert _snapshot(loaded_app) is before
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
 
 
 class TestConcurrencySmoke:
