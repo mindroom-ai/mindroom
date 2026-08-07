@@ -2630,6 +2630,8 @@ async def test_a_decision_no_row_takes_is_never_shown_or_acted_on(tmp_path: Path
     decision = await task
 
     editor.assert_not_awaited()
+    # The click is still this bot's to swallow; what it must not do is resolve.
+    assert result.consumed is True
     assert result.resolved is False
     assert decision.status == "expired"
     assert cards.resolutions == {}
@@ -2683,6 +2685,7 @@ async def test_a_decision_the_row_already_holds_is_not_replaced_or_reshown(tmp_p
     decision = await task
 
     editor.assert_not_awaited()
+    assert result.consumed is True
     assert result.resolved is False
     assert decision.status == "expired"
     assert cards.resolutions["$approval"]["status"] == "approved"
@@ -2733,6 +2736,9 @@ async def test_a_card_no_row_backs_is_taken_back_before_anyone_can_click_it(tmp_
         reason=None,
     )
 
+    # A retired card is still one this process sent, so the click is swallowed
+    # rather than falling through to a handler that has never heard of it.
+    assert clicked.consumed is True
     assert clicked.resolved is False
     assert cards.resolutions == {}
     assert editor.await_count == 1
