@@ -904,6 +904,71 @@ async def test_a_cancelled_failed_write_stops_claiming_the_turn_was_handled(
     assert await _read_persisted_records(journal_store, "test_cancelled_failed_write") == {}
 
 
+@dataclass(frozen=True, slots=True)
+class _CommittingWriteStore(TurnRecordStore):
+    """A record store whose write stays open until the test lets it commit for real."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def upsert(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> None:
+        """Hold the write open, then let it land exactly as the real one would."""
+        self.started.set()
+        await self.released.wait()
+        await super().upsert(
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_committed_write_keeps_claiming_the_turn_was_handled(
+    journal_store: EventJournalStore,
+) -> None:
+    """A write that committed after its caller was cancelled must keep its publication.
+
+    Cancelling the await does not cancel the write. The backend hands the
+    statement to a worker that outlives the await, so the transaction commits
+    while the caller is already unwinding. Rolling the publication back on the
+    strength of the cancellation alone therefore erases a record the database
+    holds: this process reports the source unhandled and answers the same
+    message a second time, which is the exact outcome publishing before the
+    commit exists to prevent.
+
+    The rollback is only correct for a write that reported failure, so this
+    pairs with the failed-write test above: between them they pin both answers
+    the branch can give.
+    """
+    records = _CommittingWriteStore(_backend=journal_store.backend, _agent_name="test_cancelled_committed_write")
+    ledger = HandledTurnLedger("test_cancelled_committed_write", records=records)
+    await ledger.load()
+
+    recording = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$event"], response_event_id="$response")),
+    )
+    await records.started.wait()
+    recording.cancel()
+    # One turn of the loop, so the cancellation lands while the write is still
+    # open rather than after it has already committed.
+    await asyncio.sleep(0)
+    records.released.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await recording
+
+    persisted = await _read_persisted_records(journal_store, "test_cancelled_committed_write")
+    assert persisted["$event"]["response_event_id"] == "$response", "the write did land, so there is a claim to keep"
+    assert ledger.has_responded("$event")
+    assert _get_response_event_id(ledger, "$event") == "$response"
+
+
 @pytest.mark.asyncio
 async def test_discovery_alias_persists_without_becoming_a_coalesced_source(
     journal_store: EventJournalStore,
