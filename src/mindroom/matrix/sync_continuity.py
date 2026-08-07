@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
-_RECORD_VERSION = "mindroom-sync-continuity-v2"
+_RECORD_VERSION = "mindroom-sync-continuity-v3"
 
 
 @dataclass(frozen=True)

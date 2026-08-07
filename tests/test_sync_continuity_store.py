@@ -16,14 +16,23 @@ from mindroom.matrix.sync_token_values import SyncCheckpoint
 if TYPE_CHECKING:
     from pathlib import Path
 
-_GENERATION = "cache-generation"
+_GENERATION = "store-generation"
 
-# The exact bytes earlier versions wrote, captured before `SyncCheckpoint` moved
-# out of the certification module. Real deployments hold records in this shape,
-# so it is a durable format rather than an implementation detail of whichever
-# module currently declares the type.
+# The exact bytes this version writes, pinned so the durable format stays a
+# deliberate choice: renaming a key, reordering keys, or dropping the trailing
+# newline has to be changed here too, in both directions.
 _PERSISTED_RECORD_BYTES = (
-    '{"checkpoint": {"store_generation": "cache-generation", "token": "s_saved"}, '
+    '{"checkpoint": {"store_generation": "store-generation", "token": "s_saved"}, '
+    '"pending_join_decrypt_fences": ["!pending:localhost"], '
+    '"revision": 2, "version": "mindroom-sync-continuity-v3"}\n'
+)
+
+# The exact bytes the version before the checkpoint-generation rename wrote,
+# captured by running that revision's own `SyncContinuityStore` through the
+# operations below. Its checkpoint key was `cache_generation`, so the shape is
+# incompatible with the reader here and the record version says so.
+_PRE_RENAME_RECORD_BYTES = (
+    '{"checkpoint": {"cache_generation": "store-generation", "token": "s_saved"}, '
     '"pending_join_decrypt_fences": ["!pending:localhost"], '
     '"revision": 2, "version": "mindroom-sync-continuity-v2"}\n'
 )
@@ -40,8 +49,8 @@ _PERSISTED_RECORD = SyncContinuityRecord(
 )
 
 
-def test_a_record_written_by_an_earlier_version_still_loads(tmp_path: Path) -> None:
-    """Checkpoints already on disk must survive the type moving modules."""
+def test_the_pinned_record_bytes_decode_to_the_expected_record(tmp_path: Path) -> None:
+    """The durable format must decode to exactly the record it claims to hold."""
     path = tmp_path / "sync_continuity" / "code.json"
     path.parent.mkdir(parents=True)
     path.write_text(_PERSISTED_RECORD_BYTES, encoding="utf-8")
@@ -49,8 +58,8 @@ def test_a_record_written_by_an_earlier_version_still_loads(tmp_path: Path) -> N
     assert SyncContinuityStore(tmp_path, "code").load() == _PERSISTED_RECORD
 
 
-def test_saving_a_checkpoint_writes_the_same_bytes_it_always_did(tmp_path: Path) -> None:
-    """A checkpoint saved now must be readable by any version that reads the old shape."""
+def test_saving_a_checkpoint_writes_the_pinned_record_bytes(tmp_path: Path) -> None:
+    """Encoding must stay byte-identical to the format the decoder is pinned against."""
     store = SyncContinuityStore(tmp_path, "code")
 
     store.update_join_fences(add={"!pending:localhost"})
@@ -59,6 +68,16 @@ def test_saving_a_checkpoint_writes_the_same_bytes_it_always_did(tmp_path: Path)
     written = (tmp_path / "sync_continuity" / "code.json").read_text(encoding="utf-8")
     assert written == _PERSISTED_RECORD_BYTES
     assert store.load() == _PERSISTED_RECORD
+
+
+def test_a_record_written_before_the_generation_rename_fails_closed(tmp_path: Path) -> None:
+    """The superseded checkpoint shape must be refused, not read as trusted continuity."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(_PRE_RENAME_RECORD_BYTES, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unsupported version"):
+        SyncContinuityStore(tmp_path, "code").load()
 
 
 def test_classic_acceptance_atomically_advances_checkpoint_and_clears_join_fence(
@@ -228,23 +247,23 @@ def test_each_changed_record_gets_monotonic_revision_under_store_lock(
         '{"version":"mindroom-sync-continuity-v1","checkpoint":"bad","pending_join_decrypt_fences":[]}',
         "not json",
         (
-            '{"version":"mindroom-sync-continuity-v2","revision":true,'
+            '{"version":"mindroom-sync-continuity-v3","revision":true,'
             '"checkpoint":null,"pending_join_decrypt_fences":[]}'
         ),
         (
-            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '{"version":"mindroom-sync-continuity-v3","revision":0,'
             '"checkpoint":{"token":"s1"},"pending_join_decrypt_fences":[]}'
         ),
         (
-            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '{"version":"mindroom-sync-continuity-v3","revision":0,'
             '"checkpoint":null,"pending_join_decrypt_fences":["!room:localhost","!room:localhost"]}'
         ),
         (
-            '{"version":"mindroom-sync-continuity-v2","revision":0,'
+            '{"version":"mindroom-sync-continuity-v3","revision":0,'
             '"checkpoint":null,"pending_join_decrypt_fences":[],"extra":true}'
         ),
         (
-            '{"version":"mindroom-sync-continuity-v3","revision":0,'
+            '{"version":"mindroom-sync-continuity-v4","revision":0,'
             '"checkpoint":null,"pending_join_decrypt_fences":[],'
             '"unsettled_recovery_room_ids":["!room:localhost","!room:localhost"]}'
         ),

@@ -789,7 +789,7 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         },
         "pending_join_decrypt_fences": [],
         "revision": 1,
-        "version": "mindroom-sync-continuity-v2",
+        "version": "mindroom-sync-continuity-v3",
     }
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     checkpoint = load_sync_checkpoint(tmp_path, "code")
