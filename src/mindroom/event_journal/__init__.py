@@ -11,6 +11,7 @@ from .approvals import RecordedApprovalDecision, StoredApprovalCard
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
+    TURN_BACKED_KINDS,
     AdmissionResult,
     ConversationCursor,
     ConversationPage,
@@ -45,6 +46,7 @@ from .views import (
 )
 
 __all__ = [
+    "TURN_BACKED_KINDS",
     "AdmissionResult",
     "AdmissionView",
     "ApprovalView",

@@ -21,6 +21,7 @@ from mindroom.logging_config import get_logger
 
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
+    TURN_BACKED_KINDS,
     AdmissionResult,
     DepartureObservation,
     DepartureOutcome,
@@ -435,7 +436,7 @@ def pending_thread_events_after(
     excluding_event_id: str,
     limit: int,
 ) -> tuple[JournalEvent, ...]:
-    """Return unsettled events in one thread newer than a timestamp, oldest first.
+    """Return unsettled turn-backed events in one thread newer than a timestamp, oldest first.
 
     The set a replay guard asks about: work this bot accepted in the
     conversation it is about to answer and has not finished. Restricting it to
@@ -444,23 +445,37 @@ def pending_thread_events_after(
     anyway, because an event that already settled will never produce the turn
     that would supersede an older one.
 
+    Restricting it to ``TURN_BACKED_KINDS`` is the same argument one step
+    further: pending means unfinished, not *will answer*. Thread membership is
+    derived from content for every kind alike -- ``inbound_event`` calls
+    ``thread_root`` regardless of kind -- so a reaction, an approval, or an
+    ``m.room.encrypted`` event this bot could not decrypt can all sit pending
+    in a thread under the requester's own sender. None of them will produce a
+    response, so counting one as a newer unanswered turn drops the older
+    message and answers neither. Only a message or a media event can become
+    the turn that legitimately supersedes another.
+
     Strictly newer. Two events stamped in the same millisecond are not ordered
     by their timestamps, and treating either as proof that the other is stale
     would drop a message on a coin flip.
     """
+    kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
+    kind_placeholders = ", ".join("?" for _ in kinds)
     rows = transaction.fetchall(
         f"""
         SELECT {_JOURNAL_COLUMNS} FROM journal_events
         WHERE principal_id = ? AND state = 'pending'
           AND room_id = ? AND thread_id = ?
+          AND kind IN ({kind_placeholders})
           AND origin_server_ts > ? AND event_id <> ?
         ORDER BY origin_server_ts, receipt_order
         LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
+        """,  # noqa: S608 - a fixed column list and generated placeholders, not interpolated input
         (
             principal_id,
             room_id,
             encode_thread_id(thread_id),
+            *kinds,
             after_origin_server_ts,
             excluding_event_id,
             limit,

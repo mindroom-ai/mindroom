@@ -26,7 +26,7 @@ import nio
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import EventKind, SemanticConsumer, SettlementOutcome
+from mindroom.event_journal import TURN_BACKED_KINDS, EventKind, SemanticConsumer, SettlementOutcome
 from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -52,10 +52,6 @@ logger = get_logger(__name__)
 # it to claim a consumer or read their receipt order without every one of them
 # having to thread the event through its own signature.
 _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
-
-# Kinds whose work outlives its callback, because the callback only starts a
-# turn. Their events stay pending until that turn's answer is durably owed.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
 
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]

@@ -169,18 +169,28 @@ def _make_bot(
     return bot
 
 
-async def _admit_pending_thread_event(bot: AgentBot, event_source: dict[str, Any]) -> None:
+async def _admit_pending_thread_event(
+    bot: AgentBot,
+    event_source: dict[str, Any],
+    *,
+    kind: EventKind = EventKind.MESSAGE,
+) -> None:
     """Admit one raw event into the bot's journal as unfinished actionable work.
 
     Through the production admission shaping rather than a hand-built row: the
     degraded replay guard filters on the thread the journal recorded, so a test
     that wrote that column itself would prove nothing about which events really
     land in a thread.
+
+    ``kind`` is a parameter because thread membership is derived from content
+    for every kind alike -- ``inbound_event`` calls ``thread_root`` regardless
+    -- so a non-turn-backed event can sit in a thread and be seen by a guard
+    that only asks what is pending.
     """
     parsed = nio.Event.parse_event(event_source)
     assert isinstance(parsed, nio.Event)
     admitted = await bot._journal_store.principal(bot._journal_principal_id).admit(
-        inbound_event(str(event_source["room_id"]), parsed, EventKind.MESSAGE, EventClass.ACTIONABLE),
+        inbound_event(str(event_source["room_id"]), parsed, kind, EventClass.ACTIONABLE),
     )
     assert admitted is AdmissionResult.ADMITTED
 
@@ -4787,6 +4797,78 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_ignores_pending_undecryptable_event(
+    tmp_path: Path,
+) -> None:
+    """Only an event that can become a turn may prove an older one stale.
+
+    The guard asks the journal for pending work in the thread, and *pending*
+    alone does not mean *will answer*. Thread membership is derived from
+    content for every kind -- ``inbound_event`` calls ``thread_root``
+    unconditionally -- and an ``m.room.encrypted`` event keeps its
+    ``m.relates_to`` in the clear so servers can aggregate relations. So a
+    threaded message this bot could not decrypt is admitted pending, in the
+    thread, under the requester's own sender.
+
+    It will never produce a response. Letting it count as a newer unanswered
+    turn drops the older message with no answer, and the undecryptable one
+    produces none either, so the user is answered twice with nothing.
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    undecryptable_source = {
+        "event_id": "$m2",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "room_id": room.room_id,
+        "type": "m.room.encrypted",
+        "content": {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "AwgAEnB2aWxsZQ",
+            "sender_key": "sender_key",
+            "device_id": "DEVICE",
+            "session_id": "session_id",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    await _admit_pending_thread_event(bot, undecryptable_source, kind=EventKind.DECRYPTION_FAILURE)
+
+    action_mock = AsyncMock()
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    action_mock.assert_awaited()
 
 
 @pytest.mark.asyncio
