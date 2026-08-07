@@ -40,6 +40,12 @@ Every fact this plan set out to give a single owner now has one, with a single e
 
 One owner is nevertheless possible, and this is unfinished work rather than an irreducible constraint. Moving `TurnRecord` into the journal as a table would make settlement and terminal-outcome recording one transaction, reduce the replay guard to a single read, and delete the JSON file, its lock sidecar, the shared in-memory state, the debounced persist and its retry timer. That is the natural next phase, and it is the same shape as this one.
 
+**Known regression, not yet fixed: thread export refuses threads longer than the prompt window.** Export reads the projection, and hydration stops at `HYDRATED_PROMPT_WINDOW_MESSAGES`, recording `complete=False`. `projected_history.py` then raises `ThreadExportIncompleteError` rather than writing a suffix as though it were the whole thread — which is the right call given only that input, because an export whose correctness is completeness must not silently truncate.
+
+The regression is that the input is wrong for this caller. On `origin/main` export defaulted `prefer_cache=False` and paginated Matrix directly (`thread_export/execution.py:281`, `:138`), so a thread of any length exported in full. On this branch a thread past the window does not export at all. Two thousand logical messages is reachable in a busy room, so this is user-visible.
+
+Two fixes, and the cheaper one is not obviously wrong. Export could hydrate with its own bounds instead of the prompt's — it already reaches the hydrator, which is how the test forces the failure — and that is a small change, but it only moves the wall to the raw-event ceiling. The complete fix is to keep one direct paginated Matrix export path that reuses the shared projection reducers, so edit and redaction semantics do not fork. Deciding between them is a scoping call rather than a technical one.
+
 **Known-open, deliberately not in this PR:** `matrix_conversation` tool room reads never collapse edits. It predates this work and is not made worse by it.
 
 ### What replaced `main`'s gap markers
