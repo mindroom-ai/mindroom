@@ -2317,3 +2317,93 @@ this exact shape. Closing that class needs a bounded liveness check on deferred
 events rather than a fix in any one owner; until then, a flush waiting on a
 lane for more than a minute at least says so once
 (`coalescing_gate_lane_wait_stalled`) instead of going silent.
+
+## How this work was done, and why (2026-08-07)
+
+The technical narrative above is the *what*. This section is the *how*, written down because it is not derivable from the diff and because it is the part that kept catching real defects.
+Anyone picking this up should read it before writing code.
+
+### Verification is mutation testing, not a green suite
+
+A passing test proves nothing until it has been shown to fail.
+Every fix in this work is pinned by reverting the production change and confirming the matching test goes red, and the mutation result is recorded in the commit message.
+This found more than it cost.
+Several tests that looked like coverage turned out to pin the defect instead: one blanked an outbox row's device without changing it, so no duplicate was reachable and its "no scan happened" assertion was recording the bug rather than preventing it.
+Another asserted a terminal record travelled through the transport while injecting the binder, so it never reached the module that does the binding.
+
+Four ways a mutation lies, all of which happened here:
+
+- The mutant never ran because the file was rewritten underneath the run by a concurrent agent. Verify the patch applied, by checksum, immediately before trusting the result.
+- The mutant left the file syntactically invalid, so pytest exited 4 — a collection error reports zero failures while testing nothing. Always read the exit code, never just the failure count.
+- The failure grep used `^FAILED`, which matches nothing because pytest colourises and the line begins with an ANSI escape. Grep unanchored, or strip escapes.
+- The test was aimed at the wrong seam. A surviving mutant more often means the test cannot reach the mutated module than that the code is unguarded. When a property spans two seams — a decision and its transport — each seam needs its own mutation.
+
+This repo also prints no `N passed` summary line, so `grep passed` finds nothing even on a clean run.
+Count `FAILED` unanchored and read `PYTEST_EXIT`.
+
+### Reviews are untrusted input, including the ones that are right
+
+Independent review ran continuously against the branch, and its findings were treated as claims to verify rather than instructions to follow.
+That distinction earned its keep in both directions.
+
+Reviews caught defects that would otherwise have shipped: hydration counting pages instead of logical messages; deleting attempted outbox rows; an entire installation's terminal truth being ignored on upgrade so the bot would re-answer its whole backlog; a non-atomic acknowledgement that let two PostgreSQL processes both claim a row.
+
+Reviews were also wrong in ways that would have made things worse.
+One proposed binding the Matrix transaction ID to the membership epoch, which converts a *suppressed* duplicate into a *visible* one.
+Another proposed commit-then-publish for the ledger, closing a rare "failed write plus restart" duplicate while opening a common "any in-flight write" one.
+A third classified a publish-before-commit window as a branch regression when `origin/main` had the same exposure with a larger window.
+None of those could be told apart from the correct findings without reading the code.
+
+So: reproduce before fixing, and say plainly which claims are wrong and why.
+A review that is right four times out of five still needs the fifth checked.
+
+### Live gates, and what each actually proves
+
+Two gates run after every phase, and neither substitutes for the other.
+
+`tests/manual/event_journal_live_proof.py` spins up a disposable Tuwunel and asserts 22 properties against a real homeserver — transaction-ID deduplication being *device-scoped*, edit churn collapsing to one logical row, sidecar upload and resolution, cold history starting zero pending work.
+These are facts about Matrix that no fake can establish, and the harness's own weakness had to be fixed first: it originally demonstrated device scoping using a second registered account, which proves nothing about devices.
+
+`scripts/testing/fuzz_live_matrix.py` runs 200 concurrent operations with periodic restarts against the same stack.
+Its invariant is `_assert_no_wrong_replies`: exactly one reply per source, no strays.
+**`canonical_agent_replies` is not that check** — it is `len(oracle.expected_sources)`, a count of prompts issued, and comparing it across runs measures the scenario rather than the runtime.
+That number was twice cited in this document as the duplicate gate before anyone read its definition.
+
+### Deletion is an acceptance criterion, not a side effect
+
+A cutover that adds a replacement while the replaced thing still stands is not a cutover.
+Every remaining phase had to delete its predecessor in the same change and leave the tree net smaller, and the row tracking this went the wrong way three times before it turned.
+
+The rule has teeth in both directions.
+It is why `delivered_turn_repair.py` going away is the *proof* that terminal truth collapsed to one owner rather than gaining another reconciler — and why an approval-card change that was green, well-tested, and net **+68** was held back rather than merged.
+It is also why unused scaffolding is not allowed to accumulate: a `TerminalTurnWrite` path was written, discovered to have no producer, and either had to be wired or deleted.
+
+When a replacement cannot demonstrate deletion, the honest move is to stop and reconsider the design rather than add another repair layer.
+
+### Prove it by compiling, not by tracing
+
+Consumer traces are not proofs.
+The history-debt deletion was traced by hand and declared clean; building it against the real nio branch surfaced a constraint no trace could have: `persist_recovery=True` is now *required*, because nio refuses an acknowledgement past an open gap unless the gap row outlives the process, and with it false every certified response raises `LocalProtocolError`.
+
+The same applies to the object under test.
+A green suite in a working tree says nothing about the commit if an untracked file is load-bearing — a marker registered only in an uncommitted `pyproject.toml` made seven tests pass locally and would have failed in CI.
+Verify with the working tree clean and the tree equal to `HEAD`.
+
+### Parallel agents share one index, and that is the hazard
+
+Several agents worked concurrently. The collisions were not in the code, they were in git and in the filesystem:
+
+- `git add` is per-file but `git commit` commits the whole index, so one agent's commit swept four files belonging to two others. Commits are serialized through one owner now.
+- `pre-commit` stashes every unstaged file in the repository and restores it afterwards. With concurrent writers that window silently reverted another agent's `cp`-based mutation restore.
+- Reading a file mid-edit yields errors that belong to nobody — `ImportError` for a symbol another agent is halfway through deleting. Do not chase those, and never "fix" them by editing outside your scope.
+
+Give an agent its own worktree when it can have one, and check the base: a worktree auto-created from `origin/main` will look plausible and contain none of the branch.
+When agents must share a tree, freeze ownership explicitly and say who owns which files.
+
+### The pattern worth naming
+
+Three times, a first fix was itself the bug: stamping the sending device at claim time, sending a fallback and then adopting it, and rolling back an in-memory record on cancellation.
+Each was reproduced, each looked correct, and each was caught by the next review.
+In all three cases the second attempt was *simpler* than the first — read the room, do not send at all, wait for the write to report.
+
+Complexity added to fix a correctness bug deserves more suspicion than the bug did.
