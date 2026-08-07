@@ -108,7 +108,21 @@ class DisposableTuwunel:
             self._created = False
 
 
-async def _register(homeserver: str) -> tuple[nio.AsyncClient, str]:
+@dataclass(frozen=True, slots=True)
+class _Account:
+    """One disposable account, kept whole so it can be logged in twice.
+
+    The password is retained deliberately. A second login by the *same* user
+    is the only way to observe what a re-login does to transaction-ID
+    idempotency, and that is the situation MindRoom actually restarts into.
+    """
+
+    client: nio.AsyncClient
+    user_id: str
+    password: str
+
+
+async def _register(homeserver: str) -> _Account:
     """Register one disposable account and return a logged-in client."""
     username = f"jrnl{secrets.token_hex(6)}"
     password = secrets.token_urlsafe(24)
@@ -120,7 +134,20 @@ async def _register(homeserver: str) -> tuple[nio.AsyncClient, str]:
     client.user_id = response.user_id
     client.access_token = response.access_token
     client.device_id = response.device_id
-    return client, response.user_id
+    return _Account(client=client, user_id=response.user_id, password=password)
+
+
+async def _login_another_device(account: _Account) -> nio.AsyncClient:
+    """Log the same account in again, producing a second device."""
+    client = nio.AsyncClient(account.client.homeserver, account.user_id)
+    response = await client.login(account.password)
+    if not isinstance(response, nio.LoginResponse):
+        msg = f"second login failed: {response}"
+        raise TypeError(msg)
+    if response.device_id == account.client.device_id:
+        msg = "the second login reused the first device, so nothing here is a re-login"
+        raise AssertionError(msg)
+    return client
 
 
 async def _send(
@@ -434,7 +461,7 @@ async def prove_sidecar_resolution(
 
 
 async def prove_deterministic_retry(
-    client: nio.AsyncClient,
+    account: _Account,
     store: PrincipalStore,
     room_id: str,
     findings: Findings,
@@ -442,9 +469,13 @@ async def prove_deterministic_retry(
     """Resending an accepted transaction ID must not create a second message.
 
     This is what makes a crash between "Matrix accepted it" and "MindRoom
-    recorded it" harmless. Servers scope the deduplication to the sending
-    device, so it holds across a restart but not across a re-login.
+    recorded it" harmless -- and the second half of this proof is where that
+    stops being true. Servers scope the deduplication to the sending device,
+    so it survives a restart that keeps its login and not one that does not.
+    The outbox records the sending device for exactly this reason, and
+    delivery reads the room instead of resending when it has changed.
     """
+    client = account.client
     turn_id = f"live-{secrets.token_hex(4)}"
     await store.enqueue_delivery(
         turn_id=turn_id,
@@ -464,11 +495,15 @@ async def prove_deterministic_retry(
         f"{first} vs {second}",
     )
 
-    other_device, _ = await _register(client.homeserver)
+    # The same user, a second device. A different account would also produce
+    # a second event, but it would prove nothing about a re-login: the sender
+    # differs, so the server has no reason to collapse it either way. What
+    # MindRoom restarts into is this -- one account, one room, a new device
+    # holding transaction IDs the old one minted.
+    relogged_in = await _login_another_device(account)
     try:
-        await other_device.join(room_id)
         third = await _send(
-            other_device,
+            relogged_in,
             room_id,
             dict(claimed.payload),
             transaction_id=claimed.transaction_id,
@@ -476,10 +511,10 @@ async def prove_deterministic_retry(
         findings.record(
             "transaction deduplication is scoped to the sending device",
             third != first,
-            "a different device reusing the ID creates a new event, as expected",
+            f"the same user on a new device reusing the ID created {third}, not {first}",
         )
     finally:
-        await other_device.close()
+        await relogged_in.close()
 
 
 async def prove_history_exhaustion(
@@ -551,7 +586,8 @@ async def _admit_from_server(
 async def run_proof(homeserver: str) -> Findings:
     """Run every live observation against one homeserver."""
     findings = Findings()
-    client, user_id = await _register(homeserver)
+    account = await _register(homeserver)
+    client, user_id = account.client, account.user_id
     with tempfile.TemporaryDirectory(prefix="journal-live-proof-") as directory:
         store_root = EventJournalStore.open_sqlite(Path(directory) / "journal.db")
         store = store_root.principal(PRINCIPAL)
@@ -571,7 +607,7 @@ async def run_proof(homeserver: str) -> Findings:
             await prove_edit_redaction(client, store, hydrator, room_id, findings)
             await prove_edit_churn(client, store, room_id, findings)
             await prove_sidecar_resolution(client, store, hydrator, room_id, findings)
-            await prove_deterministic_retry(client, store, room_id, findings)
+            await prove_deterministic_retry(account, store, room_id, findings)
             await prove_history_exhaustion(client, store, findings)
         finally:
             await store_root.close()
