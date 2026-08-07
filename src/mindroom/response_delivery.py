@@ -39,10 +39,11 @@ type ResolveDelivered = Callable[[OutboxDelivery], Awaitable[str | None]]
 # no record for the turn, or one that already knows its response event.
 type _TerminalTurnFor = Callable[[str, str], "TerminalTurnWrite | None"]
 
-# Told after an acknowledgement this caller actually bound, so an in-memory
-# view of the same record can catch up without a second write. A caller that
-# lost the row is never told, because it committed nothing to catch up with.
-type _TerminalTurnCommitted = Callable[[str, str], None]
+# Told after an acknowledgement this caller actually bound, so the record the
+# transaction committed can be re-asserted through whatever ordering the ledger
+# uses for every other write. A caller that lost the row is never told, because
+# it committed nothing to settle.
+type _TerminalTurnCommitted = Callable[[str, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,17 +238,18 @@ class ResponseDelivery:
         return await self._acknowledge(turn_id, stage, event_id)
 
     async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> str:
-        """Bind the row and let an in-memory view of the record catch up.
+        """Bind the row, then settle the record the transaction committed with it.
 
         The record commits inside the acknowledgement, so nothing else writes
-        it -- which means nothing else tells the synchronous ledger either.
-        Recovery is where that matters: it acknowledges and returns without any
-        ordinary terminal write following, so without this the database knows
-        the answer's event and memory does not, and an edit arriving before the
-        next restart is dropped for having no response to edit.
+        it -- which means the ledger never sees that write in the order it
+        orders its own. Recovery is where that matters: it acknowledges and
+        returns with no ordinary terminal write following, so a mutation racing
+        this one overwrites the row and the answer's event ID is gone for good.
+        Settling here is what puts the record back under the ledger's ordering,
+        and it is awaited because a write is what it now is.
 
         Only on a bound acknowledgement. A loser committed nothing, so it has
-        nothing to publish and must not overwrite the winner's record.
+        nothing to settle and must not overwrite the winner's record.
 
         Ownership is the store's answer, never this call's own inference. The
         settled event matching the one just sent looks like proof of winning
@@ -273,7 +275,7 @@ class ResponseDelivery:
         if acknowledged.settled_event_id is None:
             return event_id
         if acknowledged.bound and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
-            self.terminal_turn_committed(turn_id, acknowledged.settled_event_id)
+            await self.terminal_turn_committed(turn_id, acknowledged.settled_event_id)
         return acknowledged.settled_event_id
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:

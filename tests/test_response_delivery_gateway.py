@@ -28,7 +28,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
 from mindroom.response_delivery import ResponseDelivery
@@ -41,9 +41,10 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, OutboxDelivery, OutboxView, PrincipalStore
@@ -72,6 +73,7 @@ def _gateway(
     outbox: OutboxView | None = None,
     *,
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
+    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
@@ -102,6 +104,7 @@ def _gateway(
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=ignore_final_delivery_handoff,
             terminal_turn_for=terminal_turn_for,
+            terminal_turn_committed=terminal_turn_committed,
         ),
     )
 
@@ -1244,17 +1247,23 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing_publishes: list[tuple[str, str]] = []
         winning_publishes: list[tuple[str, str]] = []
 
+        async def losing_publish(turn_id: str, event_id: str) -> None:
+            losing_publishes.append((turn_id, event_id))
+
+        async def winning_publish(turn_id: str, event_id: str) -> None:
+            winning_publishes.append((turn_id, event_id))
+
         losing = ResponseDelivery(
             store=alice,
             send=losing_send,
             sending_device_id="DEVICE1",
-            terminal_turn_committed=lambda turn_id, event_id: losing_publishes.append((turn_id, event_id)),
+            terminal_turn_committed=losing_publish,
         )
         winning = ResponseDelivery(
             store=alice,
             send=winning_send,
             sending_device_id="DEVICE1",
-            terminal_turn_committed=lambda turn_id, event_id: winning_publishes.append((turn_id, event_id)),
+            terminal_turn_committed=winning_publish,
         )
 
         loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
@@ -1265,3 +1274,96 @@ class TestARacedAcknowledgementSpeaksForTheRow:
 
         assert winning_publishes == [("turn-1", "$deduplicated")]
         assert losing_publishes == [], "a caller that bound nothing published a record anyway"
+
+
+class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
+    """The record an acknowledgement commits has to be written, not just published.
+
+    Every other terminal write goes through the ledger's own lock, which
+    publishes to memory and enqueues the row while holding it. That pairing is
+    the whole reason concurrent mutation is safe: writes reach the database in
+    the order they reached memory, so whichever lands last derived from memory
+    that already held the other's fact.
+
+    The acknowledgement commits its record in the outbox's transaction instead,
+    outside that lock. Telling memory afterwards and stopping there puts the
+    acknowledgement outside the pairing: a mutation that derived its record
+    before being told, and reaches the database after the transaction, writes
+    over the row and takes the answer's event ID with it.
+
+    A live turn survives that because it re-asserts the record durably right
+    after delivery. Recovery does not: it acknowledges and returns, nothing
+    reads the outbox's event back into a record, and the turn no longer names
+    the message an edit would have to edit -- for good, across restarts.
+    """
+
+    @staticmethod
+    async def _restarted_record(journal_store: EventJournalStore, source_event_id: str) -> TurnRecord | None:
+        """Return the record as a restart reads it, from the database alone.
+
+        The live map is dropped first on purpose. Asking the ledger that just
+        wrote would answer from memory, which is the half of the state that
+        was never in doubt.
+        """
+        _reset_handled_turn_ledger_runtime()
+        restarted = await _store(journal_store, agent_name="agent")
+        return restarted.get_turn_record(source_event_id)
+
+    @pytest.mark.ledger_loads_from_disk
+    async def test_a_recovered_answer_keeps_its_event_through_a_concurrent_redaction(
+        self,
+        tmp_path: Path,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """Both facts are durable, whichever of the two writers reaches the row last.
+
+        The redaction is the one that actually happens: it arrives on a lane
+        task of its own, it is not turn-backed so nothing defers it behind a
+        live turn, and the recovery pass runs after every sync response.
+
+        Asserting on the database rather than on the ledger is the point. Both
+        orderings leave memory holding everything and only the stored row
+        short, so a test that read the ledger would pass against the loss it
+        was written to catch.
+        """
+        turn_store = await _store(journal_store, agent_name="agent")
+        await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
+        gateway = _gateway(
+            tmp_path,
+            alice,
+            terminal_turn_for=turn_store.terminal_turn_record,
+            terminal_turn_committed=turn_store.publish_committed_response,
+        )
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the answer"},
+        )
+        assert transaction_id is not None
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+
+        async def send(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            send_started.set()
+            await finish_send.wait()
+            return SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(side_effect=send)):
+            recovery = asyncio.create_task(gateway.recover_deliveries())
+            await send_started.wait()
+            # Started while the answer is on the wire, so it derives its record
+            # from a memory the acknowledgement has not published into yet.
+            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source"))
+            finish_send.set()
+            outcome = await recovery
+            await redaction
+
+        assert outcome.recovered == 1
+        stored = await self._restarted_record(journal_store, "$source")
+        assert stored is not None
+        assert stored.redacted_source_event_ids == ("$source",), "the redaction never reached the database"
+        assert stored.response_event_id == "$answer", "the delivered answer lost the event it is stored under"
+        assert stored.completed, "a delivered turn came back unfinished"

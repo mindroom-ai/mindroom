@@ -642,26 +642,6 @@ class HandledTurnLedger:
         )
         return await self.records.load_all()
 
-    def publish_committed(self, record: TurnRecord) -> None:
-        """Adopt a record another writer already committed, without writing again.
-
-        Recovery commits the terminal record inside the acknowledgement's own
-        transaction, which is what makes the two agree durably -- but it does
-        not go through ``update_handled_turn``, so the synchronous map never
-        hears about it. Left there, the database knows the answer's event and
-        memory does not, and an edit arriving before the next restart is
-        dropped for having no response to edit.
-
-        Only ever called after a commit this process won, so it publishes
-        rather than merges: the committed row is the truth, and re-deriving it
-        here would risk a different answer than the one actually stored.
-        """
-        with self._state.lock:
-            if not self._state.loaded:
-                return
-            for event_id in record.indexed_event_ids:
-                self._responses[event_id] = record
-
     def _restore_superseded(
         self,
         published: TurnRecord,

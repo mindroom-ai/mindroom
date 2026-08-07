@@ -186,8 +186,8 @@ class TurnStore:
 
         Pure by design. The in-memory map is not touched here, because this is
         called *before* the transaction and the transaction may lose the
-        acknowledgement race. Memory is updated by the ordinary terminal write
-        that follows, or by the next load.
+        acknowledgement race. The caller that actually binds the row settles
+        both halves afterwards, through ``publish_committed_response``.
 
         Returns the domain record rather than the journal's write type, so this
         module stays on its own side of the store boundary; the delivery layer,
@@ -199,11 +199,47 @@ class TurnStore:
         bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
         return None if bound.anchor_event_id is None else bound
 
-    def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
-        """Bring the in-memory ledger level with a record the acknowledgement committed."""
-        record = self.terminal_turn_record(turn_id, response_event_id)
-        if record is not None:
-            self._ledger.publish_committed(record)
+    async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
+        """Re-assert the record an acknowledgement committed, through the ordinary lock.
+
+        Bringing only memory level here looked sufficient -- the transaction
+        had already stored the record -- and it loses the answer's event ID for
+        good. Every other terminal write publishes to memory and enqueues its
+        row while holding the ledger's write lock, so the database sees writes
+        in the order memory did. A record committed outside that lock sits
+        outside that order: a mutation that derived before this call, and
+        reaches the database after the transaction, overwrites the row with a
+        record that never heard of the answer. Memory keeps the event ID,
+        storage does not, and the next start finds a delivered turn that cannot
+        name the message it produced -- so a later edit of that message is
+        dropped for having nothing to edit.
+
+        A live turn survived that because it records its terminal turn again
+        right after delivery. Recovery has no such write behind it, and nothing
+        reads an acknowledged event back into a record, which is what made the
+        loss permanent rather than momentary.
+
+        Going back through ``update_handled_turn`` puts the fact inside the
+        ordering that protects every other one: whichever of the two writes
+        lands last derives from a memory that already holds the other's, so the
+        stored row ends up carrying both. Re-deriving cannot invent a different
+        answer, because the event ID is passed in rather than looked up, and an
+        answer the record already names is kept -- it may be a later one than
+        the first thing ever sent.
+        """
+        if self._ledger.get_turn_record(turn_id) is None:
+            return
+
+        def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing = existing_records[turn_id]
+            return canonicalize_turn_record(
+                existing,
+                response_event_id=existing.response_event_id or response_event_id,
+                completed=True,
+                timestamp=0.0,
+            )
+
+        await self._ledger.update_handled_turn((turn_id,), committed_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""

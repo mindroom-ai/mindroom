@@ -378,9 +378,11 @@ class DeliveryGatewayDeps:
     # two commits, and a crash between them leaves a delivered answer whose
     # record cannot be edited.
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None
-    # Told after an acknowledgement bound its row, so the synchronous ledger
-    # can adopt the record that commit wrote without a second write.
-    terminal_turn_committed: Callable[[str, str], None] | None = None
+    # Told after an acknowledgement bound its row, so the record that commit
+    # wrote is re-asserted through the ledger's own write ordering. Skipping
+    # that leaves the row open to a mutation that derived before the commit and
+    # lands after it, which erases the event the answer is stored under.
+    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
