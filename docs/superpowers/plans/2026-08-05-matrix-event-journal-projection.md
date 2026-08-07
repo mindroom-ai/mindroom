@@ -661,10 +661,11 @@ They are gates on phase 3, not on the phases before it.
 - No cache repair, certification, or gap machinery in the replacement: **holds today.**
 - No duplicate "should this event run?" authority: **does not hold** until contract 2 lands, because the journal and `TurnStore` both currently gate execution.
 - Bounded prompt reads: **holds today**, and contract 6 is what ties the bound to the actual requirement.
-- Materially fewer production lines: **does not hold yet, and the earlier claim that it did was measuring a projection rather than the branch.**
-  `git diff --numstat origin/main -- src/mindroom` currently reports +4,799 / −2,175, a net of **+2,624 production lines**.
-  The replaced owners are still present and still required — the old cache and its read and trust machinery total roughly 15,800 lines — so nothing has been collected yet.
-  The gate is only satisfiable after the read cutover and the delivery cutover both land and their old owners are deleted; until then this row should read "not yet", because a plan that grades itself on a projection is not measuring anything.
+- Materially fewer production lines: **still does not hold, and it went backwards this round.**
+  Re-measured at `e5803a2b2`: `git diff --numstat origin/main -- src/mindroom` reports +7,589 / −4,835, a net of **+2,754 production lines** — about 130 worse than the +2,624 recorded before, even though phase 8e deleted 3,134 lines of advisory outbound bookkeeping on its own.
+  That is not a contradiction, it is the shape of a cutover measured honestly: the replacements for the read path, the relation lookup, the transport-progress policy, the export pagination, and the sync escape all landed as additions, while the thing they replace is still standing.
+  What is still standing, measured rather than estimated: `matrix/cache/` is 10,874 lines and `conversation_cache.py` plus the cache trust and certification owners are another 1,571, so **12,445 lines** are queued for deletion behind phase 8f.
+  Against 3,502 lines of `event_journal/`, the gate is satisfiable — but only once 8f actually collects, and it is worth restating that this row has now been wrong in the optimistic direction twice. It stays "does not hold" until the deletion is in the diff.
 
 The edge cases that must each stay inside one owner are crash boundaries, edit-before-original, redaction-before-original, current-edit redaction, membership re-entry, sidecar plaintext, approvals, and send-acknowledgement-before-echo.
 If handling one of them needs changes in several owners, the boundary is wrong and gets reconsidered rather than coordinated around.
