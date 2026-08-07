@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
+_DOMAINLESS_ROOM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 
@@ -23,7 +24,9 @@ __all__ = [
     "managed_account_user_id",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
+    "parse_matrix_room_id",
     "try_parse_historical_matrix_user_id",
+    "try_parse_matrix_room_id",
 ]
 
 
@@ -130,6 +133,41 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return None
     try:
         return parse_historical_matrix_user_id(value)
+    except ValueError:
+        return None
+
+
+def parse_matrix_room_id(room_id: str) -> str:
+    """Return a canonical Matrix room ID, or raise ValueError."""
+    if not room_id.startswith("!"):
+        msg = f"Invalid Matrix room ID: {room_id}"
+        raise ValueError(msg)
+
+    if ":" not in room_id:
+        if _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is None:
+            msg = f"Invalid Matrix room ID: {room_id}"
+            raise ValueError(msg)
+        return room_id
+
+    localpart, server_name = room_id[1:].split(":", 1)
+    if not localpart or "\x00" in localpart or _contains_surrogate(localpart):
+        msg = f"Invalid Matrix room ID localpart: {room_id}"
+        raise ValueError(msg)
+    if not _valid_current_server_name(server_name):
+        msg = f"Invalid Matrix room ID server name: {room_id}"
+        raise ValueError(msg)
+    if len(room_id.encode("utf-8")) > 255:
+        msg = f"Invalid Matrix room ID length: {room_id}"
+        raise ValueError(msg)
+    return room_id
+
+
+def try_parse_matrix_room_id(value: str | None) -> str | None:
+    """Return a canonical Matrix room ID when a nullable value parses."""
+    if value is None:
+        return None
+    try:
+        return parse_matrix_room_id(value)
     except ValueError:
         return None
 

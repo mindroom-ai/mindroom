@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.report_publishing.authorization import ReportAuthorizationDecision
+    from mindroom.report_publishing.store import PublishedReport
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -87,6 +89,13 @@ class ExternalTriggerRuntime:
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
 
 
+@dataclass(frozen=True)
+class ReportAuthorizationRuntime:
+    """Runtime callback for live origin-room report authorization."""
+
+    authorize: Callable[[PublishedReport, str], Awaitable[ReportAuthorizationDecision]]
+
+
 @dataclass
 class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
@@ -97,6 +106,7 @@ class _MindroomAppState:
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    report_authorization_runtime: ReportAuthorizationRuntime | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

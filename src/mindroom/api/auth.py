@@ -20,6 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.email_to_matrix_mapping import email_to_matrix_template_error
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
 
@@ -300,11 +301,9 @@ def _validated_trusted_upstream_email_to_matrix_template(
                 "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
             ),
         )
-    if template.count("{localpart}") != 1:
-        raise HTTPException(
-            status_code=500,
-            detail=("Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"),
-        )
+    template_error = email_to_matrix_template_error(template)
+    if template_error is not None:
+        raise HTTPException(status_code=500, detail=template_error)
     return template
 
 
@@ -858,6 +857,29 @@ async def verify_user(
     auth_user = {"user_id": user.id, "email": user.email}
     request.scope["auth_user"] = auth_user
     return auth_user
+
+
+async def verify_report_viewer(request: Request) -> dict[str, Any]:
+    """Authenticate a browser report viewer without dashboard or API-key policy."""
+    snapshot = _bind_authenticated_request_snapshot(request)
+    auth_state = cast("ApiAuthState", snapshot.auth_state)
+    trusted_auth_user = await _trusted_upstream_auth_user(
+        request,
+        auth_state.settings.trusted_upstream,
+        auth_state.trusted_upstream_jwt_client,
+    )
+    if trusted_auth_user is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+    request.scope["auth_user"] = trusted_auth_user
+    return trusted_auth_user
+
+
+def verified_matrix_user_id_for_auth_user(auth_user: dict[str, Any]) -> str | None:
+    """Return verified Matrix identity carried by an authenticated principal."""
+    matrix_user_id = auth_user.get("matrix_user_id")
+    if not isinstance(matrix_user_id, str):
+        return None
+    return try_parse_historical_matrix_user_id(matrix_user_id)
 
 
 @router.post("/api/auth/session", include_in_schema=False)
