@@ -496,8 +496,20 @@ def install_refetched_revision(
     reason. A refetch returns the event as the server stored it, preview and
     all, so installing it unread would resolve the debt by satisfying it with
     the very text it was raised about.
+
+    The revision is checked against the tombstone table for a reason the token
+    cannot cover. Redacting a revision that is not the one on screen matches no
+    row, so it correctly moves no token -- but it does record a tombstone. A
+    refetch already in flight, having chosen that very revision from the server,
+    then still matches the token it was issued and would install a body the
+    sender deleted. Nothing later disturbs it: hydration does not re-run under
+    the same membership, so the deleted text would be served to every prompt,
+    summary and export of that room from then on. Every other install path
+    already asks the tombstone table; this was the one that did not.
     """
     if holds_unresolved_sidecar(content):
+        return False
+    if _is_tombstoned(transaction, principal_id, room_id, revision_event_id):
         return False
     row = transaction.fetchone(
         """

@@ -449,6 +449,40 @@ class TestRedaction:
         assert await bodies(alice) == ["first"]
         assert await alice.pending_refreshes(room_id=ROOM, thread_id=None) == ()
 
+    async def test_a_refetch_cannot_install_a_revision_that_was_itself_redacted(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A redaction the token cannot see must still stop the install.
+
+        Redacting a revision that is not the one on screen matches no visible
+        row, so it correctly moves no refresh token -- but it does record a
+        tombstone. A refetch already in flight, having picked that very revision
+        off the server, still matches the token it was issued with. Without the
+        tombstone check it would install a body the sender deleted, and nothing
+        later disturbs it: hydration does not re-run under the same membership,
+        so the deleted text would reach every prompt, summary and export of the
+        room from then on.
+        """
+        await admit(alice, "$original", content=text("first"))
+        await admit(alice, "$e1", ts=2_000, content=edit("$original", "first edit"))
+        await admit(alice, "$e2", ts=3_000, content=edit("$original", "second edit"))
+        await admit(alice, "$red2", ts=4_000, redacts="$e2", kind=EventKind.REDACTION)
+        request = (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0]
+
+        # Redacting the superseded revision the refetch happens to be carrying.
+        await admit(alice, "$red1", ts=5_000, redacts="$e1", kind=EventKind.REDACTION)
+
+        installed = await alice.install_refetched_revision(
+            request,
+            revision_event_id="$e1",
+            revision_ts=2_000,
+            content=text("first edit"),
+        )
+
+        assert not installed
+        assert "first edit" not in await bodies(alice)
+
     async def test_a_newer_edit_beats_an_in_flight_refetch(self, alice: PrincipalStore) -> None:
         """The refetch read the server before the newer edit existed."""
         await admit(alice, "$original", content=text("first"))
