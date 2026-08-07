@@ -403,8 +403,20 @@ class TestStreamedAgentContinuation:
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt
         answer = _last_answer(await turn.final())
-        assert answer.endswith(_ANSWER)
-        assert answer.count(_INTERMEDIATE) == 1
+        # A streamed attempt's narration is already in the room when the tool
+        # call supersedes it, and it stays there: the visible document
+        # accumulates across attempts while the recorder is reset, so the
+        # delivered answer is both attempts' text. That was investigated as a
+        # possible room-versus-history divergence and found not to be one --
+        # the projection stores this exact string, because the terminal edit
+        # carries it and the projection reduces what the room holds.
+        #
+        # Equality rather than `endswith` plus a count, to pin the whole
+        # string. Honest limit: no mutation was found that this kills and the
+        # weaker pair did not, because the reachable ways to change this value
+        # also change the narration's count. Prefixing `finalize`'s
+        # `text_to_send` does not reach it at all.
+        assert answer == _INTERMEDIATE + _ANSWER
 
 
 class TestTeamContinuation:
