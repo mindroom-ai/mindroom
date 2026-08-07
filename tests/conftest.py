@@ -1056,6 +1056,13 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        # Turns whose membership has ended, as the journal would report it.
+        self.ended_membership_turn_ids: set[str] = set()
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        del room_id
+        return turn_id not in self.ended_membership_turn_ids
 
     async def enqueue_delivery(
         self,
@@ -1066,12 +1073,14 @@ class FakeOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
+    ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone."""
         key = (turn_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
             return existing.transaction_id
+        if turn_id in self.ended_membership_turn_ids:
+            return None
         transaction_id = f"tx-{turn_id}-{stage.value}"
         self.rows[key] = OutboxDelivery(
             turn_id=turn_id,

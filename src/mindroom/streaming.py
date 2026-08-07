@@ -467,6 +467,13 @@ class StreamingResponse:
     # every earlier edit is transport and goes out directly.
     terminal_edit: TerminalEdit | None = None
     terminal_send: TerminalSend | None = None
+    # Whether direct transport still speaks for a membership the bot is in.
+    # Progressive edits are not a turn's answer, so they never reach the
+    # outbox and nothing else would stop them writing into a conversation the
+    # fence has already invalidated. The terminal delivery is exempt: it goes
+    # through the outbox, which knows the difference between refusing an
+    # answer and stranding one the homeserver may already hold.
+    transport_is_current: Callable[[], Awaitable[bool]] | None = None
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
@@ -903,6 +910,16 @@ class StreamingResponse:
         if not is_final and not is_initial_send and not self._should_send_prepared_nonterminal_edit(prepared_delivery):
             _complete_capture_completions(capture_completions)
             return True
+        if not durable_terminal and not await self._direct_transport_allowed():
+            # Nothing owed and nothing failed. The room this stream is writing
+            # into is not one this bot is in any more, so there is no delivery
+            # left to make and no failure to report about not making it --
+            # reporting one would only produce another notice for the same
+            # room. The answer's own edit is exempt: it goes through the
+            # outbox, which can tell refusing an answer apart from stranding
+            # one the homeserver may already hold.
+            _complete_capture_completions(capture_completions)
+            return True
         capture = None
         if not is_final:
             capture = asyncio.get_running_loop().create_future()
@@ -1117,6 +1134,19 @@ class StreamingResponse:
             retry_sync_recovery=retry_sync_recovery,
         )
         return delivered is not None
+
+    async def _direct_transport_allowed(self) -> bool:
+        """Return whether an edit that is not a turn's answer may still be sent."""
+        if self.transport_is_current is None:
+            return True
+        if await self.transport_is_current():
+            return True
+        logger.info(
+            "streaming_transport_stopped_for_ended_membership",
+            room_id=self.room_id,
+            event_id=self.event_id,
+        )
+        return False
 
     async def _send_content(
         self,
@@ -1801,6 +1831,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
     terminal_send: TerminalSend | None = None,
+    transport_is_current: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -1820,6 +1851,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
         terminal_edit=terminal_edit,
         terminal_send=terminal_send,
+        transport_is_current=transport_is_current,
     )
 
     # Ensure the first chunk triggers an initial send immediately

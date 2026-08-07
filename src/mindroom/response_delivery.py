@@ -53,7 +53,7 @@ class ResponseDelivery:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
+    ) -> str | None:
         """Enqueue, claim, send, and acknowledge one delivery.
 
         Enqueueing an already-attempted delivery leaves the stored payload
@@ -62,8 +62,13 @@ class ResponseDelivery:
         that is slightly stale: the homeserver would silently drop it as a
         duplicate transaction and the durable result and the room would
         disagree forever.
+
+        Nothing means the answer is not this membership's to give: either the
+        store refused the intent, or the fence deleted the row between
+        recording it and claiming it. Both are the same fact arriving through
+        different orderings, and neither is a failure to report.
         """
-        await self.store.enqueue_delivery(
+        transaction_id = await self.store.enqueue_delivery(
             turn_id=turn_id,
             stage=stage,
             room_id=room_id,
@@ -71,14 +76,21 @@ class ResponseDelivery:
             payload=payload,
             edits_event_id=edits_event_id,
         )
+        if transaction_id is None:
+            logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
+            return None
         return await self.flush(turn_id=turn_id, stage=stage)
 
-    async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str:
-        """Send one enqueued delivery, or resend the identical one."""
+    async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
+        """Send one enqueued delivery, or resend the identical one.
+
+        Nothing means the row is gone, which only a membership fence does, and
+        only to a delivery nothing outside this process has seen.
+        """
         claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
         if claimed is None:
-            msg = f"No delivery enqueued for turn {turn_id!r} stage {stage.value!r}"
-            raise RuntimeError(msg)
+            logger.info("response_delivery_row_withdrawn", turn_id=turn_id, stage=stage.value)
+            return None
         if claimed.acknowledged_event_id is not None:
             return claimed.acknowledged_event_id
         event_id = await self.send(claimed)
@@ -144,7 +156,7 @@ class ResponseDelivery:
                 if await self._superseded_placeholder(delivery):
                     continue
                 try:
-                    await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
+                    sent = await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
                 except Exception:
                     logger.exception(
                         "response_delivery_recovery_failed",
@@ -155,6 +167,11 @@ class ResponseDelivery:
                     # Left unacknowledged deliberately: a later recovery pass
                     # picks it up again, while this pass moves on to the rest.
                     failed += 1
+                    continue
+                if sent is None:
+                    # The row went away between being listed and being
+                    # claimed, which only a membership fence does. Nothing is
+                    # owed and nothing failed.
                     continue
                 recovered += 1
 

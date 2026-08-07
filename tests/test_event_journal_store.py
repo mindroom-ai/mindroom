@@ -848,6 +848,155 @@ class TestSchemaUpgrade:
             assert column in statements
 
 
+class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
+    """A turn that outlived its membership must not answer into the next one.
+
+    The fence deletes what the previous membership derived. Without this it
+    would then write some of it straight back: a turn still running when the
+    fence committed reaches enqueue afterwards, and the fence has been and
+    gone.
+    """
+
+    async def test_a_turn_admitted_under_an_ended_membership_cannot_enqueue(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Fence first, then enqueue: the enqueue is refused."""
+        await admit(alice, "$turn")
+        await alice.advance_membership_epoch(ROOM)
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        assert transaction_id is None
+        assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_an_unattempted_row_enqueued_before_the_fence_is_deleted_by_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Enqueue first, then fence: the row goes with the membership."""
+        await admit(alice, "$turn")
+        assert (
+            await alice.enqueue_delivery(
+                turn_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("answer"),
+            )
+            is not None
+        )
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_an_attempted_row_still_retries_after_a_fence_under_its_first_transaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An attempted delivery is a different object, and refusing it is worse.
+
+        Its outcome is unknown and the homeserver may hold it already. Only
+        presenting the identical transaction ID again collapses the retry onto
+        the same event; refusing it would strand the row unacknowledged while
+        leaving whatever it sent visible, and re-deriving a fresh transaction
+        for it would guarantee the second answer rather than prevent it.
+        """
+        await admit(alice, "$turn")
+        first = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        await alice.advance_membership_epoch(ROOM)
+
+        retried = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated"),
+        )
+        claimed = await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        assert retried == first
+        assert claimed is not None
+        assert claimed.transaction_id == first
+        assert claimed.payload["body"] == "answer"
+
+    async def test_a_turn_the_journal_never_admitted_still_enqueues(self, alice: PrincipalStore) -> None:
+        """A scheduled task is not a turn a membership authorized.
+
+        There is no admission behind it and so no previous membership for its
+        work to belong to. Refusing it would silence scheduled delivery in
+        every room the bot has ever left and rejoined.
+        """
+        await alice.advance_membership_epoch(ROOM)
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="scheduled-task-7",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("reminder"),
+        )
+
+        assert transaction_id is not None
+
+    async def test_a_turn_under_the_current_membership_enqueues(self, alice: PrincipalStore) -> None:
+        """The ordinary case still delivers."""
+        await admit(alice, "$turn")
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        assert transaction_id == delivery_transaction_id("agent@alice", "$turn", "final")
+
+    async def test_in_flight_transport_learns_the_membership_ended(self, alice: PrincipalStore) -> None:
+        """Streaming edits never reach the outbox, so they ask this directly."""
+        await admit(alice, "$turn")
+
+        assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+
+    async def test_one_rooms_fence_does_not_silence_another_room(self, alice: PrincipalStore) -> None:
+        """Leaving one room says nothing about a turn running in a different one."""
+        await admit(alice, "$turn")
+
+        await alice.advance_membership_epoch(OTHER_ROOM)
+
+        assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+        assert (
+            await alice.enqueue_delivery(
+                turn_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("answer"),
+            )
+            is not None
+        )
+
+
 class TestDepartureBookkeeping:
     """One departure invalidates a room once, whichever observer sees it first."""
 

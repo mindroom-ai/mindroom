@@ -420,6 +420,19 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
+    async def _visible_notice_is_current(self, identity: ResponseIdentity, room_id: str) -> bool:
+        """Return whether a terminal notice still belongs in the room it names.
+
+        Terminal notices -- cancellations, failure updates, suppression
+        cleanup -- are direct transport. They carry no answer, so they never
+        reach the outbox, and the durable refusal that protects a turn's
+        answer does not protect them.
+        """
+        return await self.deps.outbox.turn_membership_is_current(
+            turn_id=identity.response_envelope.source_event_id,
+            room_id=room_id,
+        )
+
     async def _redact_visible_response_event(
         self,
         *,
@@ -431,6 +444,11 @@ class DeliveryGateway:
         propagate_cancelled: bool = False,
     ) -> str | None:
         """Redact one visible event, optionally propagating cancellation, and return any cleanup failure."""
+        if not await self._visible_notice_is_current(identity, room_id):
+            # The event this would tidy up belonged to a membership that has
+            # ended, and the fence has already dropped everything derived from
+            # it. There is nothing left here to clean up, and no failure.
+            return None
         self.deps.logger.warning(
             "Visible response was already delivered before suppression; attempting cleanup",
             response_kind=identity.response_kind,
@@ -468,7 +486,10 @@ class DeliveryGateway:
         """Best-effort terminal error edit for a visible placeholder."""
         failure_extra_content = dict(request.extra_content or {})
         failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
-        edited = await self.edit_text(
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
             EditTextRequest(
                 target=request.target,
                 event_id=request.event_id,
@@ -609,6 +630,11 @@ class DeliveryGateway:
             )
         except _DeliveryRefusedError:
             return None
+        if event_id is None:
+            # The membership this turn answered has ended. The room it was
+            # answering is not the room the bot is in now, so there is nothing
+            # to send and nothing to recover.
+            return None
         if delivered is not None:
             return delivered
         # The delivery was already acknowledged, so nothing was sent and the
@@ -740,6 +766,10 @@ class DeliveryGateway:
                 edits_event_id=request.event_id,
             )
         except _DeliveryRefusedError:
+            return None
+        if event_id is None:
+            # The membership this turn answered has ended, so its answer is
+            # not this bot's to give in the room it is in now.
             return None
         if delivered is not None:
             return delivered
@@ -986,7 +1016,13 @@ class DeliveryGateway:
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
-        edited = await self.edit_text(
+        # A cancellation note is transport, not a turn's answer, so it never
+        # reaches the outbox and nothing else would keep it out of a room this
+        # bot has left.
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
             EditTextRequest(
                 target=request.target,
                 event_id=request.event_id,
@@ -1219,7 +1255,28 @@ class DeliveryGateway:
             ),
             terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
             terminal_send=self._durable_terminal_send(request.delivery_turn_id, request.target),
+            transport_is_current=self._stream_transport_gate(request.delivery_turn_id, request.target.room_id),
         )
+
+    def _stream_transport_gate(
+        self,
+        turn_id: str | None,
+        room_id: str,
+    ) -> Callable[[], Awaitable[bool]] | None:
+        """Return the check that stops a stream editing into an ended membership.
+
+        Progressive edits never reach the outbox, so the durable refusal that
+        protects the terminal delivery does not protect them. Without this, a
+        turn that began before a fence keeps writing into a conversation the
+        fence deleted, for as long as the model keeps producing text.
+        """
+        if turn_id is None:
+            return None
+
+        async def transport_is_current() -> bool:
+            return await self.deps.outbox.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
+
+        return transport_is_current
 
     def _durable_terminal_send(self, turn_id: str | None, target: MessageTarget) -> TerminalSend | None:
         """Return a sender that records a stream's terminal *send* before making it.

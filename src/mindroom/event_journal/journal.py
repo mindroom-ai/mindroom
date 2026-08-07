@@ -367,6 +367,27 @@ def admitted_thread_id(
     return True, decode_thread_id(row["thread_id"])
 
 
+def admitted_membership_epoch(
+    transaction: Transaction,
+    principal_id: str,
+    event_id: str,
+) -> int | None:
+    """Return the membership one event was admitted under, or nothing.
+
+    Nothing means no membership: the caller named something the journal never
+    admitted -- a scheduled task, a hook-authored turn -- and there is no
+    previous membership for its work to belong to.
+
+    The row survives every fence on purpose, so this answer stays available
+    for as long as the turn it authorized can still be running.
+    """
+    row = transaction.fetchone(
+        "SELECT membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
+        (principal_id, event_id),
+    )
+    return None if row is None else int(row["membership_epoch"])
+
+
 def pending(
     transaction: Transaction,
     principal_id: str,
