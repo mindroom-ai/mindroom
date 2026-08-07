@@ -135,7 +135,7 @@ The harness is already there, which an earlier note in this file denied: `FakeOu
 
 **For reference, the defect that was there.** `send_message_result` calls `prepare_large_message` (`matrix/client_delivery.py:345`), which uploads the sidecar and rewrites the payload — but `_send_claimed` (`delivery_gateway.py:563`) has already frozen the row by then, so the durable payload lacks the MXC the wire carries, and a recovery resend re-uploads and can mint a new MXC and new encrypted-file keys under the old transaction ID. Same remedy: prepare the wire payload before the enqueue, in both the send and edit paths, and send an already-prepared payload on live and recovery alike. Check whether `prepare_large_message` is idempotent before calling it earlier.
 
- `_finalize_visible_replacement_edit` builds an `EditTextRequest` with no `delivery_turn_id`, so the final streamed transform edits outside the outbox after the `FINAL` row is acknowledged: the durable row holds raw text while the room shows transformed, and a crash between them leaves the room raw. Separately, an oversized terminal delivery uploads its sidecar after the claim, so the frozen payload lacks the MXC the wire carries. Both are the same class — the durable record and the wire event disagree — and both want the wire payload prepared before the enqueue.
+**And the original statement of both, also for reference — neither is open.** `_finalize_visible_replacement_edit` built an `EditTextRequest` with no `delivery_turn_id`, so the final streamed transform edited outside the outbox after the `FINAL` row was acknowledged: the durable row held raw text while the room showed transformed, and a crash between them left the room raw. Separately, an oversized terminal delivery uploaded its sidecar after the claim, so the frozen payload lacked the MXC the wire carried. Both were the same class — the durable record and the wire event disagree — and both wanted the wire payload prepared before the enqueue, which is what `e96dcaf18` and `fd7c50190` did.
 
 **Outbox idempotency rested on an unmeasured assumption. Done** (`dcf2b819a`). Recovery retried under the same transaction ID while persisting nothing about the device that used it, so a re-login turned one row into two visible answers.
 
@@ -2113,7 +2113,14 @@ first, so requiring acknowledgement put the placeholder into the room *before*
 the answer. An edit-shaped `FINAL` cannot be stranded by the skip: its target
 event ID only exists because the placeholder send returned one.
 
-### What is still open, precisely
+### What was open at the time, precisely — both closed since
+
+Both defects below were real when written and are fixed: `e96dcaf18` moved the
+transform ahead of the terminal payload build and deleted
+`_finalize_visible_replacement_edit`, and `fd7c50190` prepares the wire payload
+before the enqueue on both the send and edit paths. The statements are kept in
+their original tense because the reasoning that found them is the useful part;
+read them as a record, not as a work list.
 
 **A final-response transform edits the answer outside the outbox.**
 `finalize_streamed_response` applies `_apply_final_response_transform` after the
