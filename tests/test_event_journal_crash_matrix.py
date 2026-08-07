@@ -1044,3 +1044,78 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert (await runtime.delivery.recover()).recovered == 1
         assert runtime.homeserver.visible_messages == 1
         assert runtime.homeserver.room_scans == 1
+
+
+class TestOneTurnStageIsOneMessage:
+    """What a second delivery under the same (turn, stage) actually does.
+
+    Every caller routed through the outbox has to send at most once per turn
+    and stage, and the reason is easy to state wrongly. It is not that the
+    second attempt is rejected -- an error a caller could notice. The enqueue
+    returns a transaction ID, the claim returns the first attempt's event, and
+    the second text is silently discarded, so the caller is told it delivered
+    something it did not.
+
+    That is the whole constraint behind splitting a placeholder and its answer
+    across the two stages instead of sending both as answers, and it is worth a
+    test of its own because every future caller depends on it being true.
+    """
+
+    async def test_a_second_answer_for_one_turn_keeps_the_first_text(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The freeze rule wins, and reports success while it does."""
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the answer"},
+        )
+        first = await runtime.delivery.flush(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+
+        transaction_id = await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "a different answer"},
+        )
+        second = await runtime.delivery.flush(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+
+        assert transaction_id is not None, "the enqueue reports success rather than refusing"
+        stored = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.payload["body"] == "the answer", "the second text overwrote a frozen row"
+        assert second == first, "the caller was handed a new event for text that never went out"
+        assert runtime.homeserver.visible_messages == 1
+
+    async def test_the_two_stages_do_not_collide(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A placeholder and its answer are different rows, so both are sent.
+
+        The escape from the rule above, and the reason a caller that needs two
+        visible messages for one turn stages them rather than sending two
+        answers.
+        """
+        for stage, body in ((DeliveryStage.INITIAL, "thinking"), (DeliveryStage.FINAL, "the answer")):
+            await runtime.store.enqueue_delivery(
+                turn_id=SOURCE,
+                stage=stage,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": body},
+            )
+            await runtime.delivery.flush(turn_id=SOURCE, stage=stage)
+
+        assert runtime.homeserver.visible_messages == 2
+        placeholder = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL)
+        answer = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert placeholder is not None
+        assert answer is not None
+        assert placeholder.payload["body"] == "thinking"
+        assert answer.payload["body"] == "the answer"
+        assert placeholder.transaction_id != answer.transaction_id
