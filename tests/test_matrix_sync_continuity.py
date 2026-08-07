@@ -2082,6 +2082,58 @@ async def test_gap_skipping_checkpoint_rewinds_instead_of_acknowledging(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_never_recoverable_room_never_freezes_the_sync_watermark(tmp_path: Path) -> None:
+    """A room nio can never rebuild must not pin the transport on one position.
+
+    The escape certifies past the gap and then resets the client, and the reset
+    installs whichever cursor cache trust currently calls safe. If that were the
+    checkpoint the escape just moved past, every window would rewind onto the
+    same position and the principal would re-sync it forever. So this drives
+    several full stall windows through the real response path and pins the
+    cursor and the durable checkpoint by value after each one.
+    """
+    wedged = frozenset({"!wedged:localhost"})
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot._first_sync_done = True
+    save_sync_token(tmp_path, bot.agent_name, "s_stuck", cache_generation=_CACHE_GENERATION)
+    assert await bot._sync_cache_trust.prepare_startup() == "s_stuck"
+
+    windows = 3
+    cursors: list[str] = []
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT * windows):
+        response = MagicMock(spec=nio.SyncResponse)
+        response.next_batch = f"s_live_{attempt}"
+        response.recovered_room_ids = frozenset()
+        response.unrecovered_room_ids = wedged
+        response.rooms = MagicMock(join={}, leave={})
+        bot.client.next_batch = response.next_batch
+        bot.client.has_uncommitted_classic_sync_state = True
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            new=AsyncMock(
+                return_value=SyncCacheWriteResult.from_sync_response(response, complete=True),
+            ),
+        ):
+            await bot._on_sync_response(response)
+        cursors.append(bot.client.next_batch)
+
+    # Each window rewinds onto the checkpoint it is measured from until the
+    # escape certifies past the gap, and that escape is what the next window
+    # rewinds to. A frozen watermark would repeat "s_stuck" to the end.
+    limit = _CLASSIC_SYNC_RECOVERY_STALL_LIMIT
+    escapes = [f"s_live_{window * limit + limit - 1}" for window in range(windows)]
+    measured_from = ["s_stuck", *escapes[:-1]]
+    assert cursors == [
+        token
+        for rewind, escape in zip(measured_from, escapes, strict=True)
+        for token in [*[rewind] * (limit - 1), escape]
+    ]
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == escapes[-1]
+
+
+@pytest.mark.asyncio
 async def test_running_classic_loop_exit_resets_equal_token_staging(tmp_path: Path) -> None:
     """An unacknowledged response is dirty even when its token equals the checkpoint."""
     bot = _agent_bot(tmp_path)
