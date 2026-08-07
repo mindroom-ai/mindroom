@@ -606,11 +606,53 @@ async def test_an_empty_projection_owes_nothing(alice: PrincipalStore) -> None:
     """A skip leaves a hole only between stored history and what arrives next.
 
     With nothing stored there is no hole, just a conversation that starts later
-    -- which is what every unread room looks like and what the first hydration
-    walk fills in anyway.
+    -- which is what every unread room looks like, and no debt is invented for
+    it because there is no stored message an anchor could name.
     """
     assert await alice.record_room_history_debt(ROOM) is None
     assert await alice.room_history_debt(ROOM) is None
+
+
+async def test_an_empty_projection_drops_the_marker_that_certified_the_hole(
+    alice: PrincipalStore,
+) -> None:
+    """An empty projection is not proof that the room has nothing to miss.
+
+    "A first hydration walk fills it in anyway" is the justification for
+    recording no debt, and the rooms this actually happens to are the ones where
+    that walk has already run. A room the homeserver holds real history for can
+    project nothing at all -- undecryptable events, redactions, reactions, state
+    -- and the walk that found only those is complete over zero visible
+    messages, which is a warm marker.
+
+    Recording nothing there let the checkpoint advance past the gap while the
+    marker kept answering for it: no debt withholds the marker, so the next
+    strict read serves a conversation missing everything sent during the skip
+    without making a single server request, and reports it as whole.
+
+    Still no debt -- there is no stored message to anchor one on -- but the
+    marker that certified the hole is dropped, so the next read walks the room.
+    """
+    redacted = raw("$gone", "gone", ts=1_000)
+    redacted["content"] = {}
+    redacted["unsigned"] = {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}}
+    warm = FakeClient(pages=[[redacted]])
+    await hydrator(alice, warm).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    # The dangerous state: a whole conversation with nothing in it.
+    assert await bodies(alice) == []
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+
+    assert await alice.record_room_history_debt(ROOM) is None
+    assert await alice.room_history_debt(ROOM) is None
+
+    # One re-walk, rather than an unbounded tax on a room that owes nothing.
+    assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    repair = FakeClient(pages=[[raw("$missed", "missed", ts=3_000), redacted]])
+    await hydrator(alice, repair).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    assert await bodies(alice) == ["missed"]
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
 async def test_a_second_skip_keeps_the_older_hole(alice: PrincipalStore) -> None:

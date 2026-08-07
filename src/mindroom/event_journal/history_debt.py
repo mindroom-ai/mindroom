@@ -74,11 +74,24 @@ def _newest_projected_ts(transaction: Transaction, principal_id: str, room_id: s
 def record(transaction: Transaction, principal_id: str, room_id: str) -> RoomHistoryDebt | None:
     """Record that a skipped sync gap left this room owing history.
 
-    Nothing is recorded for a room whose projection is empty, and that is not a
-    shortcut. A debt exists to name a hole between what is already stored and
-    what arrives after the skip; with nothing stored there is no hole, only a
-    conversation that starts later, which is what every unread room looks like
-    and what a first hydration walk fills in anyway.
+    A room whose projection holds no visible message gets no debt, because a
+    debt is a timestamp and there is no stored message to take one from. What it
+    does not get either is the benefit of the doubt: an empty projection is not
+    evidence that the room has nothing to miss, and the justification that a
+    first hydration walk fills such a room in anyway is true only of a room
+    nobody has read yet.
+
+    The ordinary case is the other one. A room the homeserver holds real history
+    for can project nothing at all -- undecryptable events, redactions,
+    reactions, state -- and the walk that found only those is complete over zero
+    visible messages. Leaving that marker in place while the checkpoint moves
+    past the gap is what makes the next strict read answer from a conversation
+    missing everything sent during the skip, without asking the server anything.
+
+    So the room's hydration markers are dropped instead, in the transaction that
+    already orders this write ahead of the checkpoint. No anchor is invented and
+    the debt semantics are untouched; the cost is one re-walk of a room that owes
+    nothing, rather than a hole certified as a whole conversation.
 
     A room that is already indebted keeps the older timestamp. The two gaps are
     one hole from a reader's point of view, and reaching only the newer of them
@@ -86,6 +99,10 @@ def record(transaction: Transaction, principal_id: str, room_id: str) -> RoomHis
     """
     anchor = _newest_projected_ts(transaction, principal_id, room_id)
     if anchor is None:
+        transaction.execute(
+            "DELETE FROM conversation_hydration WHERE principal_id = ? AND room_id = ?",
+            (principal_id, room_id),
+        )
         return None
     outstanding_debt = outstanding(transaction, principal_id, room_id)
     owed = anchor if outstanding_debt is None else min(outstanding_debt.owed_through_ts, anchor)
