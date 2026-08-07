@@ -26,7 +26,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, parse_matrix_media_event_source
-from mindroom.matrix.transport_progress import is_transport_progress_revision
+from mindroom.matrix.transport_progress import is_own_stream_frame, is_transport_progress_revision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -89,15 +89,27 @@ def _event_kind(event: nio.Event) -> EventKind | None:
     return None
 
 
-def _event_class_for(provenance: nio.TimelineEventProvenance) -> EventClass:
+def _event_class_for(
+    provenance: nio.TimelineEventProvenance,
+    event: nio.Event,
+    *,
+    self_sender: str,
+) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
     a member and has not answered yet. Cold history is context the bot is
     seeing for the first time, and answering it would mean replying to
     conversations that ended long ago.
+
+    This bot's own streaming frames are the exception at any provenance. They
+    are admitted so the conversation keeps the message the stream lands on, and
+    they can never be work: answering your own placeholder is the loop the
+    router echo drop exists to prevent, one layer earlier.
     """
     if provenance is nio.TimelineEventProvenance.HISTORY:
+        return EventClass.CONTEXT_ONLY
+    if is_own_stream_frame(event, self_sender=self_sender):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -273,6 +285,8 @@ class JournalIngress:
     def admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
         kind = _event_kind(event)
+        if kind is None and is_own_stream_frame(event, self_sender=self.self_sender):
+            return EventKind.MESSAGE
         if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
             return EventKind.ROOM_LIFECYCLE
         return kind
@@ -295,7 +309,7 @@ class JournalIngress:
         kind = self.admission_kind(event)
         if kind is None:
             return
-        event_class = _event_class_for(provenance)
+        event_class = _event_class_for(provenance, event, self_sender=self.self_sender)
         try:
             await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),

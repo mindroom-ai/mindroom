@@ -154,11 +154,19 @@ PLACEHOLDER_ID = "$placeholder"
 PLACEHOLDER_BODY = "Thinking..."
 
 
-def placeholder_event(*, ts: int = 1_000) -> nio.Event:
+def placeholder_event(*, ts: int = 1_000, msgtype: str = "m.notice") -> nio.Event:
     """Return the visible message a streamed answer starts life as.
 
-    Built the way the runtime builds it: an ordinary ``m.text`` send carrying
-    the pending stream status as extra content.
+    ``m.notice``, because that is what the runtime sends: every `pending` and
+    `streaming` frame is a notice so Matrix suppresses it before evaluating
+    mention rules, and only the terminal frame reverts to ``m.text``
+    (`streaming.py`, `_prepare_delivery_from_snapshot`).
+
+    This fixture used to hard-code ``m.text`` while claiming it was built the
+    way the runtime builds it. It was not, and the difference was the whole
+    bug: a notice is a sibling of `RoomMessageText` in nio, not a subclass, so
+    the real placeholder was never admitted and every streamed answer's
+    terminal edit had no original to reduce onto.
     """
     event = nio.Event.parse_event(
         {
@@ -167,7 +175,7 @@ def placeholder_event(*, ts: int = 1_000) -> nio.Event:
             "origin_server_ts": ts,
             "type": "m.room.message",
             "content": {
-                "msgtype": "m.text",
+                "msgtype": msgtype,
                 "body": PLACEHOLDER_BODY,
                 STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
             },
@@ -229,12 +237,12 @@ class TestProvenanceMapping:
         expected: EventClass,
     ) -> None:
         """Provenance decides whether work may start."""
-        assert _event_class_for(provenance) is expected
+        assert _event_class_for(provenance, text_event("$m", "hi"), self_sender=BOT) is expected
 
     async def test_every_provenance_is_mapped(self) -> None:
         """A new provenance must not silently default to actionable."""
         for provenance in nio.TimelineEventProvenance:
-            assert _event_class_for(provenance) in EventClass
+            assert _event_class_for(provenance, text_event("$m", "hi"), self_sender=BOT) in EventClass
 
 
 class TestEventKinds:
@@ -550,12 +558,13 @@ class TestStreamingProgressIsTransport:
     settled on. Reducing every progress echo would rewrite that row once per
     edit and arrive where it was going anyway.
 
-    The frames here carry ``m.text`` deliberately. MindRoom currently sends
-    in-progress updates as ``m.notice``, which journal admission does not own
-    at all, so today's progress echo is dropped by a filter that has nothing to
-    do with conversation content. The rule under test must hold on its own —
-    see the last test in this class, which pins both filters and which is
-    which.
+    MindRoom sends in-progress updates as ``m.notice`` so Matrix suppresses
+    the push notification each edit would otherwise fire, and only the terminal
+    frame reverts to ``m.text``. A notice is not a kind journal admission owns,
+    so recognising this bot's own frames is what puts the placeholder in the
+    conversation for that terminal edit to land on. Most tests here use
+    ``m.text`` frames so the transport rule is exercised on its own; the last
+    two run the exact sequence production sends.
     """
 
     @staticmethod
@@ -588,6 +597,83 @@ class TestStreamingProgressIsTransport:
         assert visible.content["body"] == PLACEHOLDER_BODY
         assert visible.revision_event_id == PLACEHOLDER_ID
 
+    async def test_someone_elses_notice_is_not_treated_as_our_stream(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The sender check is what keeps the stream key from being writable.
+
+        A notice is not a kind journal admission owns, so one from another
+        sender does not reach the conversation at all. Recognising our own
+        frames is the single exception, and it is earned by the sender, not by
+        the key: without that check any member could put content into another
+        principal's conversation context by decorating an `m.notice` with a
+        stream status, which is a room-visible field anyone can set.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        foreign = nio.Event.parse_event(
+            {
+                "event_id": "$theirs",
+                "sender": ALICE,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.notice",
+                    "body": "not mine",
+                    STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+                },
+            },
+        )
+        assert isinstance(foreign, nio.Event)
+
+        await self._admit_live(ingress, foreign)
+
+        assert ingress.admission_kind(foreign) is None
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert page.messages == ()
+        assert await alice.pending() == ()
+
+    async def test_the_production_stream_sequence_leaves_one_visible_answer(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The exact shapes production sends, in the order it sends them.
+
+        `m.notice` placeholder, `m.notice` progress, `m.text` terminal. The
+        whole point of the notice/text split is invisible to every other test
+        here, and it is what broke: with the placeholder unadmitted the
+        terminal edit had no original, parked in `unresolved_edits`, and the
+        conversation this projection exists to serve never saw the answer.
+        """
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await self._admit_live(
+            ingress,
+            placeholder_event(),
+            stream_event(
+                "$progress",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
+            stream_event(
+                "$terminal",
+                "the whole answer",
+                STREAM_STATUS_COMPLETED,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.text",
+                ts=1_200,
+            ),
+        )
+
+        visible = await self._one_visible(alice)
+        assert visible.logical_event_id == PLACEHOLDER_ID
+        assert visible.revision_event_id == "$terminal"
+        assert visible.content["body"] == "the whole answer"
+        assert await alice.pending_refreshes(room_id=ROOM, thread_id=None) == ()
+
     async def test_a_skipped_progress_edit_is_still_an_admitted_event(
         self,
         alice: PrincipalStore,
@@ -603,10 +689,22 @@ class TestStreamingProgressIsTransport:
         await self._admit_live(
             ingress,
             placeholder_event(),
-            stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
+            stream_event(
+                "$progress",
+                "half an ans",
+                STREAM_STATUS_STREAMING,
+                replaces=PLACEHOLDER_ID,
+                msgtype="m.notice",
+                ts=1_100,
+            ),
         )
 
-        assert [event.event_id for event in await alice.pending()] == [PLACEHOLDER_ID, "$progress"]
+        # Admitted, and neither is work: a bot answering its own streaming
+        # frames is the loop the echo drop exists to prevent, refused here one
+        # layer earlier by admitting them as context.
+        assert await alice.pending() == ()
+        assert await alice.load_event(PLACEHOLDER_ID) is not None
+        assert await alice.load_event("$progress") is not None
 
     async def test_the_placeholder_is_the_message_the_answer_lands_on(
         self,
@@ -735,14 +833,21 @@ class TestStreamingProgressIsTransport:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Two filters can drop a progress echo, and only one of them is this rule.
+        """A notice-typed progress echo reaches this rule and is refused by it.
 
-        MindRoom sends in-progress updates as ``m.notice`` so they raise no
-        push notification, and journal admission owns ``m.text`` messages only.
-        Today's progress echo is therefore refused a kind before the projection
-        policy is consulted. That is a notification-semantics choice on the
-        delivery side rather than a statement about conversation content, so
-        the rule above is deliberately not allowed to lean on it.
+        This test used to assert the opposite, and the difference was a real
+        bug. MindRoom sends in-progress updates as ``m.notice`` so they raise
+        no push notification, and `RoomMessageNotice` is a sibling of
+        `RoomMessageText` in nio rather than a subclass -- so admission
+        silently owned neither the progress edits nor the placeholder they
+        replace. The terminal frame reverts to ``m.text``, arrived with no
+        original to reduce onto, and parked in `unresolved_edits`, which meant
+        the live projection was missing every streamed answer this bot gave.
+
+        Admission now owns this bot's own stream frames, and the projection
+        policy is what drops the intermediate ones -- which is where that
+        decision belonged all along, rather than resting on a
+        notification-semantics choice made on the delivery side.
         """
         ingress = JournalIngress(store=alice, self_sender=BOT)
 
@@ -759,7 +864,7 @@ class TestStreamingProgressIsTransport:
             ),
         )
 
-        assert [event.event_id for event in await alice.pending()] == [PLACEHOLDER_ID]
+        assert await alice.pending() == ()
         assert (await self._one_visible(alice)).revision_event_id == PLACEHOLDER_ID
 
 
