@@ -107,7 +107,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.threading_helpers import seed_unhydrated_room_event
+from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -1126,6 +1126,17 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
     )
     bot._turn_controller.deps.resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
         side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$thread-seed" else None,
+    )
+    # The reply inherits its thread from the event it answers, so the journal
+    # has to already place that event in one. Without it the walk reaches an
+    # unhydrated candidate root instead, and unproven roots are refused a
+    # coalescing key rather than guessed at.
+    await seed_unhydrated_room_event(
+        bot,
+        room_id=room.room_id,
+        event_id="$thread-seed",
+        body="thread seed",
+        thread_id="$thread-root",
     )
     calls: list[list[str]] = []
 
@@ -3199,6 +3210,10 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
             await release_approval_lookup.wait()
         return False
 
+    # These are ingress-ordering tests. The reply target is an approval card
+    # the bot posted, so its conversation is one MindRoom already knows;
+    # saying so keeps the reply's thread resolution from being the subject.
+    await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
     bot._coalescing_gate._dispatch_batch = dispatch_batch
     first = _reply_event(
         event_id="$first:localhost",
@@ -3248,6 +3263,10 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
             await release_approval_lookup.wait()
         return False
 
+    # These are ingress-ordering tests. The reply target is an approval card
+    # the bot posted, so its conversation is one MindRoom already knows;
+    # saying so keeps the reply's thread resolution from being the subject.
+    await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$approval-card:localhost")
     bot._coalescing_gate._dispatch_batch = dispatch_batch
     first = _reply_event(
         event_id="$relay-first:localhost",
@@ -7412,7 +7431,6 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     snapshot.assert_awaited_once_with(
         room.room_id,
         "$thread",
-        source_event_id=event.event_id,
         caller_label="router_pre_ingress_skip",
     )
 
@@ -7452,6 +7470,5 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     snapshot.assert_awaited_once_with(
         room.room_id,
         "$maybe-root",
-        source_event_id=event.event_id,
         caller_label="router_pre_ingress_skip",
     )

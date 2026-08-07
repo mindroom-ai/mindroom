@@ -385,7 +385,6 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
         "$thread:localhost",
         mode=ThreadReadMode.STRICT_FULL,
         caller_label="dispatch_context_strict_thread_fallback",
-        source_event_id="$incoming:localhost",
     )
     assert agent_response_should_respond(
         agent_name="primary",

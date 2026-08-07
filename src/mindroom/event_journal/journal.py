@@ -349,26 +349,6 @@ def admit(
     return AdmissionResult.ADMITTED
 
 
-def has_other_admitted_room_event(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    event_id: str,
-) -> bool:
-    """Return whether this principal admitted another event in the room."""
-    row = transaction.fetchone(
-        """
-        SELECT 1 AS present
-        FROM journal_events
-        WHERE principal_id = ? AND room_id = ? AND event_id <> ?
-        LIMIT 1
-        """,
-        (principal_id, room_id, event_id),
-    )
-    return row is not None
-
-
 def admitted_thread_id(
     transaction: Transaction,
     principal_id: str,

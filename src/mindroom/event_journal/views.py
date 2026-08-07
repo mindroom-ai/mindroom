@@ -174,10 +174,6 @@ class ConversationReadView(ProjectionView, Protocol):
         """Return whether a walk ran for this conversation and stopped at a ceiling."""
         ...
 
-    async def has_other_admitted_room_event(self, *, room_id: str, event_id: str) -> bool:
-        """Return whether another event from this room has reached the journal."""
-        ...
-
 
 class HydrationView(Protocol):
     """Building a conversation from the server and repairing one message of it."""

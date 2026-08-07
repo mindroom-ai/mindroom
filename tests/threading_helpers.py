@@ -185,6 +185,31 @@ async def seed_thread_history(
     )
 
 
+async def seed_hydrated_conversation(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    thread_id: str | None = None,
+) -> None:
+    """Record that a walk already ran for this conversation and reached the start of it.
+
+    The counterpart of ``seed_unhydrated_room_event``. A dispatch-safe read can
+    only call a conversation complete when hydration proves it, so a test whose
+    subject is something else -- ingress ordering, command targeting -- has to
+    say which conversations the bot already knows. Leaving the journal empty
+    instead makes the read report itself degraded, which is honest but is not
+    what those tests are about.
+    """
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    await store.install_hydrated_conversation(
+        room_id=room_id,
+        thread_id=thread_id,
+        events=(),
+        complete=True,
+        expected_membership_epoch=await store.membership_epoch(room_id),
+    )
+
+
 async def seed_unhydrated_room_event(
     bot: AgentBot,
     *,
@@ -192,6 +217,7 @@ async def seed_unhydrated_room_event(
     event_id: str,
     body: str,
     sender: str = "@user:localhost",
+    thread_id: str | None = None,
 ) -> None:
     """Admit one known room event without claiming its conversation is complete."""
     store = bot._journal_store.principal(bot._journal_principal_id)
@@ -199,7 +225,7 @@ async def seed_unhydrated_room_event(
         InboundEvent(
             event_id=event_id,
             room_id=room_id,
-            thread_id=None,
+            thread_id=thread_id,
             kind=EventKind.MESSAGE,
             event_class=EventClass.CONTEXT_ONLY,
             sender=sender,

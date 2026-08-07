@@ -106,20 +106,17 @@ class ConversationReader:
     store: ConversationReadView
     hydrator: ConversationHydrator
 
-    async def may_have_unread_history(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        source_event_id: str,
-    ) -> bool:
-        """Return whether local absence cannot prove this conversation is fresh."""
-        if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
-            return False
-        return await self.store.has_other_admitted_room_event(
-            room_id=room_id,
-            event_id=source_event_id,
-        )
+    async def may_have_unread_history(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether local absence cannot prove this conversation is fresh.
+
+        Hydration is the only thing that ever proves it. A conversation nobody
+        walked has no evidence behind its emptiness, and a room that predates
+        the journal looks exactly like one that has never held a message --
+        which is why guessing from what else the journal happens to hold
+        answers "fresh" about a room full of history, right up until a second
+        event lands in it.
+        """
+        return not await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id)
 
     async def hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether a walk ran for this conversation and gave up early.
