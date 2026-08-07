@@ -126,6 +126,7 @@ visibility = [
     "mindroom.response_delivery",
     "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
+    "mindroom.orchestrator",
 ]
 
 [[modules]]
@@ -134,6 +135,7 @@ depends_on = ["mindroom.event_journal"]
 visibility = [
     "mindroom.bot",
     "mindroom.thread_export.service",
+    "mindroom.orchestrator",
 ]
 
 [[modules]]
@@ -1472,6 +1474,8 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agents",
+    "mindroom.event_journal",
+    "mindroom.event_journal_open",
     "mindroom.api.main",
     "mindroom.approval_transport",
     "mindroom.bot",

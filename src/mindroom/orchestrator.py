@@ -91,6 +91,7 @@ from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
+from .event_journal_open import open_event_journal_store
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
@@ -127,6 +128,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
     from .constants import RuntimePaths
+    from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
 logger = get_logger(__name__)
 
@@ -230,6 +232,9 @@ class _MultiAgentOrchestrator:
     storage_path: Path = field(init=False)
     config_path: Path = field(init=False)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
+    # The one journal store every bot in this process borrows, opened on first
+    # use and closed after the last bot stops.
+    _journal_store: EventJournalStore | None = field(default=None, init=False, repr=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
@@ -803,6 +808,7 @@ class _MultiAgentOrchestrator:
                 self.runtime_paths,
                 self.storage_path,
                 config_path=self.config_path,
+                journal_store=self._shared_journal_store(),
             ),
         )
         bot.orchestrator = self
@@ -1876,6 +1882,27 @@ class _MultiAgentOrchestrator:
 
         logger.info("Ensured room invitations for all configured responders and authorized users")
 
+    def _shared_journal_store(self) -> EventJournalStore:
+        """Return the one journal store every bot in this process borrows.
+
+        One database holds every principal, so opening it per bot bought
+        nothing and cost a connection pool each: on PostgreSQL that multiplies
+        connections by the number of configured entities until the server
+        refuses them, and on SQLite it moves write contention off an in-process
+        queue and onto the file lock. Bots borrow this and do not close it.
+        """
+        if self._journal_store is None:
+            config = self.config
+            if config is None:
+                msg = "The orchestrator needs its config before it can open the event journal"
+                raise RuntimeError(msg)
+            self._journal_store = open_event_journal_store(
+                config.event_journal,
+                runtime_paths=self.runtime_paths,
+                storage_path=self.storage_path,
+            )
+        return self._journal_store
+
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
@@ -1908,6 +1935,11 @@ class _MultiAgentOrchestrator:
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
+        # Last, because every bot borrows it: closing it earlier would pull the
+        # store out from under a bot still draining its outbox.
+        if self._journal_store is not None:
+            store, self._journal_store = self._journal_store, None
+            await store.close()
         logger.info("All agent bots stopped")
 
 

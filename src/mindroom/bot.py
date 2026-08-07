@@ -253,6 +253,7 @@ def create_bot_for_entity(
     runtime_paths: RuntimePaths,
     storage_path: Path,
     config_path: Path | None = None,
+    journal_store: EventJournalStore | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -263,6 +264,7 @@ def create_bot_for_entity(
         runtime_paths: Explicit runtime context for paths, env, and Matrix identity resolution
         storage_path: Path for storing agent data
         config_path: Path to the YAML config file used by config-aware tools
+        journal_store: Shared event-journal store to borrow, or None to open one
 
     Returns:
         Bot instance or None if entity not found in config
@@ -280,6 +282,7 @@ def create_bot_for_entity(
             rooms,
             config_path=config_path,
             enable_streaming=enable_streaming,
+            journal_store=journal_store,
         )
 
     if entity_name in config.teams:
@@ -295,6 +298,7 @@ def create_bot_for_entity(
             team_mode=team_config.mode,
             team_model=team_config.model,
             enable_streaming=enable_streaming,
+            journal_store=journal_store,
         )
 
     if entity_name in config.agents:
@@ -374,8 +378,18 @@ class AgentBot:
         rooms: list[str] | None = None,
         config_path: Path | None = None,
         enable_streaming: bool = True,
+        journal_store: EventJournalStore | None = None,
     ) -> None:
-        """Initialize the bot with canonical runtime-backed config state."""
+        """Initialize the bot with canonical runtime-backed config state.
+
+        ``journal_store`` is borrowed when given. One database holds every
+        principal in a deployment, so a store per bot means a connection pool
+        per bot -- on PostgreSQL that multiplies connections by the number of
+        configured entities until the server refuses them, and on SQLite it
+        moves write contention from an in-process queue onto the file lock. A
+        borrowed store is not closed here, because its owner outlives this bot.
+        """
+        self._borrowed_journal_store = journal_store
         self.agent_user = agent_user
         self.storage_path = storage_path
         self.runtime_paths = runtime_paths
@@ -477,7 +491,7 @@ class AgentBot:
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
         self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
-        self._journal_store = self._open_journal_store()
+        self._journal_store = self._borrowed_journal_store or self._open_journal_store()
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -1946,7 +1960,8 @@ class AgentBot:
         # replacement opened the same database under the same principal.
         failures: list[Exception] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
-        await self._release("journal store", self._journal_store.close(), failures)
+        if self._borrowed_journal_store is None:
+            await self._release("journal store", self._journal_store.close(), failures)
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)
@@ -2519,6 +2534,7 @@ class TeamBot(AgentBot):
         team_mode: str = "coordinate",
         team_model: str | None = None,
         enable_streaming: bool = True,
+        journal_store: EventJournalStore | None = None,
     ) -> None:
         """Initialize the team bot and its shared agent runtime."""
         super().__init__(
@@ -2529,6 +2545,7 @@ class TeamBot(AgentBot):
             rooms=rooms,
             config_path=config_path,
             enable_streaming=enable_streaming,
+            journal_store=journal_store,
         )
         self.team_mode = team_mode
         self.team_model = team_model

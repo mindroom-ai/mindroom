@@ -1915,6 +1915,9 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     # sets. stop() releases the journal lane, which a real bot always has.
     bot._journal_dispatcher = MagicMock(stop=AsyncMock())
     bot._journal_store = MagicMock(close=AsyncMock())
+    # Owned rather than borrowed, so stop() closes it -- which is what this
+    # test's shutdown-intent assertions run through.
+    bot._borrowed_journal_store = None
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
