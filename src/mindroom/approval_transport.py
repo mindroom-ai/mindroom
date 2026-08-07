@@ -199,10 +199,11 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
         return await self._run_on_runtime_loop(
-            lambda: self.send_approval_event_now(room_id, thread_id, content),
+            lambda: self.send_approval_event_now(room_id, thread_id, content, transaction_id),
         )
 
     async def send_approval_event_now(
@@ -210,8 +211,14 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
-        """Send one custom approval event on the current loop."""
+        """Send one custom approval event on the current loop.
+
+        The transaction is the caller's, not a fresh one per attempt, so a send
+        repeated after a crash collapses onto the event the homeserver already
+        accepted instead of putting a second card in the room.
+        """
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
@@ -232,6 +239,7 @@ class ApprovalMatrixTransport:
             room_id,
             "io.mindroom.tool_approval",
             send_content,
+            transaction_id=transaction_id,
             operation="send_approval_event",
         )
         if isinstance(response, nio.RoomSendResponse):

@@ -844,11 +844,7 @@ class TestAgentBot(AgentBotTestBase):
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         cards = FakeApprovalCards()
-        await cards.remember_approval_card(
-            room_id="!test:localhost",
-            card_event_id="$approval",
-            card=_detached_approval_card(),
-        )
+        await cards.store_card("$approval", "!test:localhost", _detached_approval_card())
         editor = AsyncMock(return_value=True)
         initialize_approval_store(
             runtime_paths,
@@ -893,11 +889,7 @@ class TestAgentBot(AgentBotTestBase):
         handle_text_event = _install_text_dispatch_mock(monkeypatch, bot)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         cards = FakeApprovalCards()
-        await cards.remember_approval_card(
-            room_id="!test:localhost",
-            card_event_id="$approval",
-            card=_detached_approval_card(),
-        )
+        await cards.store_card("$approval", "!test:localhost", _detached_approval_card())
         editor = AsyncMock(return_value=True)
         initialize_approval_store(
             runtime_paths,

@@ -318,24 +318,28 @@ class OutboxView(Protocol):
 class ApprovalView(Protocol):
     """The approval cards this bot owes a decision on, and nothing else."""
 
-    async def remember_approval_card(
+    async def claim_approval_card(
         self,
         *,
         room_id: str,
+        transaction_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        """Record one approval card as awaiting a decision, before it is sent.
+
+        Committed ahead of the send so that nothing clickable can exist without
+        a row that accounts for it.
+        """
+        ...
+
+    async def acknowledge_approval_card(
+        self,
+        *,
+        transaction_id: str,
         card_event_id: str,
         card: Mapping[str, Any],
     ) -> None:
-        """Record one sent approval card as awaiting a decision."""
-        ...
-
-    async def room_messages_from_sender(
-        self,
-        *,
-        room_id: str,
-        sender: str,
-        limit: int = ...,
-    ) -> tuple[VisibleMessage, ...]:
-        """Return one sender's visible messages across a room, newest first."""
+        """Record the Matrix event one claimed approval card became."""
         ...
 
     async def resolve_approval_card(
@@ -352,8 +356,8 @@ class ApprovalView(Protocol):
         """
         ...
 
-    async def forget_approval_card(self, *, card_event_id: str) -> None:
-        """Drop one approval card whose decision the room now shows."""
+    async def forget_approval_card(self, *, transaction_id: str) -> None:
+        """Drop one approval card whose decision the room now shows, or that was never sent."""
         ...
 
     async def pending_approval_card(

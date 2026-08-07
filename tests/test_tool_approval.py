@@ -6,9 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -23,6 +22,7 @@ from mindroom.approval_manager import (
     ApprovalDecision,
     PendingApproval,
     SentApprovalEvent,
+    _approval_transaction_id,
     _ApprovalManager,
     _build_event_arguments_preview,
     _build_full_event_arguments,
@@ -53,8 +53,9 @@ from mindroom.tool_approval import (
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import (
     FakeApprovalCards,
-    UnrememberableApprovalCards,
+    UnclaimableApprovalCards,
     UnwritableApprovalCards,
+    transaction_id_for,
 )
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -1002,6 +1003,7 @@ async def test_request_approval_honors_transport_stripped_full_arguments(tmp_pat
         _room_id: str,
         _thread_id: str | None,
         content: dict[str, Any],
+        _transaction_id: str,
     ) -> SentApprovalEvent:
         sent_content = {key: value for key, value in content.items() if key != "full_arguments"}
         sent_content["approvable"] = False
@@ -1046,6 +1048,7 @@ async def test_request_approval_honors_transport_non_approvable_flag_with_stale_
         _room_id: str,
         _thread_id: str | None,
         content: dict[str, Any],
+        _transaction_id: str,
     ) -> SentApprovalEvent:
         return SentApprovalEvent(
             event_id="$approval",
@@ -1165,17 +1168,13 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_cancellation_after_the_send_still_records_and_expires_the_card(tmp_path: Path) -> None:
-    """A cancelled request must not leave a clickable card with no row behind it.
+async def test_a_cancellation_while_acknowledging_the_send_still_expires_the_card(tmp_path: Path) -> None:
+    """A cancelled request must not leave a clickable card nobody settles.
 
-    The card is already in the room by this point. Without a durable row no
-    restart can expire it and a click finds neither a live waiter nor a stored
-    card, so it stays clickable forever and answers nobody.
-
-    The cancelled-*send* path always handled this shape. This is the same shape
-    arriving one step later -- after the send returned, while the row was being
-    written -- and it had no handler. Recording happens before the expiry edit
-    so the row and the room cannot disagree.
+    The card is already in the room by this point, and the row that accounts
+    for it was written before the send. What is still owed is the expiry edit,
+    and the caller's cancellation must not swallow it: without it the card
+    stays clickable until the next startup goes looking.
     """
     cards = FakeApprovalCards()
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1191,18 +1190,18 @@ async def test_a_cancellation_after_the_send_still_records_and_expires_the_card(
 
     write_started = asyncio.Event()
     release_write = asyncio.Event()
-    real_remember = cards.remember_approval_card
+    real_acknowledge = cards.acknowledge_approval_card
     first_call = True
 
-    async def gated_remember(*args: object, **kwargs: object) -> object:
+    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
         nonlocal first_call
         if first_call:
             first_call = False
             write_started.set()
             await release_write.wait()
-        return await real_remember(*args, **kwargs)
+        return await real_acknowledge(*args, **kwargs)
 
-    cards.remember_approval_card = gated_remember  # type: ignore[method-assign]
+    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
 
     task = asyncio.create_task(
         store.request_approval(
@@ -1240,7 +1239,12 @@ async def test_request_approval_cancel_after_event_id_before_sender_return_emits
     edit_seen = asyncio.Event()
     sent_content: dict[str, Any] = {}
 
-    async def sender(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         sent_content.update(content)
         event_committed.set()
         await release_sender.wait()
@@ -1286,7 +1290,12 @@ async def test_request_approval_cancelled_send_returns_before_event_id_and_clean
     sent_content: dict[str, Any] = {}
     edits: list[tuple[str, str, dict[str, Any]]] = []
 
-    async def sender(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         sent_content.update(content)
         event_committed.set()
         await release_sender.wait()
@@ -1336,7 +1345,12 @@ async def test_request_approval_cancelled_slow_send_background_cleanup_removes_w
     sent_content: dict[str, Any] = {}
     edits: list[dict[str, Any]] = []
 
-    async def sender(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         sent_content.update(content)
         send_started.set()
         await release_sender.wait()
@@ -1380,7 +1394,12 @@ async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Pa
     edit_seen = asyncio.Event()
     edits: list[dict[str, Any]] = []
 
-    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        _content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         event_committed.set()
         await release_sender.wait()
         return SentApprovalEvent("$approval")
@@ -1427,7 +1446,12 @@ async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monke
     send_started = asyncio.Event()
     never_release_sender = asyncio.Event()
 
-    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        _content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         send_started.set()
         await never_release_sender.wait()
         return SentApprovalEvent("$approval")
@@ -1508,7 +1532,7 @@ async def test_request_approval_cancelled_after_a_real_transport_send_leaves_no_
 
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert cards.cards == {}
+    assert cards.rows == {}
 
 
 async def _wait_for_room_send_approval_id(client: MagicMock) -> str:
@@ -1548,6 +1572,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
             "arguments": {"path": "notes.txt"},
             "status": "pending",
         },
+        "txn-1",
     )
 
     assert sent == SentApprovalEvent(
@@ -1595,7 +1620,7 @@ async def test_approval_transport_keeps_small_full_arguments_inline(tmp_path: Pa
         "full_arguments": {"content": "x" * 2_000},
         "status": "pending",
     }
-    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content)
+    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content, "txn-1")
 
     assert sent is not None
     assert sent.sent_content == content
@@ -1619,6 +1644,7 @@ async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(t
             "full_arguments": full_arguments,
             "status": "pending",
         },
+        "txn-1",
     )
 
     assert sent is not None
@@ -1663,6 +1689,7 @@ async def test_approval_transport_offloads_encrypted_full_arguments_to_file_side
             "full_arguments": {"content": "word " * 20_000},
             "status": "pending",
         },
+        "txn-1",
     )
 
     assert sent is not None
@@ -1725,6 +1752,7 @@ async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_
             "full_arguments": {"content": "word " * 20_000},
             "status": "pending",
         },
+        "txn-1",
     )
 
     assert sent is not None
@@ -1781,13 +1809,17 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         message_type: str,
         content: dict[str, Any],
         ignore_unverified_devices: bool = False,
+        tx_id: str | None = None,
     ) -> nio.RoomSendResponse:
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
         assert ignore_unverified_devices is True
+        is_edit = "m.new_content" in content
+        # The card's own send carries the caller's transaction, which is what
+        # lets a repeat converge; the edit that resolves it does not need one.
+        assert tx_id == (None if is_edit else "txn-1")
         sent_contents.append(content)
-        event_id = "$approval-edit" if "m.new_content" in content else "$approval"
-        return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
+        return nio.RoomSendResponse(event_id="$approval-edit" if is_edit else "$approval", room_id=room_id)
 
     router_client = MagicMock()
     router_client.user_id = "@mindroom_router:localhost"
@@ -1817,6 +1849,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
             "status": "pending",
             "agent_name": "code",
         },
+        "txn-1",
     )
     edited = await orchestrator._approval_transport.edit_approval_event_now(
         "!room:localhost",
@@ -1878,6 +1911,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
             "arguments": {"path": "notes.txt"},
             "status": "pending",
         },
+        "txn-1",
     )
     edited = await orchestrator._approval_transport.edit_approval_event_now(
         "!room:localhost",
@@ -1901,7 +1935,12 @@ async def test_shutdown_expires_approval_send_that_finishes_after_shutdown_start
     send_started = asyncio.Event()
     release_send = asyncio.Event()
 
-    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        _content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
         send_started.set()
         await release_send.wait()
         return SentApprovalEvent("$approval")
@@ -2209,52 +2248,97 @@ async def test_a_restart_can_answer_a_card_the_previous_process_sent(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_restart_retires_a_card_whose_row_was_never_written(tmp_path: Path) -> None:
-    """The window between sending a card and recording it, and who closes it.
+async def test_the_row_exists_before_the_card_reaches_matrix(tmp_path: Path) -> None:
+    """The ordering itself, observed from inside the send.
 
-    A card reaches the room before its row exists. A process that dies in
-    between leaves something clickable that no row accounts for, so the row
-    scan at startup cannot see it and nobody can ever resolve it.
-
-    The previous design caught this by scanning a general event cache of the
-    room. Deleting that cache removed the safety net, so startup now also reads
-    the projection -- which is where this bot's own messages live now -- and
-    treats a card there with no row behind it as the orphan it is.
+    Everything downstream depends on it: a card the homeserver has accepted
+    while no row accounts for it cannot be expired by a restart, and a click on
+    it finds neither a live waiter nor a stored card. Recording afterwards
+    leaves that window open however small it is, so the check is not "a row
+    exists at the end" but "a row existed before the send was made".
     """
     cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    # Exactly the crash shape: the card is in the room, no row was written.
-    cards.projected.append(
-        SimpleNamespace(
+    claimed_when_sent: list[tuple[str, str | None]] = []
+
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        _content: dict[str, Any],
+        transaction_id: str,
+    ) -> SentApprovalEvent:
+        rows = await cards.pending_approval_cards(room_id="!room:localhost")
+        claimed_when_sent.extend((row.transaction_id, row.card_event_id) for row in rows)
+        # The transaction the row was claimed under is the one being sent, or a
+        # repeat could never converge on this event.
+        assert transaction_id in {claimed for claimed, _ in claimed_when_sent}
+        return SentApprovalEvent("$approval")
+
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(side_effect=sender),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
             room_id="!room:localhost",
-            sender="@mindroom_router:localhost",
-            revision_event_id="$orphan",
-            created_ts=1_000,
-            content={
-                "msgtype": "io.mindroom.tool_approval",
-                "tool_name": "read_file",
-                "approval_id": "orphan-approval",
-                "tool_call_id": "orphan-approval",
-                "status": "pending",
-                "approver_user_id": "@user:localhost",
-                "arguments": {"path": "notes.txt"},
-            },
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
         ),
     )
-    # Ordinary chatter from the same sender shares the room and the projection.
-    cards.projected.append(
-        SimpleNamespace(
-            room_id="!room:localhost",
-            sender="@mindroom_router:localhost",
-            revision_event_id="$chatter",
-            created_ts=900,
-            content={"msgtype": "m.notice", "body": "working on it"},
-        ),
-    )
+    pending = await _wait_for_pending(store, sender=store._send_event)  # type: ignore[arg-type] - the AsyncMock above
+
+    # Claimed with no event id, because the homeserver had not answered yet.
+    assert claimed_when_sent == [(_approval_transaction_id(pending.approval_id), None)]
+    # And pointed at the event once it had.
+    assert cards.acknowledged == [(_approval_transaction_id(pending.approval_id), "$approval")]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def _claimed_card_body(approval_id: str) -> dict[str, Any]:
+    """One card as it is recorded before its send: everything but the event id."""
+    return {
+        "sender": "@mindroom_router:localhost",
+        "type": "io.mindroom.tool_approval",
+        "origin_server_ts": 1_000,
+        "content": {
+            "msgtype": "io.mindroom.tool_approval",
+            "tool_name": "read_file",
+            "approval_id": approval_id,
+            "tool_call_id": approval_id,
+            "status": "pending",
+            "approver_user_id": "@user:localhost",
+            "arguments": {"path": "notes.txt"},
+            "thread_id": "$thread",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_restart_retires_a_card_whose_send_never_came_back(tmp_path: Path) -> None:
+    """The window between claiming a card and learning what it became.
+
+    The row is written first, so a process that dies around the send leaves a
+    claim with no event id rather than a card with no row. That is a knowable
+    state: presenting the same transaction again either collapses onto the
+    event the homeserver already accepted or posts the card now, and either way
+    startup ends up holding an event it can expire.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
+    # The homeserver already has this card; the repeat resolves to that event.
+    sender = AsyncMock(return_value=SentApprovalEvent("$stranded"))
     editor = AsyncMock(return_value=True)
     restarted = initialize_approval_store(
-        runtime_paths,
-        sender=AsyncMock(),
+        test_runtime_paths(tmp_path),
+        sender=sender,
         editor=editor,
         cards=cards,
         approval_room_ids=lambda: {"!room:localhost"},
@@ -2262,57 +2346,35 @@ async def test_a_restart_retires_a_card_whose_row_was_never_written(tmp_path: Pa
     )
 
     assert await restarted.discard_pending_on_startup() == 1
-    assert editor.await_args.args[:2] == ("!room:localhost", "$orphan")
-    # The repair writes the row the crash skipped, and only that one: a message
-    # that is not a card must not become one. The row is then dropped again,
-    # because the room now shows the decision, so the write is what to observe.
-    assert cards.remembered == ["$orphan"]
+    # The repeat carries the stored transaction, which is the only reason it
+    # can converge on the card already in the room instead of adding a second.
+    assert sender.await_args.args == ("!room:localhost", "$thread", ANY, "txn-stranded")
+    assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert cards.acknowledged == [("txn-stranded", "$stranded")]
+    # Retired for good: the row is gone, so the next startup has nothing to do.
+    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
 
 
 @pytest.mark.asyncio
-async def test_a_restart_does_not_retire_the_same_card_twice(tmp_path: Path) -> None:
-    """A card with a row must not also arrive as an orphan.
+async def test_a_restart_does_not_resend_a_card_it_already_has_an_event_for(tmp_path: Path) -> None:
+    """An acknowledged card is expired where it stands.
 
-    The row scan and the projection scan see the same room, so anything with a
-    row appears in both. Retiring it once is correct; retiring it twice would
-    edit an already-expired card and double every startup's work.
+    Resending one would present a transaction the homeserver has already
+    answered for no reason, and on a device whose transaction namespace has
+    since changed it would put a second card in the room.
     """
     cards = FakeApprovalCards()
-    runtime_paths = test_runtime_paths(tmp_path)
-    card_content = {
-        "msgtype": "io.mindroom.tool_approval",
-        "tool_name": "read_file",
-        "approval_id": "recorded-approval",
-        "tool_call_id": "recorded-approval",
-        "status": "pending",
-        "approver_user_id": "@user:localhost",
-        "arguments": {"path": "notes.txt"},
-    }
-    await cards.remember_approval_card(
-        room_id="!room:localhost",
-        card_event_id="$recorded",
-        card={
-            "event_id": "$recorded",
-            "sender": "@mindroom_router:localhost",
-            "type": "io.mindroom.tool_approval",
-            "origin_server_ts": 1_000,
-            "content": dict(card_content),
-        },
+    await cards.store_card(
+        "$recorded",
+        "!room:localhost",
+        {**_claimed_card_body("recorded-approval"), "event_id": "$recorded"},
     )
-    cards.projected.append(
-        SimpleNamespace(
-            room_id="!room:localhost",
-            sender="@mindroom_router:localhost",
-            revision_event_id="$recorded",
-            created_ts=1_000,
-            content=dict(card_content),
-        ),
-    )
-    cards.remembered.clear()  # Ignore this test's own seeding of the row.
+    sender = AsyncMock()
     editor = AsyncMock(return_value=True)
     restarted = initialize_approval_store(
-        runtime_paths,
-        sender=AsyncMock(),
+        test_runtime_paths(tmp_path),
+        sender=sender,
         editor=editor,
         cards=cards,
         approval_room_ids=lambda: {"!room:localhost"},
@@ -2321,7 +2383,35 @@ async def test_a_restart_does_not_retire_the_same_card_twice(tmp_path: Path) -> 
 
     assert await restarted.discard_pending_on_startup() == 1
     assert editor.await_count == 1
-    assert cards.remembered == [], "a card that already had a row was written again"
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_keeps_the_claim_when_the_repeat_send_fails(tmp_path: Path) -> None:
+    """A repeat that fails leaves the card claimed, not abandoned.
+
+    The send failing says the outcome is still unknown. Dropping the row on
+    that would strand whatever did reach the room -- exactly the state the
+    claim exists to prevent -- so the row survives for the next startup to
+    try again.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=None),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await restarted.discard_pending_on_startup() == 0
+    editor.assert_not_awaited()
+    remaining = await cards.pending_approval_cards(room_id="!room:localhost")
+    assert [card.transaction_id for card in remaining] == ["txn-stranded"]
+    assert remaining[0].card_event_id is None
 
 
 @pytest.mark.asyncio
@@ -2330,7 +2420,7 @@ async def test_card_response_for_resolved_card_is_not_consumed_without_live_wait
     await cards.store_card("$approval", "!room:localhost", _approval_card())
     # The decision landed in the room, which is what drops the card. A user
     # clicking the answered card afterwards must not resolve it a second time.
-    await cards.forget_approval_card(card_event_id="$approval")
+    await cards.forget_approval_card(transaction_id=transaction_id_for("$approval"))
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),
@@ -2717,22 +2807,7 @@ async def test_a_decision_that_cannot_be_recorded_is_never_shown(tmp_path: Path)
     """
     cards = UnwritableApprovalCards()
 
-    async def sender(room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
-        await cards.store_card(
-            "$approval",
-            room_id,
-            {
-                "event_id": "$approval",
-                "room_id": room_id,
-                "sender": "@mindroom_router:localhost",
-                "type": "io.mindroom.tool_approval",
-                "origin_server_ts": int(datetime.now(UTC).timestamp() * 1000),
-                "content": content,
-            },
-        )
-        return SentApprovalEvent("$approval")
-
-    sender_mock = AsyncMock(side_effect=sender)
+    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),
@@ -2767,7 +2842,7 @@ async def test_a_decision_that_cannot_be_recorded_is_never_shown(tmp_path: Path)
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request could not be delivered to Matrix."
     assert cards.resolutions == {}
-    assert set(cards.cards) == {"$approval"}
+    assert cards.stored_event_ids() == {"$approval"}
 
 
 @pytest.mark.asyncio
@@ -2801,10 +2876,10 @@ async def test_a_decision_no_row_takes_is_never_shown_or_acted_on(tmp_path: Path
         ),
     )
     pending = await _wait_for_pending(store, sender=sender_mock)
-    assert set(cards.cards) == {"$approval"}
+    assert cards.stored_event_ids() == {"$approval"}
 
     # The row goes away between the card being sent and the human answering.
-    await cards.forget_approval_card(card_event_id="$approval")
+    await cards.forget_approval_card(transaction_id=_approval_transaction_id(pending.approval_id))
 
     result = await store.handle_card_response(
         room_id="!room:localhost",
@@ -2878,15 +2953,16 @@ async def test_a_decision_the_row_already_holds_is_not_replaced_or_reshown(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_card_no_row_backs_is_taken_back_before_anyone_can_click_it(tmp_path: Path) -> None:
-    """A sent card that nothing recorded must not be left answerable.
+async def test_a_card_no_row_can_back_is_never_sent(tmp_path: Path) -> None:
+    """A card the store will not take must not reach the room at all.
 
-    Nothing can expire it, nothing can redeliver a decision made on it, and
-    nothing could ever account for one. Binding a live waiter to it anyway
-    leaves exactly one click between an unrecorded card and a running tool,
-    so the request fails closed at the point the record failed.
+    Nothing could expire it, nothing could redeliver a decision made on it, and
+    a click on it would sit exactly one step from releasing a tool nothing
+    durable agreed to. Because the claim comes first, that whole class is
+    settled by not sending: the request fails closed at the point the record
+    failed, and the room never learns an approval was contemplated.
     """
-    cards = UnrememberableApprovalCards()
+    cards = UnclaimableApprovalCards()
     sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
@@ -2910,9 +2986,9 @@ async def test_a_card_no_row_backs_is_taken_back_before_anyone_can_click_it(tmp_
 
     assert decision.status == "expired"
     assert decision.reason == "Tool approval request could not be recorded durably, so it cannot be answered."
-    # The room is told the card is dead, and is never told it was approved.
-    assert editor.await_count == 1
-    assert editor.await_args.args[2]["status"] == "expired"
+    # Nothing was sent, so there is nothing to take back either.
+    sender_mock.assert_not_awaited()
+    editor.assert_not_awaited()
 
     clicked = await store.handle_card_response(
         room_id="!room:localhost",
@@ -2922,12 +2998,11 @@ async def test_a_card_no_row_backs_is_taken_back_before_anyone_can_click_it(tmp_
         reason=None,
     )
 
-    # A retired card is still one this process sent, so the click is swallowed
-    # rather than falling through to a handler that has never heard of it.
-    assert clicked.consumed is True
+    # No waiter, no row: the click resolves nothing and releases nothing.
+    assert clicked.consumed is False
     assert clicked.resolved is False
     assert cards.resolutions == {}
-    assert editor.await_count == 1
+    assert editor.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -2942,22 +3017,7 @@ async def test_a_failed_edit_does_not_give_one_decision_two_meanings(tmp_path: P
     """
     cards = FakeApprovalCards()
 
-    async def sender(room_id: str, _thread_id: str | None, content: dict[str, Any]) -> SentApprovalEvent:
-        await cards.store_card(
-            "$approval",
-            room_id,
-            {
-                "event_id": "$approval",
-                "room_id": room_id,
-                "sender": "@mindroom_router:localhost",
-                "type": "io.mindroom.tool_approval",
-                "origin_server_ts": int(datetime.now(UTC).timestamp() * 1000),
-                "content": content,
-            },
-        )
-        return SentApprovalEvent("$approval")
-
-    sender_mock = AsyncMock(side_effect=sender)
+    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(side_effect=[False, True])
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),
@@ -3016,7 +3076,7 @@ async def test_a_failed_edit_does_not_give_one_decision_two_meanings(tmp_path: P
 
     assert await restarted.discard_pending_on_startup() == 1
     assert editor.await_args.args[2]["status"] == "approved"
-    assert cards.cards == {}
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
@@ -3086,7 +3146,7 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
     assert [event_id for event_id, _ in edits] == ["$approval"]
     assert edits[0][1]["status"] == "expired"
     assert edits[0][1]["resolution_reason"] == ("Bot restarted before approval — original request was cancelled.")
-    assert cards.cards == {}
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
@@ -3245,7 +3305,7 @@ async def test_a_restart_redelivers_a_decision_instead_of_expiring_it(tmp_path: 
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     assert editor.await_args.args[2]["status"] == "approved"
     assert editor.await_args.args[2]["resolution_reason"] == "Looks fine."
-    assert cards.cards == {}
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
@@ -3332,11 +3392,11 @@ async def test_startup_discard_that_never_reached_matrix_stays_recoverable(
     )
 
     assert await store.discard_pending_on_startup() == 0
-    assert set(cards.cards) == {"$approval"}
+    assert cards.stored_event_ids() == {"$approval"}
 
     editor.return_value = True
     assert await store.discard_pending_on_startup() == 1
-    assert cards.cards == {}
+    assert cards.rows == {}
 
 
 @pytest.mark.asyncio
@@ -3597,6 +3657,7 @@ async def test_cancelled_fast_path_moves_card_to_resolved_memory(tmp_path: Path)
     store = _ApprovalManager(test_runtime_paths(tmp_path), editor=AsyncMock())
     waiter = _LiveApprovalWaiter(
         approval_id="approval-1",
+        transaction_id="txn-approval-1",
         card_event_id="$approval",
         room_id="!room:localhost",
         card_event=_approval_card(),
@@ -3843,10 +3904,10 @@ async def test_shutdown_waits_for_a_cancelled_cards_recovery(tmp_path: Path) -> 
     write_started = asyncio.Event()
     recovery_started = asyncio.Event()
     release_recovery = asyncio.Event()
-    real_remember = cards.remember_approval_card
+    real_acknowledge = cards.acknowledge_approval_card
     calls = 0
 
-    async def gated_remember(*args: object, **kwargs: object) -> object:
+    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
         # First call is the caller's, and is cancelled out from under it.
         # Second is the detached recovery -- the one shutdown must wait for.
         nonlocal calls
@@ -3856,9 +3917,9 @@ async def test_shutdown_waits_for_a_cancelled_cards_recovery(tmp_path: Path) -> 
             await asyncio.Event().wait()
         recovery_started.set()
         await release_recovery.wait()
-        return await real_remember(*args, **kwargs)
+        return await real_acknowledge(*args, **kwargs)
 
-    cards.remember_approval_card = gated_remember  # type: ignore[method-assign]
+    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
 
     task = asyncio.create_task(
         store.request_approval(

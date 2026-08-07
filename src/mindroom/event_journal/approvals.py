@@ -17,6 +17,16 @@ room shows it. A row that survives with a decision on it is not a card anyone
 still owes an answer to; it is an answer that may not have been delivered, and
 resending the identical edit is what settles it.
 
+The same ordering governs the card's own arrival. A row is claimed before the
+card is sent, keyed on a transaction ID this bot chose, because the alternative
+-- keying on the event ID the homeserver hands back -- makes a row impossible
+until after the card is already clickable. A crash in that window used to leave
+a card visible with nothing durable behind it: no startup could expire it and
+no click could resolve it. Claiming first turns the dangerous case into a
+harmless one, a row for a card that may not exist, and the frozen transaction
+ID is what tells the two apart -- presenting it again collapses onto the event
+the homeserver already accepted, or creates the card if it never landed.
+
 Only cards this bot authored are ever stored, because only those are ever
 recovered; a card another sender wrote is not this bot's to resolve.
 """
@@ -34,6 +44,10 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+_CARD_COLUMNS = """
+    cards.card_json AS card_json, cards.resolution_json AS resolution_json,
+    cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +58,14 @@ class StoredApprovalCard:
     # None while the card is genuinely unanswered. Once set, the decision was
     # made and only its delivery is in doubt.
     resolution: dict[str, Any] | None
+    # This bot's own name for the card, and the Matrix transaction the send
+    # used. Stable across restarts, which is what makes a repeat send converge.
+    transaction_id: str
+    # None while nothing has come back from the homeserver. The card may still
+    # be in the room -- an unacknowledged row says the outcome is unknown, not
+    # that the send failed -- so the event ID has to be established before the
+    # card can be edited at all.
+    card_event_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,15 +126,25 @@ def resolve(
     return RecordedApprovalDecision(resolution=stored, recorded=False)
 
 
-def remember(
+def claim(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
-    card_event_id: str,
+    transaction_id: str,
     card: Mapping[str, Any],
 ) -> None:
-    """Record one sent approval card as pending under the current membership."""
+    """Record one card as pending under the current membership, before sending it.
+
+    Committed before any network I/O, so no card can reach the room ahead of
+    the row that accounts for it. The body written here is the body a repeat
+    send would present, and it stays frozen for exactly as long as a repeat is
+    still possible.
+
+    Doing nothing on conflict keeps that promise across a retried claim: a row
+    whose send may already have been attempted must not have its body replaced
+    under a transaction ID the homeserver could be holding.
+    """
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
@@ -120,17 +152,53 @@ def remember(
     transaction.execute(
         """
         INSERT INTO approval_cards (
-            principal_id, room_id, card_event_id, card_json, membership_epoch, created_at_ns
+            principal_id, room_id, transaction_id, card_json, membership_epoch, created_at_ns
         ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        ON CONFLICT (principal_id, transaction_id) DO NOTHING
         """,
         (
             principal_id,
             room_id,
-            card_event_id,
+            transaction_id,
             json.dumps(dict(card), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             0 if epoch is None else int(epoch["membership_epoch"]),
             time.time_ns(),
+        ),
+    )
+
+
+def acknowledge(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    transaction_id: str,
+    card_event_id: str,
+    card: Mapping[str, Any],
+) -> None:
+    """Record the Matrix event one claimed card became.
+
+    The body is rewritten here and only here. Up to this point it had to stay
+    frozen because a repeat send would have presented it again; once the event
+    ID is known no repeat can happen, and what the room actually shows is the
+    better thing to keep -- the transport may have replaced an oversized
+    payload with a sidecar reference, and every later read compares the stored
+    card against the room.
+
+    Guarded on the row still being unacknowledged so a second pass cannot move
+    a card onto a different event. Two event IDs for one transaction means the
+    homeserver did not collapse the repeat, and the first one is the card the
+    user is looking at.
+    """
+    transaction.execute(
+        """
+        UPDATE approval_cards SET card_event_id = ?, card_json = ?
+        WHERE principal_id = ? AND transaction_id = ? AND card_event_id IS NULL
+        """,
+        (
+            card_event_id,
+            json.dumps(dict(card), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            principal_id,
+            transaction_id,
         ),
     )
 
@@ -139,12 +207,18 @@ def forget(
     transaction: Transaction,
     principal_id: str,
     *,
-    card_event_id: str,
+    transaction_id: str,
 ) -> None:
-    """Drop one card that has reached a terminal state."""
+    """Drop one card that has reached a terminal state, sent or not.
+
+    Keyed on the transaction rather than the event, because a card whose send
+    definitively failed has no event and still has a row. Dropping by the
+    event ID would need a second statement for that case and would silently
+    match nothing when handed a card the homeserver never accepted.
+    """
     transaction.execute(
-        "DELETE FROM approval_cards WHERE principal_id = ? AND card_event_id = ?",
-        (principal_id, card_event_id),
+        "DELETE FROM approval_cards WHERE principal_id = ? AND transaction_id = ?",
+        (principal_id, transaction_id),
     )
 
 
@@ -157,8 +231,8 @@ def pending_card(
 ) -> StoredApprovalCard | None:
     """Return one card this bot still owes work on, or nothing if it is fenced."""
     row = transaction.fetchone(
-        """
-        SELECT cards.card_json AS card_json, cards.resolution_json AS resolution_json
+        f"""
+        SELECT {_CARD_COLUMNS}
         FROM approval_cards AS cards
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = cards.principal_id
@@ -167,7 +241,7 @@ def pending_card(
           AND cards.room_id = ?
           AND cards.card_event_id = ?
           AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
-        """,
+        """,  # noqa: S608 - a fixed column list, not interpolated input
         (principal_id, room_id, card_event_id),
     )
     return None if row is None else _card(row)
@@ -180,10 +254,15 @@ def pending_cards(
     room_id: str,
     limit: int = _DEFAULT_ROOM_CARD_LIMIT,
 ) -> tuple[StoredApprovalCard, ...]:
-    """Return one room's unfinished cards, oldest first."""
+    """Return one room's unfinished cards, oldest first.
+
+    Includes cards no send has come back from. Those are the ones a crash is
+    most likely to have stranded, and leaving them out would restore exactly
+    the blind spot claiming before sending exists to close.
+    """
     rows = transaction.fetchall(
-        """
-        SELECT cards.card_json AS card_json, cards.resolution_json AS resolution_json
+        f"""
+        SELECT {_CARD_COLUMNS}
         FROM approval_cards AS cards
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = cards.principal_id
@@ -194,9 +273,9 @@ def pending_cards(
         -- Two cards sent in the same nanosecond would otherwise come back in
         -- whatever order each backend felt like, and the caller expires them
         -- in the order it reads them.
-        ORDER BY cards.created_at_ns, cards.card_event_id/*bytes*/
+        ORDER BY cards.created_at_ns, cards.transaction_id/*bytes*/
         LIMIT ?
-        """,
+        """,  # noqa: S608 - a fixed column list, not interpolated input
         (principal_id, room_id, limit),
     )
     return tuple(_card(row) for row in rows)
@@ -207,7 +286,12 @@ def _card(row: Row) -> StoredApprovalCard:
     if not isinstance(card, dict):
         msg = "Stored approval card is not an object"
         raise TypeError(msg)
-    return StoredApprovalCard(card=card, resolution=_resolution(row["resolution_json"]))
+    return StoredApprovalCard(
+        card=card,
+        resolution=_resolution(row["resolution_json"]),
+        transaction_id=str(row["transaction_id"]),
+        card_event_id=row["card_event_id"],
+    )
 
 
 def _resolution(stored: str | None) -> dict[str, Any] | None:
