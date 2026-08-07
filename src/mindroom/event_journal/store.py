@@ -900,10 +900,19 @@ class TurnRecordStore:
     """One agent's durable turn records, in the journal's own database.
 
     Deliberately separate from ``PrincipalStore``. The point of moving these
-    rows here is that a turn record and the settlement of the journal sources
-    it answers can commit together, and that needs one database -- not one
-    scope key. Keeping the two views apart keeps a reader from assuming a turn
-    record belongs to the principal it happened to be fetched beside.
+    rows here is that the acknowledgement binding a delivery's Matrix event and
+    the terminal record naming that event commit together, and that needs one
+    database -- not one scope key.
+
+    Not one transaction spanning the whole answer, which is the easy thing to
+    read into this and is wrong. Sources settle when the ``FINAL`` row is
+    enqueued; the record lands when that row is acknowledged, a send later. One
+    database buys an unbroken chain of ownership across those two writes, not a
+    single write -- and a crash between them is a state the outbox is designed
+    to own, not one a reconciler has to repair.
+
+    Keeping the two views apart keeps a reader from assuming a turn record
+    belongs to the principal it happened to be fetched beside.
     """
 
     _backend: Backend

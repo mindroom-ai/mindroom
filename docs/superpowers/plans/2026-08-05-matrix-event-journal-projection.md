@@ -902,7 +902,13 @@ They are gates on phase 3, not on the phases before it.
 
 - One pending-event worker and one outbox recovery path: **holds today.**
 - No cache repair, certification, or gap machinery in the replacement: **holds today.**
-- No duplicate "should this event run?" authority: **now holds.** Contract 2 landed -- the handoff is durable outbox enqueue and enqueue-and-settle is one transaction -- and the second half followed when turn records moved into the journal database, so the terminal record and the settlement of the sources it answers commit together. The startup pass that used to rejoin them (`delivered_turn_repair.py`) is deleted rather than kept, which is the check that this is a collapse and not another reconciliation.
+- No duplicate "should this event run?" authority: **now holds.** Contract 2 landed -- the handoff is durable outbox enqueue and enqueue-and-settle is one transaction -- and the second half followed when turn records moved into the journal database.
+  Say what that bought precisely, because the obvious phrasing is false: source settlement and the terminal turn record do *not* share one transaction, and an earlier revision of this row claimed they did.
+  The real shape is a chain of ownership across two backend writes with a network send between them: `journal sources -> FINAL outbox intent -> acknowledged outbox plus terminal turn record`.
+  Enqueue commits the outbox row and settles every source it answers; acknowledgement binds `acknowledged_event_id` and upserts `turn_records` together, once Matrix has supplied an event ID.
+  A crash between the two leaves settled sources with no terminal record, and that state is intended and tested rather than a hole: the unacknowledged row owns the answer, so recovery resends the frozen payload instead of replaying the model.
+  The distinction matters for review, not pedantry -- describing it as one transaction sends a reader hunting for a settlement-to-turn-record reconciler that should not exist.
+  The startup pass that used to rejoin them (`delivered_turn_repair.py`) is deleted rather than kept, which is the check that this is a collapse and not another reconciliation.
 - Bounded prompt reads: **now holds end-to-end.** Every projection read takes a limit, and the thread walk that used to be unbounded behind a strict read now carries the same bounds as the room walk: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` caps the raw relation tree that streaming makes an order of magnitude larger than the message count. See contract 6.
 - Materially fewer production lines: **now holds.**
   Measured at this HEAD: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +13,047 / -21,473, a net of **-8,426 production lines**. The whole branch is -26,043.
