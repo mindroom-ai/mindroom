@@ -2439,6 +2439,76 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_edit_carries_the_turn(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The failure notice is the turn's answer, so it belongs to the outbox.
+
+        Editing the placeholder into an error message is the delivery that
+        makes this turn terminal. Routing it through the outbox settles the
+        journal sources inside the enqueue, so the handled-turn record the
+        caller writes immediately afterwards cannot land while the journal
+        still reports the turn unfinished.
+        """
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.edit_text = AsyncMock(return_value=True)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+            error=RuntimeError("boom"),
+            existing_event_id="$placeholder",
+            delivery_turn_id="$turn",
+        )
+
+        assert resolution == "$placeholder"
+        bot._delivery_gateway.send_text.assert_not_awaited()
+        edited = bot._delivery_gateway.edit_text.await_args.args[0]
+        assert edited.delivery_turn_id == "$turn"
+
+    @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_fallback_send_stays_off_the_outbox(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The send after a failed edit must not reuse the edit's frozen row.
+
+        By the time this runs, the edit has been attempted, so a row for this
+        turn and stage already exists holding an edit envelope. A second
+        delivery under that pair does not refuse -- it resends what is frozen,
+        which would put an ``m.replace`` payload into the room as a new
+        message. Sending the right bytes without a durable row is the better
+        failure.
+        """
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+            error=RuntimeError("boom"),
+            existing_event_id="$placeholder",
+            delivery_turn_id="$turn",
+        )
+
+        assert resolution == "$error"
+        sent = bot._delivery_gateway.send_text.await_args.args[0]
+        assert sent.delivery_turn_id is None
+
+    @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_records_fallback_before_return(
         self,
         mock_agent_user: AgentMatrixUser,

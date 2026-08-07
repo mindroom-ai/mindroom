@@ -1398,6 +1398,7 @@ class TurnController:
                     selection_handled_turn,
                     event_id,
                 ),
+                delivery_turn_id=selection_handled_turn.anchor_event_id,
             )
             if response_event_id is not None:
                 self.deps.turn_store.record_responded_turn(
@@ -1740,8 +1741,24 @@ class TurnController:
         error: Exception,
         existing_event_id: str | None = None,
         on_visible_response: Callable[[str], Awaitable[None]] | None = None,
+        delivery_turn_id: str | None = None,
     ) -> str | None:
-        """Convert dispatch setup failures into a visible terminal message."""
+        """Convert dispatch setup failures into a visible terminal message.
+
+        The edit carries the turn when the caller has one, which puts this
+        failure notice behind the same durable row an answer would use: the
+        journal sources settle inside the enqueue, so the terminal record the
+        caller writes next cannot land while the journal still calls this turn
+        unfinished.
+
+        The fallback send below deliberately does not. It runs only when the
+        edit failed, and by then an attempted row already holds the edit's
+        frozen envelope -- a second delivery under the same turn and stage does
+        not refuse, it resends what is frozen, which would put an edit-shaped
+        payload into the room as a new message. A degraded path that sends the
+        right bytes without a durable row beats one that sends the wrong bytes
+        with one.
+        """
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         if existing_event_id is not None:
@@ -1751,6 +1768,7 @@ class TurnController:
                     event_id=existing_event_id,
                     new_text=error_text,
                     extra_content=terminal_extra_content,
+                    delivery_turn_id=delivery_turn_id,
                 ),
             )
             if edited:
@@ -1970,6 +1988,7 @@ class TurnController:
                     error=failure,
                     existing_event_id=error.placeholder_event_id,
                     on_visible_response=record_visible_response,
+                    delivery_turn_id=handled_turn.anchor_event_id,
                 )
                 self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
