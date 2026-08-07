@@ -268,6 +268,30 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"])
 
 
+def conversation_hydration_was_truncated(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> bool:
+    """Return whether a walk ran for this conversation and stopped at a ceiling.
+
+    The negation of `conversation_is_complete` is not this, and the difference
+    decides whether a prompt is allowed to call its page whole. A conversation
+    with no hydration row is not complete, but nothing is missing from it
+    either -- there was never anything to walk. Only a row that ran and gave up
+    proves the page is a suffix.
+
+    So an export, whose correctness is completeness, asks
+    `conversation_is_complete` and refuses anything less. A prompt, whose
+    correctness is recency, asks this and accepts everything except a proven
+    truncation.
+    """
+    row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    return row is not None and not bool(row["complete"])
+
+
 def mark_conversation_hydrated(
     transaction: Transaction,
     principal_id: str,

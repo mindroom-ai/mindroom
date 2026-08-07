@@ -673,9 +673,18 @@ class ConversationResolver:
             thread_id=thread_id,
             limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
+        # Two independent ways this page can fall short of the conversation.
+        # `source_degraded` means local state might not have caught up yet, and
+        # a strict read rules it out. Hydration stopping at a ceiling is not
+        # ruled out by anything a caller can do: the walk already ran, it
+        # already installed its marker, and it will not run again under this
+        # membership. Only the recorded flag distinguishes a page that ends
+        # because the conversation does from one that ends because the walk
+        # ran out of allowance.
+        hydration_truncated = await reader.hydration_was_truncated(room_id=room_id, thread_id=thread_id)
         return projected_thread_history(
             page,
-            complete=not source_degraded,
+            complete=not hydration_truncated and not source_degraded,
             source_degraded=source_degraded,
         )
 

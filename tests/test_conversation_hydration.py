@@ -710,6 +710,37 @@ class TestThreadHydrationBounds:
 
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
+    async def test_a_truncated_walk_is_the_only_thing_that_proves_a_page_is_a_suffix(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A prompt must reject a windowed thread without rejecting a new room.
+
+        These are the two halves a prompt has to tell apart, and the negation
+        of `conversation_is_complete` conflates them: a conversation nothing
+        ever walked is not complete, but nothing is missing from it either.
+        Reporting it truncated would mark every brand-new room's first turn as
+        partial history, so the question is asked the other way round.
+        """
+        client = self._edited_thread(answers=4, edits=1)
+
+        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
+    async def test_a_walk_that_reached_the_end_is_not_truncated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The other direction: a whole thread must not be reported as a suffix."""
+        client = self._edited_thread(answers=4, edits=1)
+
+        await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
+
 
 class TestRoomHydration:
     """Room history is walked once, and exhaustion is not a failure."""

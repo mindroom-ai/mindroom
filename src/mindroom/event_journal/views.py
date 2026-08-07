@@ -133,6 +133,10 @@ class ConversationReadView(ProjectionView, Protocol):
         """Return whether this conversation was hydrated under current membership."""
         ...
 
+    async def conversation_hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether a walk ran for this conversation and stopped at a ceiling."""
+        ...
+
     async def has_other_admitted_room_event(self, *, room_id: str, event_id: str) -> bool:
         """Return whether another event from this room has reached the journal."""
         ...

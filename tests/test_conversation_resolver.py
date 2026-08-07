@@ -77,6 +77,7 @@ def _conversation_reader(*messages: VisibleMessage) -> ConversationReader:
         "ConversationReader",
         SimpleNamespace(
             may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
         ),
@@ -109,6 +110,7 @@ def _empty_conversation_reader() -> ConversationReader:
         "ConversationReader",
         SimpleNamespace(
             may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
         ),

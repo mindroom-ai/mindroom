@@ -121,6 +121,21 @@ class ConversationReader:
             event_id=source_event_id,
         )
 
+    async def hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether a walk ran for this conversation and gave up early.
+
+        A bounded walk that stopped at a ceiling installs a hydration marker
+        over a partial conversation, and its last page is shaped exactly like
+        the last page of a whole one. Nothing about the page distinguishes
+        them, so a caller reporting completeness has to ask.
+
+        Asked this way round on purpose. A conversation with no hydration row
+        is not complete, but nothing is missing from it either -- there was
+        never anything to walk, which is every brand-new room. Only a walk that
+        ran and gave up proves the page is a suffix.
+        """
+        return await self.store.conversation_hydration_was_truncated(room_id=room_id, thread_id=thread_id)
+
     async def latest_thread_event_id(
         self,
         *,
@@ -263,4 +278,7 @@ async def complete_thread_history(
         thread_id=thread_id,
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
-    return projected_thread_history(page, complete=True)
+    # A strict read proves nothing is pending. It does not prove the walk that
+    # populated the conversation reached the beginning of it.
+    truncated = await reader.hydration_was_truncated(room_id=room_id, thread_id=thread_id)
+    return projected_thread_history(page, complete=not truncated)
