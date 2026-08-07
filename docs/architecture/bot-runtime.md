@@ -170,7 +170,9 @@ Recovery never replaces a ledger record that changed while run metadata was load
 Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
 Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
-One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
+One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
+Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
+Neither substrate ever merged two processes' views of one record, so one process must own one agent's records — an unenforced contract, and a second runtime against the same storage path will still start.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.

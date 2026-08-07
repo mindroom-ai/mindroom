@@ -220,12 +220,19 @@ def acknowledge(
 
     The conditional update reports its own ownership through ``RETURNING``,
     which is the only way this answer is trustworthy. Reading the column first
-    and then updating it looks equivalent and is not: two processes against one
-    PostgreSQL database can both read a null, and the loser's update then
-    matches zero rows while it still believes it won. Reproduced with two
-    stores on one database -- both returned success, the outbox named the first
-    event and the terminal record named the second. Only the writing statement
-    knows whether it wrote.
+    and then updating it looks equivalent and is not: both readers can see a
+    null, and the loser's update then matches zero rows while it still believes
+    it won.
+
+    Two callers for one row is ordinary, not exotic, and does not need a second
+    process to arrive at. ``_recover_unacknowledged_deliveries`` runs after
+    every sync response and flushes each unacknowledged row, while the live
+    turn that owns that row is still inside its own flush -- the row stays
+    unacknowledged across the network send, and nothing excludes the two. Two
+    stores over one PostgreSQL database reach it as well, and that is how it
+    was reproduced: both returned success, the outbox named the first event and
+    the terminal record named the second. Only the writing statement knows
+    whether it wrote.
     """
     bound = transaction.fetchone(
         """
