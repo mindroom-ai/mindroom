@@ -1979,6 +1979,7 @@ class ResponseRunner:
                         transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                             StreamingDeliveryRequest(
                                 target=delivery_target,
+                                identity=response_identity,
                                 response_stream=response_stream,
                                 existing_event_id=delivery_request.existing_event_id,
                                 adopt_existing_placeholder=bool(delivery_request.existing_event_id)
@@ -2420,6 +2421,7 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         attempt_run_id_collector: list[str],
+        identity: ResponseIdentity,
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -2489,6 +2491,7 @@ class ResponseRunner:
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
                         target=runtime.resolved_target,
+                        identity=identity,
                         response_stream=wrapped_response_stream,
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
@@ -2736,6 +2739,7 @@ class ResponseRunner:
             try:
                 transport_outcome = await self.generate_streaming_ai_response(
                     request,
+                    identity=response_identity,
                     run_id=run_id,
                     runtime=runtime,
                     active_event_ids=active_event_ids,

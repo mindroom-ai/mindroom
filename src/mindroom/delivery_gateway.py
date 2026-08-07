@@ -50,6 +50,7 @@ from mindroom.response_delivery import (
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
+    FinalTextTransform,
     StreamingResponse,
     TerminalEdit,
     TerminalSend,
@@ -341,6 +342,9 @@ class StreamingDeliveryRequest:
     delivery_turn_id: str | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    # Carried so the final-answer transform runs before the terminal payload is
+    # built, rather than as a second edit after it was frozen and delivered.
+    identity: ResponseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -1280,6 +1284,7 @@ class DeliveryGateway:
             ),
             terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
             terminal_send=self._durable_terminal_send(request.delivery_turn_id, request.target),
+            final_text_transform=self._final_text_transform(request.identity),
             transport_is_current=self._stream_transport_gate(request.delivery_turn_id, request.target.room_id),
         )
 
@@ -1349,6 +1354,25 @@ class DeliveryGateway:
 
         return terminal_send
 
+    def _final_text_transform(self, identity: ResponseIdentity | None) -> FinalTextTransform | None:
+        """Return the hook that shapes the answer before its terminal payload is built.
+
+        Applying it here keeps the durable row and the room in agreement: the
+        payload is frozen from the transformed text, so there is no later edit
+        to lose to a crash.
+        """
+        if identity is None:
+            return None
+
+        async def transform(response_text: str) -> str:
+            draft = await self.deps.response_hooks._apply_final_response_transform(
+                identity=identity,
+                response_text=response_text,
+            )
+            return draft.response_text
+
+        return transform
+
     def _durable_terminal_edit(self, turn_id: str | None, target: MessageTarget) -> TerminalEdit | None:
         """Return a sender that records a stream's terminal edit before making it.
 
@@ -1397,46 +1421,6 @@ class DeliveryGateway:
             )
 
         return terminal_edit
-
-    async def _finalize_visible_replacement_edit(
-        self,
-        *,
-        target: MessageTarget,
-        event_id: str | None,
-        response_text: str,
-        canonical_body_candidate: str | None = None,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-        failure_reason: str | None = None,
-    ) -> FinalDeliveryOutcome | None:
-        if event_id is None:
-            return None
-        interactive_response = interactive_response_for_visible_body(
-            response_text,
-            canonical_body_candidate=canonical_body_candidate,
-        )
-        edited = await self.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=event_id,
-                new_text=interactive_response.formatted_text,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
-        if not edited:
-            return None
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id=event_id,
-            is_visible_response=True,
-            final_visible_body=interactive_response.formatted_text,
-            delivery_kind="edited",
-            failure_reason=failure_reason,
-            tool_trace=tuple(tool_trace or ()),
-            extra_content=extra_content,
-            interactive_metadata=interactive_response.interactive_metadata,
-        )
 
     async def _finalize_placeholder_only_stream_error(
         self,
@@ -1719,60 +1703,21 @@ class DeliveryGateway:
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            try:
-                if stream_outcome.failure_reason is not None:
-                    failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=visible_stream_event_id,
-                        is_visible_response=True,
-                        final_visible_body=streamed_text,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
-                final_transform_draft = await self.deps.response_hooks._apply_final_response_transform(
-                    identity=request.identity,
-                    response_text=final_body_candidate,
+            if stream_outcome.failure_reason is not None:
+                failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=visible_stream_event_id,
+                    is_visible_response=True,
+                    final_visible_body=streamed_text,
+                    failure_reason=failure_reason,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
                 )
-                if (
-                    final_transform_draft.response_text != final_body_candidate
-                    and final_transform_draft.response_text.strip()
-                ):
-                    try:
-                        final_outcome = await self._finalize_visible_replacement_edit(
-                            target=request.target,
-                            event_id=streamed_event_id,
-                            response_text=final_transform_draft.response_text,
-                            canonical_body_candidate=final_body_candidate,
-                            tool_trace=request.tool_trace,
-                            extra_content=request.extra_content,
-                            failure_reason=stream_outcome.failure_reason,
-                        )
-                    except asyncio.CancelledError:
-                        self.deps.logger.warning(
-                            "Final streamed-response transform edit cancelled; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    except Exception:
-                        self.deps.logger.exception(
-                            "Final streamed-response transform edit failed; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    else:
-                        if final_outcome is not None:
-                            return final_outcome
-            except asyncio.CancelledError:
-                self.deps.logger.warning(
-                    "Final streamed-response transform cancelled; preserving streamed success",
-                    correlation_id=request.identity.correlation_id,
-                )
-            except Exception:
-                self.deps.logger.exception(
-                    "Final streamed-response transform failed; preserving streamed success",
-                    correlation_id=request.identity.correlation_id,
-                )
-
+            # The transform already ran against the answer text, before the
+            # terminal payload was built, so the durable outbox row and the
+            # room carry the same body. A second edit here is what made them
+            # disagree, and losing it to a crash left the room showing raw text.
             assert streamed_event_id is not None
             interactive_response = interactive_response_for_visible_body(
                 streamed_text,

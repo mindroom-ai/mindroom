@@ -32,12 +32,10 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
-    PostResponseEffectsDeps,
     PostResponseEffectsSupport,
     ResponseOutcome,
     apply_post_response_effects,
 )
-from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from tests.conftest import (
     bind_runtime_paths,
@@ -1021,100 +1019,6 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
         "📂": "inspect",
         "2": "inspect",
     }
-
-
-@pytest.mark.asyncio
-async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_path: Path) -> None:
-    """A failed one-shot final transform edit must keep the visible streamed text and resolve cleanly."""
-    config = _config(tmp_path)
-    envelope = _envelope()
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(
-            return_value=SimpleNamespace(
-                response_text="chunk",
-                response_kind="ai",
-                tool_trace=None,
-                extra_content=None,
-                envelope=envelope,
-                suppress=False,
-            ),
-        ),
-        _apply_final_response_transform=AsyncMock(
-            return_value=SimpleNamespace(
-                response_text="updated text",
-                response_kind="ai",
-                envelope=envelope,
-            ),
-        ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
-
-    outcome = await gateway.finalize_streamed_response(
-        FinalizeStreamedResponseRequest(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-            stream_transport_outcome=StreamTransportOutcome(
-                last_physical_stream_event_id="$streaming",
-                terminal_status="completed",
-                rendered_body="chunk",
-                visible_body_state="visible_body",
-            ),
-            initial_delivery_kind="sent",
-            identity=ResponseIdentity(
-                response_kind="ai",
-                response_envelope=envelope,
-                correlation_id="corr-final-transform-failure",
-            ),
-            tool_trace=None,
-            extra_content=None,
-        ),
-    )
-
-    assert outcome.terminal_status == "completed"
-    assert outcome.final_visible_event_id == "$streaming"
-    assert outcome.final_visible_body == "chunk"
-    response_hooks._apply_before_response.assert_not_awaited()
-    response_hooks._apply_final_response_transform.assert_awaited_once()
-    gateway.edit_text.assert_awaited_once()
-    lifecycle = ResponseLifecycle(
-        ResponseLifecycleDeps(
-            response_hooks=response_hooks,
-            logger=get_logger("tests.response_lifecycle"),
-        ),
-        identity=ResponseIdentity(
-            response_kind="ai",
-            response_envelope=envelope,
-            correlation_id="corr-final-transform-failure",
-        ),
-        pipeline_timing=None,
-    )
-    finalized = await lifecycle.finalize(
-        outcome,
-        build_post_response_outcome=lambda _delivered: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
-    )
-
-    assert finalized.response_text == "chunk"
-    assert finalized.delivery_kind == "sent"
-    response_hooks.emit_after_response.assert_awaited_once()
-    after_kwargs = response_hooks.emit_after_response.await_args.kwargs
-    assert after_kwargs["response_text"] == "chunk"
-    assert after_kwargs["delivery_kind"] == "sent"
-    response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

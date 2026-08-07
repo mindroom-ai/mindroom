@@ -7,7 +7,7 @@ import re
 import time
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -69,6 +69,7 @@ __all__ = [
     "SYNC_RESTART_CANCEL_MSG",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
+    "FinalTextTransform",
     "ReplacementStreamingResponse",
     "StreamInputChunk",
     "StreamingDeliveryError",
@@ -424,6 +425,8 @@ type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The same contract for a stream whose answer is its first visible event: no
 # placeholder was sent, so the terminal update is a send rather than an edit.
 type TerminalSend = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
+# The answer text once the stream has ended, in and transformed out.
+type FinalTextTransform = Callable[[str], Awaitable[str]]
 
 
 @dataclass
@@ -467,6 +470,13 @@ class StreamingResponse:
     # every earlier edit is transport and goes out directly.
     terminal_edit: TerminalEdit | None = None
     terminal_send: TerminalSend | None = None
+    # Applied to the answer text once, before the terminal payload is built.
+    # Run afterwards it would need a second edit, outside the outbox and after
+    # the durable row was acknowledged, leaving the row holding one body while
+    # the room shows another. Formatted text, mentions, the canonical visible
+    # body and the warmup suffix all derive from this one string, so
+    # transforming it here keeps them consistent with nothing to rebuild.
+    final_text_transform: FinalTextTransform | None = None
     # Whether direct transport still speaks for a membership the bot is in.
     # Progressive edits are not a turn's answer, so they never reach the
     # outbox and nothing else would stop them writing into a conversation the
@@ -1023,6 +1033,21 @@ class StreamingResponse:
         )
         if snapshot is None:
             return None
+        if is_final and self.final_text_transform is not None and snapshot.accumulated_text.strip():
+            # A transform that fails must not cost the answer. The streamed text
+            # is already correct and already visible; shaping it is an
+            # improvement, not a precondition, so a failure here degrades to
+            # delivering what the stream produced rather than delivering
+            # nothing. Cancellation is left alone: that is the turn ending.
+            try:
+                transformed = await self.final_text_transform(snapshot.accumulated_text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("final_response_transform_failed_preserving_streamed_text")
+            else:
+                if transformed.strip() and transformed != snapshot.accumulated_text:
+                    snapshot = replace(snapshot, accumulated_text=transformed)
         return await asyncio.to_thread(_prepare_delivery_from_snapshot, snapshot)
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
@@ -1831,11 +1856,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
     terminal_send: TerminalSend | None = None,
+    final_text_transform: FinalTextTransform | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
     streaming = streaming_cls(
+        final_text_transform=final_text_transform,
         target=target,
         config=config,
         runtime_paths=runtime_paths,
