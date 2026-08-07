@@ -55,6 +55,7 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.event_journal import (
     ConversationPage,
+    DeliveryAcknowledgement,
     DeliveryStage,
     JournalEvent,
     OutboxDelivery,
@@ -1036,7 +1037,7 @@ class FakeOutbox:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> str | None:
+    ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes.
 
         The terminal record is kept rather than discarded so a test can assert
@@ -1047,11 +1048,12 @@ class FakeOutbox:
         already = self.rows[key].acknowledged_event_id
         if already is not None:
             # First-writer-wins, like the real store: a loser is told the event
-            # the row already names rather than its own.
-            return already
+            # the row already names rather than its own, and told it bound
+            # nothing -- which stays true even when the two events are equal.
+            return DeliveryAcknowledgement(settled_event_id=already, bound=False)
         self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
         self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
-        return event_id
+        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
 
     async def unacknowledged_deliveries(
         self,
@@ -1187,7 +1189,7 @@ class DiesAfterAcknowledgement:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> str | None:
+    ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
         await self.inner.acknowledge_delivery(
             turn_id=turn_id,

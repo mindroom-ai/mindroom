@@ -241,6 +241,27 @@ class OutboxDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryAcknowledgement:
+    """What one delivery's row names afterwards, and who put it there.
+
+    The two are separate facts and cannot be recovered from each other. Two
+    processes can send the same frozen transaction ID from the same device;
+    Matrix deduplicates and hands both callers the *same* event ID, while only
+    one conditional update binds the row. Comparing the settled event to the
+    one just sent therefore tells a loser it won, which is precisely when it
+    goes on to publish a record the database does not hold.
+    """
+
+    # The event the row names now: this call's if it bound the row, the
+    # winner's if it did not, and ``None`` when there is no row left to name
+    # one -- a membership fence deleted it between the send and this write.
+    settled_event_id: str | None
+    # Whether this call's conditional update is the one that bound the row.
+    # The only thing that licenses writing anything beside the row.
+    bound: bool
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalTurnWrite:
     """One agent's terminal turn record, committed with a delivery acknowledgement.
 

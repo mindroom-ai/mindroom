@@ -50,7 +50,12 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import OutboxDelivery, OutboxView, TerminalTurnWrite
+    from mindroom.event_journal import (
+        DeliveryAcknowledgement,
+        OutboxDelivery,
+        OutboxView,
+        TerminalTurnWrite,
+    )
     from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
@@ -144,7 +149,7 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> str | None:
+    ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         return await self.inner.acknowledge_delivery(
             turn_id=turn_id,

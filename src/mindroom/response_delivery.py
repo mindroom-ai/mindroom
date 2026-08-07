@@ -249,6 +249,14 @@ class ResponseDelivery:
         Only on a bound acknowledgement. A loser committed nothing, so it has
         nothing to publish and must not overwrite the winner's record.
 
+        Ownership is the store's answer, never this call's own inference. The
+        settled event matching the one just sent looks like proof of winning
+        and is not: two processes resending one frozen transaction ID from the
+        same device are deduplicated by Matrix into the *same* event, so a
+        loser sees its own event on the row while the write that put it there
+        was somebody else's -- and it would publish a record the database does
+        not hold.
+
         Returns the event the row actually names, which is not always the one
         just sent. A caller that lost the race must report the winner's event
         upward, because everything downstream records what delivery returns --
@@ -256,17 +264,17 @@ class ResponseDelivery:
         record end up naming different events even though the acknowledgement
         itself was guarded.
         """
-        settled = await self.store.acknowledge_delivery(
+        acknowledged = await self.store.acknowledge_delivery(
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
             terminal_turn=self._terminal_turn(turn_id, stage, event_id),
         )
-        if settled is None:
+        if acknowledged.settled_event_id is None:
             return event_id
-        if settled == event_id and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
-            self.terminal_turn_committed(turn_id, event_id)
-        return settled
+        if acknowledged.bound and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
+            self.terminal_turn_committed(turn_id, acknowledged.settled_event_id)
+        return acknowledged.settled_event_id
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.

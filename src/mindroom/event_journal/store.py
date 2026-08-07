@@ -20,7 +20,7 @@ from .history_debt import (
     HistoryDebtOutcome,
     RoomHistoryDebt,
 )
-from .models import SettlementOutcome
+from .models import DeliveryAcknowledgement, SettlementOutcome
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -521,7 +521,7 @@ class PrincipalStore:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> str | None:
+    ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
 
         Returns the event the row now names -- this call's if it bound the row,
@@ -529,6 +529,12 @@ class PrincipalStore:
         send: everything downstream records what delivery returns, so that is
         exactly how the outbox and the terminal record come to name different
         events.
+
+        Ownership rides back beside it rather than being inferred from it.
+        Matrix deduplicates a resent transaction ID by handing both callers the
+        same event, so a loser's settled event can equal the one it just sent
+        while it bound nothing at all -- and only the conditional update below
+        knows the difference.
 
         ``terminal_turn`` is the turn record this acknowledgement completes,
         written in the same transaction. The acknowledgement is the durable
@@ -544,7 +550,7 @@ class PrincipalStore:
         database. That is the whole reason turn records were moved here.
         """
 
-        def acknowledge(transaction: Transaction) -> str | None:
+        def acknowledge(transaction: Transaction) -> DeliveryAcknowledgement:
             bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
@@ -565,7 +571,7 @@ class PrincipalStore:
                     record_json=terminal_turn.record_json,
                 )
             if bound:
-                return event_id
+                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
             # Lost the row. Whatever is on it now is the answer this delivery
             # resolves to, and the caller has to be told that rather than its
             # own event id -- everything downstream records what `flush`
@@ -578,7 +584,10 @@ class PrincipalStore:
                 """,
                 (self._principal_id, turn_id, stage.value),
             )
-            return None if settled is None else str(settled["acknowledged_event_id"])
+            return DeliveryAcknowledgement(
+                settled_event_id=None if settled is None else str(settled["acknowledged_event_id"]),
+                bound=False,
+            )
 
         return await self._backend.write(acknowledge)
 

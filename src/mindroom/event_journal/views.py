@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
+        DeliveryAcknowledgement,
         DeliveryStage,
         EventKind,
         InboundEvent,
@@ -309,8 +310,8 @@ class OutboxView(Protocol):
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> str | None:
-        """Record the delivery's event and the turn it completes; return the event the row names."""
+    ) -> DeliveryAcknowledgement:
+        """Record the delivery's event and the turn it completes; name the event and who bound it."""
         ...
 
     async def unacknowledged_deliveries(

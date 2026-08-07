@@ -7,6 +7,7 @@ the event the homeserver already accepted rather than posting a second answer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from mindroom.delivery_gateway import (
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
+from mindroom.response_delivery import ResponseDelivery
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
@@ -44,7 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore, OutboxView, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, OutboxDelivery, OutboxView, PrincipalStore
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -1099,3 +1101,167 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
 
         assert outcome.event_id == "$sent"
         assert outbox.acknowledged_terminal_turns == [("$cause", None)]
+
+
+class TestARacedAcknowledgementSpeaksForTheRow:
+    """Two flushes can reach one FINAL row, and only one of them binds it.
+
+    That happens whenever a delivery is retried while an earlier attempt is
+    still in flight -- a recovery pass overlapping a live turn, or two
+    processes sharing one principal. Both claim, both produce an event, and
+    the conditional acknowledgement lets exactly one through.
+
+    The loser then owes two things and used to get both wrong. It must report
+    the event the *row* names, because everything downstream records what
+    ``flush`` returns and the later terminal settlement would otherwise upsert
+    the loser's event over the winner's record. And it must publish nothing to
+    the in-memory ledger, because it committed nothing to publish.
+
+    Driven through the public ``flush`` against a real store on purpose. A fake
+    outbox proves nothing here: what is under test is what the production
+    return value carries out of a real conditional update.
+    """
+
+    @staticmethod
+    async def _enqueue(alice: PrincipalStore) -> None:
+        """Record one FINAL answer as durably owed, ready to be flushed twice."""
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+        assert transaction_id is not None
+
+    async def test_a_send_that_lost_the_row_reports_the_winners_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Two sends, two events, one row -- and both callers must name the stored one."""
+        await self._enqueue(alice)
+        losing_send_started = asyncio.Event()
+        finish_losing_send = asyncio.Event()
+
+        async def losing_send(_claimed: OutboxDelivery) -> str:
+            losing_send_started.set()
+            await finish_losing_send.wait()
+            return "$loser"
+
+        async def winning_send(_claimed: OutboxDelivery) -> str:
+            return "$winner"
+
+        losing = ResponseDelivery(store=alice, send=losing_send, sending_device_id="DEVICE1")
+        winning = ResponseDelivery(store=alice, send=winning_send, sending_device_id="DEVICE1")
+
+        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        await losing_send_started.wait()
+        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
+        finish_losing_send.set()
+
+        assert await loser == "$winner", "the losing send reported its own event upward"
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$winner"
+
+    async def test_an_adopted_answer_that_lost_the_row_reports_the_winners_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The same rule on the branch that adopts an answer instead of sending one.
+
+        A row attempted by a device this process is no longer logged in as
+        makes the frozen transaction ID stop being proof, so both flushes read
+        the room rather than send. Adoption is still an acknowledgement, and
+        still has exactly one winner.
+        """
+        await self._enqueue(alice)
+        await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.record_sending_device(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="OLD-DEVICE")
+
+        losing_lookup_started = asyncio.Event()
+        finish_losing_lookup = asyncio.Event()
+
+        async def losing_lookup(_claimed: OutboxDelivery) -> str | None:
+            losing_lookup_started.set()
+            await finish_losing_lookup.wait()
+            return "$loser"
+
+        async def winning_lookup(_claimed: OutboxDelivery) -> str | None:
+            return "$winner"
+
+        async def never_sends(_claimed: OutboxDelivery) -> str:
+            msg = "an adopted answer is already in the room"
+            raise AssertionError(msg)
+
+        losing = ResponseDelivery(
+            store=alice,
+            send=never_sends,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=losing_lookup,
+        )
+        winning = ResponseDelivery(
+            store=alice,
+            send=never_sends,
+            sending_device_id="NEW-DEVICE",
+            resolve_delivered=winning_lookup,
+        )
+
+        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        await losing_lookup_started.wait()
+        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$winner"
+        finish_losing_lookup.set()
+
+        assert await loser == "$winner", "the losing adoption reported its own event upward"
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$winner"
+
+    async def test_only_the_caller_that_bound_the_row_publishes_its_record(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A shared event ID is what both callers get, and it says nothing about who won.
+
+        Both flushes here send the same frozen transaction ID from the same
+        device, so Matrix deduplicates and hands each of them the *same* event
+        -- exactly as a real homeserver does. Reading ownership off that
+        equality told the loser it had won, and it published a terminal record
+        the database had refused to take from it.
+        """
+        await self._enqueue(alice)
+        losing_send_started = asyncio.Event()
+        finish_losing_send = asyncio.Event()
+
+        async def losing_send(_claimed: OutboxDelivery) -> str:
+            losing_send_started.set()
+            await finish_losing_send.wait()
+            return "$deduplicated"
+
+        async def winning_send(_claimed: OutboxDelivery) -> str:
+            return "$deduplicated"
+
+        losing_publishes: list[tuple[str, str]] = []
+        winning_publishes: list[tuple[str, str]] = []
+
+        losing = ResponseDelivery(
+            store=alice,
+            send=losing_send,
+            sending_device_id="DEVICE1",
+            terminal_turn_committed=lambda turn_id, event_id: losing_publishes.append((turn_id, event_id)),
+        )
+        winning = ResponseDelivery(
+            store=alice,
+            send=winning_send,
+            sending_device_id="DEVICE1",
+            terminal_turn_committed=lambda turn_id, event_id: winning_publishes.append((turn_id, event_id)),
+        )
+
+        loser = asyncio.create_task(losing.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        await losing_send_started.wait()
+        assert await winning.flush(turn_id="turn-1", stage=DeliveryStage.FINAL) == "$deduplicated"
+        finish_losing_send.set()
+        assert await loser == "$deduplicated"
+
+        assert winning_publishes == [("turn-1", "$deduplicated")]
+        assert losing_publishes == [], "a caller that bound nothing published a record anyway"
