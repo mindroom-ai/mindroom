@@ -607,28 +607,13 @@ class PrincipalStore:
             ),
         )
 
-    async def acknowledged_final_deliveries(
-        self,
-        *,
-        limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
-        after: tuple[int, str] | None = None,
-    ) -> tuple[tuple[int, str, str], ...]:
-        """Return ``(created_at_ns, turn_id, acknowledged_event_id)`` for accepted answers."""
-        return await self._backend.read(
-            lambda transaction: outbox.acknowledged_finals(
-                transaction,
-                self._principal_id,
-                limit=limit,
-                after=after,
-            ),
-        )
-
     async def claim_approval_card(
         self,
         *,
         room_id: str,
         transaction_id: str,
         card: Mapping[str, Any],
+        sending_device_id: str | None,
     ) -> None:
         """Record one approval card as awaiting a decision, before it is sent."""
         await self._backend.write(
@@ -638,6 +623,7 @@ class PrincipalStore:
                 room_id=room_id,
                 transaction_id=transaction_id,
                 card=card,
+                sending_device_id=sending_device_id,
             ),
         )
 

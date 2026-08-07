@@ -141,6 +141,7 @@ class ApprovalMatrixTransport:
             cards=self.cards_provider(),
             approval_room_ids=self.configured_approval_room_ids,
             transport_sender=self.transport_sender_id,
+            sending_device=self.transport_device_id,
         )
 
     async def _run_on_runtime_loop(
@@ -303,6 +304,18 @@ class ApprovalMatrixTransport:
             return None
         user_id = bot.client.user_id
         return user_id if isinstance(user_id, str) and user_id else None
+
+    def transport_device_id(self) -> str | None:
+        """Return the Matrix device that sends approval cards for this runtime.
+
+        The transaction IDs the recovery pass relies on belong to this device,
+        so a card claimed under a different one cannot be presented again.
+        """
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is None or bot.client is None:
+            return None
+        device_id = bot.client.device_id
+        return device_id if isinstance(device_id, str) and device_id else None
 
     def configured_approval_room_ids(self) -> set[str]:
         """Return rooms currently served by the router approval transport."""

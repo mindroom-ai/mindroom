@@ -52,6 +52,7 @@ from mindroom.tool_approval import (
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import (
+    CLAIMING_DEVICE_ID,
     FakeApprovalCards,
     UnclaimableApprovalCards,
     UnwritableApprovalCards,
@@ -2343,6 +2344,7 @@ async def test_a_restart_retires_a_card_whose_send_never_came_back(tmp_path: Pat
         cards=cards,
         approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
     assert await restarted.discard_pending_on_startup() == 1
@@ -2405,6 +2407,7 @@ async def test_a_restart_keeps_the_claim_when_the_repeat_send_fails(tmp_path: Pa
         cards=cards,
         approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
     )
 
     assert await restarted.discard_pending_on_startup() == 0
@@ -2412,6 +2415,134 @@ async def test_a_restart_keeps_the_claim_when_the_repeat_send_fails(tmp_path: Pa
     remaining = await cards.pending_approval_cards(room_id="!room:localhost")
     assert [card.transaction_id for card in remaining] == ["txn-stranded"]
     assert remaining[0].card_event_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "restarted_device",
+    [
+        pytest.param("ADIFFERENTDEVICE", id="relogged-in-under-a-new-device"),
+        pytest.param(None, id="device-not-yet-known"),
+    ],
+)
+async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
+    tmp_path: Path,
+    restarted_device: str | None,
+) -> None:
+    """A transaction belongs to a device, so a repeat from another is a new card.
+
+    The homeserver deduplicates a transaction ID only against the device that
+    used it. Presenting a claimed card again from a device that cannot be
+    matched would therefore not converge on the card already in the room; it
+    would add a second one, and a duplicated prompt for a human decision is
+    worse than a stale one -- answering the copy resolves nothing.
+
+    So the card dies here. The row goes with it, because keeping it would only
+    re-ask the same unanswerable question on the next startup.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
+    sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: restarted_device,
+    )
+
+    assert await restarted.discard_pending_on_startup() == 0
+    # The whole point: no second card, and nothing edited, because there is no
+    # event id this process is entitled to claim.
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
+    # Expired for good rather than left for the next startup to retry, which
+    # would be a retry that can never succeed.
+    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(tmp_path: Path) -> None:
+    """The device only gates the resend, never the edit.
+
+    A card whose event id is already recorded needs no transaction to be
+    addressed, and a second ``m.replace`` carrying the same terminal content
+    resolves to the same visible message. Refusing to expire it because the
+    device changed would strand an answerable card for no gain.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_card(
+        "$recorded",
+        "!room:localhost",
+        {**_claimed_card_body("recorded-approval"), "event_id": "$recorded"},
+    )
+    sender = AsyncMock()
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: "ADIFFERENTDEVICE",
+    )
+
+    assert await restarted.discard_pending_on_startup() == 1
+    sender.assert_not_awaited()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$recorded")
+    assert editor.await_args.args[2]["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_a_claim_records_the_device_that_will_send_the_card(tmp_path: Path) -> None:
+    """The device is on the row before the send, not added after it.
+
+    Recording it afterwards would leave exactly the rows that matter -- the
+    ones a crash interrupted around the send -- with no device on them, and a
+    row whose device is unknown is one recovery has to expire rather than
+    present again.
+    """
+    cards = FakeApprovalCards()
+    devices_when_sent: list[str | None] = []
+
+    async def sender(
+        _room_id: str,
+        _thread_id: str | None,
+        _content: dict[str, Any],
+        _transaction_id: str,
+    ) -> SentApprovalEvent:
+        devices_when_sent.extend(row.sending_device_id for row in cards.rows.values())
+        return SentApprovalEvent("$approval")
+
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(side_effect=sender),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await _wait_for_pending(store, sender=store._send_event)  # type: ignore[arg-type] - the AsyncMock above
+
+    assert devices_when_sent == [CLAIMING_DEVICE_ID]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

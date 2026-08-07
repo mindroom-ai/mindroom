@@ -37,6 +37,7 @@ MatrixEventSender = Callable[[str, str | None, dict[str, Any], str], Awaitable["
 MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
+SendingDeviceProvider = Callable[[], str | None]
 
 _STARTUP_DISCARD_SCAN_LIMIT = 10_000
 _POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -301,6 +302,7 @@ class _ApprovalManager:
         cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
+        sending_device: SendingDeviceProvider | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -308,6 +310,7 @@ class _ApprovalManager:
         self._cards = cards
         self._approval_room_ids = approval_room_ids
         self._transport_sender = transport_sender
+        self._sending_device = sending_device
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -582,6 +585,7 @@ class _ApprovalManager:
         cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
+        sending_device: SendingDeviceProvider | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -594,6 +598,8 @@ class _ApprovalManager:
             self._approval_room_ids = approval_room_ids
         if transport_sender is not None:
             self._transport_sender = transport_sender
+        if sending_device is not None:
+            self._sending_device = sending_device
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -1122,7 +1128,12 @@ class _ApprovalManager:
         if self._cards is None:
             return True
         try:
-            await self._cards.claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            await self._cards.claim_approval_card(
+                room_id=room_id,
+                transaction_id=transaction_id,
+                card=card,
+                sending_device_id=self._sending_device_id(),
+            )
         except Exception:
             logger.warning(
                 "Failed to claim an approval card before sending it",
@@ -1187,6 +1198,23 @@ class _ApprovalManager:
             )
         return cards
 
+    def _repeat_would_deduplicate(self, stored: StoredApprovalCard) -> bool:
+        """Return whether presenting this row's transaction again is safe.
+
+        A Matrix transaction ID is scoped to the device that used it, so the
+        homeserver only collapses a repeat onto the original event when the
+        same device asks. From any other device the repeat is simply a new
+        event, which for a card means a second one in the room.
+
+        An unrecorded device on either side is not "unchanged", it is a device
+        nobody can name, and a repeat cannot be proven safe against a device
+        that cannot be named.
+        """
+        current = self._sending_device_id()
+        if stored.sending_device_id is None or current is None:
+            return False
+        return stored.sending_device_id == current
+
     async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> StoredApprovalCard | None:
         """Establish which Matrix event one claimed card became, sending it again if need be.
 
@@ -1198,12 +1226,33 @@ class _ApprovalManager:
         accepts the card now. Either way this pass ends up holding an event it
         can expire.
 
+        Unless the device changed, in which case the repeat is not a repeat and
+        the card is dropped unsent. This is the opposite call from the response
+        outbox, which reconciles against the room and sends anyway, and the
+        asymmetry is the point: a lost answer is unacceptable, so the outbox
+        risks a duplicate to avoid one. A card is a prompt for a human
+        decision. Two of them ask a question that has one answer, and the
+        answer to the copy resolves nothing, while a card that never appears
+        costs only a tool call that fails closed. So a stale card dies here
+        rather than reappearing, and the row goes with it -- keeping it would
+        just re-ask the same unanswerable question on the next startup.
+
         A repeat that fails leaves the row alone. The outcome is still unknown,
         and dropping the claim would abandon whatever did reach the room; the
         next startup asks again.
         """
         if stored.card_event_id is not None:
             return stored
+        if not self._repeat_would_deduplicate(stored):
+            logger.info(
+                "approval_startup_card_expired_unsendable_device",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            await self._forget_card(stored.transaction_id)
+            return None
         cards = self._cards
         content = stored.card.get("content")
         if cards is None or self._send_event is None or not isinstance(content, dict):
@@ -1226,6 +1275,7 @@ class _ApprovalManager:
             resolution=stored.resolution,
             transaction_id=stored.transaction_id,
             card_event_id=sent_event.event_id,
+            sending_device_id=stored.sending_device_id,
         )
 
     async def shutdown(self, *, reason: str) -> None:
@@ -1452,6 +1502,11 @@ class _ApprovalManager:
             return None
         return self._transport_sender()
 
+    def _sending_device_id(self) -> str | None:
+        if self._sending_device is None:
+            return None
+        return self._sending_device()
+
     def _claimed_card_body(self, *, content: dict[str, Any], requested_at: datetime) -> dict[str, Any]:
         """Return the card as it is recorded before the homeserver has seen it.
 
@@ -1630,6 +1685,7 @@ def initialize_approval_store(
     cards: ApprovalView | None = None,
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
+    sending_device: SendingDeviceProvider | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -1641,6 +1697,7 @@ def initialize_approval_store(
             cards=cards,
             approval_room_ids=approval_room_ids,
             transport_sender=transport_sender,
+            sending_device=sending_device,
         )
         return _MANAGER
 
@@ -1655,6 +1712,7 @@ def initialize_approval_store(
         cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
+        sending_device=sending_device,
     )
     return _MANAGER
 

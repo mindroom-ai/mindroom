@@ -63,6 +63,9 @@ ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
+# The device an approval card is claimed from. Stored with the row because a
+# Matrix transaction ID only deduplicates against the device that used it.
+DEVICE = "SENDINGDEVICE"
 
 # How long a claimer that is already inside its transaction waits for a second
 # claimer to reach its own first statement. Generous next to the sub-millisecond
@@ -2017,7 +2020,12 @@ class TestApprovalCards:
     async def remember(cls, store: PrincipalStore, event_id: str, *, sender: str = ALICE) -> None:
         """Leave one card in the state a completed send leaves it: claimed and acknowledged."""
         card = cls.card(event_id, sender=sender)
-        await store.claim_approval_card(room_id=ROOM, transaction_id=cls.transaction(event_id), card=card)
+        await store.claim_approval_card(
+            room_id=ROOM,
+            transaction_id=cls.transaction(event_id),
+            card=card,
+            sending_device_id=DEVICE,
+        )
         await store.acknowledge_approval_card(
             transaction_id=cls.transaction(event_id),
             card_event_id=event_id,
@@ -2040,11 +2048,21 @@ class TestApprovalCards:
         Nothing can look this card up by event id yet, because no event id
         exists -- but the room scan startup drives sees it, which is the whole
         point of writing the row before the send.
+
+        It carries the claiming device, because that is what decides whether
+        the recovery pass may present the frozen transaction again or has to
+        expire the card instead.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn",
+            card=self.card("$card"),
+            sending_device_id=DEVICE,
+        )
 
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [(entry.transaction_id, entry.card_event_id) for entry in scanned] == [("txn", None)]
+        assert [entry.sending_device_id for entry in scanned] == [DEVICE]
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
 
     async def test_a_claim_cannot_carry_a_decision_before_its_send_returns(self, alice: PrincipalStore) -> None:
@@ -2053,7 +2071,12 @@ class TestApprovalCards:
         Letting one land would mean answering a card whose place in the room is
         still unknown, and the answer would have no event to be shown on.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn",
+            card=self.card("$card"),
+            sending_device_id=DEVICE,
+        )
 
         refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
@@ -2067,7 +2090,12 @@ class TestApprovalCards:
         a re-login can produce a second card. The first is the one the user has
         been looking at, and moving the row onto the second would abandon it.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn",
+            card=self.card("$card"),
+            sending_device_id=DEVICE,
+        )
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=self.card("$card"))
         await alice.acknowledge_approval_card(
             transaction_id="txn",
@@ -2087,7 +2115,12 @@ class TestApprovalCards:
         have diverged from what was claimed -- oversized arguments become a
         sidecar reference -- and every later read compares the row to the room.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn",
+            card=self.card("$card"),
+            sending_device_id=DEVICE,
+        )
         sent = {**self.card("$card"), "content": {"approval_id": "card", "status": "pending", "approvable": False}}
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=sent)
 
@@ -2101,7 +2134,12 @@ class TestApprovalCards:
         Keying the delete on the event id would silently match nothing here,
         and the row would come back on every startup as a card to resend.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn-unsent", card=self.card("$unsent"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn-unsent",
+            card=self.card("$unsent"),
+            sending_device_id=DEVICE,
+        )
         await self.remember(alice, "$sent")
 
         await alice.forget_approval_card(transaction_id="txn-unsent")
@@ -2229,11 +2267,17 @@ class TestApprovalCards:
         would let a retry post different content under a transaction the
         homeserver has already accepted.
         """
-        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
+            room_id=ROOM,
+            transaction_id="txn",
+            card=self.card("$card"),
+            sending_device_id=DEVICE,
+        )
         await alice.claim_approval_card(
             room_id=ROOM,
             transaction_id="txn",
             card={**self.card("$card"), "sender": BOB},
+            sending_device_id=DEVICE,
         )
 
         # Read while it is still frozen. Acknowledging first would rewrite the

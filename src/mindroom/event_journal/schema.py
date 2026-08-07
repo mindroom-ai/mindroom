@@ -197,6 +197,12 @@ _TABLES = (
         -- again is what settles which, because the homeserver collapses a
         -- repeat onto the event it already accepted.
         card_event_id TEXT,
+        -- The device that claimed this card, and therefore the only device
+        -- whose transaction ID the homeserver will deduplicate against. A
+        -- repeat from any other device is a second card rather than the same
+        -- one, so a row whose device cannot be matched is expired instead of
+        -- presented again.
+        sending_device_id TEXT,
         card_json TEXT NOT NULL,
         -- The decision this bot committed to before it tried to show it. A
         -- card is answered the moment this is set, whether or not the edit

@@ -12,6 +12,11 @@ if TYPE_CHECKING:
 
     from mindroom.approval_manager import ApprovalActionResult, PendingApproval, _ApprovalManager
 
+# The device a seeded claim was made from. A test that wants recovery to
+# present the frozen transaction again has to run as this device, because that
+# is the only one the homeserver would deduplicate it against.
+CLAIMING_DEVICE_ID = "CLAIMINGDEVICE"
+
 
 @dataclass
 class _StoredRow:
@@ -24,6 +29,10 @@ class _StoredRow:
     # there, and the two must not be allowed to look alike here.
     card_event_id: str | None = None
     resolution: dict[str, Any] | None = None
+    # The device that claimed the row. Only that device's repeat of the frozen
+    # transaction collapses onto the same event, so a row claimed elsewhere is
+    # one recovery must expire rather than present again.
+    sending_device_id: str | None = None
 
 
 class FakeApprovalCards:
@@ -74,12 +83,23 @@ class FakeApprovalCards:
     def _row_for_event(self, card_event_id: str) -> _StoredRow | None:
         return next((row for row in self.rows.values() if row.card_event_id == card_event_id), None)
 
-    async def claim_approval_card(self, *, room_id: str, transaction_id: str, card: Mapping[str, Any]) -> None:
+    async def claim_approval_card(
+        self,
+        *,
+        room_id: str,
+        transaction_id: str,
+        card: Mapping[str, Any],
+        sending_device_id: str | None = None,
+    ) -> None:
         """Record one card as pending before it is sent, keeping the first body seen."""
         if transaction_id in self.rows:
             return
         self.claimed.append(transaction_id)
-        self.rows[transaction_id] = _StoredRow(room_id=room_id, card=dict(card))
+        self.rows[transaction_id] = _StoredRow(
+            room_id=room_id,
+            card=dict(card),
+            sending_device_id=sending_device_id,
+        )
 
     async def acknowledge_approval_card(
         self,
@@ -144,9 +164,26 @@ class FakeApprovalCards:
             card=card,
         )
 
-    async def store_unsent_card(self, transaction_id: str, room_id: str, card: dict[str, Any]) -> None:
-        """Seed one card as if a previous process had claimed it and then died."""
-        await self.claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+    async def store_unsent_card(
+        self,
+        transaction_id: str,
+        room_id: str,
+        card: dict[str, Any],
+        *,
+        sending_device_id: str | None = CLAIMING_DEVICE_ID,
+    ) -> None:
+        """Seed one card as if a previous process had claimed it and then died.
+
+        Claimed from ``CLAIMING_DEVICE_ID`` by default. Pass a different device,
+        or None, to seed the row a recovery pass cannot prove it may present
+        again.
+        """
+        await self.claim_approval_card(
+            room_id=room_id,
+            transaction_id=transaction_id,
+            card=card,
+            sending_device_id=sending_device_id,
+        )
 
 
 def transaction_id_for(card_event_id: str) -> str:
@@ -160,6 +197,7 @@ def _stored(transaction_id: str, row: _StoredRow) -> StoredApprovalCard:
         resolution=row.resolution,
         transaction_id=transaction_id,
         card_event_id=row.card_event_id,
+        sending_device_id=row.sending_device_id,
     )
 
 
@@ -186,6 +224,7 @@ class UnclaimableApprovalCards(FakeApprovalCards):
         room_id: str,  # noqa: ARG002 - matches the view it stands in for
         transaction_id: str,
         card: Mapping[str, Any],  # noqa: ARG002 - matches the view it stands in for
+        sending_device_id: str | None = None,  # noqa: ARG002 - matches the view it stands in for
     ) -> None:
         """Fail loudly, the way a store that cannot take the row does."""
         msg = f"cannot claim the card {transaction_id!r}"

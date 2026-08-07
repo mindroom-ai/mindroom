@@ -46,7 +46,8 @@ if TYPE_CHECKING:
 _DEFAULT_ROOM_CARD_LIMIT = 256
 _CARD_COLUMNS = """
     cards.card_json AS card_json, cards.resolution_json AS resolution_json,
-    cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id
+    cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id,
+    cards.sending_device_id AS sending_device_id
 """
 
 
@@ -66,6 +67,10 @@ class StoredApprovalCard:
     # that the send failed -- so the event ID has to be established before the
     # card can be edited at all.
     card_event_id: str | None
+    # The device that claimed the row, which is the device the transaction ID
+    # belongs to. Only that device can present it again and get the same event
+    # back; None means no device was recorded and none can be proven.
+    sending_device_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +138,7 @@ def claim(
     room_id: str,
     transaction_id: str,
     card: Mapping[str, Any],
+    sending_device_id: str | None,
 ) -> None:
     """Record one card as pending under the current membership, before sending it.
 
@@ -140,6 +146,13 @@ def claim(
     the row that accounts for it. The body written here is the body a repeat
     send would present, and it stays frozen for exactly as long as a repeat is
     still possible.
+
+    The device is written here rather than after the send, because a Matrix
+    transaction ID belongs to the device that used it and this row exists to
+    say whether a repeat is safe. Recording it early can only be wrong in the
+    safe direction: a re-login between the claim and the send leaves a device
+    that no longer matches, and a mismatch expires the card rather than
+    duplicating it.
 
     Doing nothing on conflict keeps that promise across a retried claim: a row
     whose send may already have been attempted must not have its body replaced
@@ -152,14 +165,16 @@ def claim(
     transaction.execute(
         """
         INSERT INTO approval_cards (
-            principal_id, room_id, transaction_id, card_json, membership_epoch, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            principal_id, room_id, transaction_id, sending_device_id,
+            card_json, membership_epoch, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, transaction_id) DO NOTHING
         """,
         (
             principal_id,
             room_id,
             transaction_id,
+            sending_device_id,
             json.dumps(dict(card), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             0 if epoch is None else int(epoch["membership_epoch"]),
             time.time_ns(),
@@ -291,6 +306,7 @@ def _card(row: Row) -> StoredApprovalCard:
         resolution=_resolution(row["resolution_json"]),
         transaction_id=str(row["transaction_id"]),
         card_event_id=row["card_event_id"],
+        sending_device_id=row["sending_device_id"],
     )
 
 

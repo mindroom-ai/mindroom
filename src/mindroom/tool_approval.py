@@ -21,6 +21,7 @@ from mindroom.approval_manager import (
     ApprovalRoomProvider,
     MatrixEventEditor,
     MatrixEventSender,
+    SendingDeviceProvider,
     SentApprovalEvent,
     ToolApprovalTransportError,
     TransportSenderProvider,
@@ -336,6 +337,7 @@ def initialize_approval_runtime(
     cards: ApprovalView | None,
     approval_room_ids: ApprovalRoomProvider,
     transport_sender: TransportSenderProvider,
+    sending_device: SendingDeviceProvider,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -345,6 +347,7 @@ def initialize_approval_runtime(
         cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
+        sending_device=sending_device,
     )
 
 

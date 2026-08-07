@@ -333,11 +333,13 @@ class ApprovalView(Protocol):
         room_id: str,
         transaction_id: str,
         card: Mapping[str, Any],
+        sending_device_id: str | None,
     ) -> None:
         """Record one approval card as awaiting a decision, before it is sent.
 
         Committed ahead of the send so that nothing clickable can exist without
-        a row that accounts for it.
+        a row that accounts for it. The device is recorded with it, because the
+        transaction ID only deduplicates for the device that used it.
         """
         ...
 
