@@ -573,7 +573,8 @@ Adopt such a root by creating `.mindroom-thread-exports` inside it containing ex
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
-Thread bodies always come from a direct Matrix pagination walk, so an export never depends on another process having kept a cache warm and never writes out rows the homeserver has already moved past.
+Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
+A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

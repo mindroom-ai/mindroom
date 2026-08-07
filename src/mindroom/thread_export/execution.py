@@ -9,7 +9,6 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
-from mindroom.thread_export.history import fetch_exported_thread_history
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportRoom,
@@ -17,6 +16,7 @@ from mindroom.thread_export.models import (
     failure_for_room,
 )
 from mindroom.thread_export.policy import target_accepts_room
+from mindroom.thread_export.projected_history import fetch_projected_thread_history
 from mindroom.thread_export.selection import trusted_sender_ids_for_export
 from mindroom.thread_export.storage import (
     remove_room_export,
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
 logger = get_logger(__name__)
@@ -55,18 +56,17 @@ async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset
 
 
 async def _fetch_thread_payload(
-    client: nio.AsyncClient,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_id: str,
     *,
     trusted_sender_ids: frozenset[str],
 ) -> dict[str, object]:
     """Fetch and build one thread payload independently of export destinations."""
-    messages = await fetch_exported_thread_history(
-        client,
+    messages = await fetch_projected_thread_history(
+        reader,
         room_id=room.room_id,
         thread_id=thread_id,
-        trusted_sender_ids=trusted_sender_ids,
     )
     return thread_payload(
         room=room,
@@ -114,7 +114,7 @@ async def _authorized_room_accumulators(
 
 async def _write_thread_to_targets(
     *,
-    client: nio.AsyncClient,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_id: str,
     trusted_sender_ids: frozenset[str],
@@ -124,7 +124,7 @@ async def _write_thread_to_targets(
     """Fetch one thread once and write it independently to each target."""
     try:
         payload = await _fetch_thread_payload(
-            client,
+            reader,
             room,
             thread_id,
             trusted_sender_ids=trusted_sender_ids,
@@ -192,13 +192,18 @@ def _finish_room_exports(
 async def export_threads_for_targets_for_client(
     *,
     client: nio.AsyncClient,
+    reader: ProjectedThreadReader,
     config: Config,
     runtime_paths: RuntimePaths,
     rooms: Sequence[ThreadExportRoom],
     targets: Sequence[ThreadExportTarget],
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportAccumulator, ...]:
-    """Fetch each Matrix thread once and fan it out to authorized destinations."""
+    """Fetch each Matrix thread once and fan it out to authorized destinations.
+
+    ``client`` answers only what the projection cannot: which threads a room
+    has, and who is currently joined to it. Thread bodies come from ``reader``.
+    """
     trusted_sender_ids = trusted_sender_ids_for_export(config, runtime_paths)
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
 
@@ -226,7 +231,7 @@ async def export_threads_for_targets_for_client(
             if truncated:
                 accumulator.truncated_rooms += 1
         await _export_enumerated_room_threads(
-            client=client,
+            reader=reader,
             room=room,
             thread_ids=thread_ids,
             truncated=truncated,
@@ -239,7 +244,7 @@ async def export_threads_for_targets_for_client(
 
 async def _export_enumerated_room_threads(
     *,
-    client: nio.AsyncClient,
+    reader: ProjectedThreadReader,
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
     truncated: bool,
@@ -251,7 +256,7 @@ async def _export_enumerated_room_threads(
 
     for thread_id in thread_ids:
         await _write_thread_to_targets(
-            client=client,
+            reader=reader,
             room=room,
             thread_id=thread_id,
             trusted_sender_ids=trusted_sender_ids,

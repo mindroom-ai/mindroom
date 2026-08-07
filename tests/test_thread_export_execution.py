@@ -55,6 +55,7 @@ async def _export_threads_for_client(
     """Adapt the multi-target execution seam for single-target test cases."""
     accumulators = await _export_threads_for_targets_for_client(
         client=client,
+        reader=Mock(),
         config=config,
         runtime_paths=runtime_paths,
         rooms=rooms,
@@ -107,7 +108,7 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             new=AsyncMock(return_value=(["$thread/root:localhost"], False)),
         ) as enumerate_threads,
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=fetch_result),
         ) as fetch_thread,
     ):
@@ -218,7 +219,7 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
             new=AsyncMock(return_value=(list(histories), False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_side_effect),
         ),
     ):
@@ -273,7 +274,7 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
             new=AsyncMock(return_value=(["$stable:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -338,7 +339,7 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             new=AsyncMock(return_value=([retained_thread_id, removed_thread_id], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_history),
         ),
     ):
@@ -362,7 +363,7 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             new=AsyncMock(return_value=([retained_thread_id], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=histories[retained_thread_id]),
         ),
     ):
@@ -400,7 +401,7 @@ async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Pat
             new=AsyncMock(return_value=(["$stable:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -455,7 +456,7 @@ async def test_export_threads_rewrites_when_content_changed(tmp_path: Path) -> N
         new=AsyncMock(return_value=(["$original:localhost"], False)),
     ):
         with patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=first_history),
         ):
             await _export_threads_for_client(
@@ -466,7 +467,7 @@ async def test_export_threads_rewrites_when_content_changed(tmp_path: Path) -> N
                 rooms=_export_rooms(runtime_paths, "lobby"),
             )
         with patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=second_history),
         ):
             stats = await _export_threads_for_client(
@@ -508,7 +509,7 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
             new=AsyncMock(return_value=(["$fresh:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -550,7 +551,7 @@ async def test_export_threads_rewrites_existing_file_with_invalid_utf8(tmp_path:
             new=AsyncMock(return_value=(["$fresh:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -588,10 +589,11 @@ async def test_multi_target_export_fetches_each_thread_once(tmp_path: Path) -> N
 
     with (
         patch("mindroom.thread_export.execution.enumerate_room_thread_root_ids", new=enumerate_threads),
-        patch("mindroom.thread_export.execution.fetch_exported_thread_history", new=fetch_thread),
+        patch("mindroom.thread_export.execution.fetch_projected_thread_history", new=fetch_thread),
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=Mock(),
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
             rooms=_export_rooms(runtime_paths, "lobby"),
@@ -624,7 +626,7 @@ async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -
         return histories[thread_id]
 
     with patch(
-        "mindroom.thread_export.execution.fetch_exported_thread_history",
+        "mindroom.thread_export.execution.fetch_projected_thread_history",
         new=AsyncMock(side_effect=fetch_history),
     ):
         with patch(
@@ -678,7 +680,7 @@ async def test_empty_complete_enumeration_preserves_existing_thread_exports(tmp_
             new=AsyncMock(return_value=(["$existing:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -829,7 +831,7 @@ async def test_definitive_non_member_on_non_aliased_target_removes_room_export(
             new=AsyncMock(return_value=(["$member:localhost"], False)),
         ) as enumerate_threads,
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=history),
         ),
     ):
@@ -881,6 +883,7 @@ async def test_admitted_empty_root_handles_retraction_and_zero_thread_export_wit
     ) as enumerate_threads:
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
             rooms=rooms,
@@ -948,6 +951,7 @@ async def test_room_removal_failure_is_scoped_to_the_rejected_target(
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
             rooms=(room,),
@@ -1025,6 +1029,7 @@ async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
             rooms=rooms,
@@ -1058,6 +1063,7 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
     ) as enumerate_threads:
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
             rooms=_export_rooms(runtime_paths, None),
@@ -1105,7 +1111,7 @@ async def test_export_threads_continues_after_one_thread_failure(tmp_path: Path)
             new=AsyncMock(return_value=(["$bad:localhost", "$good:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.fetch_exported_thread_history",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_side_effect),
         ),
     ):

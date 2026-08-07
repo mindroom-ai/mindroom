@@ -105,6 +105,7 @@ from .event_journal import (
     MembershipFence,
     SemanticConsumer,
 )
+from .event_journal_open import open_event_journal_store
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -459,12 +460,11 @@ class AgentBot:
         One database can hold every bot in the process; each receives only its
         own principal-bound view.
         """
-        cache_config = self.config.cache
-        if cache_config.backend == "postgres":
-            return EventJournalStore.open_postgres(
-                cache_config.resolve_postgres_database_url(self.runtime_paths),
-            )
-        return EventJournalStore.open_sqlite(self.storage_path / "tracking" / "event_journal.db")
+        return open_event_journal_store(
+            self.config.cache,
+            runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
+        )
 
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
