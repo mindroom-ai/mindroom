@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -65,6 +65,14 @@ def edit(target: str, body: str) -> dict[str, object]:
         "m.new_content": {"msgtype": "m.text", "body": body},
         "m.relates_to": {"rel_type": "m.replace", "event_id": target},
     }
+
+
+def sidecar(content: dict[str, object]) -> dict[str, object]:
+    """Return one edit whose real text lives in an attached file."""
+    new_content = dict(cast("dict[str, object]", content["m.new_content"]))
+    new_content["io.mindroom.long_text"] = {"version": 2, "encoding": "matrix_event_content_json"}
+    new_content["url"] = "mxc://example.org/body"
+    return content | {"m.new_content": new_content}
 
 
 def message(
@@ -730,6 +738,31 @@ class TestLatestVisibleEvent:
         await admit(alice, "$other", ts=9_000, thread_id="$other-root")
 
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
+
+    async def test_a_sidecar_message_answers_with_the_revision_on_screen(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A withheld body is not proof of a redaction.
+
+        A message whose text lives in a sidecar is stored exactly like a
+        redacted one -- no body, refresh owed -- but its revision is a live
+        event nobody deleted, and it is the right thing to quote.
+        """
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$child", ts=2_000, thread_id="$root")
+        await admit(
+            alice,
+            "$child-edit",
+            ts=3_000,
+            thread_id="$root",
+            content=sidecar(edit("$child", "revised")),
+        )
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=10)
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$child"]
+
+        assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$child-edit"
 
     async def test_a_rejoin_stops_the_previous_membership_from_answering(
         self,

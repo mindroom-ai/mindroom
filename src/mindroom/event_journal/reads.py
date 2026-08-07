@@ -142,13 +142,27 @@ def latest_visible_event_id(
     renders as nothing. Its logical event is the answer in that window: a
     redaction of the logical event deletes the whole row, so a row that is
     still here has an original that is still in the room.
+
+    A withheld body is not enough to tell those apart. A message whose text
+    lives in a sidecar is stored exactly the same way -- no body, refresh owed
+    -- and its revision is a perfectly good event that was never redacted. Only
+    the tombstone distinguishes them, so only the tombstone is consulted.
     """
     row = transaction.fetchone(
         """
-        SELECT CASE WHEN content_json IS NULL THEN logical_event_id ELSE revision_event_id END AS reply_target
-        FROM visible_messages
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        ORDER BY created_ts DESC, logical_event_id DESC
+        SELECT CASE
+                   WHEN EXISTS (
+                       SELECT 1 FROM redaction_tombstones AS tombstone
+                       WHERE tombstone.principal_id = visible.principal_id
+                         AND tombstone.room_id = visible.room_id
+                         AND tombstone.redacted_event_id = visible.revision_event_id
+                   )
+                   THEN visible.logical_event_id
+                   ELSE visible.revision_event_id
+               END AS reply_target
+        FROM visible_messages AS visible
+        WHERE visible.principal_id = ? AND visible.room_id = ? AND visible.thread_id = ?
+        ORDER BY visible.created_ts DESC, visible.logical_event_id DESC
         LIMIT 1
         """,
         (principal_id, room_id, encode_thread_id(thread_id)),
