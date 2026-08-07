@@ -501,6 +501,34 @@ def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
     raise RuntimeError(msg)
 
 
+def _wait_for_conflicting_postgres_container(docker: str, container_name: str) -> str:
+    """Return the state of the container that already holds ``container_name``.
+
+    Docker reserves a container's name when ``create`` starts and registers the
+    container itself only when ``create`` finishes. Every worker that loses the
+    race to create the shared server therefore sees ``Conflict`` from ``run``
+    and ``no such object`` from ``inspect`` until the winner's create completes
+    -- a window that widens under load, which is precisely when the whole suite
+    is running. One inspect samples that window and reads a race as a broken
+    machine. The name is known to be taken, so wait for the container behind it.
+    """
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
+    last_error = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        last_error = result.stderr.strip()
+        time.sleep(0.05)
+    msg = f"Postgres journal container {container_name} never became inspectable: {last_error}"
+    raise RuntimeError(msg)
+
+
 def _postgres_container_name(run_id: str, prefix: str) -> str:
     """Return the deterministic disposable Postgres container name for one test run."""
     return f"{prefix}{run_id}"
@@ -539,6 +567,9 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     container_name = session.config.stash.get(_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY, None)
     if container_name is None:
         return
+    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
+        # The fixture skipped on this same condition, so nothing was ever created.
+        return
     try:
         _remove_postgres_container(docker, container_name)
     except RuntimeError as exc:
@@ -548,7 +579,13 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
-    """Start or reuse one glibc Postgres server for event-journal parity tests."""
+    """Start or reuse one glibc Postgres server for event-journal parity tests.
+
+    Only a machine that cannot run Docker at all skips. Every other failure
+    raises, because a skip here silently deletes the PostgreSQL half of a suite
+    whose entire claim is that its rules hold on both backends, and a suite that
+    proves half of what it says it proves still exits 0.
+    """
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("Docker is required for Postgres event-journal parity tests")
@@ -575,17 +612,14 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
         capture_output=True,
         text=True,
     )  # fmt: skip
-    if run_result.returncode != 0:
-        inspect_result = subprocess.run(
-            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if not shared_across_workers or inspect_result.returncode != 0:
-            pytest.skip(f"Could not start Postgres journal container: {run_result.stderr.strip()}")
-        if inspect_result.stdout.strip() in {"dead", "exited"}:
-            msg = f"Shared Postgres journal container is {inspect_result.stdout.strip()}"
+    created_container = run_result.returncode == 0
+    if not created_container:
+        if "is already in use by container" not in run_result.stderr:
+            msg = f"Could not start Postgres journal container: {run_result.stderr.strip()}"
+            raise RuntimeError(msg)
+        status = _wait_for_conflicting_postgres_container(docker, container_name)
+        if status in {"dead", "exited"}:
+            msg = f"Shared Postgres journal container is {status}"
             raise RuntimeError(msg)
 
     try:
@@ -595,7 +629,8 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
             database_url = _create_postgres_worker_database(database_url, worker_id)
         yield database_url
     finally:
-        if not shared_across_workers:
+        # Only the run that created the container may destroy it.
+        if created_container and not shared_across_workers:
             _remove_postgres_container(docker, container_name)
 
 
