@@ -93,7 +93,15 @@ class EventInfo:
     """The primary event ID this event relates to (if any)."""
 
     thread_id_from_edit: str | None = None
-    """For edit events: the thread root event ID found in ``m.new_content``."""
+    """For edit events: the thread root event ID found in ``m.new_content``.
+
+    A claim, never a placement, and never evidence of membership. Matrix applies ``m.new_content``
+    by keeping the original event's relation and ignoring every ``m.relates_to`` written inside the
+    replacement, so this value is whatever the edit's author decided to type and no rule turns it
+    into a fact. An edit is placed by the event it replaces; resolve that original through
+    ``mindroom.matrix.thread_membership`` instead of reading this. The one use left in the repo is
+    a search hint that widens a durable lookup whose result is validated on its own terms.
+    """
 
     event_type: str | None = None
     """The Matrix event type carrying these relations, when known."""

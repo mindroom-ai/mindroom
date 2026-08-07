@@ -148,9 +148,16 @@ class EditRegenerator:
             event,
             caller_label="edit_regeneration_context",
         )
+        # A search hint, and only that. The thread an edit names inside its ``m.new_content`` is
+        # ignored on application, so it places nothing - here it merely points the recovery read at
+        # one more conversation session to probe, on top of the room session it always probes. The
+        # record that comes back still has to name this event as a source authored by this
+        # requester, and every durable or visible decision below is taken from that record's own
+        # conversation target rather than from the claim that found it.
+        turn_lookup_thread_id = context.thread_id or event_info.thread_id_from_edit
         turn_record = await self.deps.turn_store.load_turn(
             room=room,
-            thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=turn_lookup_thread_id,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
@@ -158,7 +165,7 @@ class EditRegenerator:
             await self.deps.wait_for_turn_settled((original_event_id,))
             turn_record = await self.deps.turn_store.load_turn(
                 room=room,
-                thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+                thread_id=turn_lookup_thread_id,
                 original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             )
