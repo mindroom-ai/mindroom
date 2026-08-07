@@ -74,6 +74,30 @@ def enqueue(
     return transaction_id
 
 
+def is_attempted(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    turn_id: str,
+    stage: DeliveryStage,
+) -> bool:
+    """Return whether this delivery has already been offered to the homeserver.
+
+    An attempted row is a different object from an unattempted one. Its
+    outcome is unknown, the homeserver may hold it already, and the frozen
+    transaction ID is the only thing that makes a retry collapse onto the same
+    event rather than post a second answer.
+    """
+    row = transaction.fetchone(
+        """
+        SELECT 1 AS present FROM response_outbox
+        WHERE principal_id = ? AND turn_id = ? AND stage = ? AND attempted = 1
+        """,
+        (principal_id, turn_id, stage.value),
+    )
+    return row is not None
+
+
 def claim(
     transaction: Transaction,
     principal_id: str,

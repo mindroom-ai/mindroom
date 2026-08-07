@@ -198,8 +198,12 @@ class OutboxView(Protocol):
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
-        """Record delivery intent and return its deterministic transaction ID."""
+    ) -> str | None:
+        """Record delivery intent, or refuse it as an answer to a membership that ended."""
+        ...
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
         ...
 
     async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:

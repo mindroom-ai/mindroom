@@ -4499,3 +4499,109 @@ class TestTerminalEditDurability:
 
         terminal.assert_not_awaited()
         direct.assert_awaited()
+
+
+class TestStreamTransportStopsWithItsMembership:
+    """Direct transport must not keep writing into a membership that has ended.
+
+    A progressive edit is not a turn's answer and never reaches the outbox, so
+    the durable refusal that protects the terminal delivery does not protect
+    it. Without a gate, a turn that began before a fence keeps editing into a
+    conversation the fence deleted for as long as the model produces text.
+    """
+
+    @staticmethod
+    def _streaming(tmp_path: Path, *, membership_is_current: bool) -> StreamingResponse:
+        """Return one stream already showing a message, under a live or ended membership."""
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$root"),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            transport_is_current=AsyncMock(return_value=membership_is_current),
+        )
+        streaming.accumulated_text = "half an answer"
+        return streaming
+
+    @pytest.mark.asyncio
+    async def test_a_progressive_edit_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
+        """The edit the fence invalidated must never leave this process.
+
+        Stopping is not failing. A failed non-terminal edit raises, and the
+        notice that failure produces would be one more direct write into the
+        same room the bot has left.
+        """
+        streaming = self._streaming(tmp_path, membership_is_current=False)
+        streaming.event_id = "$visible"
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
+            handled = await streaming._send_or_edit_message(AsyncMock())
+
+        assert handled
+        direct.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_placeholder_send_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
+        """A stream that has not sent anything yet must not start now either."""
+        streaming = self._streaming(tmp_path, membership_is_current=False)
+
+        with patch("mindroom.streaming.send_message_result", AsyncMock()) as direct:
+            handled = await streaming._send_or_edit_message(AsyncMock())
+
+        assert handled
+        assert streaming.event_id is None
+        direct.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_cancellation_notice_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
+        """A cancelled stream's notice is transport too, and has nowhere to go."""
+        streaming = self._streaming(tmp_path, membership_is_current=False)
+        streaming.event_id = "$visible"
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
+            await streaming._send_or_edit_message(
+                AsyncMock(),
+                is_final=True,
+                stream_status=STREAM_STATUS_CANCELLED,
+            )
+
+        direct.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_progressive_edit_under_a_live_membership_still_goes_out(self, tmp_path: Path) -> None:
+        """The gate must only stop the case it exists for."""
+        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "half an answer"})
+        streaming = self._streaming(tmp_path, membership_is_current=True)
+        streaming.event_id = "$visible"
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
+            sent = await streaming._send_or_edit_message(AsyncMock())
+
+        assert sent
+        direct.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_edit_is_not_gated_by_the_membership(self, tmp_path: Path) -> None:
+        """The answer's own edit is the outbox's to refuse, not this gate's.
+
+        The outbox knows the difference between refusing an answer and
+        stranding one the homeserver may already hold; this gate does not, and
+        blocking an attempted row's retry here would leave that answer visible
+        and permanently unacknowledged.
+        """
+        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "the answer"})
+        terminal = AsyncMock(return_value=delivered)
+        streaming = self._streaming(tmp_path, membership_is_current=False)
+        streaming.event_id = "$visible"
+        streaming.terminal_edit = terminal
+        streaming.accumulated_text = "the answer"
+
+        with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
+            await streaming._send_or_edit_message(
+                AsyncMock(),
+                is_final=True,
+                stream_status=STREAM_STATUS_COMPLETED,
+            )
+
+        terminal.assert_awaited()
+        direct.assert_not_awaited()

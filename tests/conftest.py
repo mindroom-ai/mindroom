@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, LiteralString, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -713,25 +713,33 @@ async def journal_store(
         await store.close()
 
 
-_LEGACY_APPROVAL_CARDS_DDL = """
+_LEGACY_TABLE_DDL = (
+    """
     CREATE TABLE approval_cards (
         principal_id TEXT NOT NULL, room_id TEXT NOT NULL, card_event_id TEXT NOT NULL,
         card_json TEXT NOT NULL, membership_epoch BIGINT NOT NULL, created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
     )
-"""
+    """,
+    """
+    CREATE TABLE room_membership (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id)
+    )
+    """,
+)
 
 
 @pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-async def legacy_approval_cards_store(
+async def legacy_journal_store(
     request: pytest.FixtureRequest,
     tmp_path: Path,
 ) -> AsyncGenerator["EventJournalStore", None]:
-    """Return a store opened onto an `approval_cards` table that predates `resolution_json`.
+    """Return a store opened onto tables that predate their later columns.
 
     `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it is, so
-    the column arrives only if the upgrade path runs. Both backends have their
-    own upgrade path and neither can vouch for the other.
+    a later column arrives only if the upgrade path runs. Both backends have
+    their own upgrade path and neither can vouch for the other.
     """
     import sqlite3  # noqa: PLC0415
 
@@ -740,7 +748,8 @@ async def legacy_approval_cards_store(
     if str(request.param) == "sqlite":
         database_path = tmp_path / "legacy_event_journal.db"
         with sqlite3.connect(database_path) as connection:
-            connection.execute(_LEGACY_APPROVAL_CARDS_DDL)
+            for statement in _LEGACY_TABLE_DDL:
+                connection.execute(statement)
         store = EventJournalStore.open_sqlite(database_path)
     else:
         import psycopg  # noqa: PLC0415
@@ -751,7 +760,8 @@ async def legacy_approval_cards_store(
         with psycopg.connect(database_url, autocommit=True) as db:
             db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
             db.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
-            db.execute(_LEGACY_APPROVAL_CARDS_DDL)
+            for statement in _LEGACY_TABLE_DDL:
+                db.execute(cast("LiteralString", statement))
         separator = "&" if "?" in database_url else "?"
         store = EventJournalStore.open_postgres(
             f"{database_url}{separator}options=-csearch_path%3D{schema}",
@@ -1047,6 +1057,13 @@ class FakeOutbox:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], OutboxDelivery] = {}
         self.attempted: set[tuple[str, str]] = set()
+        # Turns whose membership has ended, as the journal would report it.
+        self.ended_membership_turn_ids: set[str] = set()
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        del room_id
+        return turn_id not in self.ended_membership_turn_ids
 
     async def enqueue_delivery(
         self,
@@ -1057,7 +1074,7 @@ class FakeOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
+    ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
 
         An unattempted row is rewritten, exactly as the real `ON CONFLICT DO
@@ -1065,6 +1082,11 @@ class FakeOutbox:
         double stricter than production and hide a same-turn re-enqueue -- a
         continuation replacing the answer it has not sent yet -- behind a stale
         payload no real deployment would serve.
+
+        An attempted row is exempt from the membership check for the same
+        reason production exempts it: its outcome is unknown, so the retry has
+        to go out under the frozen transaction rather than strand whatever it
+        may already have made visible.
         """
         key = (turn_id, stage.value)
         existing = self.rows.get(key)
@@ -1079,6 +1101,8 @@ class FakeOutbox:
                 edits_event_id=edits_event_id,
             )
             return existing.transaction_id
+        if turn_id in self.ended_membership_turn_ids:
+            return None
         transaction_id = f"tx-{turn_id}-{stage.value}"
         self.rows[key] = OutboxDelivery(
             turn_id=turn_id,

@@ -1206,6 +1206,7 @@ class AgentBot:
     async def _on_room_joined(self, room_id: str) -> None:
         """Reopen cache access after an explicit homeserver-confirmed join."""
         self._local_departures_awaiting_sync.discard(room_id)
+        await self._membership_fence.note_membership_restarted(room_id)
         await self._conversation_cache.mark_room_joined(room_id)
 
     async def leave_unconfigured_rooms(self) -> None:

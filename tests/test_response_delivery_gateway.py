@@ -17,6 +17,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     DeliveryStage,
@@ -650,3 +651,154 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert retried.recovered == 1
         assert retried.complete
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
+
+
+class TestAnEndedMembershipStopsTheAnswer:
+    """A turn that outlived its membership must not reach the room it left."""
+
+    @staticmethod
+    def _target() -> MessageTarget:
+        """Return the room-mode target these tests deliver into."""
+        return MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
+
+    async def test_a_turn_fenced_mid_flight_produces_no_visible_answer(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The fence deleted this conversation; the answer must not rebuild it."""
+        outbox = FakeOutbox()
+        outbox.ended_membership_turn_ids.add("$cause")
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        )
+        delivered = SimpleNamespace(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)) as send:
+            outcome = await gateway.deliver_final(TestTurnDeliveryGoesThroughTheOutbox._final_request("answer"))
+
+        send.assert_not_awaited()
+        assert outcome.event_id is None
+        assert outcome.terminal_status == "error"
+        assert outbox.rows == {}
+
+    async def test_a_fenced_turns_final_edit_never_reaches_matrix(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A streamed answer becomes visible by editing, so that edit is refused too."""
+        outbox = FakeOutbox()
+        outbox.ended_membership_turn_ids.add("$cause")
+        gateway = _gateway(tmp_path, outbox)
+        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock()) as edit:
+            delivered = await terminal(AsyncMock(), _ROOM_ID, "$placeholder", {"body": "answer"}, "answer")
+
+        edit.assert_not_awaited()
+        assert delivered is None
+        assert outbox.rows == {}
+
+    async def test_a_stream_is_given_the_gate_that_stops_its_progressive_edits(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Progressive edits never reach the outbox, so nothing else would stop them."""
+        outbox = FakeOutbox()
+        outbox.ended_membership_turn_ids.add("$cause")
+        gateway = _gateway(tmp_path, outbox)
+        request = StreamingDeliveryRequest(
+            target=self._target(),
+            response_stream=_empty_stream(),
+            delivery_turn_id="$cause",
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+
+        gate = stream.await_args.kwargs["transport_is_current"]
+        assert gate is not None
+        assert not await gate()
+
+    async def test_a_turnless_stream_is_given_no_gate(self, tmp_path: Path) -> None:
+        """A stream with no turn behind it belongs to no membership to be stale against."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        request = StreamingDeliveryRequest(
+            target=self._target(),
+            response_stream=_empty_stream(),
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+
+        assert stream.await_args.kwargs["transport_is_current"] is None
+
+    async def test_a_cancellation_note_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
+        """The note has nowhere to go: the fence deleted what it would annotate."""
+        outbox = FakeOutbox()
+        outbox.ended_membership_turn_ids.add("$cause")
+        gateway = _gateway(tmp_path, outbox)
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock()) as edit:
+            outcome = await gateway.deliver_cancelled_visible_note(
+                CancelledVisibleNoteRequest(
+                    target=self._target(),
+                    event_id="$visible",
+                    existing_event_is_placeholder=False,
+                    cancel_source="user_stop",
+                    identity=TestTurnDeliveryGoesThroughTheOutbox._final_request("x").identity,
+                ),
+            )
+
+        edit.assert_not_awaited()
+        assert outcome.terminal_status == "cancelled"
+
+    async def test_a_cancellation_note_under_a_live_membership_still_lands(self, tmp_path: Path) -> None:
+        """The gate must only stop the case it exists for."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        edited = SimpleNamespace(event_id="$visible", content_sent={"body": "stopped"})
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)) as edit:
+            outcome = await gateway.deliver_cancelled_visible_note(
+                CancelledVisibleNoteRequest(
+                    target=self._target(),
+                    event_id="$visible",
+                    existing_event_is_placeholder=False,
+                    cancel_source="user_stop",
+                    identity=TestTurnDeliveryGoesThroughTheOutbox._final_request("x").identity,
+                ),
+            )
+
+        edit.assert_awaited()
+        assert outcome.delivery_kind == "edited"
+
+    async def test_suppression_cleanup_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
+        """The fence already dropped everything derived from that membership."""
+        outbox = FakeOutbox()
+        outbox.ended_membership_turn_ids.add("$cause")
+        gateway = _gateway(tmp_path, outbox)
+
+        failure = await gateway._redact_visible_response_event(
+            room_id=_ROOM_ID,
+            event_id="$visible",
+            identity=TestTurnDeliveryGoesThroughTheOutbox._final_request("x").identity,
+            redaction_reason="suppressed",
+        )
+
+        assert failure is None
+        gateway.deps.redact_message_event.assert_not_awaited()
+
+    async def test_a_stream_under_a_live_membership_keeps_its_gate_open(self, tmp_path: Path) -> None:
+        """The ordinary case must still be allowed to stream."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        request = StreamingDeliveryRequest(
+            target=self._target(),
+            response_stream=_empty_stream(),
+            delivery_turn_id="$cause",
+        )
+
+        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
+            await gateway.deliver_stream(request)
+
+        assert await stream.await_args.kwargs["transport_is_current"]()

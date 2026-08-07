@@ -16,6 +16,8 @@ from mindroom.event_journal import (
     AdmissionResult,
     ConversationCursor,
     DeliveryStage,
+    DepartureObservation,
+    DepartureSource,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -817,7 +819,7 @@ class TestSchemaUpgrade:
 
     async def test_a_card_table_predating_its_resolution_column_still_works(
         self,
-        legacy_approval_cards_store: EventJournalStore,
+        legacy_journal_store: EventJournalStore,
     ) -> None:
         """Approval cards shipped before decisions were recorded on them.
 
@@ -825,7 +827,7 @@ class TestSchemaUpgrade:
         the upgrade has to have happened by then -- on both backends, since one
         guards the add itself and the other inspects the existing columns.
         """
-        store = legacy_approval_cards_store
+        store = legacy_journal_store
         try:
             principal = store.principal("agent@alice")
             await principal.remember_approval_card(room_id=ROOM, card_event_id="$card", card={"body": "run it?"})
@@ -851,11 +853,230 @@ class TestSchemaUpgrade:
         finally:
             await store.close()
 
+    async def test_a_membership_table_predating_its_departure_columns_still_works(
+        self,
+        legacy_journal_store: EventJournalStore,
+    ) -> None:
+        """Membership epochs shipped before departure bookkeeping sat beside them.
+
+        A room already fenced by the old code has a row with no departure
+        columns at all, and the very first departure observed after the upgrade
+        reads them.
+        """
+        store = legacy_journal_store
+        try:
+            alice = store.principal("agent@alice")
+            await alice.advance_membership_epoch(ROOM)
+
+            local = await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+            assert local.observation is DepartureObservation.FENCED
+            assert local.membership_epoch == 2
+
+            reported = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+            assert reported.observation is DepartureObservation.OWED_REPORT_CONSUMED
+            assert await alice.membership_epoch(ROOM) == 2
+        finally:
+            await store.close()
+
     async def test_every_added_column_is_declared_in_the_table_too(self) -> None:
         """The two lists are edited by hand and drift silently otherwise."""
         statements = " ".join(schema_statements(SQLITE_DIALECT))
         for _table, column, _definition in added_columns():
             assert column in statements
+
+
+class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
+    """A turn that outlived its membership must not answer into the next one.
+
+    The fence deletes what the previous membership derived. Without this it
+    would then write some of it straight back: a turn still running when the
+    fence committed reaches enqueue afterwards, and the fence has been and
+    gone.
+    """
+
+    async def test_a_turn_admitted_under_an_ended_membership_cannot_enqueue(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Fence first, then enqueue: the enqueue is refused."""
+        await admit(alice, "$turn")
+        await alice.advance_membership_epoch(ROOM)
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        assert transaction_id is None
+        assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_an_unattempted_row_enqueued_before_the_fence_is_deleted_by_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Enqueue first, then fence: the row goes with the membership."""
+        await admit(alice, "$turn")
+        assert (
+            await alice.enqueue_delivery(
+                turn_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("answer"),
+            )
+            is not None
+        )
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
+
+    async def test_an_attempted_row_still_retries_after_a_fence_under_its_first_transaction(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An attempted delivery is a different object, and refusing it is worse.
+
+        Its outcome is unknown and the homeserver may hold it already. Only
+        presenting the identical transaction ID again collapses the retry onto
+        the same event; refusing it would strand the row unacknowledged while
+        leaving whatever it sent visible, and re-deriving a fresh transaction
+        for it would guarantee the second answer rather than prevent it.
+        """
+        await admit(alice, "$turn")
+        first = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        await alice.advance_membership_epoch(ROOM)
+
+        retried = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated"),
+        )
+        claimed = await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
+
+        assert retried == first
+        assert claimed is not None
+        assert claimed.transaction_id == first
+        assert claimed.payload["body"] == "answer"
+
+    async def test_a_turn_the_journal_never_admitted_still_enqueues(self, alice: PrincipalStore) -> None:
+        """A scheduled task is not a turn a membership authorized.
+
+        There is no admission behind it and so no previous membership for its
+        work to belong to. Refusing it would silence scheduled delivery in
+        every room the bot has ever left and rejoined.
+        """
+        await alice.advance_membership_epoch(ROOM)
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="scheduled-task-7",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("reminder"),
+        )
+
+        assert transaction_id is not None
+
+    async def test_a_turn_under_the_current_membership_enqueues(self, alice: PrincipalStore) -> None:
+        """The ordinary case still delivers."""
+        await admit(alice, "$turn")
+
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        assert transaction_id == delivery_transaction_id("agent@alice", "$turn", "final")
+
+    async def test_in_flight_transport_learns_the_membership_ended(self, alice: PrincipalStore) -> None:
+        """Streaming edits never reach the outbox, so they ask this directly."""
+        await admit(alice, "$turn")
+
+        assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+
+        await alice.advance_membership_epoch(ROOM)
+
+        assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+
+    async def test_one_rooms_fence_does_not_silence_another_room(self, alice: PrincipalStore) -> None:
+        """Leaving one room says nothing about a turn running in a different one."""
+        await admit(alice, "$turn")
+
+        await alice.advance_membership_epoch(OTHER_ROOM)
+
+        assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
+        assert (
+            await alice.enqueue_delivery(
+                turn_id="$turn",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload=text("answer"),
+            )
+            is not None
+        )
+
+
+class TestDepartureBookkeeping:
+    """One departure invalidates a room once, whichever observer sees it first."""
+
+    async def test_a_consumed_report_leaves_the_new_projection_alone(self, alice: PrincipalStore) -> None:
+        """Absorbing a report must not delete what the membership after it built."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+        await admit(alice, "$fresh", ts=5_000)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=5)
+        assert [m.logical_event_id for m in page.messages] == ["$fresh"]
+
+    async def test_a_departure_with_no_report_owed_invalidates(self, alice: PrincipalStore) -> None:
+        """A departure the bot never initiated drops what the old membership built."""
+        await admit(alice, "$stale", ts=5_000)
+
+        outcome = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert outcome.observation is DepartureObservation.FENCED
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=5)
+        assert page.messages == ()
+
+    async def test_owed_reports_are_scoped_to_one_principal(self, journal_store: EventJournalStore) -> None:
+        """One bot's owed report must not absorb another bot's departure."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert await bob.rooms_owing_departure_reports() == frozenset()
+        assert (await bob.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+
+    async def test_retiring_one_room_leaves_another_rooms_report_owed(self, alice: PrincipalStore) -> None:
+        """Giving up on one room's report says nothing about any other room."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.fence_departure(OTHER_ROOM, source=DepartureSource.LOCAL)
+
+        await alice.retire_owed_departure_reports(ROOM)
+
+        assert await alice.rooms_owing_departure_reports() == frozenset({OTHER_ROOM})
+        assert (await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+        assert not (await alice.fence_departure(OTHER_ROOM, source=DepartureSource.REPORTED)).fenced
 
 
 class TestByteOrderPinning:

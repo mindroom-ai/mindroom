@@ -28,6 +28,8 @@ if TYPE_CHECKING:
         ConversationCursor,
         ConversationPage,
         DeliveryStage,
+        DepartureOutcome,
+        DepartureSource,
         EventKind,
         InboundEvent,
         JournalEvent,
@@ -174,6 +176,35 @@ class PrincipalStore:
             lambda transaction: journal.advance_membership_epoch(transaction, self._principal_id, room_id),
         )
 
+    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        """Apply one observation of a departure, invalidating at most once per departure."""
+        return await self._backend.write(
+            lambda transaction: journal.fence_departure(
+                transaction,
+                self._principal_id,
+                room_id,
+                source=source,
+            ),
+        )
+
+    async def note_membership_restarted(self, room_id: str) -> None:
+        """Record a confirmed join, so the room's next departure fences again."""
+        await self._backend.write(
+            lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
+        )
+
+    async def retire_owed_departure_reports(self, room_id: str) -> None:
+        """Forget sync reports that can no longer arrive for one room."""
+        await self._backend.write(
+            lambda transaction: journal.retire_owed_departure_reports(transaction, self._principal_id, room_id),
+        )
+
+    async def rooms_owing_departure_reports(self) -> frozenset[str]:
+        """Return every room whose local departure is still owed a sync report."""
+        return await self._backend.read(
+            lambda transaction: journal.rooms_owing_departure_reports(transaction, self._principal_id),
+        )
+
     async def read_conversation(
         self,
         *,
@@ -303,10 +334,16 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
-        """Record delivery intent and return its deterministic transaction ID."""
+    ) -> str | None:
+        """Record delivery intent, or refuse it as an answer to a membership that ended.
+
+        Nothing means refused. The turn is named by the Matrix event that
+        caused it, and that event's journal row records which membership
+        admitted it, so this needs no epoch from its caller and cannot be
+        given a stale one.
+        """
         return await self._backend.write(
-            lambda transaction: outbox.enqueue(
+            lambda transaction: _enqueue_delivery(
                 transaction,
                 self._principal_id,
                 turn_id=turn_id,
@@ -315,6 +352,17 @@ class PrincipalStore:
                 thread_id=thread_id,
                 payload=payload,
                 edits_event_id=edits_event_id,
+            ),
+        )
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        return await self._backend.read(
+            lambda transaction: _turn_membership_is_current(
+                transaction,
+                self._principal_id,
+                turn_id=turn_id,
+                room_id=room_id,
             ),
         )
 
@@ -449,6 +497,64 @@ class PrincipalStore:
                 limit=limit,
             ),
         )
+
+
+def _turn_membership_is_current(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    *,
+    turn_id: str,
+    room_id: str,
+) -> bool:
+    """Return whether the membership that admitted a turn is still the room's."""
+    admitted = journal.admitted_membership_epoch(transaction, principal_id, turn_id)
+    if admitted is None:
+        # Nothing the journal admitted, so nothing a rejoin invalidated.
+        return True
+    return admitted == journal.current_membership_epoch(transaction, principal_id, room_id)
+
+
+def _enqueue_delivery(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    *,
+    turn_id: str,
+    stage: DeliveryStage,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+    edits_event_id: str | None,
+) -> str | None:
+    """Record delivery intent unless the membership that authorized it has ended.
+
+    The fence deletes a room's unattempted deliveries because they answer a
+    conversation the bot has left. This closes the other half of the same
+    window: a turn that was still running when the fence committed would
+    otherwise write its answer back in afterwards, and the fence has already
+    been and gone. Because both are single write transactions against a
+    serialized writer, the two possible orderings are "enqueued, then deleted"
+    and "fenced, then refused". Neither leaves an answer behind.
+
+    An already-attempted row is exempt, and deliberately so. Its outcome is
+    unknown -- the homeserver may be holding it -- and refusing the retry
+    would strand it unacknowledged forever while leaving whatever it sent
+    visible. Only the frozen transaction ID can resolve that, by collapsing
+    the retry onto the same event.
+    """
+    if not outbox.is_attempted(transaction, principal_id, turn_id=turn_id, stage=stage) and not (
+        _turn_membership_is_current(transaction, principal_id, turn_id=turn_id, room_id=room_id)
+    ):
+        return None
+    return outbox.enqueue(
+        transaction,
+        principal_id,
+        turn_id=turn_id,
+        stage=stage,
+        room_id=room_id,
+        thread_id=thread_id,
+        payload=payload,
+        edits_event_id=edits_event_id,
+    )
 
 
 def _install_hydration(
