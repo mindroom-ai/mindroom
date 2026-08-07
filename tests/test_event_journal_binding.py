@@ -11,7 +11,9 @@ saved ``event_journal`` edit has not taken effect yet.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
@@ -28,6 +30,7 @@ from mindroom.event_journal_open import (
     clear_event_journal_binding,
     describe_event_journal,
     event_journal_binding_path,
+    event_journal_sqlite_path,
     open_event_journal_store,
     pending_event_journal_restart,
     read_event_journal_binding,
@@ -191,6 +194,118 @@ class TestBindingRefusal:
 
         with pytest.raises(EventJournalBindingError):
             await _open_and_bind(runtime_paths)
+
+
+def _identity_only_sqlite(database_path: Path, generation: str) -> None:
+    """Write a database that carries a journal identity and nothing else.
+
+    This is what a freshly minted journal on a server that is not this
+    install's looks like, and it is the shape that made the damage visible:
+    one table before the probe, twelve after it.
+    """
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "CREATE TABLE journal_identity ("
+            "singleton BOOLEAN NOT NULL PRIMARY KEY, generation TEXT NOT NULL, created_at_ns BIGINT NOT NULL)",
+        )
+        connection.execute("INSERT INTO journal_identity VALUES (1, ?, 0)", (generation,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _sqlite_tables(database_path: Path) -> set[str]:
+    connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True)
+    try:
+        return {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        connection.close()
+
+
+def _pinned_schema(database_url: str) -> str:
+    """Return the schema a test DSN is pinned to."""
+    options = parse_qs(urlparse(database_url).query)["options"][0]
+    return options.removeprefix("-csearch_path=")
+
+
+def _postgres_table_count(database_url: str, schema: str) -> int:
+    import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
+
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        row = connection.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = %s",
+            (schema,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+class TestRefusalLeavesTheCandidateAlone:
+    """Being told no must not be the thing that writes this install into a database."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_a_refused_sqlite_journal_keeps_the_tables_it_arrived_with(self, tmp_path: Path) -> None:
+        """Both backends create the whole schema on open, so the check has to come first.
+
+        A candidate that gets refused for carrying somebody else's generation
+        used to be opened anyway, one statement before the refusal, and an
+        identity-only database came out of the encounter carrying every table
+        this install uses.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+
+        journal_file = event_journal_sqlite_path(runtime_paths.storage_root)
+        journal_file.unlink()
+        _identity_only_sqlite(journal_file, "another-install")
+        before = journal_file.read_bytes()
+
+        with pytest.raises(EventJournalBindingError) as exc_info:
+            await _open_and_bind(runtime_paths)
+
+        assert "different journal" in str(exc_info.value)
+        assert _sqlite_tables(journal_file) == {"journal_identity"}
+        assert journal_file.read_bytes() == before, "a refused database must come out byte-identical"
+
+    async def test_a_refused_empty_sqlite_file_is_not_turned_into_a_journal(self, tmp_path: Path) -> None:
+        """The other refusal has the same duty: an unused database stays unused."""
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+
+        journal_file = event_journal_sqlite_path(runtime_paths.storage_root)
+        journal_file.unlink()
+        journal_file.touch()
+
+        with pytest.raises(EventJournalBindingError) as exc_info:
+            await _open_and_bind(runtime_paths)
+
+        assert "never been used" in str(exc_info.value)
+        assert journal_file.read_bytes() == b""
+
+    async def test_a_refused_postgres_journal_gets_no_schema(
+        self,
+        tmp_path: Path,
+        postgres_journal_url: str,
+    ) -> None:
+        """The same rule on the backend where the wrong database is somebody else's server."""
+        runtime_paths = _postgres_runtime_paths(tmp_path, postgres_journal_schema_url(postgres_journal_url))
+        await _open_and_bind(runtime_paths)
+
+        stranger = postgres_journal_schema_url(postgres_journal_url)
+        schema = _pinned_schema(stranger)
+        assert _postgres_table_count(postgres_journal_url, schema) == 0
+        runtime_paths.config_path.write_text(
+            yaml.dump({**BASE_CONFIG, "event_journal": {"backend": "postgres", "database_url": stranger}}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(EventJournalBindingError) as exc_info:
+            await _open_and_bind(runtime_paths)
+
+        assert "never been used" in str(exc_info.value)
+        assert _postgres_table_count(postgres_journal_url, schema) == 0
 
 
 class TestAdoptCommand:

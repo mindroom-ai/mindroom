@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal.probe import probe_postgres_generation, probe_sqlite_generation
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -226,62 +227,36 @@ def clear_event_journal_binding(storage_path: Path) -> bool:
     return True
 
 
-def open_event_journal_store(
+def event_journal_sqlite_path(storage_path: Path) -> Path:
+    """Return the SQLite journal one storage root uses."""
+    return storage_path / "tracking" / "event_journal.db"
+
+
+def _probe_generation(
     journal_config: EventJournalConfig,
     *,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-) -> EventJournalStore:
-    """Open the durable store this runtime's journal, projection, and outbox share.
-
-    One database can hold every principal in the deployment; each caller
-    receives only its own principal-bound view from it.
-
-    Opening is what fixes the journal for the rest of the process, so this
-    records the identity :func:`pending_event_journal_restart` compares against.
-    Recorded after the open succeeds: a store that failed to open is not one
-    anybody is writing to.
-
-    Opening is not the same as being allowed to use it. Every caller must await
-    :func:`bind_event_journal` before reading or writing.
-    """
-    store = (
-        EventJournalStore.open_postgres(journal_config.resolve_postgres_database_url(runtime_paths))
-        if journal_config.backend == "postgres"
-        else EventJournalStore.open_sqlite(storage_path / "tracking" / "event_journal.db")
-    )
-    record_opened_event_journal(journal_config, runtime_paths=runtime_paths)
-    return store
+) -> str | None:
+    """Return the configured database's generation without creating anything in it."""
+    if journal_config.backend == "postgres":
+        return probe_postgres_generation(journal_config.resolve_postgres_database_url(runtime_paths))
+    return probe_sqlite_generation(event_journal_sqlite_path(storage_path))
 
 
-async def bind_event_journal(
-    store: EventJournalStore,
+def _refuse_foreign_generation(
+    generation: str | None,
     *,
-    journal_config: EventJournalConfig,
-    runtime_paths: RuntimePaths,
-    storage_path: Path,
+    binding: EventJournalBinding,
+    description: str,
 ) -> str:
-    """Return the journal's generation, refusing a database this install is not bound to.
+    """Return the generation, or raise the refusal it earns.
 
-    Idempotent, and meant to be called by every opener: the first call on an
-    unbound install mints the generation and records it, and every later call
-    compares. The two refusals are told apart because they are different
-    operator problems -- a database that has never been used is usually a
-    connection pointing somewhere new, while a database carrying someone else's
-    generation is usually a connection pointing at another install.
+    The two refusals stay apart because they are different operator problems.
+    A database that has never been used is usually a connection pointing
+    somewhere new, while a database carrying someone else's generation is
+    usually a connection pointing at another install.
     """
-    description = describe_event_journal(journal_config, runtime_paths)
-    binding = read_event_journal_binding(storage_path)
-    if binding is None:
-        generation = await store.generation(new_generation=uuid.uuid4().hex)
-        write_event_journal_binding(
-            storage_path,
-            EventJournalBinding(generation=generation, database=description),
-        )
-        logger.info("event_journal_bound", database=description)
-        return generation
-
-    generation = await store.existing_generation()
     if generation is None:
         msg = (
             f"The configured event journal ({description}) has never been used by this install, "
@@ -300,6 +275,91 @@ async def bind_event_journal(
     return generation
 
 
+def _open_store(
+    journal_config: EventJournalConfig,
+    *,
+    runtime_paths: RuntimePaths,
+    storage_path: Path,
+) -> EventJournalStore:
+    """Open the store unconditionally, creating or migrating its schema."""
+    store = (
+        EventJournalStore.open_postgres(journal_config.resolve_postgres_database_url(runtime_paths))
+        if journal_config.backend == "postgres"
+        else EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_path))
+    )
+    record_opened_event_journal(journal_config, runtime_paths=runtime_paths)
+    return store
+
+
+def open_event_journal_store(
+    journal_config: EventJournalConfig,
+    *,
+    runtime_paths: RuntimePaths,
+    storage_path: Path,
+) -> EventJournalStore:
+    """Open the durable store this runtime's journal, projection, and outbox share.
+
+    One database can hold every principal in the deployment; each caller
+    receives only its own principal-bound view from it.
+
+    An install that is already bound has its candidate checked here, before the
+    store exists, because opening one creates or migrates the entire schema.
+    Checking afterwards would mean every refused database still ends up
+    carrying this install's tables -- pointing a probe at the wrong server and
+    being told no would leave twelve tables behind in it. A refusal now leaves
+    the candidate exactly as it was found.
+
+    Opening is still not the same as being allowed to use it: an unbound
+    install has nothing to check against yet, and gets its binding minted by
+    :func:`bind_event_journal`, which every caller must await before reading or
+    writing.
+
+    Opening is also what fixes the journal for the rest of the process, so this
+    records the identity :func:`pending_event_journal_restart` compares against.
+    Recorded after the open succeeds: a store that failed to open is not one
+    anybody is writing to.
+    """
+    binding = read_event_journal_binding(storage_path)
+    if binding is not None:
+        _refuse_foreign_generation(
+            _probe_generation(journal_config, runtime_paths=runtime_paths, storage_path=storage_path),
+            binding=binding,
+            description=describe_event_journal(journal_config, runtime_paths),
+        )
+    return _open_store(journal_config, runtime_paths=runtime_paths, storage_path=storage_path)
+
+
+async def bind_event_journal(
+    store: EventJournalStore,
+    *,
+    journal_config: EventJournalConfig,
+    runtime_paths: RuntimePaths,
+    storage_path: Path,
+) -> str:
+    """Return the journal's generation, refusing a database this install is not bound to.
+
+    Idempotent, and meant to be called by every opener: the first call on an
+    unbound install mints the generation and records it, and every later call
+    compares. Bots that borrow a store somebody else opened reach their first
+    async moment here, so this is where they find out.
+    """
+    description = describe_event_journal(journal_config, runtime_paths)
+    binding = read_event_journal_binding(storage_path)
+    if binding is None:
+        generation = await store.generation(new_generation=uuid.uuid4().hex)
+        write_event_journal_binding(
+            storage_path,
+            EventJournalBinding(generation=generation, database=description),
+        )
+        logger.info("event_journal_bound", database=description)
+        return generation
+    return _refuse_foreign_generation(
+        await store.existing_generation(),
+        binding=binding,
+        description=description,
+    )
+
+
 __all__ = [
     "BINDING_FILENAME",
     "EventJournalBinding",
@@ -308,6 +368,7 @@ __all__ = [
     "clear_event_journal_binding",
     "describe_event_journal",
     "event_journal_binding_path",
+    "event_journal_sqlite_path",
     "open_event_journal_store",
     "pending_event_journal_restart",
     "read_event_journal_binding",
