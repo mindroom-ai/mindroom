@@ -16,18 +16,23 @@ The prototype proved out and the cutover is landing on `wip/matrix-journal-ingre
 
 **Done:** the nio prerequisite (merged, released as **0.37.0**, and now resolved from PyPI rather than a branch pin); the journal, principal-bound store, admission and pending worker; the visible-message projection with bounded reads and hydration; the deterministic outbox; the crash matrix and the live Tuwunel harness; ingress cutover; delivery cutover; and **all eleven boundary contracts**, each verified against the code rather than assumed — see the status table below.
 
-**Remaining: nothing implementable. Two items wait on actions outside this repository.**
+**Remaining: defects this branch's own review keeps finding, plus two items that wait on actions outside this repository.**
+
+Review rounds against the running code are still reproducing production defects directly, and fixes for them are landing on this branch faster than this section has been updated.
+They fall into two kinds, both visible in the log above this line: ownership and ordering errors in paths this plan already calls done, and tests that passed without ever exercising the behaviour they are named for.
+Neither kind is detectable from the status table below, because a boundary contract can be verified against the code and still be broken by the code that calls it, and a green suite proves only that the assertions that ran were satisfied.
+So there is implementable work in this repository, and the honest count is not knowable until the reviews stop finding things.
 
 Terminal truth now has one owner. The terminal turn record commits inside the acknowledgement's transaction, and `delivered_turn_repair.py` -- which existed only because the two stores could not share one -- is deleted rather than kept. That deletion is the check that this was a collapse and not another reconciler.
 
-What is left needs a person, not a change:
+The two external items need a person rather than a change:
 
 - **Three plugin PRs and PR #1800 itself.** An agent is blocked from `gh pr merge` by policy, deliberately.
 - **A `mindroom-nio` release.** Per-room continued recovery is implemented and green on branch `per-room-recovery`, steps 1 through 4 including the sticky abandonment flag. Once it ships and the PyPI pin moves, MindRoom deletes `history_debt.py` (187) and `sync_recovery_escape.py` (98) with the machinery around them. That deletion is already proven on branch `history-debt-deletion`: net **-662**, full suite exit 0. Do not merge its temporary local-path pin commit.
 
 Deleting the history-debt side *before* the release would be a regression, not progress. It would convert a context-only fallback into a silent one for the cases nio abandons outright -- the `backfill_max_events` cap, a hard non-retryable `/messages` rejection, an unverifiable page. Step 4's sticky flag is what makes those visible instead.
 
-Four earlier versions of this line were wrong in the same direction, and the pattern is worth more than the line. The first said "Remaining: nothing" while the same document described two gaps below it. The second named an approval card sent before its recovery row was written -- real, and since fixed (`f5e22efbb`). The third said terminal truth still had two owners after the collapse had landed, contradicting the gate-check table further down. Each time the summary was more finished, or less finished, than the work. Treat this line as a claim to check rather than as evidence.
+Five earlier versions of this line were wrong in the same direction, and the pattern is worth more than the line. The first said "Remaining: nothing" while the same document described two gaps below it. The second named an approval card sent before its recovery row was written -- real, and since fixed (`f5e22efbb`). The third said terminal truth still had two owners after the collapse had landed, contradicting the gate-check table further down. The fifth said nothing implementable remained while review was still reproducing production defects, and while the fixes for them were being committed to this very branch. Each time the summary was more finished, or less finished, than the work. Treat this line as a claim to check rather than as evidence.
 
 The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`, and with it `conversation_cache.py`, `client_thread_history.py`, `runtime_support.py`, `membership_fence.py`, `thread_bookkeeping.py` and `postgres_cursor` — 27 source modules. `ThreadReadMode` moved to `matrix/conversation_reads.py`, where the read API it describes already lives; it is a caller contract, not cache policy. `vulture_whitelist.py` came through byte-identical, which was read at the time as evidence that nothing had been suppressed to make the deletion pass. It was the opposite. Eight entries naming `matrix/cache/` modules survived the modules themselves, and vulture cannot fail on a whitelist line whose symbol no longer exists — so the deletion passed while the suppressions it should have retired stayed in the tree. They are removed now, and `uv run vulture` still passes without them.
 
