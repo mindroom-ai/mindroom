@@ -21,6 +21,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -49,6 +50,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
@@ -132,7 +134,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.client,
         context.room_id,
         "$ctx-thread:localhost",
-        conversation_cache=context.conversation_cache,
+        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -218,7 +220,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.client,
         context.room_id,
         "$reply-event:localhost",
-        conversation_cache=context.conversation_cache,
+        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,

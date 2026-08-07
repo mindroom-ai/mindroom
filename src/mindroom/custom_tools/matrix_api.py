@@ -674,7 +674,7 @@ class MatrixApiTools(Toolkit):
                 context.client,
                 room_id=room_id,
                 event_id=event_id,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             )
         except Exception as exc:
             logger.warning(
@@ -738,7 +738,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             )
             if thread_impact.state is MutationThreadImpactState.UNKNOWN:
                 return self._error_payload(

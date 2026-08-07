@@ -11,8 +11,9 @@ here.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from aiohttp import ClientError
@@ -21,13 +22,20 @@ from nio.responses import RoomThreadsResponse
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
     VISIBLE_ROOM_MESSAGE_EVENT_TYPES,
+    ResolvedVisibleMessage,
     ThreadEditCandidates,
+    apply_latest_edits_to_messages,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.event_normalization import (
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
 )
+from mindroom.matrix.media import (
+    is_encrypted_media_event_source,
+    parse_matrix_media_event_source,
+)
+from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,
@@ -38,11 +46,13 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
     sort_thread_event_sources_root_first,
+    sort_thread_messages_root_first,
 )
+from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable, Collection, Iterable
 
 logger = get_logger(__name__)
 
@@ -582,3 +592,171 @@ async def enumerate_room_thread_root_ids(
         page_token = next_token
 
     return thread_root_ids, truncated
+
+
+def room_message_fallback_body(event: nio.Event) -> str:
+    """Return one best-effort fallback body for a room message event."""
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        return event.body
+    event_source = event.source if isinstance(event.source, dict) else {}
+    content = event_source.get("content")
+    if isinstance(content, dict):
+        body = content.get("body")
+        if isinstance(body, str):
+            return body
+    return ""
+
+
+def parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
+    """Parse one event dict into a room-message event when possible."""
+    if is_encrypted_media_event_source(event_source):
+        parsed_event = parse_matrix_media_event_source(event_source)
+    else:
+        try:
+            parsed_event = nio.Event.parse_event(event_source)
+        except Exception:
+            return None
+    if parsed_event is None:
+        return None
+    # nio's parser returns BadEvent even though its public return type is Event.
+    event = cast("nio.Event", parsed_event)
+    return event if is_room_message_event(event) else None
+
+
+def bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return one bundled replacement event source when Matrix already included it."""
+    unsigned = event_source.get("unsigned")
+    if not isinstance(unsigned, Mapping):
+        return None
+    relations = unsigned.get("m.relations")
+    if not isinstance(relations, Mapping):
+        return None
+    replacement = relations.get("m.replace")
+    if not isinstance(replacement, Mapping):
+        return None
+    candidates: tuple[object, ...] = (
+        replacement.get("event"),
+        replacement.get("latest_event"),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
+        if _parse_visible_text_message_event(normalized_candidate) is not None:
+            return normalized_candidate
+    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
+    if {
+        "event_id",
+        "sender",
+        "type",
+        "origin_server_ts",
+    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
+        return replacement_candidate
+    return None
+
+
+async def fetch_thread_messages_from_source(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    *,
+    trusted_sender_ids: Collection[str] = (),
+) -> list[ResolvedVisibleMessage]:
+    """Return one thread's visible messages as the homeserver reports them right now.
+
+    This is the read for a caller that must observe a write another runtime
+    just made. The projection is strict about staleness but still answers from
+    local state, so it cannot see an event that has not reached this process
+    yet -- and "has it reached anyone else" is the only question worth paying a
+    homeserver round trip for.
+
+    No local store is consulted or written, deliberately. Sidecar bodies are
+    fetched from their media URL rather than from a text cache: the caller is
+    already paying for a room scan, and a cache read here would reintroduce the
+    staleness the scan exists to avoid.
+    """
+    scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
+    parsed_events = [
+        parsed
+        for event_source in scan_result.event_sources
+        if (parsed := parse_room_message_event(event_source)) is not None
+    ]
+    messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
+    edit_candidates = ThreadEditCandidates()
+    for event in parsed_events:
+        event_info = EventInfo.from_event(event.source)
+        replacement_source = bundled_replacement_source(event.source)
+        if replacement_source is not None:
+            bundled_replacement = nio.Event.parse_event(replacement_source)
+            if isinstance(bundled_replacement, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+                edit_candidates.record(
+                    bundled_replacement,
+                    event_info=EventInfo.from_event(bundled_replacement.source),
+                )
+        if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
+            event,
+            event_info=event_info,
+        ):
+            continue
+        if event_info.is_edit or event.event_id in messages_by_event_id:
+            continue
+        messages_by_event_id[event.event_id] = await _resolve_message_from_source(
+            event,
+            client,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    await apply_latest_edits_to_messages(
+        client,
+        messages_by_event_id=messages_by_event_id,
+        edit_candidates=edit_candidates,
+        required_thread_id=thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    messages = list(messages_by_event_id.values())
+    sort_thread_messages_root_first(messages, thread_id=thread_id)
+    return messages
+
+
+async def _resolve_message_from_source(
+    event: nio.Event,
+    client: nio.AsyncClient,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> ResolvedVisibleMessage:
+    """Resolve one scanned event into the normalized thread-history shape."""
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        message_data = await extract_and_resolve_message(event, client, trusted_sender_ids=trusted_sender_ids)
+        return ResolvedVisibleMessage.from_message_data(
+            message_data,
+            thread_id=EventInfo.from_event(event.source).thread_id,
+            latest_event_id=event.event_id,
+        )
+
+    resolved_event_source = await resolve_event_source_content(
+        event.source if isinstance(event.source, dict) else {},
+        client,
+    )
+    content = resolved_event_source.get("content", {})
+    event_info = EventInfo.from_event(resolved_event_source)
+    message = ResolvedVisibleMessage.synthetic(
+        sender=event.sender,
+        body=visible_body_from_event_source(
+            resolved_event_source,
+            room_message_fallback_body(event),
+            trusted_sender_ids=trusted_sender_ids,
+        ),
+        timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
+        event_id=event.event_id,
+        content=content if isinstance(content, dict) else {},
+        thread_id=event_info.thread_id,
+    )
+    message.refresh_stream_status()
+    return message
+
+
+def _parse_visible_text_message_event(
+    event_source: dict[str, Any],
+) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
+    """Parse one event dict into a visible text or notice message when possible."""
+    parsed_event = parse_room_message_event(event_source)
+    return parsed_event if isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)) else None

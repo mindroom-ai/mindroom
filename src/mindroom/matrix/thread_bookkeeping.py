@@ -68,9 +68,7 @@ from mindroom.matrix.thread_membership import (
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.thread_room_scan import (
-    RoomScanConversationCache,
-    fetch_event_info_for_client,
-    fetch_event_info_from_conversation_cache,
+    RoomScanRelations,
     room_scan_membership_access_for_client,
 )
 
@@ -151,20 +149,30 @@ async def resolve_event_thread_impact_for_client(
     *,
     event_type: str,
     content: Mapping[str, object],
-    conversation_cache: RoomScanConversationCache | None,
+    relations: RoomScanRelations,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one outbound client-side event payload."""
     if event_type != "m.room.message":
         return MutationThreadImpact.room_level()
     event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        access=room_scan_membership_access_for_client(
-            client,
-            conversation_cache=conversation_cache,
-        ),
-    )
+    try:
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            event_info,
+            access=room_scan_membership_access_for_client(
+                client,
+                relations=relations,
+            ),
+        )
+    except Exception:
+        # Two different failures, one correct answer. An ancestor that cannot
+        # carry thread membership -- a sticker, a reaction -- proves nothing;
+        # a lookup that simply failed proves nothing either. Both must report
+        # UNKNOWN rather than "no thread", because the caller turns UNKNOWN
+        # into an explicit error and would otherwise send threaded work at
+        # room level. The strict lookup exists so this path sees the failure
+        # at all instead of a silently degraded None.
+        return MutationThreadImpact.unknown()
     return _mutation_thread_impact_from_resolution(resolution)
 
 
@@ -173,33 +181,23 @@ async def resolve_redaction_thread_impact_for_client(
     room_id: str,
     *,
     event_id: str,
-    conversation_cache: RoomScanConversationCache | None,
+    relations: RoomScanRelations,
 ) -> MutationThreadImpact:
     """Return the mutation impact for one client-side redaction target."""
-    if conversation_cache is None:
-        target_event_info = await fetch_event_info_for_client(
-            client,
-            room_id,
-            event_id,
-            strict=True,
-        )
-    else:
-        target_event_info = await fetch_event_info_from_conversation_cache(
-            conversation_cache,
-            room_id,
-            event_id,
-            strict=True,
-        )
+    target_event_info = await relations.event_info(room_id, event_id)
     if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
         return MutationThreadImpact.room_level()
-    resolution = await resolve_related_event_thread_membership(
-        room_id,
-        event_id,
-        access=room_scan_membership_access_for_client(
-            client,
-            conversation_cache=conversation_cache,
-        ),
-    )
+    try:
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            event_id,
+            access=room_scan_membership_access_for_client(
+                client,
+                relations=relations,
+            ),
+        )
+    except Exception:
+        return MutationThreadImpact.unknown()
     return _mutation_thread_impact_from_resolution(resolution)
 
 

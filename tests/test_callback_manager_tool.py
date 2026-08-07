@@ -18,7 +18,7 @@ from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import make_conversation_reader_mock
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 
 class _Client:
@@ -61,6 +61,7 @@ def _context(
         config=_config(),
         runtime_paths=_runtime_paths(tmp_path, process_env),
         conversation_cache=cast("Any", object()),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
 

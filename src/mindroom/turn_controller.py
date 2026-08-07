@@ -134,6 +134,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
@@ -432,6 +433,7 @@ class TurnControllerDeps:
     agent_name: str
     matrix_id: MatrixID
     conversation_cache: MatrixConversationCache
+    relations: RelationLookup
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     command_executor: CommandTurnExecutor
@@ -535,7 +537,7 @@ class TurnController:
             thread_id=thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
-            get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
+            get_thread_id_for_event=self.deps.relations.admitted_thread_id,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,

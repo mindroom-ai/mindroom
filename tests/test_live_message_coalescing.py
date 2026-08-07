@@ -70,6 +70,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -5129,12 +5130,10 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         },
     }
     bot.event_cache.get_recent_room_events.return_value = [newer_event_source]
-    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: "$thread" if event_id == "$m2" else None,
-    )
-
     action_mock = AsyncMock()
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    # RelationLookup is a frozen slots dataclass, so the seam is the class.
+    admitted_thread_id = AsyncMock(side_effect=lambda _room_id, event_id: "$thread" if event_id == "$m2" else None)
     with (
         patch.object(
             bot._turn_controller,
@@ -5143,11 +5142,12 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+        patch.object(RelationLookup, "admitted_thread_id", new=admitted_thread_id),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
-    bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
+    admitted_thread_id.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
 

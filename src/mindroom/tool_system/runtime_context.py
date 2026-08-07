@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
+    from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -72,6 +73,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     conversation_cache: ConversationCacheProtocol
     conversation_reader: ConversationReader
+    relations: RelationLookup
     transport_agent_name: str | None = None
     active_model_name: str | None = None
     room: nio.MatrixRoom | None = None
@@ -237,6 +239,7 @@ class ToolRuntimeSupport:
             runtime_paths=self.runtime_paths,
             conversation_cache=self.resolver.deps.conversation_cache,
             conversation_reader=self.resolver.deps.conversation_reader,
+            relations=self.resolver.deps.relations,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
             room=self.resolver.cached_room(target.room_id),

@@ -23,6 +23,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -91,6 +92,7 @@ def _context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=conversation_cache,
+        relations=make_relation_lookup(),
         conversation_reader=conversation_reader,
     )
 

@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_ru
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -154,6 +155,7 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
@@ -191,6 +193,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=AsyncMock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=room,
         storage_path=None,

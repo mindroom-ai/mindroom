@@ -13,7 +13,6 @@ read might be replayed later in the same turn.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -23,23 +22,16 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.background_tasks import create_background_task
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
 )
-from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
     bulk_refresh_room_thread_histories,
-    fetch_dispatch_thread_history,
-    fetch_dispatch_thread_snapshot,
-    fetch_thread_history,
-    log_thread_history_refresh,
-    refresh_thread_history_from_source,
     thread_ids_needing_refill,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -53,16 +45,11 @@ from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.room_history_reads import get_room_threads_page
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.thread_membership import resolve_event_thread_membership
-from mindroom.matrix.thread_room_scan import (
-    fetch_event_info_for_client,
-    lookup_thread_id_from_conversation_cache,
-    room_scan_membership_access_for_client,
-)
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Coroutine, Mapping
+    import asyncio
+    from collections.abc import AsyncIterator, Callable, Collection
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -84,56 +71,11 @@ __all__ = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
-    "resolve_thread_root_event_id_for_client",
 ]
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_MAX_SCAN_PAGES = 20
-
-
-async def resolve_thread_root_event_id_for_client(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    *,
-    conversation_cache: ConversationCacheProtocol | None = None,
-) -> str | None:
-    """Resolve one event ID into a canonical thread root when thread membership can prove one."""
-    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
-    if not normalized_event_id:
-        return None
-
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
-    if event_info is None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            room_id,
-            normalized_event_id,
-        )
-
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        event_id=normalized_event_id,
-        allow_current_root=True,
-        access=room_scan_membership_access_for_client(
-            client,
-            conversation_cache=conversation_cache,
-            fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(
-                client,
-                lookup_room_id,
-                lookup_event_id,
-                strict=False,
-            ),
-        ),
-    )
-    return resolution.thread_id
 
 
 class ConversationCacheProtocol(Protocol):
@@ -144,24 +86,6 @@ class ConversationCacheProtocol(Protocol):
 
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
-
-    async def refresh_strict_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh strict full history directly from Matrix."""
-
-    async def refresh_startup_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh startup-only strict history without entering live cache coordination."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
@@ -322,64 +246,6 @@ async def _cached_room_get_event(
     return (visible_response if visible_response is not None else response), normalized_event_source
 
 
-type _ThreadRefillKey = tuple[str, str, str, bool, bool]
-
-
-@dataclass(frozen=True, slots=True)
-class _ThreadRefillSingleFlightResult:
-    """One caller's view of a shared thread refill."""
-
-    result: ThreadReadResult
-    wait_ms: float
-    shared: bool
-
-
-@dataclass(slots=True)
-class _ThreadRefillSingleFlight:
-    """Join concurrent refills of one thread onto a single homeserver scan.
-
-    This is all that survives of the deleted repair registry: no tiering, no speculative fan-out
-    gate, no cooldown, no failure backoff. Just "one scan per thread in flight at a time", because
-    a full room scan costs seconds under load and N readers of one gapped thread would otherwise
-    each run their own.
-
-    Keyed by the caller's whole contract rather than the thread alone. A caller that asked for
-    hydrated sidecars, or that allows a stale fallback, must not be handed the result of one that
-    did not - sharing across those would return history the caller did not ask for.
-
-    Waiters ``shield`` the shared task, so a caller giving up cannot cancel the scan the others are
-    still waiting on. The task is owned so shutdown drains it rather than leaving it pending.
-    """
-
-    _owner: object
-    _in_flight: dict[_ThreadRefillKey, asyncio.Task[ThreadReadResult]] = field(default_factory=dict, init=False)
-
-    async def run(
-        self,
-        key: _ThreadRefillKey,
-        refill: Callable[[], Coroutine[Any, Any, ThreadReadResult]],
-    ) -> _ThreadRefillSingleFlightResult:
-        """Run one refill, or join the one already running for this key."""
-        in_flight = self._in_flight.get(key)
-        shared = in_flight is not None
-        wait_started = time.perf_counter() if shared else None
-        if in_flight is None:
-            in_flight = create_background_task(
-                refill(),
-                name="matrix_cache_thread_refill",
-                owner=self._owner,
-                log_exceptions=False,
-            )
-            self._in_flight[key] = in_flight
-            in_flight.add_done_callback(lambda _task: self._in_flight.pop(key, None))
-        result = await asyncio.shield(in_flight)
-        return _ThreadRefillSingleFlightResult(
-            result=result,
-            wait_ms=elapsed_ms_since(wait_started, clock=time.perf_counter) if wait_started is not None else 0.0,
-            shared=shared,
-        )
-
-
 @dataclass
 class MatrixConversationCache(ConversationCacheProtocol):
     """Own Matrix conversation reads and advisory cache writes for one bot."""
@@ -389,22 +255,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
-    _reads: ThreadReadPolicy = field(init=False, repr=False)
-    _refill_single_flight: _ThreadRefillSingleFlight = field(init=False, repr=False)
     _write_cache_ops: ThreadMutationCacheOps = field(init=False, repr=False)
     _live: ThreadLiveWritePolicy = field(init=False, repr=False)
     _sync: ThreadSyncWritePolicy = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind extracted read/write collaborators to this facade."""
-        self._reads = ThreadReadPolicy(
-            logger_getter=lambda: self.logger,
-            runtime=self.runtime,
-            fetch_thread_history_from_client=self._fetch_thread_history_from_client,
-            fetch_dispatch_thread_history_from_client=self._fetch_dispatch_thread_history_from_client,
-            fetch_dispatch_thread_snapshot_from_client=self._fetch_dispatch_thread_snapshot_from_client,
-            refresh_thread_history_from_source=self._refresh_thread_history_from_client,
-        )
         resolver = ThreadMutationResolver(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
@@ -414,7 +270,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
         )
-        self._refill_single_flight = _ThreadRefillSingleFlight(_owner=self)
         self._live = ThreadLiveWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
@@ -561,178 +416,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return None
         return EventInfo.from_event(response.event.source)
 
-    async def _fetch_thread_history_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        return await self._fetch_thread_from_client(
-            fetch_thread_history,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=True,
-            allows_stale_fallback=True,
-        )
-
-    async def _fetch_dispatch_thread_history_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        return await self._fetch_thread_from_client(
-            fetch_dispatch_thread_history,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=True,
-            allows_stale_fallback=False,
-        )
-
-    async def _fetch_dispatch_thread_snapshot_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        return await self._fetch_thread_from_client(
-            fetch_dispatch_thread_snapshot,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=False,
-            allows_stale_fallback=False,
-        )
-
-    async def _refresh_thread_history_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
-        post_coordinator_read_started = time.perf_counter()
-        result = await self._refill_thread_from_client(
-            room_id,
-            thread_id,
-            cache_reject_diagnostics=None,
-            wants_full_history=True,
-            allows_stale_fallback=False,
-        )
-        log_thread_history_refresh(
-            room_id=room_id,
-            thread_id=thread_id,
-            caller_label=caller_label,
-            mode="full_scan",
-            diagnostics=result.diagnostics,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            post_coordinator_read_started=post_coordinator_read_started,
-        )
-        return result
-
-    async def _refill_thread_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-        wants_full_history: bool,
-        allows_stale_fallback: bool,
-    ) -> ThreadHistoryResult:
-        """Rebuild one thread from Matrix and reinstall its snapshot.
-
-        Matching readers join one single-flight, and its fetch-plus-store owns the same-thread write
-        lane. Mutations queued before the refill run first; mutations arriving while it runs wait
-        until the snapshot is installed, then extend that snapshot instead of repeatedly re-gapping
-        a snapshotless thread.
-
-        The 126 ms figure quoted elsewhere in this subsystem prices a warm *cache* read and does not
-        apply here.
-        """
-        principal_id = self.runtime.event_cache.principal_id
-
-        async def refill() -> ThreadReadResult:
-            result = await self._write_cache_ops.queue_thread_cache_update(
-                room_id,
-                thread_id,
-                lambda: refresh_thread_history_from_source(
-                    self._require_client(),
-                    room_id,
-                    thread_id,
-                    self.runtime.event_cache,
-                    hydrate_sidecars=wants_full_history,
-                    allow_stale_fallback=allows_stale_fallback,
-                    cache_reject_diagnostics=cache_reject_diagnostics,
-                    trusted_sender_ids=self._trusted_sender_ids(),
-                ),
-                name="matrix_cache_thread_refill",
-                emit_timing=True,
-            )
-            return cast("ThreadReadResult", result)
-
-        refill_result = await self._refill_single_flight.run(
-            (principal_id, room_id, thread_id, wants_full_history, allows_stale_fallback),
-            refill,
-        )
-        return ThreadHistoryResult(
-            messages=list(refill_result.result),
-            is_full_history=refill_result.result.is_full_history,
-            diagnostics={
-                **refill_result.result.diagnostics,
-                "refill_singleflight_wait_ms": refill_result.wait_ms,
-                "refill_singleflight_shared": refill_result.shared,
-            },
-        )
-
-    async def _fetch_thread_from_client(
-        self,
-        fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-        wants_full_history: bool,
-        allows_stale_fallback: bool,
-    ) -> ThreadHistoryResult:
-        post_coordinator_read_started = time.perf_counter()
-
-        async def refill(
-            cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-        ) -> ThreadHistoryResult:
-            return await self._refill_thread_from_client(
-                room_id,
-                thread_id,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                wants_full_history=wants_full_history,
-                allows_stale_fallback=allows_stale_fallback,
-            )
-
-        return await fetcher(
-            self._require_client(),
-            room_id,
-            thread_id,
-            event_cache=self.runtime.event_cache,
-            trusted_sender_ids=self._trusted_sender_ids(),
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            post_coordinator_read_started=post_coordinator_read_started,
-            refill=refill,
-        )
-
     async def _bulk_refresh_startup_threads(
         self,
         room_id: str,
@@ -873,40 +556,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             threads_failed=threads_failed,
         )
         return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
-
-    async def refresh_strict_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh strict full history directly from Matrix."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
-            caller_label=caller_label,
-        )
-
-    async def refresh_startup_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh startup-only strict history without entering live cache coordination."""
-        return await refresh_thread_history_from_source(
-            self._require_client(),
-            room_id,
-            thread_id,
-            self.runtime.event_cache,
-            hydrate_sidecars=True,
-            allow_stale_fallback=False,
-            trusted_sender_ids=self._trusted_sender_ids(),
-            caller_label=caller_label,
-        )
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""

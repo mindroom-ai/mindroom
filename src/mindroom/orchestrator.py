@@ -1141,7 +1141,6 @@ class _MultiAgentOrchestrator:
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
-            resume_conversation_cache=router_bot._conversation_cache if router_bot is not None else None,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,

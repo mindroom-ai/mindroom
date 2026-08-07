@@ -11,7 +11,7 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import make_conversation_reader_mock
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,6 +91,7 @@ def _context(
         config=config or _config(),
         runtime_paths=_runtime_paths(tmp_path),
         conversation_cache=cast("Any", object()),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
 

@@ -105,6 +105,83 @@ class TestThreadId:
         assert await lookup(relations, client).thread_id(ROOM, "$gone") is None
 
 
+class TestAdmittedThreadId:
+    """The journal-only lookup, for callers that must not pay a round trip."""
+
+    async def test_an_admitted_thread_reply_answers_from_the_journal(self) -> None:
+        """An admitted thread reply answers from the journal."""
+        relations = FakeRelations(admitted={"$reply": "$root"})
+        client = FakeClient()
+
+        assert await lookup(relations, client).admitted_thread_id(ROOM, "$reply") == "$root"
+        assert client.fetches == []
+
+    async def test_an_unseen_event_is_never_fetched(self) -> None:
+        """The whole point: `thread_id` would fetch here, and this must not.
+
+        The degraded replay guard runs this over a page of recent room events.
+        One fetch per unproven event turns a single skipped message into
+        hundreds of sequential requests inside a turn.
+        """
+        relations = FakeRelations()
+        client = FakeClient(events={"$old": source("$old", thread_id="$root")})
+
+        assert await lookup(relations, client).admitted_thread_id(ROOM, "$old") is None
+        assert client.fetches == []
+
+    async def test_the_contrast_is_real(self) -> None:
+        """Same event, same fakes: `thread_id` fetches it and finds the thread."""
+        relations = FakeRelations()
+        client = FakeClient(events={"$old": source("$old", thread_id="$root")})
+
+        assert await lookup(relations, client).thread_id(ROOM, "$old") == "$root"
+        assert client.fetches == ["$old"]
+
+    async def test_an_admitted_room_event_is_reported_as_thread_less(self) -> None:
+        """An admitted event in no thread answers None, same as an unseen one.
+
+        The caller only acts on positive proof, so collapsing these two costs
+        it nothing -- but it is a real collapse, and `thread_id` keeps them
+        apart because its caller pays a fetch to tell them apart.
+        """
+        relations = FakeRelations(admitted={"$room-message": None})
+        client = FakeClient()
+
+        assert await lookup(relations, client).admitted_thread_id(ROOM, "$room-message") is None
+        assert client.fetches == []
+
+    async def test_the_boolean_decides_and_not_the_thread_it_came_with(self) -> None:
+        """A store reporting "not admitted" is believed even if it names a thread.
+
+        The two halves of the answer are separate facts, and only the first one
+        is proof. Without this the gate is invisible: every store in reach
+        pairs "not admitted" with no thread, so returning the thread unguarded
+        passes every other test here.
+        """
+
+        class ConfusedRelations(FakeRelations):
+            async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+                del room_id
+                self.calls.append(event_id)
+                return False, "$root"
+
+        assert await lookup(ConfusedRelations()).admitted_thread_id(ROOM, "$reply") is None
+
+    async def test_an_unreadable_journal_proves_nothing_and_still_does_not_fetch(self) -> None:
+        """A store that raises must not escalate into a homeserver sweep."""
+
+        class BrokenRelations(FakeRelations):
+            async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+                del room_id, event_id
+                msg = "journal unavailable"
+                raise RuntimeError(msg)
+
+        client = FakeClient(events={"$reply": source("$reply", thread_id="$root")})
+
+        assert await lookup(BrokenRelations(), client).admitted_thread_id(ROOM, "$reply") is None
+        assert client.fetches == []
+
+
 class TestEventInfo:
     """Relation metadata, and what a failed lookup means."""
 

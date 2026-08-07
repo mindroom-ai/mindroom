@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
 
@@ -16,6 +17,7 @@ from mindroom.matrix.client_thread_history import (
 from mindroom.matrix.room_history_reads import (
     OpaqueEncryptedThreadHistoryError,
     fetch_thread_event_sources_via_room_messages,
+    fetch_thread_messages_from_source,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
@@ -543,3 +545,61 @@ async def test_prewarm_probe_selects_cold_threads_as_well_as_gapped_ones(
     assert needs_refill == (gapped_thread_id, cold_thread_id), (
         "startup prewarm would skip the cold thread and warm nothing"
     )
+
+
+@pytest.mark.asyncio
+async def test_thread_messages_from_source_resolves_edits_without_touching_a_store() -> None:
+    """The freshness readers get resolved messages, and no local store is consulted.
+
+    Both callers exist to observe a write another runtime just made, so a
+    result assembled with any help from local state would defeat them. The
+    assertion that matters is the second one: this client has no cache
+    attached at all, and the read still produces the edited body.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [
+                    _edit_event("$reply-edit:localhost", reply_id, timestamp=4000, thread_root_id=root_id),
+                    _message_event("first draft", "first draft", timestamp=3000, thread_root_id=root_id),
+                    _message_event(reply_id, "first draft", timestamp=2000, thread_root_id=root_id),
+                    _message_event(root_id, "the question", timestamp=1000),
+                ],
+                end=None,
+            ),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    assert next(message.event_id for message in messages) == root_id
+    edited = next(message for message in messages if message.event_id == reply_id)
+    assert edited.body == "edited reply"
+    # Structural, not incidental: the reader takes no store to consult. An
+    # `AsyncMock` client would satisfy any assertion phrased about attributes,
+    # so the parameter list is the thing worth pinning.
+    parameters = inspect.signature(fetch_thread_messages_from_source).parameters
+    assert not [name for name in parameters if "cache" in name or "store" in name]
+
+
+@pytest.mark.asyncio
+async def test_thread_messages_from_source_raises_rather_than_returning_a_partial_thread() -> None:
+    """A scan that never finds the root must raise, not answer with what it saw.
+
+    The auto-resume freshness check dropped its explicit completeness guard
+    because this raises. If it returned the partial page instead, a thread
+    whose root scrolled past the scan window would look like it had no newer
+    human activity, and a stale turn would resume on top of one.
+    """
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([_message_event("$unrelated:localhost", "hi", timestamp=1000)], end=None),
+        ],
+    )
+
+    with pytest.raises(ThreadRoomScanRootNotFoundError):
+        await fetch_thread_messages_from_source(client, _ROOM_ID, "$missing-root:localhost")

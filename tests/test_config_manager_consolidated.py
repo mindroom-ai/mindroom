@@ -35,6 +35,7 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
+    make_relation_lookup,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -76,6 +77,7 @@ def _caller_context(
         config=config,
         runtime_paths=config_manager.runtime_paths,
         conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
 
@@ -536,6 +538,7 @@ class TestConsolidatedConfigManager:
             config=config,
             runtime_paths=cm.runtime_paths,
             conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             room=room,
         )

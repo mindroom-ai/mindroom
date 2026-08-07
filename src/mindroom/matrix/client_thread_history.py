@@ -42,16 +42,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
-    ThreadCacheGap,
-    thread_cache_gap_reason,
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.thread_cache_gap import (
@@ -66,10 +63,6 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.event_normalization import is_opaque_encrypted_event_source
-from mindroom.matrix.media import (
-    is_encrypted_media_event_source,
-    parse_matrix_media_event_source,
-)
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
@@ -81,14 +74,15 @@ from mindroom.matrix.room_history_reads import (
     OpaqueEncryptedThreadHistoryError,
     UnresolvedOpaqueRoomHistoryError,
     bulk_scan_thread_event_sources,
+    bundled_replacement_source,
     fetch_thread_event_sources_via_room_messages,
-    is_room_message_event,
+    parse_room_message_event,
+    room_message_fallback_body,
 )
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
@@ -104,6 +98,8 @@ from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
+
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
@@ -111,10 +107,6 @@ _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
-type _ThreadHistoryRefill = Callable[
-    [Mapping[str, str | int | float | bool] | None],
-    Awaitable[ThreadHistoryResult],
-]
 
 
 async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
@@ -223,19 +215,6 @@ def _report_direct_source_refresh(
     return result
 
 
-def _room_message_fallback_body(event: nio.Event) -> str:
-    """Return one best-effort fallback body for a room message event."""
-    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-        return event.body
-    event_source = event.source if isinstance(event.source, dict) else {}
-    content = event_source.get("content")
-    if isinstance(content, dict):
-        body = content.get("body")
-        if isinstance(body, str):
-            return body
-    return ""
-
-
 def _snapshot_message_dict(
     event: nio.Event,
     *,
@@ -250,7 +229,7 @@ def _snapshot_message_dict(
         sender=event.sender,
         body=visible_body_from_event_source(
             event_source,
-            _room_message_fallback_body(event),
+            room_message_fallback_body(event),
             trusted_sender_ids=trusted_sender_ids,
         ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
@@ -262,66 +241,10 @@ def _snapshot_message_dict(
     return message
 
 
-def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
-    """Parse one event dict into a room-message event when possible."""
-    if is_encrypted_media_event_source(event_source):
-        parsed_event = parse_matrix_media_event_source(event_source)
-    else:
-        try:
-            parsed_event = nio.Event.parse_event(event_source)
-        except Exception:
-            return None
-    if parsed_event is None:
-        return None
-    # nio's parser returns BadEvent even though its public return type is Event.
-    event = cast("nio.Event", parsed_event)
-    return event if is_room_message_event(event) else None
-
-
-def _parse_visible_text_message_event(
-    event_source: dict[str, Any],
-) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
-    """Parse one event dict into a visible text or notice message when possible."""
-    parsed_event = _parse_room_message_event(event_source)
-    return parsed_event if isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)) else None
-
-
 def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     """Return one Matrix event ID from a raw event source when present."""
     event_id = event_source.get("event_id")
     return event_id if isinstance(event_id, str) else None
-
-
-def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return one bundled replacement event source when Matrix already included it."""
-    unsigned = event_source.get("unsigned")
-    if not isinstance(unsigned, Mapping):
-        return None
-    relations = unsigned.get("m.relations")
-    if not isinstance(relations, Mapping):
-        return None
-    replacement = relations.get("m.replace")
-    if not isinstance(replacement, Mapping):
-        return None
-    candidates: tuple[object, ...] = (
-        replacement.get("event"),
-        replacement.get("latest_event"),
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
-        if _parse_visible_text_message_event(normalized_candidate) is not None:
-            return normalized_candidate
-    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
-    if {
-        "event_id",
-        "sender",
-        "type",
-        "origin_server_ts",
-    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
-        return replacement_candidate
-    return None
 
 
 def _sidecar_hydration_sources(
@@ -332,7 +255,7 @@ def _sidecar_hydration_sources(
     """Return sources whose sidecars this resolution pass may hydrate."""
     hydration_sources: list[dict[str, Any]] = []
     for event_source in event_sources:
-        bundled_replacement = _bundled_replacement_source(event_source)
+        bundled_replacement = bundled_replacement_source(event_source)
         if bundled_replacement is not None:
             hydration_sources.append(bundled_replacement)
         if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
@@ -375,7 +298,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     parsed_events = [
         parsed_event
         for event_source in event_sources
-        if (parsed_event := _parse_room_message_event(event_source)) is not None
+        if (parsed_event := parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates = ThreadEditCandidates()
@@ -390,9 +313,9 @@ async def _resolve_thread_history_from_event_sources_timed(
     )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
-        bundled_replacement_source = _bundled_replacement_source(event.source)
-        if bundled_replacement_source is not None:
-            bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
+        replacement_source = bundled_replacement_source(event.source)
+        if replacement_source is not None:
+            bundled_replacement = nio.Event.parse_event(replacement_source)
             if isinstance(bundled_replacement, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
                 edit_candidates.record(
                     bundled_replacement,
@@ -557,92 +480,6 @@ async def _resolve_cached_thread_history(
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         return None, 0.0
     return resolved.messages, resolved.sidecar_hydration_ms
-
-
-def _cache_reject_diagnostics(gap: ThreadCacheGap) -> dict[str, str | int | float | bool]:
-    """Describe one gap-marked snapshot for the read that refused it.
-
-    The rejection reason comes from ``thread_cache_gap_reason`` rather than an argument, so
-    the label a read logs and the gate that produced it cannot drift apart.
-    """
-    diagnostics: dict[str, str | int | float | bool] = {
-        THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: thread_cache_gap_reason(gap),
-        "cache_gap_marked_at": gap.gap_marked_at,
-        "cache_gap_age_ms": elapsed_ms_since(gap.gap_marked_at, clock=time.time),
-    }
-    if gap.gap_reason is not None:
-        diagnostics["cache_gap_reason"] = gap.gap_reason
-    return diagnostics
-
-
-async def _load_cached_thread_history_if_usable(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    hydrate_sidecars: bool,
-    trusted_sender_ids: Collection[str] = (),
-) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
-    """Return a durable thread snapshot when the current runtime may safely trust it."""
-    cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
-    if gap is not None:
-        cache_reject_diagnostics = _cache_reject_diagnostics(gap)
-        logger.info(
-            "Thread cache rejected for read",
-            room_id=room_id,
-            thread_id=thread_id,
-            **cache_reject_diagnostics,
-        )
-        return None, cache_reject_diagnostics
-
-    resolution_started = time.perf_counter()
-    cache_read_started = time.perf_counter()
-    cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
-    cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
-    if cached_event_sources is None:
-        return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing"}
-    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
-    if cached_rejection_reason is not None:
-        await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        payload_reject_diagnostics: dict[str, str | int | float | bool] = {
-            THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: f"cache_{cached_rejection_reason}",
-        }
-        logger.info(
-            "Thread cache rejected for read",
-            room_id=room_id,
-            thread_id=thread_id,
-            **payload_reject_diagnostics,
-        )
-        return None, payload_reject_diagnostics
-
-    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        cached_event_sources=cached_event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-        expected_membership_epoch=cached_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if resolved_history is None:
-        return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_payload_unresolvable"}
-
-    # A window that left messages out is not full history, whatever its sidecars did. Callers gate
-    # completeness-dependent planning and the model-history refresh on this flag, so claiming a
-    # truncated tail is complete silently drops older participants and mentions from the context.
-    return _thread_history_result(
-        resolved_history,
-        is_full_history=hydrate_sidecars,
-        diagnostics={
-            "cache_read_ms": cache_read_ms,
-            "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
-            "sidecar_hydration_ms": sidecar_hydration_ms,
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
-        },
-    ), None
 
 
 async def _invalidate_thread_cache_entry(
@@ -990,7 +827,7 @@ async def _resolve_thread_history_message(
         sender=event.sender,
         body=visible_body_from_event_source(
             resolved_event_source,
-            _room_message_fallback_body(event),
+            room_message_fallback_body(event),
             trusted_sender_ids=trusted_sender_ids,
         ),
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else 0,
@@ -1000,162 +837,6 @@ async def _resolve_thread_history_message(
     )
     message.refresh_stream_status()
     return message
-
-
-async def _fetch_thread_history_with_cache_policy(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    hydrate_sidecars: bool,
-    allow_stale_fallback: bool,
-    cache_read_failure_message: str,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-    post_coordinator_read_started: float | None,
-    refill: _ThreadHistoryRefill | None = None,
-) -> ThreadHistoryResult:
-    """Serve one trusted cache hit or delegate only the required refill."""
-    resolved_post_coordinator_read_started = (
-        time.perf_counter() if post_coordinator_read_started is None else post_coordinator_read_started
-    )
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    cached_history: ThreadHistoryResult | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=hydrate_sidecars,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    except Exception as exc:
-        logger.warning(
-            cache_read_failure_message,
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    if cached_history is not None:
-        result = cached_history
-    elif refill is not None:
-        result = await refill(cache_reject_diagnostics)
-    else:
-        result = await refresh_thread_history_from_source(
-            client,
-            room_id,
-            thread_id,
-            event_cache,
-            hydrate_sidecars=hydrate_sidecars,
-            allow_stale_fallback=allow_stale_fallback,
-            cache_reject_diagnostics=cache_reject_diagnostics,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    log_thread_history_refresh(
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode="cache_hit" if cached_history is not None else "full_scan",
-        diagnostics=result.diagnostics,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        post_coordinator_read_started=resolved_post_coordinator_read_started,
-    )
-    return result
-
-
-async def fetch_thread_history(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-    post_coordinator_read_started: float | None = None,
-    refill: _ThreadHistoryRefill | None = None,
-) -> ThreadHistoryResult:
-    """Fetch all messages in a thread, allowing advisory stale fallback.
-
-    Cached reads are collapsed but never truncated, so a caller whose output is the history
-    itself - export, and anything else that must be complete rather than recent - gets every
-    message. ``is_full_history`` still reports false when sidecar hydration was skipped.
-    """
-    return await _fetch_thread_history_with_cache_policy(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-        hydrate_sidecars=True,
-        allow_stale_fallback=True,
-        cache_read_failure_message="Durable thread cache read failed; refetching from homeserver",
-        trusted_sender_ids=trusted_sender_ids,
-        caller_label=caller_label,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        post_coordinator_read_started=post_coordinator_read_started,
-        refill=refill,
-    )
-
-
-async def fetch_dispatch_thread_history(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-    post_coordinator_read_started: float | None = None,
-    refill: _ThreadHistoryRefill | None = None,
-) -> ThreadHistoryResult:
-    """Fetch strict full thread history from trusted cache or a fresh refill."""
-    return await _fetch_thread_history_with_cache_policy(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-        hydrate_sidecars=True,
-        allow_stale_fallback=False,
-        cache_read_failure_message="Durable dispatch thread cache read failed; refetching from homeserver",
-        trusted_sender_ids=trusted_sender_ids,
-        caller_label=caller_label,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        post_coordinator_read_started=post_coordinator_read_started,
-        refill=refill,
-    )
-
-
-async def fetch_dispatch_thread_snapshot(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-    post_coordinator_read_started: float | None = None,
-    refill: _ThreadHistoryRefill | None = None,
-) -> ThreadHistoryResult:
-    """Fetch strict lightweight dispatch context from trusted cache or a fresh refill."""
-    return await _fetch_thread_history_with_cache_policy(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-        hydrate_sidecars=False,
-        allow_stale_fallback=False,
-        cache_read_failure_message="Durable dispatch thread cache read failed; refetching snapshot from homeserver",
-        trusted_sender_ids=trusted_sender_ids,
-        caller_label=caller_label,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        post_coordinator_read_started=post_coordinator_read_started,
-        refill=refill,
-    )
 
 
 async def _fetch_thread_history_via_room_messages_with_events(
@@ -1321,9 +1002,6 @@ __all__ = [
     "BulkThreadRefreshStats",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
-    "fetch_dispatch_thread_history",
-    "fetch_dispatch_thread_snapshot",
-    "fetch_thread_history",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
     "thread_ids_needing_refill",
