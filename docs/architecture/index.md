@@ -42,6 +42,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
 
 ## Key Internal Modules
 

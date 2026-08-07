@@ -43,7 +43,7 @@ _.chunking_strategy  # unused attribute (src/mindroom/knowledge/manager.py)
 _.thinking  # unused attribute (src/mindroom/history/summary_call.py)
 start_new_session  # unused variable (src/mindroom/knowledge/refresh_runner.py)
 _.check_hostname  # unused attribute (src/mindroom/matrix/client_session.py)
-_.row_factory  # sqlite row-name access (src/mindroom/dispatch_obligations.py)
+_.row_factory  # sqlite row-name access (src/mindroom/event_journal/sqlite_backend.py)
 _.uploaded_key_count  # consumed by nio after assignment (src/mindroom/matrix/client_session.py)
 _.verify_mode  # unused attribute (src/mindroom/matrix/client_session.py)
 _.uploaded_key_count  # nio's Olm machine state (src/mindroom/matrix/client_session.py)
@@ -307,7 +307,6 @@ _.validate_host  # Pydantic validator (src/mindroom/config/voice.py)
 _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 _.chat  # LiveKit LLM adapter override (src/mindroom/matrix_rtc/voice_agent.py)
 _.asearch  # agno Agent knowledge retrieval calls it dynamically (src/mindroom/strict_knowledge.py)
-_.get_thread_event_ids  # thread-membership row set; edit-sender rule coverage in tests/test_thread_read_collapse.py (src/mindroom/matrix/cache/event_cache.py)
 INITIAL  # unused variable (src/mindroom/event_journal/models.py)
 FINAL  # unused variable (src/mindroom/event_journal/models.py)
 
@@ -326,32 +325,3 @@ recover  # unused method (src/mindroom/response_delivery.py)
 # tests/test_turn_input_snapshot.py.
 _dispatch_payload_inputs_from_snapshot  # unused function (src/mindroom/response_payload_preparation.py)
 _TurnInputSnapshotCorruptionError  # unused class (src/mindroom/response_payload_preparation.py)
-
-# DEAD, not dynamic. Every entry below is an event-cache method with no
-# remaining caller in `src/`, left standing only because `matrix/cache/` still
-# exists and its own tests still exercise it. They died when point lookups
-# moved onto the visible-message projection: `get_event` stopped reading the
-# cache and stopped filling it, which removed the last caller of `store_event`
-# and of the whole MXC-plaintext cache, whose replacement is
-# `visible_messages.content_json`.
-#
-# The phase that removes them is the deletion of `matrix/cache/`. These
-# whitelist lines and the methods they name are deleted in that same change --
-# a whitelist entry that outlives its method is how dead code becomes
-# permanent, so nothing here may be kept "just in case".
-get_latest_edit  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
-get_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
-get_mxc_texts  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
-store_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
-store_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
-# Joined them when the last tool-side reader moved off the cache facade: thread
-# bookkeeping now resolves relations through the journal, which fences on its
-# own membership epoch instead of serving rows a departure never invalidated.
-get_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/, src/mindroom/matrix/conversation_cache.py)
-# Joined them when the startup thread prewarm was deleted: `thread_ids_needing_refill` was the last
-# reader of a gap marker. Unlike the entries above, this one's *writers* are still live -- live
-# thread mutation and opaque-encrypted history both still mark gaps -- so the marker is currently
-# write-only. Resolving that asymmetry belongs to the deletion of `matrix/cache/`, which is where
-# the writers go too; the gap semantics stay pinned by tests/test_event_cache_contract.py and
-# tests/test_thread_mutation_atomicity.py until then.
-get_thread_cache_gap  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)

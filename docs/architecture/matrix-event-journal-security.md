@@ -1,119 +1,143 @@
-# Matrix event-cache security and plaintext lifecycle
+# Matrix event-journal security and plaintext lifecycle
 
-The Matrix event cache is a runtime-wide storage service that exposes a principal-bound view for each authenticated Matrix account.
+MindRoom decrypts Matrix conversations to answer them, and answering them takes more than one process lifetime, so some of that plaintext has to be written down.
 
-Room membership is not used as the plaintext authorization boundary because two joined bots can have different encryption keys and decryption results.
+This document says exactly which plaintext is durable, which principal owns it, and what removes it.
 
-The stable principal is the full Matrix user ID, not the device ID or the configured entity name.
+The storage described here is `src/mindroom/event_journal/`: the journal of admitted events, the visible-message projection built from them, and the delivery outbox that answers them.
 
-SQLite stores the principal ID and room ID in every event, index, tombstone, state, reference, and plaintext key.
+## Principal binding
 
-PostgreSQL derives an opaque SHA-256 namespace from the configured base namespace and full Matrix user ID, and every row remains room-scoped inside that principal-exclusive namespace.
+One database holds every bot in a runtime, and every content row carries a `principal_id` column that separates them.
 
-The default constructor principal exists for standalone cache consumers and tests, while the orchestrator, approval transport, and thread exporter use explicit principal views.
+The principal is the agent name joined to the full Matrix user ID, which is narrower than the Matrix account alone.
 
-An event lookup is keyed by principal, room, and event ID.
+Two agents can be configured onto one Matrix account, and neither should read the other's conversations, so the account by itself is not a sufficient owner.
 
-A thread read returns each message with only the single edit that currently wins it, and an edit can win only against an original with the same sender, compared through the inline `sender` column rather than the payload.
+Room membership is not the authorization boundary either, because two bots joined to the same room can hold different encryption keys and therefore decrypt different subsets of it.
 
-That comparison is an optimization rather than the authorization boundary: the fold rechecks every candidate against the payload sender, so a foreign replacement that reached the read would render the pre-edit body rather than the replacing account's text.
+`EventJournalStore.principal()` hands out a `PrincipalStore` with the principal bound into the object.
 
-A decrypted sidecar row is keyed by principal, room, and MXC URL, and reads additionally require a surviving reference from the requested event ID.
+No operational method on that view takes a `principal_id` argument, so reading or settling another bot's rows is not something a caller can express rather than something it is trusted not to do.
 
-Reference rows are derived from version 2 `io.mindroom.long_text` metadata in top-level content and `m.new_content`.
+Turn records are the one deliberate exception, scoped to the agent name alone.
 
-Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
+A turn record is the proof that a message was already answered, which stays true across a re-login, and scoping it per principal would make a bot that reauthenticates under a new Matrix ID answer every outstanding message a second time.
 
-Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
+That record still holds conversation-derived text in `record_json`, so it is content and not merely bookkeeping.
 
-Durable plaintext exists only in the principal-owned event cache; there is no runtime-wide process-local plaintext cache shared across bots.
+Both backends run the same schema statements.
 
-No resolved thread projection is retained between turns; every thread read resolves from durable rows, so no resolved message body or sidecar plaintext outlives the call that produced it.
+PostgreSQL is not partitioned into per-principal namespaces: separation is the same `principal_id` predicate SQLite uses, applied in every statement, and a query that omitted it would cross principals rather than fail.
 
-Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
+## Where durable plaintext lives
 
-Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference.
+`journal_events.source_json` holds the full decrypted Matrix event, and only while that event still owes semantic work.
 
-Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
+Settlement overwrites it with the empty string in the same statement that marks the work terminal, because the row's remaining job is to prove the event already produced its one turn.
 
-Candidate plaintext is deleted only when no surviving reference in the same principal and room remains.
+The row is kept and the payload is dropped, which is the smallest thing that survives a restart without retaining every message the bot has ever seen.
 
-Redaction tombstones prevent late event delivery or late hydration from recreating a removed event or plaintext row.
+A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
 
-Thread replacement installs the authoritative snapshot's surviving references before pruning removed-event references, while invalidation uses the same orphan cleanup path.
+`visible_messages.content_json` holds the current visible body of one logical message, and it is the only long-lived plaintext store.
 
-An authoritative sync leave, a live own-user leave or ban, and a successful proactive leave purge only the departed principal's rows for that room.
+The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.
 
-Another principal that remains joined keeps its events, references, plaintext, tombstones, and freshness state.
+`unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
 
-Each principal-bound view is a non-owning handle, so closing one bot cannot close the runtime-wide cache service used by another bot.
+`response_outbox.payload_json` holds an answer frozen before it was sent, and it survives until the delivery is acknowledged.
 
-If durable leave or ban cleanup fails, the principal-room purge remains pending in the backend runtime, blocks cache certification, and is flushed transactionally before any later read or write in that room.
+`approval_cards.card_json` and `approval_cards.resolution_json` hold one tool-approval prompt and the decision taken on it.
 
-The operation that commits a pending room or principal purge is discarded, so its queued callback cannot recreate deleted rows in the same transaction.
+## Sidecar previews are never stored as bodies
 
-Each principal keeps a runtime departed-room fence after purge commit, and every backend read or write rechecks that fence while the backend operation is serialized until an authoritative rejoin finishes any pending cleanup.
+A message too large for a single Matrix event carries a truncated preview in its content and its real text in an attached file.
 
-A proactive multi-room leave fences and durably purges each room immediately after its leave succeeds and before processing the next room.
+The projection refuses to store that shape: it writes no body and a refresh token instead, which is the same row shape a redaction leaves behind.
 
-Each leave request and its confirmed cleanup run as one shielded operation, so caller cancellation waits for the final leave outcome and purge before propagating.
+Storing the preview would hand every reader a body that looks complete and is not, and no reader could tell the difference by inspecting it.
 
-Raising a room fence also records the durable purge synchronously, so cancellation before the queued purge coroutine starts cannot let a later rejoin expose pre-leave rows.
+There is no plaintext table keyed by media URL, and no runtime-wide process-local plaintext cache shared across bots.
 
-Reads recheck the fence after the backend callback and PostgreSQL transaction completes, so a result obtained before a leave cannot be returned after that leave is observed.
+Resolved content carries no sidecar metadata of its own, so storing the resolution is what clears the debt, and nothing has to remember to clear it separately.
 
-Each room fence has a monotonic runtime epoch, and queued rejoin work may clear the fence only when no newer departure changed that epoch.
-The room-state row also stores a durable joined/departed state and transition epoch that every backend operation checks, with writes checking inside their transaction.
-Thread snapshot and point-lookup refills certify the durable epoch before homeserver I/O, and replacement plus fetch-derived event, sidecar-ownership, and plaintext writes require the same still-joined transition.
-Cached and stale thread reads also certify before loading rows and carry that epoch through sidecar hydration, so a held pre-purge snapshot cannot recreate ownership or plaintext after purge or rejoin.
-If storage cannot certify an epoch, the authoritative homeserver read continues but uses an impossible epoch that suppresses fetch-derived writes and durable sidecar plaintext reuse.
-Departure atomically purges room content and advances the durable state to departed, while an authoritative rejoin advances it to joined only after pending cleanup commits.
-An authoritative rejoin also recovers a durable departed row after process restart.
-If it observes a newer local departure inside the rejoin transaction, it purges the room and restores durable departed state before commit.
-Generic thread invalidation preserves the room-state row, so it cannot erase the cross-process membership fence.
+## Edits
 
-Per-turn event memoization includes the runtime departure epoch in every key, so active turns cannot replay pre-leave cached content; thread reads are no longer memoized at all, so there is nothing for a turn to replay.
+An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.
 
-Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
+An edit from anyone else changes nothing, so a foreign replacement cannot rewrite another account's message.
 
-Every authoritative leave invalidates both the in-memory and saved checkpoint before durable cleanup starts.
+Held edits are keyed by target and sender together for the same reason.
 
-If saved-checkpoint deletion fails, the runtime disables cache reads and writes, leaves durable rows consistent with the older checkpoint, and poisons further certification so restart can replay the leave.
+Without the sender in the key, anyone in the room could send an edit for a message that has not arrived yet and evict the author's real edit before it could apply.
 
-`SyncCacheTrust` owns saved-checkpoint loading, cache-generation validation, checkpoint persistence and invalidation, cold-start principal cleanup sequencing, and generation-safe redaction retry-token selection.
+Revisions are ordered by `(origin_server_ts, event_id)` rather than by timestamp alone, because two edits can share a millisecond and clients disagree about clocks.
 
-The bot lifecycle owns authenticated identity binding, Matrix client token assignment, authoritative room membership detection, local-leave coordination, and calls into room/cache lifecycle services.
+The tie-break makes every replica of the projection converge on the same visible revision, whether it was built from live events or reconstructed from the server.
 
-Sync-response leave cleanup commits before unrelated call reconciliation can suspend or fail.
+## Redaction
 
-Thread lookup indexes are rebuilt on event replacement, while root self-mappings survive only when a current batch or a surviving child still proves them.
+A redaction records its tombstone before it projects anything.
 
-If the process stops before cleanup commits, the next startup has no certified checkpoint and transactionally purges every content row for that principal before restoring sync continuity or allowing cache reads.
-Cold-start principal cleanup preserves certified room-state rows and advances their epochs, so another process cannot finish a refill certified before the cleanup.
+That order is what stops an original or an edit arriving later — a real ordering on a server that backfills — from resurrecting content the sender deleted.
 
-That cold-start principal purge preserves rows owned by every other principal.
+Redacting a logical message deletes its visible row and every edit held against it.
 
-If cold-start cleanup is unavailable or fails, only that principal view is disabled for the rest of the runtime, no later sync checkpoint can certify the missing cache writes, and the next process retries cleanup before using cache continuity.
+Redacting the revision currently on screen instead clears `content_json` in the same transaction and sets a refresh token, so the body stops being readable before the server-authoritative replacement is known.
 
-SQLite write operations begin with `BEGIN IMMEDIATE`, so tombstone and MXC-ownership authorization reads cannot race a second connection's redaction commit.
+A conversation read reports such a message as owing a refetch and omits it from the returned messages, and there is no read that returns it, whether or not the caller is willing to wait.
 
-SQLite content writes establish a durable room-membership row, and reads use `BEGIN IMMEDIATE` so they are ordered strictly before or after departure, principal cleanup, redaction, and other content mutations committed through another connection.
+A point refetch is refused if the revision it chose has since been tombstoned, which the refresh token alone cannot cover: redacting a revision that is not the one on screen moves no token but does record a tombstone.
 
-An SQLite read attempts writer reservation without waiting and returns a cache miss instead of falling back to a snapshot concurrent with an unknown content mutation.
+A refetch is also refused if the content it returns still holds a sidecar preview, because installing it would satisfy the debt with the very text the debt was raised about.
 
-If `SQLITE_BUSY` or `SQLITE_LOCKED` prevents a durable stale marker, that principal's cache generation and durable writes remain unavailable until a later transaction purges its cached content.
+Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
 
-SQLite write results are reauthorized after commit while the operation lock is still held, so a concurrent leave cannot expose plaintext written before the fence.
+## Membership
 
-SQLite schema version 12 resets predecessor and older advisory cache contents inside one rollback-safe transaction because those rows have no provable principal owner, and it creates a new durable database-generation identifier.
-Each SQLite principal view derives a stable checkpoint generation from that database generation and the full Matrix principal ID, so a retained agent token cannot cross an account or homeserver rebind.
+Every projected row carries the `membership_epoch` it was written under.
 
-PostgreSQL schema version 3 migrates under a global transaction-scoped advisory lock, preserves scoped rows from every namespace, expands event and plaintext keys with room scope, adds durable membership generations, and deletes legacy plaintext whose room and event ownership cannot be proven.
+Rejoining a room can expose a different slice of history than the bot saw before, so state built under the old membership is dropped rather than merged with the new view.
 
-Every PostgreSQL operation holds the same exclusive transaction-scoped advisory lock for its principal namespace.
+A departure advances the epoch and deletes that room's conversation hydration, visible messages, unresolved edits, redaction tombstones, and history debt.
 
-Different principals use different namespaces and locks, while all operations for one principal serialize with principal purge and leave cleanup across processes.
+It deletes them for the departing principal only, so another bot still joined to the same room keeps everything it holds.
 
-Each PostgreSQL principal namespace stores a durable random cache-generation identifier that changes when that namespace metadata is recreated.
+Journal rows survive the fence on purpose, because they are the proof that an event already had its turn, and their payloads were released at settlement.
 
-Certified sync-token records must use version 2 and include the cache generation, so a legacy plaintext token, old schema, principal change, or reset cache starts cold instead of skipping the history required to rebuild ownership rows.
+Turn-backed rows still pending are settled as intentionally ignored, since their answers would be refused by the epoch check forever and leaving them pending would replay the model run on every recovery pass.
+
+Unattempted outbox rows for the room are deleted, because they answer a conversation the bot has left and nothing outside the process has seen them.
+
+An attempted row is kept instead: its outcome is unknown, and only presenting the same frozen transaction again can converge on one visible answer rather than posting a second.
+
+One departure reaches the bot twice, locally and again in the sync response that reports it, and both must fence exactly once.
+
+Fencing twice is not merely wasteful — if the bot rejoined in between, the second fence deletes the conversation it has already hydrated under the new membership, along with any answer queued for it.
+
+The bookkeeping that decides which observation is a repeat is durable and counted rather than a flag, because leave/rejoin/leave owes two reports and it has to survive a restart between a local departure and its report.
+
+## Restart
+
+A Matrix sync token is only meaningful next to the store that consumed the events it already covers.
+
+`journal_identity` holds a single generation, written once when the database is first opened and never rewritten.
+
+A saved sync checkpoint records that generation, and a checkpoint naming a different one is refused, so a bot resuming against a database that no longer exists starts cold instead of skipping every event in between.
+
+Only startup refuses a checkpoint this way.
+
+A room departure deliberately does not discard the global position, because that room is already fenced by its own membership epoch and dropping the checkpoint would resync every other room with it.
+
+## Storage and connections
+
+SQLite stores the journal at `mindroom_data/tracking/event_journal.db`, and PostgreSQL is selected by configuring a database URL instead.
+
+That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
+
+Every SQL statement originates in a module constant, and the only transformations applied to it are the parameter marker and the byte-order pin.
+
+Both rewrites are plain string substitution, so both refuse a statement that places their marker adjacent to a string literal rather than trusting that no statement does.
+
+Values are bound by the driver in every case and are never formatted into SQL.
