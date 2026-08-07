@@ -31,7 +31,7 @@ from .models import (
     VisibleMessage,
 )
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
-from .store import EventJournalStore, PrincipalStore
+from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,
     ApprovalView,
@@ -85,6 +85,7 @@ __all__ = [
     "SemanticConsumer",
     "SettlementOutcome",
     "StoredApprovalCard",
+    "TurnRecordStore",
     "VisibleMessage",
     "decode_thread_id",
     "delivery_transaction_id",

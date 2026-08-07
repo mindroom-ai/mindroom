@@ -1946,3 +1946,109 @@ class TestHotQueriesAreIndexCovered:
         assert ordered_text_indexes, "expected indexes over the unpinned text columns"
         for statement in ordered_text_indexes:
             assert 'COLLATE "C"' in statement, statement
+
+
+class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
+    """The first half of collapsing "has this turn finished?" onto one writer.
+
+    Today that question is answered by the journal's pending set and by a
+    JSON-file ledger, which cannot share a transaction and therefore settle at
+    different moments. These rows are the same records in the database that
+    settles the turns, so a future writer can commit both together. Nothing
+    reads them yet on purpose: a dedupe substrate that is half migrated is one
+    that can answer a message twice.
+    """
+
+    async def test_a_record_is_reachable_from_every_event_that_indexes_it(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A coalesced turn answers several sources and is found from any of them.
+
+        Storing it by anchor alone would turn "was this source answered?" into
+        a scan, and that question is asked on the ingress path for every event.
+        """
+        records = journal_store.turn_records("agent")
+        await records.upsert(
+            index_event_ids=("$a", "$b", "$c"),
+            anchor_event_id="$a",
+            record_json='{"anchor_event_id": "$a"}',
+        )
+
+        for event_id in ("$a", "$b", "$c"):
+            assert await records.load(event_id=event_id) == '{"anchor_event_id": "$a"}'
+        assert await records.load(event_id="$missing") is None
+
+    async def test_an_index_the_turn_no_longer_answers_is_dropped(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A shrinking coalesced batch must not leave a source looking answered.
+
+        This is the one direction that silently drops a user's message: a stale
+        row would report "already handled" for a source the turn stopped
+        accounting for, and nothing would ever answer it.
+        """
+        records = journal_store.turn_records("agent")
+        await records.upsert(
+            index_event_ids=("$a", "$b"),
+            anchor_event_id="$a",
+            record_json='{"v": 1}',
+        )
+
+        await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 2}')
+
+        assert await records.load(event_id="$a") == '{"v": 2}'
+        assert await records.load(event_id="$b") is None
+
+    async def test_records_are_scoped_to_the_agent_not_the_matrix_identity(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A re-login must not lose the proof that a message was answered.
+
+        Every other table here is keyed per (agent, Matrix identity), because
+        what it holds is only meaningful beside the sync that produced it. This
+        one is not: it records that a turn is finished, which stays true when
+        the bot logs in as a new device. Scoping it per principal would make
+        such a bot answer its whole backlog a second time.
+
+        Transactionality comes from sharing the database, which two views of
+        the same store do regardless of how they are keyed.
+        """
+        first = journal_store.turn_records("agent")
+        other_agent = journal_store.turn_records("other-agent")
+        await first.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 1}')
+
+        assert await journal_store.turn_records("agent").load(event_id="$a") == '{"v": 1}'
+        assert await other_agent.load(event_id="$a") is None, "one agent read another's turn records"
+
+    async def test_a_warm_up_reads_every_record_in_a_stable_order(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Both backends have to rebuild the same map from the same rows.
+
+        The order is pinned to byte order rather than the server's collation,
+        for the reason every other scan here is: PostgreSQL's default collation
+        does not agree with SQLite's about it, and a restart that rebuilt a
+        differently ordered map would be a difference nothing else would catch.
+        """
+        records = journal_store.turn_records("agent")
+        await records.upsert(index_event_ids=("$B",), anchor_event_id="$B", record_json='{"v": "B"}')
+        await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": "a"}')
+
+        assert [index for index, _anchor, _json in await records.load_all()] == ["$B", "$a"]
+
+    async def test_compaction_forgets_what_it_is_told_to(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The ledger compacts terminal history, so these rows have to as well."""
+        records = journal_store.turn_records("agent")
+        await records.upsert(index_event_ids=("$a", "$b"), anchor_event_id="$a", record_json='{"v": 1}')
+
+        await records.forget(index_event_ids=("$a",))
+
+        assert await records.load(event_id="$a") is None
+        assert await records.load(event_id="$b") == '{"v": 1}'

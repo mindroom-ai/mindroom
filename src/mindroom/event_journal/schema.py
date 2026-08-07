@@ -198,6 +198,25 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS turn_records (
+        -- Scoped to the agent, not to a journal principal. Every other table
+        -- here is per (agent, Matrix identity), because what it holds is only
+        -- meaningful next to the sync that produced it. A turn record is not:
+        -- it is the proof that a message was already answered, and a bot that
+        -- re-logs in under a new Matrix ID must not answer everything twice.
+        -- Sharing the database is what makes this transactional with a
+        -- settlement; sharing the scope key is not required and would be wrong.
+        agent_name TEXT NOT NULL,
+        -- A coalesced turn answers several sources at once and is reachable by
+        -- any of them, so one record is stored once per event that indexes it.
+        index_event_id TEXT NOT NULL,
+        anchor_event_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        updated_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (agent_name, index_event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- One row, ever. A Matrix sync token is only meaningful next to the
         -- store that consumed the events it already covers: resuming from a

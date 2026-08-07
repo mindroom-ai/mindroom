@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from . import approvals, history_debt, journal, outbox, reads
+from . import approvals, history_debt, journal, outbox, reads, turn_records
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
@@ -24,7 +24,7 @@ from .models import SettlementOutcome
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from .backend import Backend
@@ -813,6 +813,74 @@ class EventJournalStore:
             lambda transaction: journal.store_generation(transaction, new_generation=new_generation),
         )
 
+    def turn_records(self, agent_name: str) -> TurnRecordStore:
+        """Return the agent-scoped turn-record view.
+
+        Not a ``PrincipalStore`` method, because turn records are not scoped to
+        a Matrix identity. They record that a message was answered, which stays
+        true across a re-login; scoping them per principal would make a bot
+        that logs in as a new device answer everything a second time.
+        """
+        if not agent_name:
+            msg = "Turn records require an agent name"
+            raise ValueError(msg)
+        return TurnRecordStore(_backend=self.backend, _agent_name=agent_name)
+
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()
+
+
+@dataclass(frozen=True, slots=True)
+class TurnRecordStore:
+    """One agent's durable turn records, in the journal's own database.
+
+    Deliberately separate from ``PrincipalStore``. The point of moving these
+    rows here is that a turn record and the settlement of the journal sources
+    it answers can commit together, and that needs one database -- not one
+    scope key. Keeping the two views apart keeps a reader from assuming a turn
+    record belongs to the principal it happened to be fetched beside.
+    """
+
+    _backend: Backend
+    _agent_name: str
+
+    async def upsert(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> None:
+        """Store one record under every event that indexes it."""
+        await self._backend.write(
+            lambda transaction: turn_records.upsert(
+                transaction,
+                self._agent_name,
+                index_event_ids=index_event_ids,
+                anchor_event_id=anchor_event_id,
+                record_json=record_json,
+            ),
+        )
+
+    async def load(self, *, event_id: str) -> str | None:
+        """Return the record indexed by one event, if there is one."""
+        return await self._backend.read(
+            lambda transaction: turn_records.load(transaction, self._agent_name, event_id=event_id),
+        )
+
+    async def load_all(self) -> tuple[tuple[str, str, str], ...]:
+        """Return every record this agent holds, for a warm-up."""
+        return await self._backend.read(
+            lambda transaction: turn_records.load_all(transaction, self._agent_name),
+        )
+
+    async def forget(self, *, index_event_ids: Sequence[str]) -> None:
+        """Drop records indexed by these events, as compaction does."""
+        await self._backend.write(
+            lambda transaction: turn_records.forget(
+                transaction,
+                self._agent_name,
+                index_event_ids=index_event_ids,
+            ),
+        )
