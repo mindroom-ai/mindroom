@@ -31,7 +31,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -352,7 +352,9 @@ class RestartRegressionObservation:
 
     historical_output_counts: tuple[int, int]
     historical_callback_counts: tuple[int, int]
-    cached_event_pair_count: int
+    projected_after_answer_count: int
+    context_only_count: int
+    historical_projected_on_room_read: int
     fresh_agent_output_count: int
     fresh_router_output_count: int
     fresh_response_complete: bool
@@ -421,13 +423,12 @@ def _restart_invariant_checks(
             step=2,
         ),
         _RestartInvariantCheck(
-            invariant="historical_event_pairs_cached",
-            observed=observation.cached_event_pair_count,
-            expected=4,
+            invariant="historical_events_projected_on_room_read",
+            observed=observation.historical_projected_on_room_read,
+            expected=2,
             event_category="historical_events",
-            phase="observation",
+            phase="room_read",
             step=3,
-            wait_until_passes=True,
         ),
         _RestartInvariantCheck(
             invariant="fresh_agent_response_exactly_once",
@@ -1442,6 +1443,50 @@ class ManagedTuwunelStack:
         )
         return cast("int", rows[0][0]) if rows else 0
 
+    def context_only_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+        """Count exact principal/event pairs admitted as context and settled without a turn.
+
+        Reported rather than asserted. Whether pre-gap history reaches a
+        principal as ``context_only`` or as an actionable event the policy then
+        ignores is a classification detail this profile does not control, and
+        both suppress the turn. The invariant that matters — no output, no
+        callback, no prompt — is asserted separately and does not care which
+        mechanism did it.
+        """
+        rows = self._journal_query(
+            """
+            SELECT COUNT(*) FROM journal_events
+            WHERE principal_id IN (?, ?)
+              AND room_id = ?
+              AND event_id IN (?, ?)
+              AND event_class = 'context_only'
+              AND state = 'settled'
+              AND outcome IS NULL
+            """,
+            (
+                self._journal_principal_id(self.agent_id),
+                self._journal_principal_id(self.router_id, agent_name=ROUTER_NAME),
+                room_id,
+                *event_ids,
+            ),
+        )
+        return cast("int", rows[0][0]) if rows else 0
+
+    def agent_matrix_credentials(self) -> tuple[str, str] | None:
+        """Return the managed agent's persisted access token and device ID."""
+        state_path = self.storage_path / "matrix_state.yaml"
+        if not state_path.is_file():
+            return None
+        state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+        accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
+        account = accounts.get(f"agent_{AGENT_NAME}") if isinstance(accounts, dict) else None
+        if not isinstance(account, dict):
+            return None
+        access_token, device_id = account.get("access_token"), account.get("device_id")
+        if not isinstance(access_token, str) or not isinstance(device_id, str):
+            return None
+        return access_token, device_id
+
     def _restart_event_projected_for_agent(self, room_id: str, event_id: str) -> bool:
         """Return whether the managed agent durably projected one exact event."""
         rows = self._journal_query(
@@ -1610,20 +1655,6 @@ class ManagedTuwunelStack:
         expected_states = frozenset({expected}) if isinstance(expected, str) else expected
         return _wait_until(
             lambda: self.restart_journal_event_state(event_id) in expected_states,
-            timeout=timeout,
-        )
-
-    def wait_for_projected_restart_event_pairs(
-        self,
-        room_id: str,
-        event_ids: tuple[str, str],
-        *,
-        minimum: int,
-        timeout: float,
-    ) -> bool:
-        """Wait until both replacement principals durably project historical events."""
-        return _wait_until(
-            lambda: self.projected_restart_event_pair_count(room_id, event_ids) >= minimum,
             timeout=timeout,
         )
 
@@ -2251,26 +2282,15 @@ class LiveFuzzRunner:
             observed=replacement_boundary_reached,
             step=3,
         )
+        # The fresh event is released with no wait for the historical ones.
+        # Hydration is lazy and per-conversation: nothing fetches this room's
+        # history until something reads it, so there is no moment where the
+        # history is durably present and the fresh event has not yet been
+        # released, and waiting for one hangs until the deadline. The same
+        # ground is covered after the answer by an explicit room read, which is
+        # also the stronger claim: the history is not lost, and it appears when
+        # something asks.
         historical_event_ids = (historical_text, historical_media)
-        historical_cache_ready = await asyncio.to_thread(
-            self.stack.wait_for_projected_restart_event_pairs,
-            dormant.room_id,
-            historical_event_ids,
-            minimum=4,
-            timeout=self.reply_timeout,
-        )
-        historical_event_pair_count = self.stack.projected_restart_event_pair_count(
-            dormant.room_id,
-            historical_event_ids,
-        )
-        _require_restart_invariant(
-            historical_cache_ready,
-            "historical_event_pairs_cached",
-            event_category="historical_events",
-            phase="replacement_sync",
-            observed=historical_event_pair_count,
-            step=3,
-        )
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
@@ -2381,11 +2401,20 @@ class LiveFuzzRunner:
             fresh_event_id=fresh,
             fresh_semantic_ingress_count_before_restart=fresh_semantic_ingress_count_before_restart,
         )
+        observation = replace(
+            observation,
+            historical_projected_on_room_read=await self._read_historical_room_projection(
+                room_id=dormant.room_id,
+                historical_event_ids=historical_event_ids,
+            ),
+        )
         failures = evaluate_restart_regression(observation)
         if failures:
             _raise_restart_failures(failures)
         return {
-            "historical_event_pairs_cached": observation.cached_event_pair_count,
+            "historical_events_projected_after_answer": observation.projected_after_answer_count,
+            "historical_events_context_only": observation.context_only_count,
+            "historical_events_projected_on_room_read": observation.historical_projected_on_room_read,
             "historical_outputs": sum(observation.historical_output_counts),
             "status": "PASS",
         }
@@ -2423,7 +2452,11 @@ class LiveFuzzRunner:
                 f"event_id={historical_media_id}",
             ),
         )
-        cached_event_pair_count = self.stack.projected_restart_event_pair_count(
+        projected_after_answer_count = self.stack.projected_restart_event_pair_count(
+            dormant.room_id,
+            historical_event_ids,
+        )
+        context_only_count = self.stack.context_only_restart_event_pair_count(
             dormant.room_id,
             historical_event_ids,
         )
@@ -2461,11 +2494,66 @@ class LiveFuzzRunner:
                 and all(RECOVERED_RUNTIME_GENERATION_MARKER in body for body in fresh_response_bodies)
             ),
             fresh_obligation_recovered=(self.stack.restart_journal_event_state(fresh_event_id) == "succeeded"),
-            cached_event_pair_count=cached_event_pair_count,
+            projected_after_answer_count=projected_after_answer_count,
+            context_only_count=context_only_count,
+            # Filled in by the runner once every other observation is safely
+            # made, because reading a conversation hydrates it.
+            historical_projected_on_room_read=0,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,
             orderly_drain_completed=orderly_drain_completed,
         )
+
+    async def _read_historical_room_projection(
+        self,
+        *,
+        room_id: str,
+        historical_event_ids: tuple[str, str],
+    ) -> int:
+        """Read the room conversation as the agent and count the historical messages.
+
+        The point of this assertion is that it is a read. Hydration is lazy and
+        per-conversation, so answering a turn in a thread does not project the
+        room's main timeline, and demanding that it did would be demanding the
+        eager back-fill this design removed. What must hold is weaker and more
+        useful: the history is not lost, and it appears when something asks.
+
+        Asking has to happen after every other observation, because hydration
+        writes to the projection, and a read that ran earlier would manufacture
+        the very evidence the earlier invariants are meant to find on their own.
+        """
+        # Imported here so the harness's module import stays free of nio and the
+        # MindRoom runtime, which it otherwise never needs.
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
+        from mindroom.matrix.conversation_hydration import ConversationHydrator  # noqa: PLC0415
+
+        credentials = self.stack.agent_matrix_credentials()
+        if credentials is None:
+            return 0
+        access_token, device_id = credentials
+        client = nio.AsyncClient(self.stack.homeserver, self.stack.agent_id)
+        client.access_token = access_token
+        client.user_id = self.stack.agent_id
+        client.device_id = device_id
+        try:
+            store = EventJournalStore.open_sqlite(
+                self.stack.storage_path / "tracking" / "event_journal.db",
+            ).principal(f"{AGENT_NAME}@{self.stack.agent_id}")
+            hydrator = ConversationHydrator(
+                store=store,
+                runtime=cast("Any", SimpleNamespace(client=client)),
+                self_sender=self.stack.agent_id,
+            )
+            await hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
+            page = await store.read_conversation(room_id=room_id, thread_id=None, limit=100)
+        finally:
+            await client.close()
+        projected = {message.logical_event_id for message in page.messages}
+        return sum(event_id in projected for event_id in historical_event_ids)
 
     async def _wait_for_restart_observation(
         self,
