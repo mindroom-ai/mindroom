@@ -107,7 +107,8 @@ class DepartureObservation(StrEnum):
     # The sync report a local departure was waiting for. Fencing again would
     # delete whatever the membership after it has already built.
     OWED_REPORT_CONSUMED = "owed_report_consumed"
-    # The same departure reaching the same observer twice.
+    # The same departure observed again, by either observer, with no rejoin in
+    # between for a second departure to have happened in.
     ALREADY_FENCED = "already_fenced"
 
 

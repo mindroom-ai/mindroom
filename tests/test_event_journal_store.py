@@ -1361,8 +1361,13 @@ class TestDepartureBookkeeping:
         await alice.retire_owed_departure_reports(ROOM)
 
         assert await alice.rooms_owing_departure_reports() == frozenset({OTHER_ROOM})
-        assert (await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
-        assert not (await alice.fence_departure(OTHER_ROOM, source=DepartureSource.REPORTED)).fenced
+        # The retired room's report is no longer absorbed. It is recognised as
+        # the departure this room is already fenced for, which is a different
+        # answer from "a report was owed and this was it".
+        retired = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+        still_owed = await alice.fence_departure(OTHER_ROOM, source=DepartureSource.REPORTED)
+        assert retired.observation is DepartureObservation.ALREADY_FENCED
+        assert still_owed.observation is DepartureObservation.OWED_REPORT_CONSUMED
 
 
 class TestByteOrderPinning:

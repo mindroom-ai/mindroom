@@ -219,17 +219,23 @@ def fence_departure(
       bot did not initiate never produce one -- so it leaves no debt. It marks
       the room fenced instead, which is what suppresses the local observation
       of the same departure when the sync response gets there first.
+
+    That asymmetry is in what each observation *records*, not in whether it may
+    fence a room that is already fenced. Neither may. A sync report is not a
+    once-only signal: a checkpoint that could not advance, an initial sync, a
+    resumed older token all present the same leave again, and a bot cannot
+    leave a room it has not rejoined. Fencing on the repeat deletes whatever
+    the membership after it has built -- the hydrated conversation, the answer
+    queued for it -- and settles the live message that provoked it as ignored
+    with its replay payload erased. A rejoin is what re-arms the fence, and
+    every path this bot takes back into a room reports one.
     """
     state = _membership_state(transaction, principal_id, room_id)
-    if source is DepartureSource.LOCAL and state.departure_fenced:
-        # Whoever saw this departure first already fenced it, and nothing has
-        # put the bot back in the room, so there is no second departure here.
-        return DepartureOutcome(
-            observation=DepartureObservation.ALREADY_FENCED,
-            membership_epoch=state.membership_epoch,
-            owed_reports=state.owed_reports,
-        )
     if source is DepartureSource.REPORTED and state.owed_reports > 0:
+        # Asked before the fenced check, not after: a local departure fences
+        # and *then* waits for its report, so the report always arrives at a
+        # fenced room. Reading that as a repeat would leave the debt standing
+        # forever, and it would absorb the next genuine departure instead.
         owed_reports = state.owed_reports - 1
         _write_departure_state(
             transaction,
@@ -243,6 +249,14 @@ def fence_departure(
             observation=DepartureObservation.OWED_REPORT_CONSUMED,
             membership_epoch=state.membership_epoch,
             owed_reports=owed_reports,
+        )
+    if state.departure_fenced:
+        # Whoever saw this departure first already fenced it, and nothing has
+        # put the bot back in the room, so there is no second departure here.
+        return DepartureOutcome(
+            observation=DepartureObservation.ALREADY_FENCED,
+            membership_epoch=state.membership_epoch,
+            owed_reports=state.owed_reports,
         )
     membership_epoch = advance_membership_epoch(transaction, principal_id, room_id)
     owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports

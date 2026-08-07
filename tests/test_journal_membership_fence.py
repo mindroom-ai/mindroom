@@ -132,12 +132,39 @@ async def test_a_second_departure_after_the_echo_fences_again(
     membership: MembershipFence,
     store: RecordingStore,
 ) -> None:
-    """Absorbing one echo must not deafen the fence to the next real departure."""
+    """Absorbing one echo must not deafen the fence to the next real departure.
+
+    A second departure needs a rejoin in front of it. Without one the bot is
+    already out of the room, so a second report of a leave is the first report
+    arriving twice.
+    """
     await membership.fence_local_departure(ROOM)
     await membership.fence_reported_departures([ROOM])
+    await membership.note_membership_restarted(ROOM)
     await membership.fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
+
+
+async def test_a_replayed_report_does_not_fence_a_second_time(
+    membership: MembershipFence,
+    store: RecordingStore,
+    principal: PrincipalStore,
+) -> None:
+    """A sync report is not a once-only signal, so it cannot be trusted as one.
+
+    A checkpoint that could not advance re-presents the response that carried
+    the leave, and a backfilled limited timeline can carry the leave event
+    again on its own. The bot cannot leave a room it has not rejoined, so the
+    repeat is the same departure and owes no second invalidation: one
+    departure, one epoch, whichever observer saw it.
+    """
+    await membership.fence_reported_departures([ROOM])
+
+    await membership.fence_reported_departures([ROOM])
+
+    assert store.advanced == [ROOM]
+    assert await principal.membership_epoch(ROOM) == 1
 
 
 async def test_an_echo_absorbs_only_its_own_room(
@@ -325,7 +352,12 @@ async def test_a_retired_report_is_forgotten_durably(
     store: RecordingStore,
     principal: PrincipalStore,
 ) -> None:
-    """A restart must not resurrect a report that was already given up on."""
+    """A restart must not resurrect a report that was already given up on.
+
+    Proven through the next genuine departure, because that is what a
+    resurrected debt would swallow. The rejoin is what makes the report after
+    it a second departure rather than the first one arriving twice.
+    """
     await membership.fence_local_departure(ROOM)
     await sync_response_without_departures(membership)
     await sync_response_without_departures(membership)
@@ -333,6 +365,7 @@ async def test_a_retired_report_is_forgotten_durably(
     assert await principal.rooms_owing_departure_reports() == frozenset()
 
     restarted = MembershipFence(store=store)
+    await restarted.note_membership_restarted(ROOM)
     await restarted.fence_reported_departures([ROOM])
 
     assert store.advanced == [ROOM, ROOM]
