@@ -152,6 +152,12 @@ class PendingEventWorker:
         has to be observable rather than eventually true. Unlike a pump pass,
         this keeps scanning until nothing dispatchable is left, so its return
         value is the whole backlog rather than one bounded slice of it.
+
+        Recovery runs while the pump is live rather than only before it starts,
+        so this drains through the room's lane instead of beside it. A second
+        lane over one room is not a faster drain: it puts two handlers inside
+        one event and lets event three overtake event two, which are the two
+        things a lane exists to make impossible.
         """
         drained = 0
         attempted: frozenset[str] = frozenset()
@@ -166,7 +172,24 @@ class PendingEventWorker:
                 return drained
             attempted = ids
             drained += len(ids)
-            await asyncio.gather(*(self._run_lane(events) for events in by_room.values()))
+            await asyncio.gather(*(self._drain_room(room_id, events) for room_id, events in by_room.items()))
+
+    async def _drain_room(self, room_id: str, events: list[JournalEvent]) -> None:
+        """Run one room's events, once whatever lane owns that room is done.
+
+        Rechecked after each wait because the pump wakes on the same lane
+        completion, so the room can be claimed again before this resumes.
+        Someone else's lane is waited on rather than awaited: whether that one
+        was cancelled is the pump's business, and a drain must not inherit it.
+        """
+        while (active := self._lanes.get(room_id)) is not None and not active.done():
+            await asyncio.wait([active])
+        lane = self._start_lane(room_id, events, more_remains=False)
+        await asyncio.wait([lane])
+        # This lane is the drain's own, so whatever ended it is the drain's to
+        # report. A cancelled turn is not a failed one: it leaves its event
+        # pending and hands the cancellation to whoever asked for the drain.
+        lane.result()
 
     async def _run(self) -> None:
         while True:
@@ -198,7 +221,8 @@ class PendingEventWorker:
         # lane-finished path cannot be the only thing that arms the next look.
         self._schedule_deferral_scan()
 
-    def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> None:
+    def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> asyncio.Task[None]:
+        """Make one room's lane, which is the only one that room may have."""
         self._rooms_with_more.discard(room_id)
         lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
@@ -207,6 +231,7 @@ class PendingEventWorker:
             # owe work that no later admission would reveal.
             self._rooms_with_more.add(room_id)
         lane.add_done_callback(lambda task: self._lane_finished(room_id, task))
+        return lane
 
     def _lane_finished(self, room_id: str, lane: asyncio.Task[None]) -> None:
         if self._lanes.get(room_id) is lane:

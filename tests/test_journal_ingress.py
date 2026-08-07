@@ -18,7 +18,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.event_journal import EventClass, EventKind, SettlementOutcome, VisibleMessage
+from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import _projected_from_event
@@ -1182,6 +1182,10 @@ class TestPendingEventWorker:
             projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
+    @staticmethod
+    async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
+        await store.admit(inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
         """A rooms events run in receipt order."""
         handled: list[str] = []
@@ -1250,6 +1254,68 @@ class TestPendingEventWorker:
 
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
+
+    async def test_a_recovery_drain_runs_a_room_through_its_lane_not_beside_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room has one lane, and a drain has to take it rather than add one.
+
+        Recovery is not a phase that finishes before the pump starts:
+        `JournalDispatcher.drain_once` is scheduled every time a bot reports
+        ready, so it runs against a live pump. A drain that dispatched beside
+        the room's lane would break both halves of what a lane guarantees --
+        one event would be inside two handlers at once, and event three would
+        overtake event two.
+
+        The handler claims a semantic consumer the way a reaction's does, so
+        the second handler is not merely wasteful: its claim raises against
+        the row the first one already settled, and `_run_lane` logs that and
+        stops the room mid-pass. The claim is right to raise. Nothing settles
+        an event while its own handler is running, so a settled row there
+        means the event was already being run somewhere else.
+        """
+        handled: list[str] = []
+        concurrent = 0
+        peak_concurrent = 0
+        inside_first = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            nonlocal concurrent, peak_concurrent
+            handled.append(event.event_id)
+            concurrent += 1
+            peak_concurrent = max(peak_concurrent, concurrent)
+            try:
+                if event.event_id == "$first":
+                    # Held open so a drain has a window to start while the
+                    # pump's lane is demonstrably inside this event.
+                    inside_first.set()
+                    await release_first.wait()
+                await alice.claim_semantic_consumer(event.event_id, SemanticConsumer.REACTION_HOOKS)
+            finally:
+                concurrent -= 1
+            return SettlementOutcome.SUCCEEDED
+
+        for event_id in ("$first", "$second", "$third"):
+            await self._admit_reaction(alice, reaction_event(event_id))
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        await asyncio.wait_for(inside_first.wait(), timeout=5)
+
+        draining = asyncio.create_task(worker.drain_once())
+        # Enough turns of the loop for a drain to scan the store and dispatch.
+        for _ in range(50):
+            await asyncio.sleep(0)
+        release_first.set()
+
+        await asyncio.wait_for(draining, timeout=5)
+        await worker.stop()
+
+        assert handled == ["$first", "$second", "$third"]
+        assert peak_concurrent == 1
+        assert await alice.unsettled_event_ids() == frozenset()
 
     async def test_one_stalled_room_does_not_block_another(
         self,
