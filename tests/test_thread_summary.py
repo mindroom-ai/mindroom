@@ -685,11 +685,14 @@ class TestMaybeGenerateThreadSummary:
     @pytest.fixture(autouse=True)
     def _conversation_cache(self) -> Iterator[None]:
         """Provide one explicit conversation-cache mock per test."""
-        self.conversation_cache = MagicMock()
         self.conversation_reader = make_conversation_reader_mock()
-        # The pre-delivery pin guard reads from source; default it to "no pin".
-        self.conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(return_value=[])
+        # The pre-delivery pin guard reads from the homeserver; default "no pin".
+        self.source_read = AsyncMock(return_value=[])
         with (
+            patch(
+                "mindroom.thread_summary.fetch_thread_messages_from_source",
+                new=self.source_read,
+            ),
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
                 new=AsyncMock(return_value=None),
@@ -714,7 +717,6 @@ class TestMaybeGenerateThreadSummary:
             "$thread1",
             config,
             rp,
-            conversation_cache=self.conversation_cache,
             conversation_reader=self.conversation_reader,
         )
 
@@ -3082,16 +3084,12 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
 class TestPinLandingDuringGeneration:
     """A pin written while the model runs must supersede the in-flight summary."""
 
-    def _cache(self, source_history: list | None = None) -> MagicMock:
-        conversation_cache = MagicMock()
-        # The guard must read from source, not through the cache: a pin written
-        # by another runtime is not in this runtime's cache yet.
-        conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
-            return_value=source_history if source_history is not None else [],
-        )
-        return conversation_cache
+    def _cache(self, source_history: list | None = None) -> AsyncMock:
+        # The guard must read from the homeserver, not through the projection:
+        # a pin written by another runtime has not reached this one yet.
+        return AsyncMock(return_value=source_history if source_history is not None else [])
 
-    async def _run(self, conversation_cache: MagicMock, histories: list) -> AsyncMock:
+    async def _run(self, source_read: AsyncMock, histories: list) -> AsyncMock:
         client = _mock_client()
         with (
             patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
@@ -3109,6 +3107,10 @@ class TestPinLandingDuringGeneration:
                 return_value="Freshly generated title",
             ),
             patch(
+                "mindroom.thread_summary.fetch_thread_messages_from_source",
+                new=source_read,
+            ),
+            patch(
                 "mindroom.thread_summary.send_thread_summary_event",
                 new=AsyncMock(return_value="$summary1"),
             ) as deliver,
@@ -3119,7 +3121,6 @@ class TestPinLandingDuringGeneration:
                 "$thread1",
                 _mock_config(),
                 _mock_runtime_paths(),
-                conversation_cache=conversation_cache,
                 conversation_reader=make_conversation_reader_mock(),
             )
         return deliver
@@ -3142,7 +3143,7 @@ class TestPinLandingDuringGeneration:
         deliver = await self._run(conversation_cache, [unpinned, unpinned])
 
         deliver.assert_not_awaited()
-        conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+        conversation_cache.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
@@ -3156,10 +3157,7 @@ class TestPinLandingDuringGeneration:
     async def test_recheck_failure_still_delivers(self) -> None:
         """A failed source re-read falls back to the pre-generation decision."""
         unpinned = _make_thread_history(12)
-        conversation_cache = self._cache()
-        conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
-            side_effect=RuntimeError("source read failed"),
-        )
+        conversation_cache = AsyncMock(side_effect=RuntimeError("source read failed"))
 
         deliver = await self._run(conversation_cache, [unpinned, unpinned])
 
@@ -3195,9 +3193,6 @@ class TestTruncatedHistoryIsNotCounted:
                 "$thread1",
                 _mock_config(),
                 _mock_runtime_paths(),
-                conversation_cache=MagicMock(
-                    refresh_strict_thread_history_from_source=AsyncMock(return_value=[]),
-                ),
                 conversation_reader=make_conversation_reader_mock(),
             )
 

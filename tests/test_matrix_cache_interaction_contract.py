@@ -18,16 +18,8 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
-from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot, fetch_thread_history
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-)
 from tests.event_cache_test_support import (
     raw_nio_event,
     raw_nio_redaction,
@@ -850,113 +842,6 @@ async def test_persisted_non_message_index_is_not_trusted_by_relation_walks(
 
 
 @pytest.mark.asyncio
-async def test_joined_timeline_thread_relations_indexes_edits_and_visible_history(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Thread, reply, edit, reference, and reaction families keep their distinct effects."""
-    await _seed_thread(event_cache)
-    explicit_child = _message_source(
-        "$explicit-child",
-        "m.text",
-        timestamp=50,
-        body="explicit child",
-        relation=_thread_relation(),
-    )
-    plain_reply = _message_source(
-        "$plain-reply",
-        "m.text",
-        timestamp=51,
-        body="plain reply",
-        relation=_reply_relation("$explicit-child"),
-    )
-    root_edit = _edit_source("$root-edit", _THREAD_ID, body="edited root", timestamp=52)
-    child_edit = _edit_source(
-        "$child-edit",
-        "$explicit-child",
-        body="edited child",
-        timestamp=53,
-        thread_id=_THREAD_ID,
-    )
-    reply_edit = _edit_source("$reply-edit", "$plain-reply", body="edited reply", timestamp=54)
-    reference = _message_source(
-        "$reference",
-        "m.text",
-        timestamp=55,
-        body="reference",
-        relation={"event_id": "$explicit-child", "rel_type": "m.reference"},
-    )
-    reaction = _event_source(
-        "$reaction",
-        "m.reaction",
-        {"m.relates_to": {"event_id": "$explicit-child", "key": "👍", "rel_type": "m.annotation"}},
-        timestamp=56,
-    )
-    threaded_sources = [
-        explicit_child,
-        plain_reply,
-        root_edit,
-        child_edit,
-        reply_edit,
-        reference,
-        reaction,
-    ]
-
-    await _build_sync_harness(event_cache).apply(
-        _sync_response([raw_nio_event(source) for source in threaded_sources]),
-    )
-
-    for source in threaded_sources:
-        event_id = cast("str", source["event_id"])
-        assert await event_cache.get_event(_ROOM_ID, event_id) == source
-    for event_id in {
-        _THREAD_ID,
-        "$explicit-child",
-        "$plain-reply",
-        "$root-edit",
-        "$child-edit",
-        "$reply-edit",
-        "$reference",
-    }:
-        assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) == _THREAD_ID
-    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$reaction") is None
-    assert await event_cache.get_latest_edit(_ROOM_ID, _THREAD_ID) == root_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$explicit-child") == child_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$plain-reply") == reply_edit
-
-    cached_sources = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-    assert cached_sources is not None
-    assert {source["event_id"] for source in cached_sources} == {
-        _THREAD_ID,
-        _THREAD_CHILD_ID,
-        "$explicit-child",
-        "$plain-reply",
-        "$root-edit",
-        "$child-edit",
-        "$reply-edit",
-        "$reference",
-    }
-    # No marker at all is what a usable snapshot looks like.
-    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
-    assert state is None
-    assert thread_cache_rejection_reason(state) is None
-
-    client = cast("nio.AsyncClient", object())
-    history = await fetch_dispatch_thread_snapshot(
-        client,
-        _ROOM_ID,
-        _THREAD_ID,
-        event_cache,
-    )
-    assert [(message.event_id, message.latest_event_id, message.body) for message in history] == [
-        (_THREAD_ID, "$root-edit", "edited root"),
-        (_THREAD_CHILD_ID, _THREAD_CHILD_ID, "child"),
-        ("$explicit-child", "$child-edit", "edited child"),
-        ("$plain-reply", "$reply-edit", "edited reply"),
-        ("$reference", "$reference", "reference"),
-    ]
-
-
-@pytest.mark.asyncio
 async def test_encrypted_relation_bearing_events_are_point_cached_and_fail_the_thread_closed(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -1289,106 +1174,6 @@ async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serv
     assert state is None
 
 
-@pytest.mark.asyncio
-async def test_visible_thread_history_message_and_non_message_family_boundary(
-    event_cache: ConversationEventCache,
-) -> None:
-    """All message msgtypes render, while non-message interaction families remain raw-only."""
-    visible_sources = [
-        _message_source(_THREAD_ID, "m.text", timestamp=70, body="root"),
-        *[
-            _message_source(
-                f"$visible-{msgtype.removeprefix('m.')}",
-                msgtype,
-                timestamp=71 + index,
-                relation=_thread_relation(),
-                extra_content=extra_content,
-            )
-            for index, (msgtype, extra_content) in enumerate(
-                (
-                    ("m.notice", {}),
-                    ("m.emote", {}),
-                    ("m.location", {"geo_uri": "geo:51.5,-0.1"}),
-                    ("m.file", {"url": "mxc://localhost/file"}),
-                    ("m.image", {"url": "mxc://localhost/image"}),
-                    (
-                        "m.audio",
-                        {
-                            "org.matrix.msc1767.audio": {"duration": 20, "waveform": [0]},
-                            "org.matrix.msc3245.voice": {},
-                            "url": "mxc://localhost/audio",
-                        },
-                    ),
-                    ("m.video", {"url": "mxc://localhost/video"}),
-                ),
-            )
-        ],
-    ]
-    non_message_sources = [
-        _event_source(
-            "$raw-sticker",
-            "m.sticker",
-            {"body": "sticker", "m.relates_to": _thread_relation(), "url": "mxc://localhost/sticker"},
-            timestamp=90,
-        ),
-        _event_source(
-            "$raw-poll",
-            "m.poll.start",
-            {"m.poll.start": {}, "m.relates_to": _thread_relation()},
-            timestamp=91,
-        ),
-        _event_source(
-            "$raw-beacon",
-            "m.beacon",
-            {"m.relates_to": _thread_relation()},
-            timestamp=92,
-        ),
-        _event_source(
-            "$raw-state",
-            "m.room.topic",
-            {"m.relates_to": _thread_relation(), "topic": "topic"},
-            timestamp=93,
-            state_key="",
-        ),
-        _event_source(
-            "$raw-call",
-            "m.call.invite",
-            {
-                "call_id": "call",
-                "lifetime": 60000,
-                "m.relates_to": _thread_relation(),
-                "offer": {"sdp": "", "type": "offer"},
-                "version": 1,
-            },
-            timestamp=94,
-        ),
-        _event_source(
-            "$raw-rtc",
-            "org.matrix.msc3401.call.member",
-            {"m.relates_to": _thread_relation()},
-            timestamp=95,
-            state_key="@user:localhost_DEVICE",
-        ),
-    ]
-    await replace_thread_unconditionally(
-        event_cache,
-        _ROOM_ID,
-        _THREAD_ID,
-        [*visible_sources, *non_message_sources],
-    )
-
-    history = await fetch_dispatch_thread_snapshot(
-        cast("nio.AsyncClient", object()),
-        _ROOM_ID,
-        _THREAD_ID,
-        event_cache,
-    )
-
-    assert [message.event_id for message in history] == [source["event_id"] for source in visible_sources]
-    assert history[6].to_dict()["msgtype"] == "m.audio"
-    assert history[6].to_dict()["content"]["org.matrix.msc3245.voice"] == {}
-
-
 def _excluded_sync_response(excluded_events: dict[str, nio.Event]) -> _SyncEnvelope:
     joined_room = _RoomSync(
         timeline=_Timeline(events=[excluded_events["joined_timeline"]]),
@@ -1696,46 +1481,6 @@ async def test_unknown_redaction_of_cached_target_fails_closed_room_wide(
         assert state is not None
         assert state.gap_reason == "sync_redaction_lookup_unavailable"
         assert thread_cache_rejection_reason(state) == "sync_redaction_lookup_unavailable"
-
-
-@pytest.mark.asyncio
-async def test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Only advisory reads may return stale rows after a failed homeserver refill."""
-    await _seed_thread(event_cache)
-    await event_cache.mark_thread_gap(
-        _ROOM_ID,
-        _THREAD_ID,
-        reason="contract_fallback",
-    )
-    fetch_error = RuntimeError("deterministic homeserver failure")
-    client = cast("nio.AsyncClient", object())
-
-    with patch(
-        "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
-        AsyncMock(side_effect=fetch_error),
-    ) as fetch_from_homeserver:
-        advisory_history = await fetch_thread_history(
-            client,
-            _ROOM_ID,
-            _THREAD_ID,
-            event_cache,
-        )
-        with pytest.raises(RuntimeError, match="deterministic homeserver failure"):
-            await fetch_dispatch_thread_snapshot(
-                client,
-                _ROOM_ID,
-                _THREAD_ID,
-                event_cache,
-            )
-
-    assert [message.event_id for message in advisory_history] == [_THREAD_ID, _THREAD_CHILD_ID]
-    assert advisory_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
-    assert advisory_history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
-    assert advisory_history.diagnostics[THREAD_HISTORY_ERROR_DIAGNOSTIC] == str(fetch_error)
-    assert advisory_history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "contract_fallback"
-    assert fetch_from_homeserver.await_count == 2
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
@@ -1437,81 +1436,6 @@ async def test_principal_purge_advances_certified_room_refill_epoch(
         assert await stale_cache.get_event(room_id, "$fresh") == event
     finally:
         await stale_root.close()
-        await purge_root.close()
-
-
-@pytest.mark.asyncio
-async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
-    event_cache_factory: Callable[[], ConversationEventCache],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A held cached snapshot must keep its pre-purge epoch through hydration."""
-    purge_root = _shared_cache(event_cache_factory)
-    reader_root = _shared_cache(event_cache_factory)
-    await purge_root.initialize()
-    await reader_root.initialize()
-    principal_id = "@alice:localhost"
-    room_id = "!room:localhost"
-    thread_id = "$thread"
-    sidecar_event_id = "$sidecar"
-    mxc_url = "mxc://server/held-before-purge"
-    purge_cache = purge_root.for_principal(principal_id)
-    reader_cache = reader_root.for_principal(principal_id)
-    sidecar_event = _event(sidecar_event_id, 2, sidecar_url=mxc_url)
-    sidecar_event["content"]["m.relates_to"] = {
-        "rel_type": "m.thread",
-        "event_id": thread_id,
-    }
-    await replace_thread_unconditionally(
-        reader_cache,
-        room_id,
-        thread_id,
-        [_event(thread_id, 1, body="root"), sidecar_event],
-    )
-    rows_loaded = asyncio.Event()
-    release_rows = asyncio.Event()
-    # Patch the method the read actually calls. Patching a seam production no longer routes
-    # through does not fail this test, it hangs it: the pause never fires, the reader never
-    # blocks, and the test waits out its timeout looking merely slow.
-    original_get_thread_events = reader_cache.get_thread_events
-
-    async def pause_after_read(
-        read_room_id: str,
-        read_thread_id: str,
-    ) -> list[dict[str, Any]] | None:
-        rows = await original_get_thread_events(read_room_id, read_thread_id)
-        rows_loaded.set()
-        await release_rows.wait()
-        return rows
-
-    monkeypatch.setattr(reader_cache, "get_thread_events", pause_after_read)
-    download_response = MagicMock(spec=nio.DownloadResponse)
-    download_response.body = b'{"msgtype":"m.text","body":"secret plaintext"}'
-    client = MagicMock(spec=nio.AsyncClient)
-    client.download = AsyncMock(return_value=download_response)
-    read_task = asyncio.create_task(
-        client_thread_history._load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=reader_cache,
-            hydrate_sidecars=True,
-        ),
-    )
-    try:
-        await rows_loaded.wait()
-        await purge_cache.purge_principal()
-        release_rows.set()
-        cached_history, _diagnostics = await read_task
-
-        assert cached_history is not None
-        assert await reader_cache.get_event(room_id, sidecar_event_id) is None
-        assert await _raw_mxc_text_count(reader_cache, room_id, mxc_url) == 0
-    finally:
-        release_rows.set()
-        if not read_task.done():
-            await read_task
-        await reader_root.close()
         await purge_root.close()
 
 

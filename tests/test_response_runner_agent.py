@@ -2351,7 +2351,6 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
             conversation_reader=bot._conversation_reader,
             entity_name=bot.agent_name,
         )
@@ -2466,7 +2465,6 @@ class TestAgentBot(AgentBotTestBase):
             thread_id=root_event_id,
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
             conversation_reader=bot._conversation_reader,
             entity_name=bot.agent_name,
         )

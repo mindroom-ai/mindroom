@@ -2578,6 +2578,7 @@ depends_on = [
     "mindroom.matrix.identity",
 ]
 visibility = [
+    "mindroom.matrix.room_history_reads",
     "mindroom.approval_inbound",
     "mindroom.approval_events",
     "mindroom.bot",
@@ -2613,6 +2614,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.room_history_reads"
 depends_on = [
+    "mindroom.matrix.visible_body",
+    "mindroom.matrix.message_content",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.event_normalization",
@@ -2621,6 +2624,8 @@ depends_on = [
     "mindroom.timing",
 ]
 visibility = [
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.thread_summary",
     "mindroom.commands.config_confirmation",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
@@ -2816,6 +2821,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.stale_stream_cleanup"
 depends_on = [
+    "mindroom.matrix.room_history_reads",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
@@ -3520,6 +3526,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
+    "mindroom.matrix.room_history_reads",
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
@@ -4470,7 +4477,11 @@ expose = [
     "UnresolvedOpaqueRoomHistoryError",
     "VISIBLE_ROOM_MESSAGE_EVENT_TYPES",
     "bulk_scan_thread_event_sources",
+    "bundled_replacement_source",
     "enumerate_room_thread_root_ids",
+    "fetch_thread_messages_from_source",
+    "parse_room_message_event",
+    "room_message_fallback_body",
     "fetch_thread_event_sources_via_room_messages",
     "find_response_event_ids_via_room_messages",
     "get_room_threads_page",

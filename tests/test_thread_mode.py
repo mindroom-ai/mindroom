@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -29,7 +28,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import ConversationPage
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -47,6 +45,8 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.event_journal import ConversationPage
+
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -56,13 +56,11 @@ from tests.conftest import (
     install_send_response_mock,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
-    make_event_cache_mock,
     runtime_paths_for,
     sync_bot_runtime_state,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.event_cache_test_support import advisory_thread_read
 from tests.threading_helpers import seed_thread_history
 
 
@@ -1607,166 +1605,6 @@ class TestExtractedModuleLoggerRebinding:
         # Background repair is gone, so the append failure is the only warning left to rebind.
         assert original_logger.warning.call_count == 1
         rebound_logger.warning.assert_not_called()
-
-    def test_conversation_resolver_fetch_path_reads_the_projection(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Resolver full-history fetches should come from the conversation projection."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.client = AsyncMock()
-        sync_bot_runtime_state(bot)
-        empty_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
-
-        with patch.object(
-            ConversationReader,
-            "read_strict",
-            new=AsyncMock(return_value=empty_page),
-        ) as mock_read_strict:
-            asyncio.run(
-                unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
-                    "!room:localhost",
-                    "$threadroot",
-                ),
-            )
-
-        mock_read_strict.assert_awaited_once_with(
-            room_id="!room:localhost",
-            thread_id="$threadroot",
-            limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
-        )
-
-    @pytest.mark.asyncio
-    async def test_conversation_cache_fetch_path_passes_explicit_event_cache(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Access-layer fetches should opt into cache maintenance explicitly."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = make_event_cache_mock()
-        bot.event_cache.get_thread_events = AsyncMock(
-            return_value=[
-                {
-                    "event_id": "$threadroot",
-                    "sender": "@user:localhost",
-                    "type": "m.room.message",
-                    "origin_server_ts": 1000,
-                    "content": {"body": "Root", "msgtype": "m.text"},
-                },
-                {
-                    "event_id": "$reply",
-                    "sender": "@agent:localhost",
-                    "type": "m.room.message",
-                    "origin_server_ts": 2000,
-                    "content": {
-                        "body": "Reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
-                    },
-                },
-            ],
-        )
-        sync_bot_runtime_state(bot)
-
-        client = AsyncMock()
-        with patch(
-            "mindroom.matrix.conversation_cache.fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ) as fetch_thread_history_mock:
-            bot.client = client
-            await advisory_thread_read(
-                bot._conversation_cache,
-                "!room:localhost",
-                "$threadroot",
-            )
-
-        fetch_thread_history_mock.assert_awaited_once()
-        call_args = fetch_thread_history_mock.await_args
-        assert call_args.args == (
-            client,
-            "!room:localhost",
-            "$threadroot",
-        )
-        assert call_args.kwargs["event_cache"] is bot.event_cache
-        assert "runtime_started_at" not in call_args.kwargs
-
-    @pytest.mark.asyncio
-    async def test_conversation_cache_reuses_fresh_durable_snapshot_before_full_history_hydration(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Fresh durable thread rows should serve snapshots before full-history hydration."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot.event_cache = make_event_cache_mock()
-        sync_bot_runtime_state(bot)
-        # No gap marker: the cached snapshot reads as usable.
-        bot.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
-        bot.event_cache.get_thread_events = AsyncMock(
-            return_value=[
-                {
-                    "event_id": "$threadroot",
-                    "sender": "@user:localhost",
-                    "type": "m.room.message",
-                    "origin_server_ts": 1000,
-                    "content": {"body": "Root", "msgtype": "m.text"},
-                },
-                {
-                    "event_id": "$reply",
-                    "sender": "@agent:localhost",
-                    "type": "m.room.message",
-                    "origin_server_ts": 2000,
-                    "content": {
-                        "body": "Reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$threadroot"},
-                    },
-                },
-            ],
-        )
-
-        bot.client = AsyncMock()
-        async with bot._conversation_cache.turn_scope():
-            full_history = await advisory_thread_read(
-                bot._conversation_cache,
-                "!room:localhost",
-                "$threadroot",
-            )
-
-        assert full_history.is_full_history is True
-        assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
     @pytest.mark.asyncio
     async def test_explicit_thread_id_inherits_known_thread_for_plain_reply_target(

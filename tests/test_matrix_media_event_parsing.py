@@ -10,7 +10,7 @@ import pytest
 
 import mindroom.matrix.media as media_module
 from mindroom.matrix.cache import ConversationEventCache
-from mindroom.matrix.client_thread_history import _parse_room_message_event
+from mindroom.matrix.client_thread_history import parse_room_message_event
 from mindroom.matrix.conversation_cache import _cached_room_get_event_response
 
 _SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
@@ -132,7 +132,7 @@ def test_thread_history_reparse_uses_encrypted_media_boundary(
 ) -> None:
     """Thread reconstruction should preserve encrypted media without logging its content."""
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = _parse_room_message_event(_encrypted_media_source())
+        parsed_event = parse_room_message_event(_encrypted_media_source())
 
     assert isinstance(parsed_event, nio.RoomEncryptedImage)
     assert parsed_event.url == _SYNTHETIC_FILE_MXC
@@ -178,7 +178,7 @@ def test_text_message_with_file_extension_is_not_dropped_from_history() -> None:
         },
     }
 
-    parsed_event = _parse_room_message_event(event_source)
+    parsed_event = parse_room_message_event(event_source)
 
     assert isinstance(parsed_event, nio.RoomMessageText)
     assert parsed_event.body == "harmless text with extension metadata"
@@ -189,7 +189,7 @@ def test_custom_message_with_encrypted_file_is_not_dropped(
 ) -> None:
     """A custom message type should keep its normal nio representation."""
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = _parse_room_message_event(_encrypted_media_source("io.synthetic.custom"))
+        parsed_event = parse_room_message_event(_encrypted_media_source("io.synthetic.custom"))
 
     assert isinstance(parsed_event, nio.RoomMessageUnknown)
     _assert_synthetic_secrets_absent(caplog)
@@ -277,7 +277,7 @@ async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
     event_cache.get_latest_edit.return_value = None
 
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = _parse_room_message_event(event_source)
+        parsed_event = parse_room_message_event(event_source)
         response = await _cached_room_get_event_response(
             client,
             event_cache,
@@ -309,7 +309,7 @@ def test_plain_media_validation_warning_keeps_harmless_diagnostic(
     }
 
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = _parse_room_message_event(event_source)
+        parsed_event = parse_room_message_event(event_source)
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)

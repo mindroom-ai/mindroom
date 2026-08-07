@@ -43,11 +43,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    is_thread_history_degraded,
-)
+from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
@@ -64,7 +60,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ThreadReadResult
 
 logger = get_logger(__name__)
 
@@ -187,7 +182,6 @@ async def recover_stale_streaming_messages(
     actors: dict[str, nio.AsyncClient],
     *,
     resume_client: nio.AsyncClient | None,
-    resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None,
@@ -250,7 +244,6 @@ async def recover_stale_streaming_messages(
                 interrupted_threads,
                 config=config,
                 runtime_paths=runtime_paths,
-                conversation_cache=resume_conversation_cache,
                 delay_before_first=resumed_count > 0,
             )
     finally:
@@ -302,7 +295,6 @@ async def _auto_resume_interrupted_threads(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None = None,
     delay: float = 2.0,
     delay_before_first: bool = False,
 ) -> int:
@@ -327,9 +319,9 @@ async def _auto_resume_interrupted_threads(
             delay_due = False
         if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
+            client=client,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=conversation_cache,
         ):
             continue
         try:
@@ -371,19 +363,25 @@ async def _auto_resume_interrupted_threads(
 async def _interrupted_target_remains_latest_human_work(
     interrupted_thread: _InterruptedThread,
     *,
+    client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None,
 ) -> bool:
-    """Return whether authoritative history has no newer effective human activity."""
-    if conversation_cache is None or interrupted_thread.thread_id is None:
+    """Return whether authoritative history has no newer effective human activity.
+
+    Reads the homeserver rather than the projection. This runs at startup to
+    decide whether a turn interrupted by the last shutdown is still the newest
+    thing in its thread, and anything written while this process was down has
+    by definition not reached its local state yet.
+    """
+    if interrupted_thread.thread_id is None:
         return False
 
     try:
-        history = await conversation_cache.refresh_startup_thread_history_from_source(
+        history = await fetch_thread_messages_from_source(
+            client,
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
-            caller_label="startup_auto_resume_freshness",
         )
         later_messages = _authoritative_history_after_target(
             history,
@@ -411,18 +409,26 @@ async def _interrupted_target_remains_latest_human_work(
 
 
 def _authoritative_history_after_target(
-    history: ThreadReadResult,
+    history: Sequence[ResolvedVisibleMessage],
     *,
     target_event_id: str,
 ) -> Sequence[ResolvedVisibleMessage]:
-    """Return history entries after an exact target or raise when history is unusable."""
-    history_source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-    if not history.is_full_history or is_thread_history_degraded(history):
-        msg = "Thread history is incomplete or degraded"
-        raise ValueError(msg)
-    if history_source != THREAD_HISTORY_SOURCE_HOMESERVER:
-        msg = f"Non-authoritative thread history source: {history_source!r}"
-        raise ValueError(msg)
+    """Return history entries after an exact target, or raise if the target is absent.
+
+    This used to take a `ThreadReadResult` and check three things before
+    trusting it: that the read was complete, that it was not degraded, and that
+    it came from the homeserver rather than a cache. All three are now
+    discharged at the source instead of inspected here.
+
+    `fetch_thread_messages_from_source` only reads `/messages`, so there is no
+    non-authoritative source it could return. And it raises rather than
+    returning a partial answer -- `ThreadRoomScanRootNotFoundError` when the
+    scan ends without the root, `UnresolvedOpaqueRoomHistoryError` when
+    relation-bearing ciphertext it cannot read would change the result. A
+    caller that reaches this function therefore holds whole, authoritative
+    history by construction, and the remaining question is only whether the
+    target is in it.
+    """
     target_index = next(
         (index for index, message in enumerate(history) if message.event_id == target_event_id),
         None,

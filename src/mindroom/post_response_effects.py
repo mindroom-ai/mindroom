@@ -147,7 +147,6 @@ class PostResponseEffectsSupport:
             thread_id=thread_id,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
-            conversation_cache=self.conversation_cache,
             conversation_reader=self.conversation_reader,
             entity_name=entity_name,
         )

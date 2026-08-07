@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
-THREAD_HISTORY_SOURCE_CACHE = "cache"
 THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
 THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
 THREAD_HISTORY_SOURCE_DEGRADED = "degraded"

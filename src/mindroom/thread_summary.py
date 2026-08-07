@@ -21,6 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
@@ -561,7 +561,7 @@ async def _thread_is_resolved(
 
 
 async def _pinned_since_generation_started(
-    conversation_cache: ConversationCacheProtocol,
+    client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     *,
@@ -586,12 +586,11 @@ async def _pinned_since_generation_started(
     single superseded title and the next pass bails at the gate.
     """
     try:
-        thread_history = list(
-            await conversation_cache.refresh_strict_thread_history_from_source(
-                room_id,
-                thread_id,
-                caller_label="thread_summary_pin_recheck",
-            ),
+        thread_history = await fetch_thread_messages_from_source(
+            client,
+            room_id,
+            thread_id,
+            trusted_sender_ids=trusted_sender_ids,
         )
     except Exception:
         logger.exception(
@@ -711,7 +710,6 @@ async def _deliver_generated_summary(
     normalized_summary: str,
     message_count: int,
     model_name: str,
-    conversation_cache: ConversationCacheProtocol,
     conversation_reader: ConversationReader,
     *,
     trusted_sender_ids: Collection[str],
@@ -725,7 +723,7 @@ async def _deliver_generated_summary(
     question: a superseded summary should apply neither its tags nor its title.
     """
     if await _pinned_since_generation_started(
-        conversation_cache,
+        client,
         room_id,
         thread_id,
         trusted_sender_ids=trusted_sender_ids,
@@ -964,7 +962,6 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    conversation_cache: ConversationCacheProtocol,
     conversation_reader: ConversationReader,
     entity_name: str | None = None,
 ) -> None:
@@ -1067,7 +1064,6 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             normalized_summary,
             message_count,
             model_name,
-            conversation_cache,
             conversation_reader,
             trusted_sender_ids=trusted_sender_ids,
         )
