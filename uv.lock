@@ -4516,7 +4516,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=feat%2Frecursive-relations" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = ">=0.37" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4628,7 +4628,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.37.0"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?branch=feat%2Frecursive-relations#0f2c3184f18ed2151e008b9ce10b35530be97d01" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -4638,6 +4638,10 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/66/76247dd320cf9ef2e2b5ae94f492509cbe15a01903a891ccd7da3de5781a/mindroom_nio-0.37.0.tar.gz", hash = "sha256:3eada963f463f18fc63558d4ffd5dab50702a25335e46a86ecf36511ca482622", size = 208986, upload-time = "2026-08-07T06:04:32.294Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/ba/244d497139bb386ae1cc19660931637593e012e3f8a13e975cbe0ee8a006/mindroom_nio-0.37.0-py3-none-any.whl", hash = "sha256:307e30ff935f6f33b29c3b64a634a552510fa3188e8774e69b8bacd1249be3f1", size = 239333, upload-time = "2026-08-07T06:04:30.703Z" },
 ]
 
 [package.optional-dependencies]
