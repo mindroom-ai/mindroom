@@ -1782,6 +1782,15 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
+            # Immediately after the ledger is readable and before a single sync
+            # callback is registered. A crash between the outbox acknowledgement
+            # and the ledger write leaves a delivered answer whose record does
+            # not know its response event, and an edit of that message arriving
+            # on the first sync would be dropped and settled as ignored -- gone
+            # for good, because nothing re-delivers a consumed edit. Waiting for
+            # the turn-replay gate is not enough: recovered events arrive as
+            # live ones and are exempt from it by design.
+            await repair_delivered_turns(self._journal_principal(), self._turn_store)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
@@ -1833,12 +1842,6 @@ class AgentBot:
 
     async def recover_pending_turn_journal_events(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
-        # Before replay, because both things replay drives read terminal state:
-        # a guard asking whether a source was handled, and an edit looking for
-        # the response event to revise. A crash between the outbox
-        # acknowledgement and the ledger write leaves both answers wrong, and
-        # nothing else repairs it.
-        await repair_delivered_turns(self._journal_principal(), self._turn_store)
         self._journal_dispatcher.release_turn_replay()
         await self._journal_dispatcher.drain_once()
         await asyncio.to_thread(

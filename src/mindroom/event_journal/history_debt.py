@@ -17,9 +17,12 @@ real lower bound: everything the room received after it may be missing, so a
 later backwards walk that reaches that timestamp has provably covered the whole
 gap. That is what discharges the debt -- coverage, not an attempt.
 
-A walk that finishes without reaching it is the one case where accepting loss
-is honest, and it says so: ``history_lost`` is set, the debt stops gating
-reads, and every completeness question about that room answers no from then on.
+A walk that reaches the beginning of what the server still holds without
+reaching that timestamp is the one case where accepting loss is honest, and it
+says so: ``history_lost`` is set and every completeness question about the room
+answers no from then on. A walk that merely spent its cost ceiling clears the
+debt without that flag -- the room is incomplete, which its hydration row
+already records, rather than incompletable.
 """
 
 from __future__ import annotations
@@ -51,6 +54,11 @@ class HistoryDebtOutcome(StrEnum):
     # Membership moved while the walk was in flight, so its view belongs to a
     # relationship with the room that has already ended.
     SUPERSEDED = "superseded"
+    # The walk spent its cost ceiling without reaching the anchor. The history
+    # is out of reach for now and is not declared gone: superseded edits are
+    # collapsed out of pagination over time, so the same allowance can carry a
+    # later walk further back than it reaches today.
+    TRUNCATED = "truncated"
 
 
 def _newest_projected_ts(transaction: Transaction, principal_id: str, room_id: str) -> int | None:
@@ -109,6 +117,7 @@ def settle(
     debt: RoomHistoryDebt,
     *,
     reached_ts: int | None,
+    walk_exhausted_server: bool,
 ) -> HistoryDebtOutcome:
     """Settle one room's debt against the walk that just finished.
 
@@ -118,16 +127,21 @@ def settle(
     coverage by what survived projection would report a walk as short when it
     was merely uneventful.
 
-    Whether the walk ran out of room or out of allowance does not enter into
-    it, and that is deliberate, but it only holds because the walk is bounded
-    for this job rather than for a prompt. Both of its remaining stopping
-    reasons are real loss. A server that has purged the history a debt names
-    runs a walk to the very beginning without ever reaching the timestamp, and
-    treating "the server had no more" as repayment would file that as success.
-    A gap deeper than the walk's cost ceiling is the other, and it is loss for a
-    different reason: a later walk starts from a tip that has only moved
-    forward, so the same allowance carries it less far back, not further. There
-    is no answer to wait for. Only reaching the timestamp is coverage.
+    Why the walk stopped decides what an uncovered gap means, and the two
+    reasons are not equivalent. ``walk_exhausted_server`` says the walk ran to
+    the beginning of what the homeserver still holds without reaching the
+    timestamp: the history is genuinely gone, and treating "the server had no
+    more" as repayment would file that as success.
+
+    Spending the cost ceiling is a different statement, and an earlier version
+    of this conflated them. The argument for calling it permanent was that a
+    later walk starts from a tip that has only moved forward -- true of the tip,
+    but the quantity that matters is the interval between the tip and the
+    anchor, and that can shrink. The servers MindRoom runs against collapse
+    superseded ``m.replace`` events out of pagination, and a streamed answer is
+    an original followed by a long tail of them, so the same allowance can carry
+    a later walk past an anchor it fell short of today. Only reaching the
+    timestamp is coverage, but only exhaustion is loss.
 
     That is also what keeps a debt from becoming an unbounded read tax. An
     outstanding debt withholds the room's hydration marker, so leaving one open
@@ -138,6 +152,24 @@ def settle(
     shallower debt was repaid over the top of it.
     """
     covered = reached_ts is not None and reached_ts <= debt.owed_through_ts
+    if not covered and not walk_exhausted_server:
+        # The walk ran out of allowance, not out of history. Calling that
+        # permanent loss assumed the interval between the tip and the anchor can
+        # only grow -- true of the tip, but not of the interval: the servers
+        # MindRoom runs against collapse superseded `m.replace` events out of
+        # pagination, and a streamed answer is mostly superseded edits. So the
+        # same ceiling can carry a later walk past an anchor it missed today.
+        #
+        # The debt is still cleared, because leaving it outstanding re-walks the
+        # ceiling on every read forever for a strictly worse answer each time.
+        # What is not written is the sticky flag: this room is incomplete now,
+        # which the hydration row already records, rather than incompletable
+        # for as long as this membership lasts.
+        transaction.execute(
+            "UPDATE room_history_debt SET owed_through_ts = NULL WHERE principal_id = ? AND room_id = ?",
+            (principal_id, debt.room_id),
+        )
+        return HistoryDebtOutcome.TRUNCATED
     if covered:
         transaction.execute(
             "UPDATE room_history_debt SET owed_through_ts = NULL WHERE principal_id = ? AND room_id = ?",

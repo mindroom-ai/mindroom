@@ -727,7 +727,13 @@ def _repay_history_debt(
         expected_membership_epoch=expected_membership_epoch,
     ):
         return HistoryDebtOutcome.SUPERSEDED
-    return history_debt.settle(transaction, principal_id, debt, reached_ts=reached_ts)
+    return history_debt.settle(
+        transaction,
+        principal_id,
+        debt,
+        reached_ts=reached_ts,
+        walk_exhausted_server=complete,
+    )
 
 
 def _install_hydration(

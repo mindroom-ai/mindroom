@@ -539,7 +539,7 @@ async def test_a_rejoin_drops_a_debt_for_the_membership_that_owed_it(alice: Prin
     assert await alice.room_history_debt(ROOM) is None
 
 
-async def test_a_gap_deeper_than_the_cost_ceiling_records_the_loss_and_stops(
+async def test_a_gap_deeper_than_the_cost_ceiling_stops_without_declaring_it_lost(
     alice: PrincipalStore,
 ) -> None:
     """The one bound that does stop a repayment, and it has to say so.
@@ -565,8 +565,8 @@ async def test_a_gap_deeper_than_the_cost_ceiling_records_the_loss_and_stops(
     await hydrate.ensure_hydrated(room_id=ROOM, thread_id=None)
 
     settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
-    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.LOST.value]
-    assert settled[0]["log_level"] == "error"
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.TRUNCATED.value]
+    assert settled[0]["log_level"] == "warning"
     assert settled[0]["owed_through_ts"] == 1_000
     # The ceiling is what stopped it and the window is not: a prompt walk would
     # have been satisfied after three messages, and this one spent its whole
@@ -574,9 +574,10 @@ async def test_a_gap_deeper_than_the_cost_ceiling_records_the_loss_and_stops(
     assert walks_after_loss == 5
     assert await alice.room_history_debt(ROOM) is None
     assert client.calls == walks_after_loss
-    # Lost history is not truncation in front of the page; it is a hole behind
-    # it, and a caller told the page was whole would report a length that never
-    # existed.
+    # The room is short, and says so -- but it is not stamped as having lost
+    # history. The ceiling measures this walk's allowance, not what the server
+    # still holds: superseded edits are collapsed out of pagination over time,
+    # so the same allowance can carry a later walk past an anchor it missed.
     assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
     assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
 
@@ -801,3 +802,36 @@ async def test_a_single_rejoin_during_hydration_retries_under_the_new_epoch(
     # promise holds: returning means a marker exists for the current membership.
     assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
     assert await bodies(alice) == ["two"]
+
+
+async def test_a_ceiling_walk_leaves_the_room_repairable(alice: PrincipalStore) -> None:
+    """Spending the allowance must not stamp the room as having lost history.
+
+    The two uncovered outcomes are not the same statement. Exhaustion says the
+    server no longer holds it; the ceiling says this walk could not afford it.
+    Only the first is permanent, and the difference is load-bearing because
+    ``history_lost`` is sticky per room: once set, no later walk can make the
+    room complete again, however far back it reaches.
+    """
+    await admit_all(alice, [raw("$old", "old", ts=1_000)])
+    await alice.record_room_history_debt(ROOM)
+
+    await hydrator(alice, FakeClient(endless=True), prompt_window_messages=3, max_requests=5).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
+    # The debt is cleared, so no later read re-walks the ceiling forever.
+    assert await alice.room_history_debt(ROOM) is None
+
+    # A later walk that does reach its anchor completes the room, in the same
+    # membership -- a new debt makes an indebted room read as unhydrated, so the
+    # next read walks again. Under a sticky loss flag this stays False no matter
+    # what the server hands back.
+    await admit_all(alice, [raw("$new", "new", ts=5_000)])
+    await alice.record_room_history_debt(ROOM)
+    await hydrator(alice, FakeClient(pages=[[raw("$reached", "reached", ts=1_000)]])).ensure_hydrated(
+        room_id=ROOM,
+        thread_id=None,
+    )
+
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)

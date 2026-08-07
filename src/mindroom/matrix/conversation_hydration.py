@@ -381,7 +381,13 @@ class ConversationHydrator:
             reached_ts=walk.reached_ts,
             expected_membership_epoch=epoch,
         )
-        log = logger.error if outcome is HistoryDebtOutcome.LOST else logger.info
+        log = logger.info
+        if outcome is HistoryDebtOutcome.LOST:
+            log = logger.error
+        elif outcome is HistoryDebtOutcome.TRUNCATED:
+            # Not loss, but not nothing: the room is short until a walk
+            # gets further back, and nothing schedules that on its own.
+            log = logger.warning
         log(
             "conversation_history_debt_settled",
             room_id=debt.room_id,
