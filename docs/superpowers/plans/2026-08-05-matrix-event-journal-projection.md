@@ -16,9 +16,18 @@ The prototype proved out and the cutover is landing on `wip/matrix-journal-ingre
 
 **Done:** the nio prerequisite (merged, released as **0.37.0**, and now resolved from PyPI rather than a branch pin); the journal, principal-bound store, admission and pending worker; the visible-message projection with bounded reads and hydration; the deterministic outbox; the crash matrix and the live Tuwunel harness; ingress cutover; delivery cutover; and **all eleven boundary contracts**, each verified against the code rather than assumed — see the status table below.
 
-**Remaining: one item, deliberately deferred to its own phase.** Terminal truth still has two owners; the dual-authority section below now maps the collapse accurately, including a proven deadlock in the migration this document originally specified.
+**Remaining: nothing implementable. Two items wait on actions outside this repository.**
 
-Two earlier versions of this line were wrong in the same direction, and the pattern is the point. The first said "Remaining: nothing" while the same document described two gaps further down. The second listed an approval card sent before its recovery row was written -- real, a regression from `main`, and since fixed (`f5e22efbb`). Both times the summary was more finished than the work, so treat this line as a claim to check rather than evidence.
+Terminal truth now has one owner. The terminal turn record commits inside the acknowledgement's transaction, and `delivered_turn_repair.py` -- which existed only because the two stores could not share one -- is deleted rather than kept. That deletion is the check that this was a collapse and not another reconciler.
+
+What is left needs a person, not a change:
+
+- **Three plugin PRs and PR #1800 itself.** An agent is blocked from `gh pr merge` by policy, deliberately.
+- **A `mindroom-nio` release.** Per-room continued recovery is implemented and green on branch `per-room-recovery`, steps 1 through 4 including the sticky abandonment flag. Once it ships and the PyPI pin moves, MindRoom deletes `history_debt.py` (187) and `sync_recovery_escape.py` (98) with the machinery around them. That deletion is already proven on branch `history-debt-deletion`: net **-662**, full suite exit 0. Do not merge its temporary local-path pin commit.
+
+Deleting the history-debt side *before* the release would be a regression, not progress. It would convert a context-only fallback into a silent one for the cases nio abandons outright -- the `backfill_max_events` cap, a hard non-retryable `/messages` rejection, an unverifiable page. Step 4's sticky flag is what makes those visible instead.
+
+Four earlier versions of this line were wrong in the same direction, and the pattern is worth more than the line. The first said "Remaining: nothing" while the same document described two gaps below it. The second named an approval card sent before its recovery row was written -- real, and since fixed (`f5e22efbb`). The third said terminal truth still had two owners after the collapse had landed, contradicting the gate-check table further down. Each time the summary was more finished, or less finished, than the work. Treat this line as a claim to check rather than as evidence.
 
 The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`, and with it `conversation_cache.py`, `client_thread_history.py`, `runtime_support.py`, `membership_fence.py`, `thread_bookkeeping.py` and `postgres_cursor` — 27 source modules. `ThreadReadMode` moved to `matrix/conversation_reads.py`, where the read API it describes already lives; it is a caller contract, not cache policy. `vulture_whitelist.py` came through byte-identical, which was read at the time as evidence that nothing had been suppressed to make the deletion pass. It was the opposite. Eight entries naming `matrix/cache/` modules survived the modules themselves, and vulture cannot fail on a whitelist line whose symbol no longer exists — so the deletion passed while the suppressions it should have retired stayed in the tree. They are removed now, and `uv run vulture` still passes without them.
 
@@ -47,15 +56,17 @@ src/mindroom` is 12,378 added against 20,915 deleted, **net −8,537**.
 - The `PendingEventWorker` lane-halting race is closed, along with a second instance of the same class found afterwards: `admit_and_run` ran its callback outside the lane after admission had already woken the pump, so one `ROOM_LIFECYCLE` event could get two concurrent handlers. Both are now single-handler by construction.
 - Hydration is single-flight again. `ensure_hydrated` checked the hydration marker before awaiting but awaited twice more before starting the walk, and `_shared` cannot join a task that has already finished and been dropped — so two readers could each walk the same conversation. That is a contract violation rather than a wasted request, because a conversation is meant to hydrate at most once per conversation and membership epoch. The marker is now rechecked in `_hydrate`, the last point before any server request.
 
-### The one durable fact that still has two owners
+### The durable fact that had two owners, and no longer does
 
-Every fact this plan set out to give a single owner now has one, with a single exception worth naming precisely rather than leaving for a future reader to rediscover.
+"Is this turn finished?" used to be answered by two records in two substrates. The journal settled a source transactionally when its answer became durable; the handled-turn ledger was a per-agent JSON file with a debounced, retrying write-behind persist. Being different substrates, they could not share a transaction, so the pair was unguarded by construction rather than by oversight, and `dispatch_replay_guard.py` had to consult both.
 
-**"Is this turn finished?" is still answered by two records in two different storage substrates.** The journal is SQLite or PostgreSQL and settles a source transactionally when its answer becomes durable. The handled-turn ledger (`handled_turns.py`) is a per-agent JSON file plus process-wide in-memory state, and its persist is deferred by default — `update_handled_turn(..., wait_for_persist=False)` schedules the write and retries it on failure. Because they are different substrates, they *cannot* be written in one transaction; the pair is unguarded by construction, not by oversight.
+**Both halves are now done.** The ledger's records live in `turn_records`, in the journal's own database, and the terminal record commits inside the acknowledgement's transaction. The proof that this collapsed ownership rather than adding a third writer is that `delivered_turn_repair.py` is *deleted*: it existed only to rejoin an acknowledged delivery with a record that had not caught up, and with the two in one transaction there is no window left to rejoin.
 
-`dispatch_replay_guard.py` consults both, and that conjunction is correct and load-bearing today: the two settle at different moments, so a turn that ends without a visible delivery leaves a pending row forever, and trusting pending alone would let that stale row suppress an older message permanently — a silent no-reply, which is the exact bug class this work exists to remove. **Do not collapse it naively.**
+Everything that existed to make two substrates approximately agree went with it -- the write-behind queue, durability barriers, the retry timer and its backoff, the bounded persist thread pool, the advisory file lock, corruption quarantine, `wait_for_persist`, `record_turn_durably`, `has_durably_responded`, `is_durably_handled`. Awaiting the write is the durability wait.
 
-One owner is nevertheless possible, and this is unfinished work rather than an irreducible constraint. Moving `TurnRecord` into the journal as a table would make settlement and terminal-outcome recording one transaction, reduce the replay guard to a single read, and delete the JSON file, its lock sidecar, the shared in-memory state, the debounced persist and its retry timer. That is the natural next phase, and it is the same shape as this one.
+Reads stayed synchronous off an in-memory map, which is why the conversion touched 28 write call sites rather than the hundred-odd read sites. That choice has one consequence, paid deliberately: a synchronous read can no longer lazily load, so an unloaded read raises instead of answering. Returning "no record" would have been the worst available answer, because it reads as "never handled" and that is how a bot answers a message twice.
+
+The migration's real cost was not the conversion. It was four defects the estimate could not have predicted, each found by review and each fixed with a probe: reading only the new table would have made every existing installation re-answer its whole backlog; shared state keyed by agent name aliased across two databases; a cancelled write rolled memory back after its transaction had already committed; and recovery committed the record while leaving the map stale. The last two are the same disagreement seen from opposite sides.
 
 **Fixed: thread export no longer refuses threads longer than the prompt window.** Export read the projection through a hydrator built with the prompt's bounds, so past `HYDRATED_PROMPT_WINDOW_MESSAGES` hydration recorded `complete=False` and `projected_history.py` declined to write a suffix as though it were the whole thread. Refusing was right given that input; the input was wrong for this caller. `origin/main` defaulted `prefer_cache=False` and paginated Matrix directly (`thread_export/execution.py:281`, `:138`), so a thread of any length exported in full, and two thousand logical messages is reachable in a busy room.
 
@@ -181,37 +192,11 @@ Why it must land atomically: a half-migrated dedupe substrate answers users twic
 
 The check that actually catches a duplicate is `_assert_no_wrong_replies` (`:2160`), which runs after every batch and fails on any source with more than one reply, on any stray reply to a source nothing expected, and -- at the end of a saturation run -- on any expected source with no reply at all. Exactly-one-reply-per-source is the invariant; the count is telemetry.
 
-**Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization.
+**One backend, and now actually shared.** Each bot used to open its own `EventJournalStore`, so N bots meant N*5 PostgreSQL connections and no cross-principal writer serialization.
 
-The injection point is narrower than it looks: every bot — router, team, agent — is built by the single factory at `bot.py:275-310`, so one optional `journal_store` parameter threaded there covers all three. The part that needs care is ownership at shutdown: `bot.py:1949` closes the store, and a shared one closed by the first bot to stop would break the rest, so an injected store must not be closed by its borrower. Do not let a default of "open my own" survive into production either — it is what makes this defect invisible in tests, where one bot is the normal case. And "is this turn finished?" is answered by both journal pending state and the `TurnStore` handled ledger, which live in different substrates and cannot share a transaction — load-bearing today, reachable by moving `TurnRecord` into the journal.
+All three factory branches now borrow the orchestrator's store, and the borrower does not close it: `bot.py` skips the close when the store was injected, and the orchestrator closes it last, after every bot has stopped. That ordering is not incidental -- closing earlier would pull the store out from under a bot still draining its outbox.
 
-Measured, so the next person can plan rather than discover: `turn_store.py` and `handled_turns.py` are 2,085 lines together, `TurnStore` exposes 29 public methods, and `src/` holds 90 call sites through it. The migration is not "add a table" — it is reimplementing that surface on SQL while every caller keeps working, plus reading the existing per-agent JSON ledgers forward. The payoff is real and already argued above: it collapses the last two-owner fact and lets `dispatch_replay_guard` stop reconciling. It is a phase of its own, not a follow-up patch.
-
-**Predates this work:** `matrix_conversation` tool room reads never collapse edits. Not made worse by it.
-
-### What replaced `main`'s gap markers
-
-**Corrected after checking `main` directly; two earlier readings of this were wrong.** The wedge is a *pre-existing `main` bug*, not something this branch created. `src/mindroom/matrix/sync_certification.py` is on `origin/main` and fails closed on exactly the same condition — line 78 reads `return self.complete and not self.errors and not self.unrecovered_room_ids`, with `reason = "sync_recovery_incomplete"`. What `main` does not have is any way out: zero hits for `STALL_LIMIT`, `recovery_escape`, `skipped_recovery`, or `certify_past`. So on `main` an unrecoverable room rewinds and retries forever, and the principal stops answering every other room for as long as it lasts.
-
-`sync_recovery_escape.py` is branch-new, and it is a **fix for that**, bounded at three attempts and per-room.
-
-The residual trade is therefore much narrower than "the escape loses messages". The gap's events go undispatched on both, because nio could not fetch them either way. The difference is unbounded retry with a dead principal, versus a bounded give-up that keeps the principal live and writes the gap down so it becomes readable. Reasoning from file provenance — "the escape file is new, so the problem is new" — is what produced the wrong answer twice; the grep that settled it was against `main`'s certification logic, not its file list.
-
-`main` did have a gap system, at thread granularity: `get_thread_cache_gap`, its schema migrations, and `thread_cache_gap_reason`. Its consumer is `client_thread_history.py:658` — a gap causes the durable thread snapshot to be **rejected for that read**, returning `None` with diagnostics so the caller falls back to the homeserver. That is cache invalidation rather than repair. It never proves the gap is covered, and it pays a server read on every read of a gapped thread, forever.
-
-The debt is the stronger mechanism on both counts: it is room-scoped, so one walk repairs every conversation a hole touched, and it has a provable discharge condition, so it stops.
-
-There was one axis on which it was briefly weaker, and it is now closed. `main`'s gap marker could never declare permanent loss — it simply kept deferring to the server — whereas `history_lost` is sticky. The first implementation earned that stickiness too cheaply: `settle` judged coverage on how far the walk reached, but the repayment walk was the ordinary prompt walk, so either bounded exit — the 2,000-message prompt window or the 20,000-raw-event ceiling — filed the debt `LOST` while the history was still sitting on the server. Streaming makes the ceiling the realistic trigger, since one answer is an original plus a long tail of `m.replace` relations.
-
-The repayment walk is now debt-aware: it keeps walking past a full prompt window until it reaches the anchor, and stops only on both conditions. Pinned by `test_a_repayment_walks_past_the_prompt_window_to_reach_its_anchor`, which asserts the page beyond the window lands in the projection by value, and by a sibling that pins that the ceiling — not the window — is what stops a genuinely deeper gap.
-
-**`LOST` is reserved for one case, and an earlier version of this document got that wrong.** It claimed the cost ceiling was equally provable, on the grounds that a later walk restarts from a tip that only moves further away while the anchor stays fixed. That is true of the tip and false of the thing that decides the outcome: what the ceiling measures is the number of raw events *between* the tip and the anchor, and that interval can shrink. The servers MindRoom runs against collapse superseded `m.replace` events out of pagination — the Synapse fork does it explicitly, across `/messages` — and a streamed answer is one original followed by a long tail of exactly those. So the same allowance can carry a later walk past an anchor it fell short of today.
-
-A ceiling exit therefore settles `TRUNCATED`: the debt is cleared, because leaving it outstanding re-walks the ceiling on every read forever for no better answer, but `history_lost` stays unset, so a later walk that does reach further can still complete the room. Only a walk that reached the beginning of what the server still holds is loss. Pinned by `test_a_ceiling_walk_leaves_the_room_repairable`, which settles a ceiling walk and then proves a subsequent covering walk in the *same membership* marks the conversation complete — an assertion that quietly passes if the epoch is advanced first, because that resets the row the stickiness lives in.
-
-On the axis that matters more — whether one unrecoverable room can stop a principal answering anything at all — `main` fails unboundedly and this branch does not.
-
-**Repayment restores the conversation, not the work.** A repaid event is projected, never admitted, so no turn is owed for it and it is never answered. That follows from contract 11 rather than from convenience: these events arrive through a client-initiated `/messages` walk, which carries no `TimelineEventProvenance`, so treating them as actionable would mean inventing the classification that contract forbids, and every alternative is a heuristic about how stale a gap may be before it stops deserving an answer. It costs nothing relative to `main`, where those same events are equally undispatched. Pinned by `test_repaid_gap_messages_are_readable_but_answer_nobody`, which asserts the repaid events are absent from the unsettled set while the live one remains in it — an empty-set assertion would also have passed if admission had stopped working.
+Worth recording because the code drifted from the contract silently: the router and team branches forwarded the shared store from the start while the ordinary-agent branch did not, so every regular bot quietly opened its own backend against the same database. One writer per agent instead of one per process, and -- since ledger state is keyed by backend identity -- a replacement instance with its own in-memory view of the same durable facts. The plan had already warned not to let "open my own" survive into production; a review caught that it had.
 
 ## Goal
 
@@ -898,7 +883,7 @@ They are gates on phase 3, not on the phases before it.
 
 | Invariant | Owner after the cutover | State |
 | --- | --- | --- |
-| A continuation turn produces no final delivery between attempts, and exactly one after the last | Outbox | **Deferred.** The assertion becomes "no `FINAL` enqueue between attempts, exactly one after the last", and it cannot be written against the real path while `enqueue_delivery` has no production caller. Writing it against a spying `DeliveryGateway` now would pin the mechanism being deleted |
+| A continuation turn produces no final delivery between attempts, and exactly one after the last | Outbox | **Held.** No longer deferred: `enqueue_delivery` has production callers since the delivery cutover, so the assertion is written against the real path rather than a spy. `tests/test_continuation_delivery_invariant.py` asserts `enqueue:final == 1` across a continuation, an exhausted continuation budget, and the team and router variants, plus `enqueue:initial == 1` for the placeholder |
 | Once the model result is durable, restart recovery never runs the model again | Outbox | **Held.** Crash boundaries six through nine assert `model_runs == 1` after recovery; boundary five, where nothing is durable yet, correctly re-runs |
 | One stop converges to one durable terminal outcome and one visible cancellation | `UserStopReconciler` | **Held.** Pinned with a real `TurnStore` for a single stop, a redelivered stop, and two racing stops |
 
@@ -920,9 +905,9 @@ They are gates on phase 3, not on the phases before it.
 - No duplicate "should this event run?" authority: **now holds.** Contract 2 landed -- the handoff is durable outbox enqueue and enqueue-and-settle is one transaction -- and the second half followed when turn records moved into the journal database, so the terminal record and the settlement of the sources it answers commit together. The startup pass that used to rejoin them (`delivered_turn_repair.py`) is deleted rather than kept, which is the check that this is a collapse and not another reconciliation.
 - Bounded prompt reads: **now holds end-to-end.** Every projection read takes a limit, and the thread walk that used to be unbounded behind a strict read now carries the same bounds as the room walk: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` caps the raw relation tree that streaming makes an order of magnitude larger than the message count. See contract 6.
 - Materially fewer production lines: **now holds.**
-  Measured at this HEAD: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +12,827 / -21,475, a net of **-8,648 production lines**. The whole branch is -26,682.
+  Measured at this HEAD: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +13,047 / -21,473, a net of **-8,426 production lines**. The whole branch is -26,043.
   The recorded history of this row was +2,624, then +2,754, then +3,940, and every step was in the wrong direction -- because the replacements landed as additions while the thing they replace was still standing. It turned when `matrix/cache/` was deleted, which is exactly where the earlier notes said the turn would come from.
-  Read the direction of travel rather than the level, though: production has grown **+1,658** since the cache deletion itself, and that growth is real. Some of it is the replacement finishing (the outbox, the projection, hydration), and some is correctness machinery the reviews demanded. Two known deletions are still queued behind other work: `history_debt.py` (187) and `sync_recovery_escape.py` (98) go when `mindroom-nio` ships per-room continued recovery.
+  Read the direction of travel rather than the level, though: production has grown **+1,880** since the cache deletion itself, and that growth is real. Some of it is the replacement finishing (the outbox, the projection, hydration), and some is correctness machinery the reviews demanded. Two known deletions are still queued behind other work: `history_debt.py` (187) and `sync_recovery_escape.py` (98) go when `mindroom-nio` ships per-room continued recovery.
   This row was wrong in the optimistic direction twice before. It is stated as holding now only because the deletion is in the diff and the number is reproducible from the command above.
 ## One-PR Implementation Sequence
 
@@ -1787,6 +1772,12 @@ ordered against the traffic around it, so deletion is now unblocked.
 
 ## Blocking: the projection serves truncated bodies for sidecar'd messages (2026-08-06)
 
+> **Resolved.** These dated sections are kept as a log of how the work went, not as open items.
+> Everything the census listed landed with the deletion of `matrix/cache/`; the reply-fallback
+> defects and both wedges are fixed and pinned. Read them for the reasoning, not for the status --
+> the status is the summary at the top of this document and the gate check above it.
+
+
 Raised by the operator: most agent messages exceed the Matrix message size
 threshold and are stored through the v2 large-message sidecar, so their event
 content carries a preview body plus an MXC reference rather than the full text.
@@ -2183,6 +2174,12 @@ certification failure is not a Matrix membership transition.
 
 ## The read cutover's remaining reply-fallback defects (2026-08-06)
 
+> **Resolved.** These dated sections are kept as a log of how the work went, not as open items.
+> Everything the census listed landed with the deletion of `matrix/cache/`; the reply-fallback
+> defects and both wedges are fixed and pinned. Read them for the reasoning, not for the status --
+> the status is the summary at the top of this document and the gate check above it.
+
+
 Two found by review, both real, one of them a genuine regression.
 
 **A redacted revision was offered as a reply target.** `latest_visible_event_id`
@@ -2212,6 +2209,12 @@ outranks what. The shared test double follows the same precedence, because one
 that answered a fixed value would let a caller silently stop passing it.
 
 ## The cache census, as the remaining work plan (2026-08-06)
+
+> **Resolved.** These dated sections are kept as a log of how the work went, not as open items.
+> Everything the census listed landed with the deletion of `matrix/cache/`; the reply-fallback
+> defects and both wedges are fixed and pinned. Read them for the reasoning, not for the status --
+> the status is the summary at the top of this document and the gate check above it.
+
 
 Confirmed against HEAD by review. The 8c -> 8e -> 8f macro-order holds, with
 the membership fence landing first (done above). The census added seven items
