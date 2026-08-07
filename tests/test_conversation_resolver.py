@@ -299,6 +299,45 @@ async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_relay_context_ignores_the_thread_a_relayed_edit_names(config: Config) -> None:
+    """A relayed edit cannot choose the thread the response is delivered into.
+
+    This context deliberately skips the canonical resolver so the relay does not pay for thread
+    hydration before the lock. That makes the relation written inside an ``m.new_content`` the one
+    value here nothing would ever check - and Matrix ignores it in any case, placing an edit by the
+    event it replaces. Reading it would let whoever authored the relayed payload pick the thread.
+    """
+    resolver = _resolver(config)
+    relayed_edit = _event(
+        {
+            "body": "* updated",
+            "m.new_content": {
+                "body": "updated",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": _PARENT},
+        },
+    )
+
+    result = await resolver.extract_trusted_router_relay_context(_room(), relayed_edit)
+
+    assert result.context.thread_id is None
+    assert result.context.is_thread is False
+
+
+@pytest.mark.asyncio
+async def test_router_relay_context_keeps_the_relays_own_thread_relation(config: Config) -> None:
+    """A relay that really is in a thread still resolves to it without a lookup."""
+    resolver = _resolver(config)
+
+    result = await resolver.extract_trusted_router_relay_context(_room(), _threaded_event())
+
+    assert result.context.thread_id == _THREAD_ROOT
+    assert result.context.is_thread is True
+
+
+@pytest.mark.asyncio
 async def test_coalescing_thread_id_for_threaded_and_room_level_events(config: Config) -> None:
     """Coalescing scope follows canonical thread membership."""
     resolver = _resolver(config)

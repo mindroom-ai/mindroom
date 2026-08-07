@@ -859,8 +859,12 @@ class ConversationResolver:
         ):
             resolved_thread_id = None
         else:
-            event_info = EventInfo.from_event(resolved_event_source)
-            resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            # The relay's own ``m.thread`` relation, and nothing else. This context skips the
+            # canonical resolver on purpose, so a thread named inside an ``m.new_content`` is the
+            # only value here that no lookup would ever confirm - and Matrix ignores it anyway,
+            # placing an edit by the event it replaces. Believing it would hand whoever wrote the
+            # relayed payload the choice of which thread this response appears in.
+            resolved_thread_id = EventInfo.from_event(resolved_event_source).thread_id
         context = MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=resolved_thread_id is not None,
