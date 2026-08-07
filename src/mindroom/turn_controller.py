@@ -1358,12 +1358,15 @@ class TurnController:
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=ack_event_id,
-            # The one caller here that sends twice for one turn: this
-            # acknowledgement, then the selection's real answer. Both would
-            # claim the same (turn, FINAL) row, and the freeze rule would keep
-            # this text and drop the answer. Staging them INITIAL and FINAL is
-            # the fix, and it needs the answer's own delivery identified first.
-            through_outbox=False,
+            through_outbox=True,
+            # This acknowledgement is the placeholder the selection's answer
+            # then edits, which is what `existing_event_is_placeholder` below
+            # says, so it is the turn's initial delivery and not its answer.
+            # Staging it that way also keeps it from settling the journal
+            # source: a placeholder discharges nothing, and a crash before the
+            # model finished would otherwise leave "Processing your
+            # response..." in the room with nothing pending to replay.
+            as_placeholder=True,
         )
         if not ack_event_id:
             self.deps.logger.error(

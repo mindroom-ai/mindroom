@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.event_journal import DeliveryStage
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_record import canonicalize_turn_record
 
@@ -145,6 +146,7 @@ class VisibleResponseReconciler:
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
         through_outbox: bool,
+        as_placeholder: bool = False,
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
@@ -165,10 +167,19 @@ class VisibleResponseReconciler:
         is gone and its answer is not, but it stops being the only thing
         standing between a crash and a lost reply.
 
-        Only callers that send exactly once per turn may pass it. The outbox
-        keys on ``(turn, stage)`` and freezes a row at its first attempt, so a
-        second ``FINAL`` send for the same turn would be refused and its text
-        would never reach the room.
+        Only callers that send exactly once per ``(turn, stage)`` may pass it.
+        The outbox freezes a row at its first attempt, so a second send under
+        the same pair would be refused and its text would never reach the room.
+        A caller that sends a placeholder and then an answer has two stages
+        available and should use them.
+
+        ``as_placeholder`` marks a send that a later answer edits rather than
+        replaces, and it is the caller's own word for what the message is --
+        the delivery stage it maps to is the outbox's business, not theirs.
+        Only an answer settles the journal sources, because only an answer
+        discharges a turn; a placeholder that settled would leave a crash
+        before the model finished with nothing pending to replay and
+        "Thinking..." in the room for good.
 
         It has no default on purpose. The safe-looking value is the wrong one
         for almost every caller here, and a default would let a new reply pick
@@ -183,6 +194,7 @@ class VisibleResponseReconciler:
                 response_text=response_text,
                 skip_mentions=skip_mentions,
                 delivery_turn_id=handled_turn.anchor_event_id if through_outbox else None,
+                delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,
             ),
         )
         if response_event_id is not None:

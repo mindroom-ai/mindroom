@@ -126,6 +126,7 @@ visibility = [
     "mindroom.response_delivery",
     "mindroom.thread_export.projected_history",
     "mindroom.turn_controller",
+    "mindroom.visible_response_reconciliation",
     "mindroom.orchestrator",
 ]
 
@@ -3401,6 +3402,7 @@ depends_on = [
     "mindroom.matrix.room_history_reads",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.event_journal",
     "mindroom.handled_turns",
     "mindroom.message_target",
     "mindroom.turn_store",
