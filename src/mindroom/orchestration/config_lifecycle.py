@@ -141,6 +141,27 @@ class ConfigReloadLifecycle:
             current_config = self.current_config()
             if current_config is None:
                 return await self.load_initial_config(new_config)
+            if new_config.event_journal != current_config.event_journal:
+                # Refused rather than applied, because there is no correct way
+                # to apply it here. The journal store is opened once and shared
+                # by every bot, so restarting entities cannot replace it: the
+                # runtime would keep committing turns and terminal records to
+                # the old database while published state advertised the new
+                # one, and the next process start would open the new database
+                # without any of that history -- so replay and delivery dedupe
+                # would both begin from a past that never happened.
+                #
+                # Reopening it safely means stopping every bot, closing the
+                # store, and reopening before anything reads it, which is a
+                # process restart by another name. Saying so is honest; doing
+                # it halfway is not.
+                logger.error(
+                    "config_reload_refused_event_journal_change",
+                    reason="the event journal backend cannot change without restarting the process",
+                    current=current_config.event_journal.backend,
+                    requested=new_config.event_journal.backend,
+                )
+                return False
 
             agent_bots = self.agent_bots()
             plugin_changes = plugin_change_paths(current_config, new_config)

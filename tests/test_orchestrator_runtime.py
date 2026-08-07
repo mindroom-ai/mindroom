@@ -3215,6 +3215,37 @@ class TestMultiAgentOrchestrator:
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
+    async def test_update_config_refuses_an_event_journal_change(self, tmp_path: Path) -> None:
+        """A journal backend cannot change under a running process, so the reload is refused.
+
+        The store is opened once and shared by every bot, so restarting
+        entities cannot replace it. Applying the change would leave turns
+        committing to the old database while published state named the new
+        one, and the next process start would open the new database without
+        that history -- replay and delivery dedupe would both begin from a past
+        that never happened. Refusing says so; the planner cannot, because it
+        classifies this as a support-only change and restarts nothing.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        current_config = MagicMock()
+        current_config.authorization.global_users = []
+        current_config.event_journal = MagicMock()
+        new_config = MagicMock()
+        new_config.authorization.global_users = []
+        new_config.event_journal = MagicMock()
+        orchestrator.config = current_config
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan") as mock_plan,
+        ):
+            updated = await orchestrator.config_reload._update_config()
+
+        assert updated is False, "a journal change must not report a successful reload"
+        mock_plan.assert_not_called()
+        assert orchestrator.config is current_config, "the refused config was adopted anyway"
+
+    @pytest.mark.asyncio
     async def test_update_config_does_not_swap_hook_runtime_on_failed_reload(self, tmp_path: Path) -> None:
         """Failed reloads must leave the active hook snapshot and scheduling registry untouched."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
@@ -3224,7 +3255,9 @@ class TestMultiAgentOrchestrator:
         current_config.event_journal = MagicMock()
         new_config = MagicMock()
         new_config.authorization.global_users = []
-        new_config.event_journal = MagicMock()
+        # The same journal config object, because a *changed* one is refused
+        # outright before the reload reaches the behaviour under test here.
+        new_config.event_journal = current_config.event_journal
         old_hook_registry = HookRegistry.empty()
         new_hook_registry = HookRegistry.empty()
 
