@@ -65,7 +65,6 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -1440,7 +1439,6 @@ class TestMultiAgentOrchestrator:
         synced_support = SimpleNamespace(
             event_cache=shared_event_cache,
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
-            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
 
         with patch(
@@ -3017,7 +3015,6 @@ class TestMultiAgentOrchestrator:
         support = SimpleNamespace(
             event_cache=MagicMock(),
             event_cache_write_coordinator=MagicMock(),
-            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         )
         store = initialize_approval_store(runtime_paths, cards=old_cards)
 

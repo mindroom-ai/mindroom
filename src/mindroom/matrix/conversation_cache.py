@@ -16,7 +16,6 @@ read might be replayed later in the same turn.
 
 from __future__ import annotations
 
-import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -31,25 +30,18 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadSyncWritePolicy
-from mindroom.matrix.client_thread_history import (
-    BulkThreadRefreshStats,
-    bulk_refresh_room_thread_histories,
-    thread_ids_needing_refill,
-)
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.event_normalization import normalize_nio_event_for_cache
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
 )
-from mindroom.matrix.room_history_reads import get_room_threads_page
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import AsyncIterator, Callable, Collection
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -73,10 +65,6 @@ __all__ = [
     "MatrixConversationCache",
     "ThreadReadResult",
 ]
-
-
-_STARTUP_PREWARM_THREAD_LIMIT = 32
-_STARTUP_PREWARM_MAX_SCAN_PAGES = 20
 
 
 class ConversationCacheProtocol(Protocol):
@@ -296,147 +284,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(response.event.source)
-
-    async def _bulk_refresh_startup_threads(
-        self,
-        room_id: str,
-        thread_ids: Collection[str],
-    ) -> BulkThreadRefreshStats:
-        """Refresh startup threads without occupying the live write coordinator during the scan."""
-        return await bulk_refresh_room_thread_histories(
-            self._require_client(),
-            room_id,
-            self.runtime.event_cache,
-            thread_root_ids=thread_ids,
-            caller_label="startup_thread_prewarm",
-            max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
-        )
-
-    def _log_startup_thread_prewarm_complete(
-        self,
-        room_id: str,
-        *,
-        started_at: float,
-        threads_warmed: int,
-        threads_failed: int,
-    ) -> None:
-        self.logger.info(
-            "startup_thread_prewarm_complete",
-            room_id=room_id,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
-            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
-        )
-
-    async def _startup_thread_prewarm_ids(
-        self,
-        room_id: str,
-    ) -> list[str] | None:
-        """Return startup-prewarm thread IDs using local recency first and /threads as a top-up.
-
-        Tuwunel does not currently order /threads by latest thread activity, so the local cache is the
-        best available recency signal for startup prewarm. /threads is only used to fill any remaining
-        slots when we have fewer than the target number of locally known threads.
-        """
-        thread_ids = await self.runtime.event_cache.get_recent_room_thread_ids(
-            room_id,
-            limit=_STARTUP_PREWARM_THREAD_LIMIT,
-        )
-        if len(thread_ids) >= _STARTUP_PREWARM_THREAD_LIMIT:
-            return thread_ids
-        try:
-            thread_roots, _next_batch = await get_room_threads_page(
-                self._require_client(),
-                room_id,
-                limit=_STARTUP_PREWARM_THREAD_LIMIT,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_room_threads_failed",
-                room_id=room_id,
-                error=str(exc),
-                local_thread_count=len(thread_ids),
-            )
-            # Partial local prewarm is still useful here because /threads is only a best-effort top-up.
-            return thread_ids or None
-
-        for thread_root in thread_roots:
-            thread_id = thread_root.event_id.strip()
-            if thread_id and thread_id not in thread_ids:
-                thread_ids.append(thread_id)
-            if len(thread_ids) >= _STARTUP_PREWARM_THREAD_LIMIT:
-                break
-        return thread_ids
-
-    async def prewarm_recent_room_threads(
-        self,
-        room_id: str,
-        *,
-        is_shutting_down: Callable[[], bool],
-    ) -> bool:
-        """Warm one room's recent thread roots and report whether the room-level pass finished."""
-        if not self.runtime.event_cache.durable_writes_available:
-            self.logger.warning(
-                "startup_thread_prewarm_skipped",
-                room_id=room_id,
-                reason="event_cache_writes_unavailable",
-            )
-            return False
-        started_at = time.perf_counter()
-        thread_ids = await self._startup_thread_prewarm_ids(room_id)
-        if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        try:
-            thread_ids_to_refill = await thread_ids_needing_refill(
-                self.runtime.event_cache,
-                room_id,
-                thread_ids,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_cache_probe_failed",
-                room_id=room_id,
-                thread_count=len(thread_ids),
-                error=str(exc),
-                error_type=type(exc).__name__,
-                exc_info=True,
-            )
-            thread_ids_to_refill = None
-        if thread_ids_to_refill is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        already_warm = len(thread_ids) - len(thread_ids_to_refill)
-        if not thread_ids_to_refill:
-            self._log_startup_thread_prewarm_complete(
-                room_id,
-                started_at=started_at,
-                threads_warmed=already_warm,
-                threads_failed=0,
-            )
-            return True
-
-        try:
-            stats = await self._bulk_refresh_startup_threads(
-                room_id,
-                thread_ids_to_refill,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_bulk_failed",
-                room_id=room_id,
-                thread_count=len(thread_ids_to_refill),
-                error=str(exc),
-            )
-            return False
-
-        threads_warmed = already_warm + stats.usable_threads
-        threads_failed = len(thread_ids_to_refill) - stats.usable_threads
-        self._log_startup_thread_prewarm_complete(
-            room_id,
-            started_at=started_at,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
-        )
-        return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""

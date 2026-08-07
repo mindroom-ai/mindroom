@@ -639,7 +639,6 @@ def _restored_token_router_bot(
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -890,7 +889,6 @@ async def test_tokenless_timeline_only_baseline_prevents_later_false_join(
     bot.client.next_batch = None
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -945,7 +943,6 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -991,7 +988,6 @@ async def test_router_ignores_restored_token_timeline_profile_update_for_existin
     bot.client.next_batch = "s_restored"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._emit_agent_lifecycle_event = AsyncMock()
-    bot._maybe_start_startup_thread_prewarm = MagicMock()
     bot._maybe_start_deferred_overdue_task_drain = MagicMock()
     monkeypatch.setattr(
         bot._conversation_cache,

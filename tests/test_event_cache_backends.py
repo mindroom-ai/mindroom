@@ -40,7 +40,6 @@ from mindroom.matrix.cache.thread_cache_state import (
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
-    StartupThreadPrewarmRegistry,
     _build_event_cache,
     _event_cache_runtime_identity,
     _EventCacheRuntimeIdentity,
@@ -375,7 +374,6 @@ async def _assert_thread_lookup_behavior(
     cached_thread = await cache.get_thread_events(room_id, thread_id)
     assert cached_thread is not None
     assert [event["event_id"] for event in cached_thread] == [thread_id, "$reply"]
-    assert await cache.get_recent_room_thread_ids(room_id, limit=5) == [thread_id]
     assert await cache.get_event(room_id, "$reply") == reply_event
     assert await cache.get_thread_id_for_event(room_id, "$reply") == thread_id
     assert await cache.get_thread_id_for_event(room_id, thread_id) == thread_id
@@ -2109,7 +2107,6 @@ async def test_event_cache_startup_backend_unavailable_retries_without_disabling
     support = OwnedRuntimeSupport(
         event_cache=cast("ConversationEventCache", cache),
         event_cache_write_coordinator=EventCacheWriteCoordinator(logger=logger),
-        startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         event_cache_identity=_event_cache_runtime_identity(cache_config, runtime_paths),
     )
 

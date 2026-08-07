@@ -392,7 +392,6 @@ class _MultiAgentOrchestrator:
         bot.admission_gate = self._response_admission_gate
         bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
-        bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
 
     def _approval_cards(self) -> ApprovalView | None:
         """Return the router principal's approval-card store, once it exists.

@@ -1561,7 +1561,6 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
         patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover)),
         patch.object(bot, "_register_room_member_callback_after_initial_sync"),
         patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
-        patch.object(bot, "_maybe_start_startup_thread_prewarm"),
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         # A pass that raises must not be the last one.

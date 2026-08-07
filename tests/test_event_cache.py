@@ -6,7 +6,6 @@ import asyncio
 import json
 import sqlite3
 from contextlib import closing
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,11 +32,7 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.client_thread_history import (
-    BulkThreadRefreshStats,
-)
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
@@ -55,7 +50,6 @@ from tests.conftest import (
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import entity_ids
-from tests.threading_helpers import EmptyProjection
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -75,43 +69,6 @@ def _empty_conversation_reader() -> ConversationReader:
     return cast(
         "ConversationReader",
         SimpleNamespace(read=AsyncMock(return_value=page), read_strict=AsyncMock(return_value=page)),
-    )
-
-
-def _conversation_cache_for_thread_reads(
-    tmp_path: Path,
-    event_cache: ConversationEventCache,
-    *,
-    client: object,
-) -> MatrixConversationCache:
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-        ),
-        runtime_paths,
-    )
-    runtime = BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        enable_streaming=False,
-        orchestrator=None,
-        event_cache=event_cache,
-        event_cache_write_coordinator=None,
-    )
-    return MatrixConversationCache(logger=MagicMock(), runtime=runtime, store=EmptyProjection())
-
-
-def _set_dispatch_thread_read_timeout(conversation_cache: MatrixConversationCache, seconds: float) -> None:
-    runtime_paths = conversation_cache.runtime.runtime_paths
-    conversation_cache.runtime.runtime_paths = replace(
-        runtime_paths,
-        process_env={
-            **runtime_paths.process_env,
-            "MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS": str(seconds),
-        },
     )
 
 
@@ -444,47 +401,6 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
 
 
 @pytest.mark.asyncio
-async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadata(
-    tmp_path: Path,
-) -> None:
-    """Startup prewarm should call the bulk room refresher with fixed metadata."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    client = MagicMock()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-    stats = BulkThreadRefreshStats(
-        requested_threads=1,
-        usable_threads=1,
-        missing_root_ids=frozenset(),
-        room_scan_pages=1,
-        scanned_event_count=2,
-    )
-    bulk_refresh_room_thread_histories = AsyncMock(return_value=stats)
-
-    try:
-        with patch(
-            "mindroom.matrix.conversation_cache.bulk_refresh_room_thread_histories",
-            bulk_refresh_room_thread_histories,
-        ):
-            result = await conversation_cache._bulk_refresh_startup_threads(
-                "!room:localhost",
-                ["$thread:localhost"],
-            )
-
-        assert result == stats
-        bulk_refresh_room_thread_histories.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            event_cache,
-            thread_root_ids=["$thread:localhost"],
-            caller_label="startup_thread_prewarm",
-            max_scan_pages=20,
-        )
-    finally:
-        await event_cache.close()
-
-
-@pytest.mark.asyncio
 async def test_thread_snapshot_storage_exposes_direct_gap_reads(tmp_path: Path) -> None:
     """A stored snapshot should expose the newest gap marker recorded against its thread."""
     db, _maintenance_report, _generation = await event_cache_module._initialize_event_cache_db(
@@ -742,83 +658,6 @@ async def test_event_cache_store_and_retrieve(event_cache: ConversationEventCach
 
     assert cached_events is not None
     assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
-
-
-@pytest.mark.asyncio
-async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Recent thread IDs should be ordered by the freshest cached event per thread, not by root timestamp."""
-    cache = event_cache
-
-    try:
-        await _seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_old_root_recent_reply",
-            events=[
-                {
-                    "event_id": "$thread_old_root_recent_reply",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1000,
-                    "type": "m.room.message",
-                    "content": {"body": "Old root", "msgtype": "m.text"},
-                },
-                {
-                    "event_id": "$recent_reply",
-                    "sender": "@agent:localhost",
-                    "origin_server_ts": 9000,
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "Recent reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": "$thread_old_root_recent_reply",
-                        },
-                    },
-                },
-            ],
-        )
-        await _seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_recent_root_no_replies",
-            events=[
-                {
-                    "event_id": "$thread_recent_root_no_replies",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 5000,
-                    "type": "m.room.message",
-                    "content": {"body": "Recent root", "msgtype": "m.text"},
-                },
-            ],
-        )
-        await _seed_thread_cache(
-            cache,
-            room_id="!other_room:localhost",
-            thread_id="$thread_other_room",
-            events=[
-                {
-                    "event_id": "$thread_other_room",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 99999,
-                    "type": "m.room.message",
-                    "content": {"body": "Other room root", "msgtype": "m.text"},
-                },
-            ],
-        )
-
-        all_recent = await cache.get_recent_room_thread_ids("!room:localhost", limit=10)
-        first_only = await cache.get_recent_room_thread_ids("!room:localhost", limit=1)
-    finally:
-        await cache.close()
-
-    assert all_recent == [
-        "$thread_old_root_recent_reply",
-        "$thread_recent_root_no_replies",
-    ]
-    assert first_only == ["$thread_old_root_recent_reply"]
 
 
 @pytest.mark.asyncio

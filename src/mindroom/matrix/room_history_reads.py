@@ -259,7 +259,6 @@ class _BulkThreadScanResult:
     unresolved_opaque_event_ids: frozenset[str]
     page_count: int
     scanned_event_count: int
-    scan_truncated: bool
     homeserver_scan_parse_cpu_ms: float = 0.0
 
 
@@ -369,25 +368,17 @@ async def bulk_scan_thread_event_sources(
     room_id: str,
     *,
     thread_root_ids: Collection[str],
-    max_scan_pages: int | None = None,
 ) -> _BulkThreadScanResult:
     """Walk room history backward once and recover every requested thread's event sources."""
-    if max_scan_pages is not None and max_scan_pages < 1:
-        msg = "max_scan_pages must be at least 1"
-        raise ValueError(msg)
     edit_candidates = ThreadEditCandidates()
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
     page_count = 0
     scanned_event_count = 0
-    scan_truncated = False
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
-        if max_scan_pages is not None and page_count >= max_scan_pages:
-            scan_truncated = True
-            break
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -436,7 +427,6 @@ async def bulk_scan_thread_event_sources(
         unresolved_opaque_event_ids=unresolved_opaque_event_ids,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
-        scan_truncated=scan_truncated,
         homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
     )
 

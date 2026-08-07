@@ -166,7 +166,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 type _MatrixEventId = str
 
@@ -355,7 +354,6 @@ class AgentBot:
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
-    _startup_thread_prewarm_task: asyncio.Task[None] | None
     _call_manager: CallManager | None
     _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
@@ -407,7 +405,6 @@ class AgentBot:
             orchestrator=None,
             event_cache=None,
             event_cache_write_coordinator=None,
-            startup_thread_prewarm_registry=None,
         )
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._sync_cache_trust = SyncCacheTrust(
@@ -420,7 +417,6 @@ class AgentBot:
             store_generation_provider=self._resolve_journal_generation,
         )
         self._deferred_overdue_task_drain_task = None
-        self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
@@ -897,20 +893,6 @@ class AgentBot:
         self._runtime_view.event_cache_write_coordinator = value
 
     @property
-    def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry:
-        """Return the shared startup thread-prewarm room-claim registry."""
-        registry = self._runtime_view.startup_thread_prewarm_registry
-        if registry is None:
-            msg = "Startup thread prewarm registry is not initialized for this bot runtime"
-            raise RuntimeError(msg)
-        return registry
-
-    @startup_thread_prewarm_registry.setter
-    def startup_thread_prewarm_registry(self, value: StartupThreadPrewarmRegistry | None) -> None:
-        """Update the shared startup thread-prewarm room-claim registry."""
-        self._runtime_view.startup_thread_prewarm_registry = value
-
-    @property
     def runtime_started_at(self) -> float:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
@@ -980,73 +962,6 @@ class AgentBot:
         if self.agent_name in self.config.teams:
             return "team"
         return "agent"
-
-    def _startup_thread_prewarm_enabled(self) -> bool:
-        """Return whether this runtime entity should prewarm recent thread snapshots on startup."""
-        if self.agent_name == ROUTER_AGENT_NAME:
-            return self.config.router.startup_thread_prewarm
-        if self.agent_name in self.config.teams:
-            return self.config.teams[self.agent_name].startup_thread_prewarm
-        return self.config.agents[self.agent_name].startup_thread_prewarm
-
-    def _maybe_start_startup_thread_prewarm(self) -> None:
-        """Start startup thread prewarm once the first sync is ready."""
-        if self.client is None or self._sync_shutting_down or not self._startup_thread_prewarm_enabled():
-            return
-
-        existing_task = self._startup_thread_prewarm_task
-        if existing_task is not None and not existing_task.done():
-            return
-
-        self._startup_thread_prewarm_task = create_background_task(
-            self._run_startup_thread_prewarm(),
-            name=f"startup_thread_prewarm_{self.agent_name}",
-            owner=self._runtime_view,
-        )
-
-    async def _get_startup_thread_prewarm_joined_rooms(self) -> list[str]:
-        """Return joined rooms for startup prewarm, failing open on lookup errors."""
-        client = self.client
-        assert client is not None
-        try:
-            joined_rooms = await get_joined_rooms(client)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._conversation_cache.logger.warning(
-                "startup_thread_prewarm_joined_rooms_failed",
-                error=str(exc),
-            )
-            return []
-        return joined_rooms or []
-
-    async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
-        """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
-        completed = False
-        try:
-            async with self.startup_thread_prewarm_registry.room_slot():
-                completed = await self._conversation_cache.prewarm_recent_room_threads(
-                    room_id,
-                    is_shutting_down=lambda: self._sync_shutting_down,
-                )
-        finally:
-            if not completed:
-                await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
-
-    async def _run_startup_thread_prewarm(self) -> None:
-        """Prewarm recent thread snapshots with one bulk scan per joined room."""
-        try:
-            joined_rooms = await self._get_startup_thread_prewarm_joined_rooms()
-            for room_id in joined_rooms:
-                if self._sync_shutting_down:
-                    return
-                if not await self.startup_thread_prewarm_registry.try_claim(self.event_cache.principal_id, room_id):
-                    continue
-                await self._prewarm_claimed_startup_thread_room(room_id)
-        finally:
-            current_task = asyncio.current_task()
-            if current_task is not None and self._startup_thread_prewarm_task is current_task:
-                self._startup_thread_prewarm_task = None
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
@@ -1581,9 +1496,6 @@ class AgentBot:
             await orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
 
-        if first_sync_response:
-            self._maybe_start_startup_thread_prewarm()
-
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
@@ -1797,11 +1709,7 @@ class AgentBot:
     def _validate_runtime_support_injection_contract_for_startup(self) -> None:
         """Reject startup unless the full injected runtime-support bundle is present."""
         runtime = self._runtime_view
-        if (
-            runtime.event_cache is not None
-            and runtime.event_cache_write_coordinator is not None
-            and runtime.startup_thread_prewarm_registry is not None
-        ):
+        if runtime.event_cache is not None and runtime.event_cache_write_coordinator is not None:
             return
         raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
@@ -2178,18 +2086,6 @@ class AgentBot:
 
         await asyncio.gather(drain_task, return_exceptions=True)
 
-    async def _cancel_startup_thread_prewarm(self) -> None:
-        """Cancel the startup thread prewarm task if it is still running."""
-        prewarm_task = self._startup_thread_prewarm_task
-        self._startup_thread_prewarm_task = None
-        if prewarm_task is None:
-            return
-
-        if not prewarm_task.done():
-            prewarm_task.cancel()
-
-        await asyncio.gather(prewarm_task, return_exceptions=True)
-
     async def prepare_for_sync_shutdown(
         self,
         *,
@@ -2205,7 +2101,6 @@ class AgentBot:
             )
         self._sync_shutting_down = True
         self._response_runner.refuse_pending_admissions()
-        await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(

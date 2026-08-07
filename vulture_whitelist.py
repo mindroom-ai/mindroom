@@ -348,3 +348,10 @@ store_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
 # bookkeeping now resolves relations through the journal, which fences on its
 # own membership epoch instead of serving rows a departure never invalidated.
 get_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/, src/mindroom/matrix/conversation_cache.py)
+# Joined them when the startup thread prewarm was deleted: `thread_ids_needing_refill` was the last
+# reader of a gap marker. Unlike the entries above, this one's *writers* are still live -- live
+# thread mutation and opaque-encrypted history both still mark gaps -- so the marker is currently
+# write-only. Resolving that asymmetry belongs to the deletion of `matrix/cache/`, which is where
+# the writers go too; the gap semantics stay pinned by tests/test_event_cache_contract.py and
+# tests/test_thread_mutation_atomicity.py until then.
+get_thread_cache_gap  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)

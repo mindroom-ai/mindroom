@@ -1319,34 +1319,6 @@ class PostgresEventCache:
             ),
         )
 
-    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
-        """Return whether any snapshot rows exist for one thread."""
-        return await self._operation(
-            room_id,
-            operation="has_thread_snapshot",
-            disabled_result=False,
-            callback=lambda db: postgres_event_cache_threads.thread_snapshot_exists(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-
-    async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
-        """Return locally known thread IDs for one room ordered by newest cached activity."""
-        return await self._operation(
-            room_id,
-            operation="get_recent_room_thread_ids",
-            disabled_result=[],
-            callback=lambda db: postgres_event_cache_threads.load_recent_room_thread_ids(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                limit=limit,
-            ),
-        )
-
     async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
         """Return the durable gap marker recorded against one cached thread, if any."""
         return await self._operation(

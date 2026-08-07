@@ -44,7 +44,6 @@ from mindroom.matrix.thread_history_result import thread_history_result as _thre
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
-    StartupThreadPrewarmRegistry,
     close_owned_runtime_support,
     sync_owned_runtime_support,
 )
@@ -617,7 +616,6 @@ async def _bind_owned_runtime_support(
     )
     bot.event_cache = support.event_cache
     bot.event_cache_write_coordinator = support.event_cache_write_coordinator
-    bot.startup_thread_prewarm_registry = support.startup_thread_prewarm_registry
     bot._runtime_view.mark_runtime_started()
     return support
 
@@ -689,7 +687,6 @@ class ThreadingBehaviorTestBase:
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
         # Sync checkpoints are certified by the event journal. Pinned so a test
         # that saves one and restarts exercises the token logic rather than the
         # first-open mint, which would rightly reject it.
@@ -741,7 +738,6 @@ class ThreadingBehaviorTestBase:
         )
         with (
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
             patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
             bot_ready_context,
         ):

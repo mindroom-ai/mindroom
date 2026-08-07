@@ -99,7 +99,6 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -986,13 +985,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_mxc_text.return_value = None
     event_cache.get_mxc_texts.return_value = {}
     event_cache.get_recent_room_events.return_value = []
-    event_cache.get_recent_room_thread_ids.return_value = []
     event_cache.get_thread_events.return_value = None
-
-    async def has_thread_snapshot(room_id: str, thread_id: str) -> bool:
-        return await event_cache.get_thread_events(room_id, thread_id) is not None
-
-    event_cache.has_thread_snapshot.side_effect = has_thread_snapshot
     event_cache.get_thread_cache_gap.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
     event_cache.pending_durable_write_room_ids.return_value = ()
@@ -1313,8 +1306,6 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
         bot.event_cache = make_event_cache_mock()
     if bot._runtime_view.event_cache_write_coordinator is None:
         bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
-    if bot._runtime_view.startup_thread_prewarm_registry is None:
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
     # Sync checkpoints are certified by the event journal, whose real generation
     # is a fresh UUID per database. Pinned to the same constant the cache mock
     # reports so a test that saves a checkpoint and restarts exercises the token
