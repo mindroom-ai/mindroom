@@ -1415,6 +1415,41 @@ async def test_an_adopted_ledger_file_is_renamed_so_it_is_never_read_twice(
 
 
 @pytest.mark.asyncio
+async def test_a_partly_stored_legacy_turn_keeps_both_halves(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A coalesced legacy turn that overlaps a stored record only partially.
+
+    This is the case whole-record upsert gets wrong in the most expensive way.
+    The file holds one record indexing two sources of a coalesced turn; the
+    runtime has since written a newer record under the first of them, and the
+    second has no record at all.
+
+    Upserting the legacy record overwrites the newer one, and the file is
+    renamed immediately afterwards, so that copy is gone for good. Filtering
+    the record out instead leaves the second source unrecorded, so a message
+    that was already answered can be answered again. Only filling the gap and
+    leaving the occupied index alone loses neither.
+    """
+    await _seed_records(
+        journal_store,
+        "partial_overlap",
+        {"$first": {"source_event_ids": ["$first"], "response_event_id": "$current", "completed": True}},
+    )
+    legacy_file = _write_legacy_ledger(
+        tmp_path / "agent_responded.json",
+        {"$first": _legacy_record(["$first", "$second"], response_event_id="$legacy")},
+    )
+
+    tracker = await _open_ledger(journal_store, "partial_overlap", legacy_responses_file=legacy_file)
+
+    assert _get_response_event_id(tracker, "$first") == "$current", "the newer record was overwritten"
+    assert _get_response_event_id(tracker, "$second") == "$legacy", "the unrecorded source was not adopted"
+    assert not legacy_file.exists(), "the file must still be retired"
+
+
+@pytest.mark.asyncio
 async def test_a_populated_database_is_never_overwritten_by_a_legacy_file(
     journal_store: EventJournalStore,
     tmp_path: Path,

@@ -564,11 +564,19 @@ class HandledTurnLedger:
         missing for good -- which for those turns is identical to never having
         imported at all.
 
-        What keeps that safe is importing only events the table does not
-        already hold. A record already here was either written by this runtime
-        or imported by an earlier pass, and in both cases it is at least as
-        current as the file's copy; overwriting it with an older one would undo
-        real work. So a resumed import fills the gaps and touches nothing else.
+        What keeps that safe is `adopt_missing`, which fills only the indexes
+        with no record yet. A record already here was written by this runtime or
+        by an earlier pass, so it is at least as current as the file's copy and
+        must not be overwritten.
+
+        Ordinary `upsert` cannot express that. A legacy record can overlap a
+        stored one only *partially* -- it indexes two sources of one coalesced
+        turn, the runtime has a newer record under the first, the second is
+        absent -- and upserting the whole record overwrites the newer one, after
+        which the file is renamed and that copy is gone. Filtering such records
+        out instead leaves the absent source with no record, so a message that
+        was answered can be answered again. Filling the gaps and leaving every
+        occupied index alone is the only option that loses neither.
 
         The rename is atomic, so it either happens or does not, and a renamed
         file is never read again. That is also what stops a later compaction
@@ -601,6 +609,7 @@ class HandledTurnLedger:
             for record in decoded.values()
             if not already_stored.issuperset(record.indexed_event_ids)
         }
+        adopted = 0
         for record in unseen.values():
             # Canonicalizing derives an anchor for a record written before one
             # was always stored, which is exactly the vintage this import
@@ -608,7 +617,7 @@ class HandledTurnLedger:
             # proof that its message was answered.
             imported = canonicalize_turn_record(record)
             assert imported.anchor_event_id is not None
-            await self.records.upsert(
+            adopted += await self.records.adopt_missing(
                 index_event_ids=imported.indexed_event_ids,
                 anchor_event_id=imported.anchor_event_id,
                 record_json=json.dumps(TurnRecordCodec._to_ledger_record(imported)),
@@ -617,7 +626,7 @@ class HandledTurnLedger:
         logger.info(
             "handled_turn_ledger_imported",
             agent=self.agent_name,
-            imported_event_count=len(unseen),
+            imported_event_count=adopted,
         )
         return await self.records.load_all()
 

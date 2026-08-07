@@ -943,6 +943,24 @@ class TurnRecordStore:
             ),
         )
 
+    async def adopt_missing(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> int:
+        """Fill only the indexes with no record yet, for migration. Returns how many."""
+        return await self._backend.write(
+            lambda transaction: turn_records.adopt_missing(
+                transaction,
+                self._agent_name,
+                index_event_ids=index_event_ids,
+                anchor_event_id=anchor_event_id,
+                record_json=record_json,
+            ),
+        )
+
     async def load(self, *, event_id: str) -> str | None:
         """Return the record indexed by one event, if there is one."""
         return await self._backend.read(
