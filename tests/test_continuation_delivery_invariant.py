@@ -93,7 +93,7 @@ class _WatchedOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
-    ) -> str:
+    ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
         return await self.inner.enqueue_delivery(
@@ -109,6 +109,17 @@ class _WatchedOutbox:
         """Freeze one delivery, noting the claim on the timeline first."""
         self.timeline.append(f"claim:{stage.value}")
         return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Answer the membership check from the real store, off the timeline.
+
+        The streaming gate asks this between progress edits, so recording it
+        would bury the enqueue and claim ordering this double exists to show.
+        It still has to be forwarded rather than stubbed: the store's answer
+        for a turn the journal never admitted is what keeps a stream running,
+        and a stub returning `True` would hide the fence never being consulted.
+        """
+        return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Return one delivery without claiming it."""
