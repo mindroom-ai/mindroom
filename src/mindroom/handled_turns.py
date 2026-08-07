@@ -523,6 +523,16 @@ class HandledTurnLedger:
             # the write ended answers "cancelled" for a write that is still
             # running -- and asking a cancelled future for its exception raises
             # instead of answering, which skipped the rollback below entirely.
+            #
+            # The backends draining their own worker threads does not replace
+            # this, which is the tempting simplification. They answer a
+            # different question: that nothing else may touch a connection
+            # while a statement is on it. This one needs to know *how* its own
+            # write ended, and a cancelled caller of the backend is told only
+            # that it was cancelled -- correctly, because swallowing the
+            # cancellation would be worse. Awaiting the upsert bare is weaker
+            # still: it cancels the coroutine outright, so the write never
+            # reaches a backend that could have drained it.
             write = asyncio.ensure_future(
                 self.records.upsert(
                     index_event_ids=persisted_record.indexed_event_ids,
