@@ -50,6 +50,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
+│ journal             Inspect and rebind the durable event journal.                      │
 │ service             Install and manage MindRoom as a background user service.          │
 │ trigger             Send signed external triggers.                                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
