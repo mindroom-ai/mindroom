@@ -72,7 +72,7 @@ Implementation, traced end to end:
 
 1. `_prepare_delivery` (`streaming.py:1010-1026`) is async: it builds the snapshot, then hands formatting to `asyncio.to_thread`. Apply the transform between those two steps, for `is_final=True` only, with `dataclasses.replace(snapshot, accumulated_text=...)`. Every derived field is then computed from the transformed text by the existing code.
 2. The streaming object needs the hook. Add an optional `final_text_transform: Callable[[str], Awaitable[str]] | None` beside `terminal_edit` and `terminal_send` (`streaming.py:468-469`), which are wired the same way.
-3. Bind it where those two are constructed in `delivery_gateway`, closing over `identity` so it can call `_apply_final_response_transform`.
+3. Bind it where those two are constructed (`delivery_gateway.py:1281-1282`), closing over `identity` so it can call `_apply_final_response_transform`. **`StreamingDeliveryRequest` does not carry `identity`** — it lives on `FinalDeliveryRequest`, which only the post-hoc finalizer sees — so the field has to be added and threaded through that request's construction sites first. This is the step that makes the change bigger than the other three combined, and it is the one a first reading misses: steps 1 and 2 apply cleanly on their own and then have nothing to bind to.
 4. Delete the post-hoc block at `delivery_gateway.py:1734-1750`, keeping its guard that an empty or unchanged transform result is ignored.
 
 Verify with the full suite, then `tests/manual/streamed_edit_live_proof.py`, which reads the room's *raw* final state rather than `m.new_content` and is the probe that can actually see a wrong fallback body. The mutation to check is that the `FINAL` outbox row's payload and the visible room body carry the same text.
