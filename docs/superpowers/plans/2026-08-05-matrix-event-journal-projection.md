@@ -16,16 +16,29 @@ The prototype proved out and the cutover is landing on `wip/matrix-journal-ingre
 
 **Done:** the nio prerequisite (merged, released as **0.37.0**, and now resolved from PyPI rather than a branch pin); the journal, principal-bound store, admission and pending worker; the visible-message projection with bounded reads and hydration; the deterministic outbox; the crash matrix and the live Tuwunel harness; ingress cutover; delivery cutover; and **all eleven boundary contracts**, each verified against the code rather than assumed — see the status table below.
 
-**Remaining — one item.**
+**Remaining: nothing.** The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`, and with it `conversation_cache.py`, `client_thread_history.py`, `runtime_support.py`, `membership_fence.py`, `thread_bookkeeping.py` and `postgres_cursor` — 27 source modules. `ThreadReadMode` moved to `matrix/conversation_reads.py`, where the read API it describes already lives; it is a caller contract, not cache policy. `vulture_whitelist.py` came through byte-identical, so nothing was suppressed to make the deletion pass.
 
-Delete `src/mindroom/matrix/cache/`. Every reader has moved: nothing in `src/` calls a single method on the cache object, which is constructed once in `bot.py:514` and threaded through seven collaborators without ever being invoked.
+| | added | deleted | net |
+| --- | --- | --- | --- |
+| `src/` | 312 | 12,312 | **−12,000** |
+| tests and tooling | 1,149 | 20,570 | −19,421 |
+| whole branch vs `main` | 34,676 | 64,107 | **−29,431** |
 
-It is a refactor rather than a `git rm`, because the package still holds three things that are alive. `ThreadReadMode` (`cache/thread_reads.py`) is a pure enum on the journal path with 18 users outside the package, and has to move rather than die. The dead `conversation_cache` pass-through has to come out of seven dataclasses and their construction sites. And `runtime_support.py` builds an entire second backend stack — `SqliteEventCache`, `PostgresEventCache`, `EventCacheWriteCoordinator` — solely to feed a cache nothing reads; the journal opens its own backends through `event_journal_open.py`, so none of it is shared. Net removal is still roughly 10,400 production lines.
-
-**Closed since the first draft of this list.** Both of the other items here have landed, each with a mutation-tested pin:
+**Closed along the way**, each with a mutation-tested pin:
 
 - The stalled-recovery escape is no longer lossy. A skipped room records a timestamp-anchored `room_history_debt` in the same transaction as the checkpoint, and the repayment walk is debt-aware: it walks past the prompt window until it actually reaches the anchor, so a bounded stop is no longer misfiled as permanent loss.
 - The `PendingEventWorker` lane-halting race is closed, along with a second instance of the same class found afterwards: `admit_and_run` ran its callback outside the lane after admission had already woken the pump, so one `ROOM_LIFECYCLE` event could get two concurrent handlers. Both are now single-handler by construction.
+- Hydration is single-flight again. `ensure_hydrated` checked the hydration marker before awaiting but awaited twice more before starting the walk, and `_shared` cannot join a task that has already finished and been dropped — so two readers could each walk the same conversation. That is a contract violation rather than a wasted request, because a conversation is meant to hydrate at most once per conversation and membership epoch. The marker is now rechecked in `_hydrate`, the last point before any server request.
+
+### The one durable fact that still has two owners
+
+Every fact this plan set out to give a single owner now has one, with a single exception worth naming precisely rather than leaving for a future reader to rediscover.
+
+**"Is this turn finished?" is still answered by two records in two different storage substrates.** The journal is SQLite or PostgreSQL and settles a source transactionally when its answer becomes durable. The handled-turn ledger (`handled_turns.py`) is a per-agent JSON file plus process-wide in-memory state, and its persist is deferred by default — `update_handled_turn(..., wait_for_persist=False)` schedules the write and retries it on failure. Because they are different substrates, they *cannot* be written in one transaction; the pair is unguarded by construction, not by oversight.
+
+`dispatch_replay_guard.py` consults both, and that conjunction is correct and load-bearing today: the two settle at different moments, so a turn that ends without a visible delivery leaves a pending row forever, and trusting pending alone would let that stale row suppress an older message permanently — a silent no-reply, which is the exact bug class this work exists to remove. **Do not collapse it naively.**
+
+One owner is nevertheless possible, and this is unfinished work rather than an irreducible constraint. Moving `TurnRecord` into the journal as a table would make settlement and terminal-outcome recording one transaction, reduce the replay guard to a single read, and delete the JSON file, its lock sidecar, the shared in-memory state, the debounced persist and its retry timer. That is the natural next phase, and it is the same shape as this one.
 
 **Known-open, deliberately not in this PR:** `matrix_conversation` tool room reads never collapse edits. It predates this work and is not made worse by it.
 
