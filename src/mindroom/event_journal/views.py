@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         SettlementOutcome,
+        VisibleMessage,
     )
     from .projection import ProjectedEvent
 
@@ -104,6 +105,21 @@ class RelationView(Protocol):
 
     async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
         """Return whether one event was admitted, and which thread it belongs to."""
+        ...
+
+
+class PointLookupView(Protocol):
+    """Resolving one named message, with no way to read a conversation.
+
+    Separate from ``ProjectionView`` because the callers are different kinds of
+    thing. A conversation read builds a prompt; a point lookup answers "what is
+    this one event", usually to place it in a thread. Handing the second one a
+    paging API is what let the old cache be reached for whatever a caller
+    happened to want.
+    """
+
+    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
+        """Return the current visible revision of one logical message."""
         ...
 
 
@@ -290,6 +306,7 @@ __all__ = [
     "DispatchView",
     "HydrationView",
     "OutboxView",
+    "PointLookupView",
     "ProjectionView",
     "RelationView",
     "ReplayView",

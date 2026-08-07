@@ -1,10 +1,13 @@
 """Facade for Matrix conversation reads and advisory cache notifications.
 
-``MatrixConversationCache`` is the facade for conversation reads and advisory thread bookkeeping; it
-composes the read policy (``cache.thread_reads``), the three write policies (``cache.thread_writes``),
-and the mutation resolver (``thread_bookkeeping``) over one shared write coordinator.
-Bots and tools still read the event cache directly for non-thread point lookups such as agent message
-snapshots and recent room events, but all thread reads and thread bookkeeping go through this facade.
+``MatrixConversationCache`` is the facade for point lookups and advisory thread bookkeeping; it
+composes the three write policies (``cache.thread_writes``) and the mutation resolver
+(``thread_bookkeeping``) over one shared write coordinator.
+
+Point lookups no longer read the cache. ``get_event`` answers from the visible-message projection,
+which is written inside the admission transaction and already holds the revision currently on
+screen, and falls through to the homeserver for anything the projection does not have. Nothing on
+this path writes the cache back: the fill existed to be read by this same lookup.
 
 Per-turn memoization covers event lookups only. Thread reads are not memoized: the saving was one
 re-read per turn, and paying for it meant every caller reasoning about whether a degraded or stale
@@ -22,7 +25,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
@@ -40,8 +42,6 @@ from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
 )
-from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
-from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.room_history_reads import get_room_threads_page
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.event_journal import PointLookupView, VisibleMessage
     from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
@@ -100,150 +101,101 @@ class ConversationCacheProtocol(Protocol):
         """Append one live threaded event into the advisory cache when the thread is known."""
 
 
-async def _apply_cached_latest_edit(
-    event_source: dict[str, Any],
-    *,
-    room_id: str,
-    client: nio.AsyncClient,
-    event_cache: ConversationEventCache,
-    expected_membership_epoch: int | None = None,
-    trusted_sender_ids: Collection[str] = (),
-) -> dict[str, Any]:
-    """Project one cached original event into its latest visible edited state."""
-    if event_source.get("type") != "m.room.message":
-        return event_source
+def _projected_event_source(message: VisibleMessage) -> dict[str, Any]:
+    """Return the Matrix event source one projected message stands for.
 
-    event_info = EventInfo.from_event(event_source)
-    event_id = event_source.get("event_id")
-    sender = event_source.get("sender")
-    if event_info.is_edit or not isinstance(event_id, str) or not event_id or not isinstance(sender, str):
-        return event_source
+    The projection is a reduction, not a copy, so two facts have to be put back
+    before nio will recognize it as an event.
 
-    # Scoped to this event's own sender. A replacement is only legitimate from the sender of the
-    # event it replaces, and without this the newest edit from anyone wins - so this path would
-    # serve someone else's text under the author's event, while the collapsed thread read of the
-    # same cache correctly refuses it.
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id, sender=sender)
-    if latest_edit_source is None:
-        return event_source
+    The timestamp is the revision's, not the original's. A point lookup asks
+    what this message is now, and for an edited message that is the edit
+    currently on screen -- which is what the row already holds, without a
+    second lookup for "and what replaced it".
 
-    edited_body, edited_content = await extract_edit_body(
-        latest_edit_source,
-        client,
-        event_cache=event_cache,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if edited_body is None or edited_content is None:
-        return event_source
-
-    original_content = event_source.get("content", {})
-    merged_content = (
-        {key: value for key, value in original_content.items() if isinstance(key, str)}
-        if isinstance(original_content, dict)
-        else {}
-    )
-    merged_content.update(edited_content)
-    merged_content.setdefault("body", edited_body)
-
-    updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = merged_content
-
-    latest_edit_timestamp = latest_edit_source.get("origin_server_ts")
-    if isinstance(latest_edit_timestamp, int) and not isinstance(latest_edit_timestamp, bool):
-        updated_event_source["origin_server_ts"] = latest_edit_timestamp
-    return updated_event_source
+    The thread relation is restored from the row's own ``thread_id`` because an
+    edited row no longer carries one. The projection stores ``m.new_content``,
+    and a replacement's new content is specified not to repeat the relation of
+    the message it replaces. Without this an edited threaded reply would read
+    back as a room-level message, and the callers of this are exactly the ones
+    resolving which thread an event belongs to.
+    """
+    content = {key: value for key, value in message.content.items() if isinstance(key, str)}
+    if message.thread_id is not None and "m.relates_to" not in content:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": message.thread_id}
+    return {
+        "event_id": message.logical_event_id,
+        "room_id": message.room_id,
+        "sender": message.sender,
+        "type": "m.room.message",
+        "origin_server_ts": message.revision_ts,
+        "content": content,
+    }
 
 
-async def _cached_room_get_event_response(
-    client: nio.AsyncClient,
-    event_cache: ConversationEventCache,
-    *,
-    room_id: str,
-    event_source: dict[str, Any],
-    expected_membership_epoch: int | None = None,
-    trusted_sender_ids: Collection[str] = (),
-) -> nio.RoomGetEventResponse | None:
-    """Reconstruct one cached room-get-event response, applying visible edits when present."""
-    visible_event_source = await _apply_cached_latest_edit(
-        event_source,
-        room_id=room_id,
-        client=client,
-        event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if is_encrypted_media_event_source(visible_event_source):
-        parsed_media_event = parse_matrix_media_event_source(visible_event_source)
+def _room_get_event_response(event_source: dict[str, Any]) -> nio.RoomGetEventResponse | None:
+    """Parse one event source into the response shape a point lookup returns."""
+    if is_encrypted_media_event_source(event_source):
+        parsed_media_event = parse_matrix_media_event_source(event_source)
         if parsed_media_event is None:
             return None
-        cached_response = nio.RoomGetEventResponse()
+        media_response = nio.RoomGetEventResponse()
         # nio's response parser also assigns BadEvent to this Event-typed field.
-        cached_response.event = cast("nio.Event", parsed_media_event)
-        return cached_response
-    cached_response = nio.RoomGetEventResponse.from_dict(visible_event_source)
-    return cached_response if isinstance(cached_response, nio.RoomGetEventResponse) else None
+        media_response.event = cast("nio.Event", parsed_media_event)
+        return media_response
+    response = nio.RoomGetEventResponse.from_dict(event_source)
+    return response if isinstance(response, nio.RoomGetEventResponse) else None
 
 
-async def _cached_room_get_event(
+async def _projected_room_get_event(
+    store: PointLookupView,
     client: nio.AsyncClient,
-    event_cache: ConversationEventCache,
     room_id: str,
     event_id: str,
-    *,
-    expected_membership_epoch: int | None = None,
-    trusted_sender_ids: Collection[str] = (),
-) -> tuple[nio.RoomGetEventResponse | RoomGetEventError, dict[str, Any] | None]:
-    """Return one event through the persistent cache when available."""
+) -> tuple[EventLookupResult, dict[str, Any] | None]:
+    """Return one event from the visible projection, or from the homeserver.
+
+    A projection miss is not an answer. The message may predate this bot's
+    membership, or be an edit rather than a logical message, or have a body the
+    projection is still withholding -- and in every one of those the homeserver
+    knows and the projection does not, so the round trip happens exactly as it
+    did when this read was cache-first.
+
+    The second element is the source of a homeserver answer, for the caller
+    that wants to remember it, and is nothing for a projection hit because a
+    projection hit came from the store already.
+    """
     normalized_event_id = event_id.strip()
     if normalized_event_id:
         try:
-            cached_event = await event_cache.get_event(room_id, normalized_event_id)
+            projected = await store.visible_message(room_id=room_id, logical_event_id=normalized_event_id)
         except Exception as exc:
             logger.warning(
-                "Failed to read cached Matrix event",
+                "Failed to read the projected Matrix event",
                 room_id=room_id,
                 event_id=normalized_event_id,
                 error=str(exc),
             )
         else:
-            if cached_event is not None:
-                cached_response = await _cached_room_get_event_response(
-                    client,
-                    event_cache,
-                    room_id=room_id,
-                    event_source=cached_event,
-                    expected_membership_epoch=expected_membership_epoch,
-                    trusted_sender_ids=trusted_sender_ids,
-                )
-                if cached_response is not None:
-                    return cached_response, None
+            if projected is not None:
+                projected_response = _room_get_event_response(_projected_event_source(projected))
+                if projected_response is not None:
+                    return projected_response, None
                 logger.warning(
-                    "Cached Matrix event could not be reconstructed",
+                    "Projected Matrix event could not be reconstructed",
                     room_id=room_id,
                     event_id=normalized_event_id,
-                    error=str(cached_response),
                 )
 
     response = await client.room_get_event(room_id, normalized_event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
         return response, None
 
-    event = response.event
     normalized_event_source = normalize_nio_event_for_cache(
-        event,
+        response.event,
         event_id=normalized_event_id,
     )
-    visible_response = await _cached_room_get_event_response(
-        client,
-        event_cache,
-        room_id=room_id,
-        event_source=normalized_event_source,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    return (visible_response if visible_response is not None else response), normalized_event_source
+    fetched_response = _room_get_event_response(normalized_event_source)
+    return (fetched_response if fetched_response is not None else response), normalized_event_source
 
 
 @dataclass
@@ -252,6 +204,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     logger: structlog.stdlib.BoundLogger
     runtime: BotRuntimeView
+    # Point lookups answer from the visible projection, which is written inside
+    # the admission transaction. Narrowed to that one read so this facade cannot
+    # reach the rest of the store on the way past.
+    store: PointLookupView
     _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
@@ -286,10 +242,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             raise RuntimeError(msg)
         return client
 
-    def _trusted_sender_ids(self) -> frozenset[str]:
-        """Return the exact internal sender IDs allowed to override canonical visible-body reads."""
-        return current_internal_sender_ids(self.runtime.config, self.runtime.runtime_paths)
-
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
         """Memoize event lookups for the lifetime of one inbound turn."""
@@ -308,7 +260,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
     ) -> EventLookupResult:
-        """Resolve one event through per-turn memoization and the advisory cache."""
+        """Resolve one event through per-turn memoization and the visible projection."""
         normalized_event_id = event_id.strip()
         cache_key: _TurnEventCacheKey = (
             room_id,
@@ -319,83 +271,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if turn_cache is not None and cache_key in turn_cache:
             return turn_cache[cache_key]
 
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None:
-            await coordinator.wait_for_prior_room_updates(
-                room_id,
-                coordination_scope=self.runtime.event_cache.principal_id,
-            )
-
-        membership_epoch = await self._capture_membership_epoch(room_id)
-        response, fetched_event_source = await _cached_room_get_event(
+        response, _fetched_event_source = await _projected_room_get_event(
+            self.store,
             self._require_client(),
-            self.runtime.event_cache,
             room_id,
             event_id,
-            expected_membership_epoch=membership_epoch,
-            trusted_sender_ids=self._trusted_sender_ids(),
         )
-        if fetched_event_source is not None:
-            await self._persist_lookup_fill(
-                room_id=room_id,
-                event_id=normalized_event_id,
-                fetched_event_source=fetched_event_source,
-                expected_membership_epoch=membership_epoch,
-                queue_write=coordinator is not None,
-            )
         if turn_cache is not None:
             turn_cache[cache_key] = response
         return response
-
-    async def _capture_membership_epoch(self, room_id: str) -> int:
-        """Return a durable lookup generation or one that rejects every cache write."""
-        try:
-            membership_epoch = await self.runtime.event_cache.room_membership_epoch(room_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to certify Matrix lookup cache generation; continuing without cache writes",
-                room_id=room_id,
-                error=str(exc),
-            )
-            return UNCERTIFIED_MEMBERSHIP_EPOCH
-        return UNCERTIFIED_MEMBERSHIP_EPOCH if membership_epoch is None else membership_epoch
-
-    async def _persist_lookup_fill(
-        self,
-        *,
-        room_id: str,
-        event_id: str,
-        fetched_event_source: dict[str, Any],
-        expected_membership_epoch: int,
-        queue_write: bool,
-    ) -> None:
-        """Persist one point-lookup fill without reintroducing same-room barrier deadlocks."""
-
-        async def persist_lookup_event() -> None:
-            await self.runtime.event_cache.store_event(
-                event_id,
-                room_id,
-                fetched_event_source,
-                expected_membership_epoch=expected_membership_epoch,
-            )
-
-        try:
-            if queue_write:
-                await self.runtime.event_cache_write_coordinator.queue_room_update(
-                    room_id,
-                    persist_lookup_event,
-                    name="matrix_cache_store_room_get_event",
-                    coordination_scope=self.runtime.event_cache.principal_id,
-                )
-            else:
-                await persist_lookup_event()
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to cache Matrix event lookup",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
 
     async def _event_info_for_thread_resolution(
         self,
@@ -403,14 +287,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str,
     ) -> EventInfo | None:
         """Resolve one related event without memoizing pre-mutation state in the active turn."""
-        membership_epoch = await self._capture_membership_epoch(room_id)
-        response, _fetched_event_source = await _cached_room_get_event(
+        response, _fetched_event_source = await _projected_room_get_event(
+            self.store,
             self._require_client(),
-            self.runtime.event_cache,
             room_id,
             event_id,
-            expected_membership_epoch=membership_epoch,
-            trusted_sender_ids=self._trusted_sender_ids(),
         )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None

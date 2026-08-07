@@ -327,6 +327,20 @@ recover  # unused method (src/mindroom/response_delivery.py)
 _dispatch_payload_inputs_from_snapshot  # unused function (src/mindroom/response_payload_preparation.py)
 _TurnInputSnapshotCorruptionError  # unused class (src/mindroom/response_payload_preparation.py)
 
-# The reverse case: conversation-cache read methods that production no longer
-# calls, kept only because `matrix/cache/` still exists and its own tests still
-# exercise its read policy through them. Both entries go with the package.
+# DEAD, not dynamic. Every entry below is an event-cache method with no
+# remaining caller in `src/`, left standing only because `matrix/cache/` still
+# exists and its own tests still exercise it. They died when point lookups
+# moved onto the visible-message projection: `get_event` stopped reading the
+# cache and stopped filling it, which removed the last caller of `store_event`
+# and of the whole MXC-plaintext cache, whose replacement is
+# `visible_messages.content_json`.
+#
+# The phase that removes them is the deletion of `matrix/cache/`. These
+# whitelist lines and the methods they name are deleted in that same change --
+# a whitelist entry that outlives its method is how dead code becomes
+# permanent, so nothing here may be kept "just in case".
+get_latest_edit  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
+get_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
+get_mxc_texts  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
+store_mxc_text  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)
+store_event  # dead, goes with matrix/cache/ (src/mindroom/matrix/cache/)

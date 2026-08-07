@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
 
 import mindroom.matrix.cache as matrix_cache
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import thread_writes
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -19,14 +18,9 @@ from mindroom.matrix.cache.thread_writes import (
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
-from tests.conftest import (
-    runtime_paths_for,
-)
 from tests.threading_helpers import (
+    EmptyProjection,
     _conversation_runtime,
-    _conversation_runtime_config,
-    _make_client_mock,
-    _make_room_get_event_response,
     _message_mutation_event_info,
     _runtime_event_cache,
     _thread_mutation_cache_ops,
@@ -310,53 +304,12 @@ class TestMatrixConversationCacheThreadReads:
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(),
+            store=EmptyProjection(),
         )
 
         assert not hasattr(access, "_writes")
 
     # Resolver disagreement cases now stay covered by the room-barrier fallback for lookup-dependent outbound mutations.
-
-    @pytest.mark.asyncio
-    async def test_get_event_persists_inline_without_write_coordinator(self) -> None:
-        """Point lookup fills should persist inline when runtime support omitted the coordinator."""
-        room_id = "!room:localhost"
-        event_id = "$event:localhost"
-        event_source = {
-            "content": {"body": "message", "msgtype": "m.text"},
-            "event_id": event_id,
-            "origin_server_ts": 1,
-            "room_id": room_id,
-            "sender": "@user:localhost",
-            "type": "m.room.message",
-        }
-        response = _make_room_get_event_response(nio.RoomMessageText.from_dict(event_source))
-        event_cache = _runtime_event_cache()
-        config = _conversation_runtime_config()
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=BotRuntimeState(
-                client=_make_client_mock(),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                enable_streaming=True,
-                orchestrator=None,
-                event_cache=event_cache,
-                event_cache_write_coordinator=None,
-            ),
-        )
-
-        with patch(
-            "mindroom.matrix.conversation_cache._cached_room_get_event",
-            new=AsyncMock(return_value=(response, event_source)),
-        ):
-            assert await access.get_event(room_id, event_id) is response
-
-        event_cache.store_event.assert_awaited_once_with(
-            event_id,
-            room_id,
-            event_source,
-            expected_membership_epoch=0,
-        )
 
     @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_gap_marker_write_fails(self) -> None:
@@ -366,6 +319,7 @@ class TestMatrixConversationCacheThreadReads:
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
 
         await access._write_cache_ops.invalidate_known_thread(
@@ -384,6 +338,7 @@ class TestMatrixConversationCacheThreadReads:
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
 
         await access._write_cache_ops.invalidate_room_threads(
@@ -404,6 +359,7 @@ class TestMatrixConversationCacheThreadReads:
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
 
         await access._write_cache_ops.invalidate_known_thread(
@@ -425,6 +381,7 @@ class TestMatrixConversationCacheThreadReads:
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
 
         await access._write_cache_ops.invalidate_room_threads(

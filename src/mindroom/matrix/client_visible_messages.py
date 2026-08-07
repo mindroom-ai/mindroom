@@ -18,8 +18,6 @@ from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_b
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
-    from mindroom.matrix.message_content import SidecarHydrationBatch
 
 VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 
@@ -174,16 +172,12 @@ async def extract_visible_message(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Extract one visible message using runtime-derived sender trust."""
     return await extract_and_resolve_message(
         event,
         client,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
@@ -194,16 +188,12 @@ async def extract_visible_edit_body(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract one visible edit body using runtime-derived sender trust."""
     return await extract_edit_body(
         event_source,
         client,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
 
@@ -215,18 +205,11 @@ async def resolve_visible_event_source(
     fallback_body: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Resolve one event source plus its canonical visible body from runtime config."""
     normalized_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    resolved_event_source = await resolve_event_source_content(
-        normalized_event_source,
-        client,
-        event_cache=event_cache,
-        room_id=room_id,
-    )
+    resolved_event_source = await resolve_event_source_content(normalized_event_source, client)
     return resolved_event_source, visible_body_from_event_source(
         resolved_event_source,
         fallback_body,
@@ -275,19 +258,12 @@ async def bundled_replacement_body(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in _bundled_replacement_candidates(event_source):
-        resolved_candidate = await resolve_event_source_content(
-            candidate,
-            client,
-            event_cache=event_cache,
-            room_id=room_id,
-        )
+        resolved_candidate = await resolve_event_source_content(candidate, client)
         body = bundled_visible_body_preview(
             resolved_candidate,
             trusted_sender_ids=trusted_sender_ids,
@@ -316,8 +292,6 @@ async def thread_root_body_preview(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str:
     """Return the canonical preview body for one thread root event."""
@@ -330,8 +304,6 @@ async def thread_root_body_preview(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     if replacement_body is not None:
@@ -342,8 +314,6 @@ async def thread_root_body_preview(
         fallback_body=_event_fallback_body(event),
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=event_cache,
-        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     return message_preview(visible_body)
@@ -476,10 +446,6 @@ async def apply_latest_edits_to_messages(
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,
     required_thread_id: str | None = None,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
-    expected_membership_epoch: int | None = None,
-    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
@@ -502,10 +468,6 @@ async def apply_latest_edits_to_messages(
         edited_body, edited_content = await extract_edit_body(
             edit_event.source,
             client,
-            event_cache=event_cache,
-            room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
         if edited_body is None:

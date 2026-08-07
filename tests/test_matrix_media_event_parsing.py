@@ -9,9 +9,8 @@ import nio
 import pytest
 
 import mindroom.matrix.media as media_module
-from mindroom.matrix.cache import ConversationEventCache
 from mindroom.matrix.client_thread_history import parse_room_message_event
-from mindroom.matrix.conversation_cache import _cached_room_get_event_response
+from mindroom.matrix.conversation_cache import _room_get_event_response
 
 _SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
 _SYNTHETIC_FILE_IV = "SYNTHETIC_FILE_IV_DO_NOT_USE"
@@ -145,17 +144,8 @@ async def test_cached_event_reconstruction_uses_encrypted_media_boundary(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Cached point lookups should rebuild encrypted media without logging its content."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    event_cache = AsyncMock(spec=ConversationEventCache)
-    event_cache.get_latest_edit.return_value = None
-
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        response = await _cached_room_get_event_response(
-            client,
-            event_cache,
-            room_id="!synthetic:example.test",
-            event_source=_encrypted_media_source(),
-        )
+        response = _room_get_event_response(_encrypted_media_source())
 
     assert isinstance(response, nio.RoomGetEventResponse)
     assert isinstance(response.event, nio.RoomEncryptedImage)
@@ -209,16 +199,7 @@ async def test_text_message_with_file_extension_uses_cached_response() -> None:
             "file": "harmless extension metadata",
         },
     }
-    client = AsyncMock(spec=nio.AsyncClient)
-    event_cache = AsyncMock(spec=ConversationEventCache)
-    event_cache.get_latest_edit.return_value = None
-
-    response = await _cached_room_get_event_response(
-        client,
-        event_cache,
-        room_id="!synthetic:example.test",
-        event_source=event_source,
-    )
+    response = _room_get_event_response(event_source)
 
     assert isinstance(response, nio.RoomGetEventResponse)
     assert isinstance(response.event, nio.RoomMessageText)
@@ -239,17 +220,8 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
         "event_id": "$synthetic-target:example.test",
         "key": "harmless-reaction",
     }
-    client = AsyncMock(spec=nio.AsyncClient)
-    event_cache = AsyncMock(spec=ConversationEventCache)
-    event_cache.get_latest_edit.return_value = None
-
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        response = await _cached_room_get_event_response(
-            client,
-            event_cache,
-            room_id="!synthetic:example.test",
-            event_source=event_source,
-        )
+        response = _room_get_event_response(event_source)
 
     assert isinstance(response, nio.RoomGetEventResponse)
     assert isinstance(response.event, nio.ReactionEvent)
@@ -272,18 +244,9 @@ async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
             "file": {},
         },
     }
-    client = AsyncMock(spec=nio.AsyncClient)
-    event_cache = AsyncMock(spec=ConversationEventCache)
-    event_cache.get_latest_edit.return_value = None
-
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
         parsed_event = parse_room_message_event(event_source)
-        response = await _cached_room_get_event_response(
-            client,
-            event_cache,
-            room_id="!synthetic:example.test",
-            event_source=event_source,
-        )
+        response = _room_get_event_response(event_source)
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)

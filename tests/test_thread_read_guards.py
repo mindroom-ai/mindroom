@@ -18,6 +18,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
+    EmptyProjection,
     ThreadingBehaviorTestBase,
     _conversation_runtime,
     _make_client_mock,
@@ -157,7 +158,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="live_thread_lookup_unavailable",
@@ -176,6 +176,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 event_cache=event_cache,
                 coordinator=coordinator,
             ),
+            store=EmptyProjection(),
         )
         prior_write_started = asyncio.Event()
         allow_prior_write_finish = asyncio.Event()
@@ -235,6 +236,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 event_cache=event_cache,
                 coordinator=coordinator,
             ),
+            store=EmptyProjection(),
         )
         sibling_update_started = asyncio.Event()
         redaction_started = asyncio.Event()
@@ -312,6 +314,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 event_cache=event_cache,
                 coordinator=coordinator,
             ),
+            store=EmptyProjection(),
         )
         predecessor_started = asyncio.Event()
         release_predecessor = asyncio.Event()
@@ -398,6 +401,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 event_cache=event_cache,
                 coordinator=coordinator,
             ),
+            store=EmptyProjection(),
         )
         sibling_update_started = asyncio.Event()
         release_sibling_update = asyncio.Event()

@@ -26,6 +26,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
     SettlementOutcome,
+    VisibleMessage,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
@@ -412,6 +413,21 @@ async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache
     return reopened_cache
 
 
+class EmptyProjection:
+    """A projection holding nothing, for tests that never point-look-up an event.
+
+    Point lookups fall through to the homeserver on a projection miss, so a
+    store that always misses gives these tests the client-only behavior they
+    were written against. A test that means to prove something about the
+    projection seeds a real store instead.
+    """
+
+    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
+        """Return nothing, so every point lookup reaches the homeserver."""
+        del room_id, logical_event_id
+        return None
+
+
 def _conversation_runtime(
     *,
     client: nio.AsyncClient | None = None,
@@ -507,6 +523,7 @@ async def _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(  # noqa
             event_cache=event_cache,
             coordinator=coordinator,
         ),
+        store=EmptyProjection(),
     )
     real_mark_room_threads_gap = event_cache.mark_room_threads_gap
 

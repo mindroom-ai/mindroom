@@ -483,36 +483,6 @@ class TestSingleEventReadObeysTheSameSenderRule:
         assert latest["event_id"] == "$zzz", "the tie broke on insertion order, not event ID"
         assert _winning_edit_ids_by_original(read)["$victim"] == latest["event_id"]
 
-    @pytest.mark.asyncio
-    async def test_the_single_event_projection_does_not_render_a_foreign_edit(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """The seam that actually served the foreign body, not just the cache API beneath it."""
-        from mindroom.matrix.conversation_cache import _apply_cached_latest_edit  # noqa: PLC0415
-
-        author = "@author:localhost"
-        attacker = "@attacker:localhost"
-        original = _message_event("$victim", 2_000, sender=author, body="real", thread_id=_THREAD_ID)
-        await _seed_thread(
-            event_cache,
-            [
-                _message_event(_THREAD_ID, 1_000, sender=author),
-                original,
-                _message_event("$forged", 9_000, sender=attacker, body="attacker text", edit_of="$victim"),
-            ],
-        )
-
-        projected = await _apply_cached_latest_edit(
-            dict(original),
-            room_id=_ROOM_ID,
-            client=cast("nio.AsyncClient", None),
-            event_cache=event_cache,
-            expected_membership_epoch=await event_cache.room_membership_epoch(_ROOM_ID),
-        )
-
-        assert projected["content"]["body"] == "real", "the single-event projection rendered someone else's replacement"
-
 
 class TestCollapsedReadCost:
     """One query per read, no matter how large or how edit-dense the thread is."""

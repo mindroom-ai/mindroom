@@ -1213,7 +1213,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
