@@ -16,17 +16,24 @@ The prototype proved out and the cutover is landing on `wip/matrix-journal-ingre
 
 **Done:** the nio prerequisite (merged, released as **0.37.0**, and now resolved from PyPI rather than a branch pin); the journal, principal-bound store, admission and pending worker; the visible-message projection with bounded reads and hydration; the deterministic outbox; the crash matrix and the live Tuwunel harness; ingress cutover; delivery cutover; and **all eleven boundary contracts**, each verified against the code rather than assumed — see the status table below.
 
-**Remaining: nothing.** The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`, and with it `conversation_cache.py`, `client_thread_history.py`, `runtime_support.py`, `membership_fence.py`, `thread_bookkeeping.py` and `postgres_cursor` — 27 source modules. `ThreadReadMode` moved to `matrix/conversation_reads.py`, where the read API it describes already lives; it is a caller contract, not cache policy. `vulture_whitelist.py` came through byte-identical, so nothing was suppressed to make the deletion pass.
+**Remaining: two items, both found by independent review after this line first said "nothing".** An approval card is still sent before its recovery row is written, so a crash in that window leaves a clickable card no owner can resolve -- a regression from `main`, which recovered such cards by scanning the general event cache this plan deletes. And terminal truth still has two owners; see the dual-authority section below. An earlier version of this line claimed completion while the same document described both gaps further down, which is how a status summary stops being evidence.
+
+The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`, and with it `conversation_cache.py`, `client_thread_history.py`, `runtime_support.py`, `membership_fence.py`, `thread_bookkeeping.py` and `postgres_cursor` — 27 source modules. `ThreadReadMode` moved to `matrix/conversation_reads.py`, where the read API it describes already lives; it is a caller contract, not cache policy. `vulture_whitelist.py` came through byte-identical, so nothing was suppressed to make the deletion pass.
+
+These are whole-tree figures including deleted tests and tooling. The
+production-source number is the one that answers "did this simplify anything",
+and it is smaller than the headline: `git diff --numstat origin/main...HEAD --
+src/mindroom` is 12,378 added against 20,915 deleted, **net −8,537**.
 
 | | added | deleted | net |
 | --- | --- | --- | --- |
-| `src/` | 312 | 12,312 | **−12,000** |
+| `src/mindroom` (production) | 12,378 | 20,915 | **−8,537** |
 | tests and tooling | 1,149 | 20,570 | −19,421 |
 | whole branch vs `main` | 34,676 | 64,107 | **−29,431** |
 
 **Closed along the way**, each with a mutation-tested pin:
 
-- The stalled-recovery escape is no longer lossy. A skipped room records a timestamp-anchored `room_history_debt` in the same transaction as the checkpoint, and the repayment walk is debt-aware: it walks past the prompt window until it actually reaches the anchor, so a bounded stop is no longer misfiled as permanent loss.
+- The stalled-recovery escape is no longer lossy. A skipped room records a timestamp-anchored `room_history_debt`, and the repayment walk is debt-aware: it walks past the prompt window until it actually reaches the anchor, so a bounded stop is no longer misfiled as permanent loss. The debt is *ordered* before the checkpoint under the same lock, not written in the same transaction as it — an earlier version of this line claimed the latter, and the two are not interchangeable. The debt lives in the journal database and the checkpoint in the continuity files, so no transaction spans them; what makes the pair safe is the ordering plus failing closed. Crash between the two and the debt describes a gap the un-advanced cursor re-syncs anyway, costing one redundant walk. Reverse the order and the watermark moves past history nothing is left to ask for. This pair is `reconciled`, not `transactional`.
 - The `PendingEventWorker` lane-halting race is closed, along with a second instance of the same class found afterwards: `admit_and_run` ran its callback outside the lane after admission had already woken the pump, so one `ROOM_LIFECYCLE` event could get two concurrent handlers. Both are now single-handler by construction.
 - Hydration is single-flight again. `ensure_hydrated` checked the hydration marker before awaiting but awaited twice more before starting the walk, and `_shared` cannot join a task that has already finished and been dropped — so two readers could each walk the same conversation. That is a contract violation rather than a wasted request, because a conversation is meant to hydrate at most once per conversation and membership epoch. The marker is now rechecked in `_hydrate`, the last point before any server request.
 
@@ -113,13 +120,35 @@ The harness is already there, which an earlier note in this file denied: `FakeOu
 
 The decision the earlier version of this note deferred turned out to be a false choice. It framed recovery as picking between refusing to resend — silent loss — and resending under a *fresh* transaction ID, which duplicates if the original landed and also breaks the deterministic-ID invariant the outbox rests on. There is a third option, and it needs no new ID: keep the deterministic one, and when the device has changed, read the room. A transaction ID is per device, so reusing the same string on a new device is still deterministic and still deduplicates that device's own later retries.
 
-So `response_outbox.sending_device_id` is written by the claim, in the same statement that marks the row attempted and for the same reason: a crash mid-send must leave behind the fact that this device may already hold the ID. `ResponseDelivery.flush` compares it against the device this process logged in as, and on a mismatch asks `find_response_event_ids_via_room_messages` — the same scan `VisibleResponseReconciler` uses — for an answer already in the room, adopting it if there is one and sending only if there is not.
+So `response_outbox.sending_device_id` records which device's transaction-ID namespace a row was attempted in. `ResponseDelivery.flush` compares it against the device this process logged in as, and on a mismatch asks `find_response_event_ids_via_room_messages` — the same scan `VisibleResponseReconciler` uses — for an answer already in the room, adopting it if there is one and sending only if there is not.
 
-Three properties keep it cheap and honest. Writing the device *at claim* rather than after a successful send bounds the scan to once per device change: a row that keeps failing to send looks like an ordinary resend from the second pass onward, which matters because recovery runs after every sync response. An unknown device on either side — a pre-column row, or a process that has not logged in — resends exactly as before rather than paying a scan to rule out a change nobody has evidence of. And an edit is exempt, because a repeated `m.replace` resolves to the same visible message either way.
+*When* that column is written is the part this note originally got wrong, and the error was not cosmetic. It first said the claim writes it, in the same statement that marks the row attempted. Implemented that way (`efd3c5b71`), a room lookup that raised left the row unacknowledged but already relabelled with the current device, so the next pass compared the marker against itself, concluded nothing had changed, skipped the lookup and posted the answer a second time — reproduced, not argued. Claiming freezes the payload; it does not mean this device is going to send. `claim()` therefore reads the row *before* marking it and returns that pre-claim view, and `record_sending_device` is a separate write called only once a send is actually about to happen (`response_delivery.py:197-207`, `outbox.py:131-138`).
+
+Three properties keep it cheap and honest. Writing the device before the send rather than after a *successful* one bounds the scan to once per device change: a crash mid-send still leaves behind the fact that this device may hold the ID, so a row that keeps failing to send looks like an ordinary resend from the second pass onward — which matters because recovery runs after every sync response. The failure that does *not* advance the marker is the scan itself, so a lookup that cannot run stays owed. An unknown device on either side — a pre-column row, or a process that has not logged in — resends exactly as before rather than paying a scan to rule out a change nobody has evidence of. And an edit is exempt, because a repeated `m.replace` resolves to the same visible message either way.
 
 Two limits, stated rather than papered over. The scan finds genuine replies, so a delivery with no source to reply to — a scheduled message, a hook notice — reads as "not delivered" and is sent, which is the pre-existing blind resend and no worse. And there is still no retry horizon: a permanently failing send is retried on every sync response forever. That is deliberate. Every terminal state available is "drop the answer", the membership fence already withdraws rows for rooms the bot has left, and the once-per-device-change bound removes the sharp edge this fix could otherwise have added.
 
 The live proof carried the same weakness the code did: it demonstrated device-scoped deduplication using a second *registered account*, which would produce a second event whether or not the server keyed on the device. It now re-logs in the same account and refuses to run if the server returns the device it already had (`f12ba305a`).
+
+**The dual-authority collapse, mapped. Step 1 done** (`d5497d7dd`).
+
+`turn_records` now exists in the journal's own database: agent-scoped rather than principal-scoped, because a turn record is proof that a message was answered and that stays true across a re-login, while every other table here is only meaningful beside the sync that produced it. Transactionality needs one database, not one scope key. One row per event that indexes a record, because a coalesced batch is reachable from any of its sources. Nothing reads it yet.
+
+Step 2 is swapping `HandledTurnLedger`'s persistence onto it, and the whole surface has been read rather than estimated:
+
+- `_LedgerState` is keyed by responses-file path; it becomes agent-name.
+- `_ensure_loaded_locked` -> `load_all()` plus `TurnRecordCodec` decode.
+- `_persist_records` -> `upsert()` per record. The advisory file lock goes: the database owns concurrency, and the whole-file read-modify-write it protected disappears with it.
+- `_cleanup_old_events` -> compute the cleaned set in memory, then `forget()` the dropped ids.
+- `_write_responses_file_locked` and the entire quarantine path (`malformed`, `structurally invalid`, `unsupported-schema`, non-UTF8) delete. Those exist because a JSON file can be corrupt; a database has its own integrity.
+- A loop bridge, about ten lines: the persist drain runs on a `ThreadPoolExecutor` thread with no running loop, so it needs `run_coroutine_threadsafe` against a loop captured in `__post_init__`. This keeps database I/O off the event loop exactly as the thread pool does today -- the loop only schedules, and SQLite still offloads.
+- A one-time import of an existing responses file, provable lossless by codec round-trip because it is the same codec.
+
+Test cost, measured: 69 `HandledTurnLedger(...)` constructions, of which most route through one helper at `tests/test_handled_turns.py:45`; 14 tests touch the file directly, and 6 of those are quarantine tests that delete rather than move. An earlier note in this file said "69 rewrites" -- that was wrong by a factor of five.
+
+Step 2 changes no call sites: all 21 terminal-record writers keep the same synchronous API. Authority collapses in step 3, when the settlement and the record commit together.
+
+Why it must land atomically: a half-migrated dedupe substrate answers users twice. The live fuzz's `canonical_agent_replies` count is the check that catches it.
 
 **Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization.
 
