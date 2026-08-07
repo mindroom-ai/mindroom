@@ -38,12 +38,13 @@ async def settled[T](work: asyncio.Future[T]) -> T:
     cancellation: asyncio.CancelledError | None = None
     while not work.done():
         try:
-            await asyncio.shield(work)
+            # Waiting rather than awaiting ``work`` directly: this must not
+            # cancel it, and must not unwind on its failure before the loop has
+            # seen that it finished. The only thing that can be raised here is
+            # this await's own cancellation.
+            await asyncio.wait({work})
         except asyncio.CancelledError as error:
-            # The shield reports this await's cancellation, never the worker's.
             cancellation = error
-        except BaseException:  # noqa: BLE001 - `work` holds the failure to re-raise below
-            pass
     if cancellation is not None:
         raise cancellation
     return work.result()
