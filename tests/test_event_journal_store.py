@@ -16,6 +16,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -1565,15 +1566,20 @@ class TestMembershipEpoch:
 _QUEUE_TIMEOUT_SECONDS = 20.0
 _QUEUE_POLL_SECONDS = 0.01
 
-# Connections parked on a heavyweight lock in this database. `current_database`
-# scopes the count to this test: an xdist worker owns its own database, and the
-# rest of a worker's connections are idle between statements rather than
-# waiting on anything.
-_QUEUED_WRITERS = """
+# Racer connections parked on a heavyweight lock. `pg_stat_activity` is
+# cluster-wide, so the count is scoped by the application name the two rival
+# stores connect under, minted per fixture and shared by nothing else -- not
+# the connection holding the row, not the one running this query, not another
+# xdist worker. Scoping by database would work today, since a worker gets its
+# own, but it would be reading isolation off the fixture's topology instead of
+# off the connections being counted: if that topology ever narrowed to a shared
+# database, an unrelated lock waiter would inflate the count, the row would be
+# released before both racers were behind it, and the late one would decline
+# against a bound row -- the test passing for the one reason it exists to rule
+# out, and passing silently.
+_QUEUED_RACERS = """
     SELECT count(*) FROM pg_stat_activity
-    WHERE datname = current_database()
-      AND wait_event_type = 'Lock'
-      AND pid <> pg_backend_pid()
+    WHERE application_name = %s AND wait_event_type = 'Lock'
 """
 
 
@@ -1590,6 +1596,9 @@ class RivalStores:
     first: EventJournalStore
     second: EventJournalStore
     database_url: str
+    # What both stores report as their `application_name`, and the only handle
+    # that tells their connections apart from every other one on the server.
+    racer_application_name: str
 
 
 @pytest_asyncio.fixture
@@ -1601,12 +1610,23 @@ async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores,
     store over the same file is a second queue onto the same serialized write
     -- there is no second connection to race, and forcing one would only prove
     something about the fixture.
+
+    Only the stores carry the application name. The connection that holds the
+    row and the one that watches for waiters use the bare DSN, so neither can
+    be mistaken for a racer it is supposed to be observing.
     """
     database_url = postgres_journal_schema_url(postgres_journal_url)
-    first = EventJournalStore.open_postgres(database_url)
-    second = EventJournalStore.open_postgres(database_url)
+    application_name = f"mindroom-acknowledgement-race-{uuid.uuid4().hex}"
+    racer_url = f"{database_url}&application_name={application_name}"
+    first = EventJournalStore.open_postgres(racer_url)
+    second = EventJournalStore.open_postgres(racer_url)
     try:
-        yield RivalStores(first=first, second=second, database_url=database_url)
+        yield RivalStores(
+            first=first,
+            second=second,
+            database_url=database_url,
+            racer_application_name=application_name,
+        )
     finally:
         await first.close()
         await second.close()
@@ -1637,30 +1657,30 @@ def _outbox_row_held(database_url: str, *, principal_id: str, turn_id: str) -> I
             connection.rollback()
 
 
-async def _await_queued_writers(database_url: str, *, expected: int) -> None:
-    """Wait until ``expected`` connections are parked on a lock in this database.
+async def _await_queued_racers(database_url: str, *, application_name: str, expected: int) -> None:
+    """Wait until ``expected`` of that application's connections are parked on a lock.
 
     A condition, not a delay. The row may only be released once every racer is
     behind it, because a racer that has not started yet would read the bound
     row and decline on its own -- which is the losing implementation passing
     for a reason that has nothing to do with what it does under contention.
     """
-    await asyncio.to_thread(_watch_queued_writers, database_url, expected)
+    await asyncio.to_thread(_watch_queued_racers, database_url, application_name, expected)
 
 
-def _watch_queued_writers(database_url: str, expected: int) -> None:
-    """Poll until enough connections are waiting, or say how many turned up."""
+def _watch_queued_racers(database_url: str, application_name: str, expected: int) -> None:
+    """Poll until enough racers are waiting, or say how many turned up."""
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
 
     deadline = time.monotonic() + _QUEUE_TIMEOUT_SECONDS
     with psycopg.connect(database_url, autocommit=True) as connection:
         while True:
-            row = connection.execute(_QUEUED_WRITERS).fetchone()
+            row = connection.execute(_QUEUED_RACERS, (application_name,)).fetchone()
             queued = 0 if row is None else int(row[0])
             if queued >= expected:
                 return
             if time.monotonic() > deadline:
-                msg = f"only {queued} of {expected} writers queued on the held outbox row"
+                msg = f"only {queued} of {expected} racers queued on the held outbox row"
                 raise AssertionError(msg)
             time.sleep(_QUEUE_POLL_SECONDS)
 
@@ -1837,7 +1857,11 @@ class TestOutbox:
                 asyncio.create_task(acknowledge(first, "$first")),
                 asyncio.create_task(acknowledge(second, "$second")),
             ]
-            await _await_queued_writers(rival_stores.database_url, expected=len(racers))
+            await _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=len(racers),
+            )
         reported = await asyncio.gather(*racers)
 
         stored = await first.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
