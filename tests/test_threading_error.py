@@ -31,6 +31,7 @@ from tests.threading_helpers import (
     _matrix_room,
     _runtime_bound_config,
     _runtime_event_cache,
+    seed_hydrated_conversation,
     thread_history_result,
 )
 
@@ -264,6 +265,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     {"event_id": "$response:localhost"},
                     room_id="!test:localhost",
                 ),
+            )
+
+            # The reply target is a plain message with no thread under it, and
+            # a hydrated conversation is what makes that a fact rather than an
+            # absence. An unhydrated one leaves the root unproven, and unproven
+            # roots answer at room level instead of opening a thread.
+            await seed_hydrated_conversation(
+                bot,
+                room_id=room.room_id,
+                thread_id="$some_other_msg:localhost",
             )
 
             # Process the command

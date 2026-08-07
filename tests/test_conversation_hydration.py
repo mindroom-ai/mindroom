@@ -1496,6 +1496,64 @@ class TestReadModes:
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
 
+class TestUnreadHistory:
+    """Only hydration proves a conversation has nothing behind it."""
+
+    def _reader(self, store: PrincipalStore) -> ConversationReader:
+        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
+
+    async def test_an_unhydrated_conversation_cannot_prove_it_is_fresh(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A room's first admitted event says nothing about what preceded it.
+
+        This is what a cutover looks like from inside the journal: a room with
+        years of Matrix history behind it, one row in the table, and nothing
+        local that distinguishes it from a room created a second ago. Counting
+        rows answers "fresh" here and only stops being wrong once a second
+        event lands, which is one turn after the answer was needed.
+        """
+        await admit_all(alice, [raw("$first", "first event this journal ever saw")])
+
+        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+
+    async def test_a_hydrated_conversation_is_proven_fresh(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A walk that ran is the evidence, so a hydrated conversation is not degraded.
+
+        The mirror of the case above: without it, "may have unread history"
+        could be hard-coded true and every dispatch read would degrade forever.
+        """
+        await admit_all(alice, [raw("$first", "first event this journal ever saw")])
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert not await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+
+    async def test_hydration_is_scoped_to_one_conversation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Hydrating the room says nothing about a thread inside it."""
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id="$root")
+
+
 class TestWindowTruncation:
     """A bounded page is not the whole conversation."""
 

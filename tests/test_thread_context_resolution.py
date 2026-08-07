@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 
-from mindroom.event_journal import ConversationPage
+from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
@@ -83,6 +83,20 @@ def _room_get_event_by_id(*responses: nio.RoomGetEventResponse) -> AsyncMock:
         return by_id.get(event_id, nio.RoomGetEventError("missing", status_code="M_NOT_FOUND"))
 
     return AsyncMock(side_effect=_lookup)
+
+
+def _visible_message(room_id: str, event_id: str, *, thread_id: str | None, body: str) -> VisibleMessage:
+    """Return one projected message as a hydrated conversation page would carry it."""
+    return VisibleMessage(
+        logical_event_id=event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender="@user:localhost",
+        created_ts=1234567880,
+        revision_event_id=event_id,
+        revision_ts=1234567880,
+        content={"msgtype": "m.text", "body": body},
+    )
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
@@ -1377,6 +1391,79 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context_result.context.thread_id is None
 
     @pytest.mark.asyncio
+    async def test_dispatch_first_journal_event_in_an_existing_room_keeps_the_thread(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A conversation nobody hydrated cannot report itself complete on its room's first event.
+
+        The cutover shape: a room full of Matrix history whose journal is
+        empty, so the very first admitted event is the only row in it. Nothing
+        local knows the reply target is a thread root, and a dispatch-safe read
+        that calls that absence "complete" turns the room's real thread into
+        room-level traffic for exactly one turn -- the turn a user is waiting on.
+        """
+        room = _matrix_room(name="Test Room")
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to a thread root the journal never saw",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        root_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "root", "msgtype": "m.text"},
+                "event_id": "$thread_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        # The inbound event is the only row the journal holds for this room,
+        # which is what makes "is there another event here" answer "no" about a
+        # room that predates the journal entirely.
+        await seed_unhydrated_room_event(
+            bot,
+            room_id=room.room_id,
+            event_id="$event:localhost",
+            body="plain reply to a thread root the journal never saw",
+        )
+        # What hydration would install: the thread the homeserver has had all
+        # along, reachable only once a read admits it does not already know.
+        hydrated_thread = ConversationPage(
+            messages=(
+                _visible_message(room.room_id, "$thread_root:localhost", thread_id=None, body="root"),
+                _visible_message(room.room_id, "$reply:localhost", thread_id="$thread_root:localhost", body="reply"),
+            ),
+            refresh_pending=(),
+            next_cursor=None,
+        )
+
+        with (
+            patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
+            patch(
+                "mindroom.matrix.conversation_reads.ConversationReader.read_strict",
+                new=AsyncMock(return_value=hydrated_thread),
+            ) as mock_strict_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context_result.context.is_thread is True
+        assert context_result.context.thread_id == "$thread_root:localhost"
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.stable_target.source_thread_id == "$thread_root:localhost"
+        assert mock_strict_read.await_count >= 1
+
+    @pytest.mark.asyncio
     async def test_advisory_context_missing_related_reply_demotes_room_level(
         self,
         bot: AgentBot,
@@ -1754,7 +1841,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_access.assert_called_once_with(
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="coalescing_thread_id",
-            source_event_id="$event:localhost",
+            requires_complete_history=True,
         )
 
     @pytest.mark.asyncio

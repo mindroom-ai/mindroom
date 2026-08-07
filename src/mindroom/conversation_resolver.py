@@ -525,7 +525,7 @@ class ConversationResolver:
                 access=self._thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="coalescing_thread_id",
-                    source_event_id=event.event_id,
+                    requires_complete_history=True,
                 ),
             )
         except Exception as exc:
@@ -553,7 +553,7 @@ class ConversationResolver:
         access = self._thread_membership_access(
             mode=mode,
             caller_label=caller_label,
-            source_event_id=event_id,
+            requires_complete_history=True,
         )
         resolution = await resolve_event_thread_membership(
             room_id,
@@ -592,7 +592,7 @@ class ConversationResolver:
                 caller_label=caller_label,
                 # Reaction hook context wants the target's thread, not its
                 # conversation, so an incomplete page answers it just as well.
-                source_event_id=None,
+                requires_complete_history=False,
             ),
         )
 
@@ -601,16 +601,15 @@ class ConversationResolver:
         *,
         mode: ThreadReadMode,
         caller_label: str,
-        source_event_id: str | None,
+        requires_complete_history: bool,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver.
 
-        ``source_event_id`` has no default on purpose. A dispatch-safe read can
-        only tell a conversation it has all of from one it merely has nothing
-        newer than by asking whether the room holds an admitted event this
-        conversation never hydrated, and that question needs the source event
-        to exclude. Passing ``None`` is a claim that the caller does not need
-        completeness, so it has to be written down at the call site.
+        ``requires_complete_history`` has no default on purpose. A dispatch-safe
+        read never waits, so an unhydrated conversation can only report that it
+        does not know whether it holds everything. Passing ``False`` is a claim
+        that the caller is content with whatever is already local, and that has
+        to be written down at the call site rather than inherited by accident.
         """
         return thread_messages_thread_membership_access(
             lookup_thread_id=self.deps.relations.thread_id,
@@ -620,7 +619,7 @@ class ConversationResolver:
                 thread_id,
                 mode=mode,
                 caller_label=caller_label,
-                source_event_id=source_event_id,
+                requires_complete_history=requires_complete_history,
             ),
         )
 
@@ -631,7 +630,7 @@ class ConversationResolver:
         *,
         mode: ThreadReadMode,
         caller_label: str,
-        source_event_id: str | None = None,
+        requires_complete_history: bool = True,
     ) -> ThreadReadResult:
         """Resolve one thread read against the conversation projection.
 
@@ -661,12 +660,8 @@ class ConversationResolver:
         # strict re-read of a conversation it had already proven whole.
         source_degraded = (
             not strict
-            and source_event_id is not None
-            and await reader.may_have_unread_history(
-                room_id=room_id,
-                thread_id=thread_id,
-                source_event_id=source_event_id,
-            )
+            and requires_complete_history
+            and await reader.may_have_unread_history(room_id=room_id, thread_id=thread_id)
         )
         page = await (reader.read_strict if strict else reader.read)(
             room_id=room_id,
@@ -760,7 +755,6 @@ class ConversationResolver:
                 thread_id,
                 mode=mode,
                 caller_label=caller_label,
-                source_event_id=event_id,
             )
         if mode.dispatch_safe and is_thread_history_degraded(thread_messages):
             # Proven threads must not plan from cold-cache/degraded history; wait for Matrix-backed refill.
@@ -769,7 +763,6 @@ class ConversationResolver:
                 thread_id,
                 mode=ThreadReadMode.STRICT_FULL,
                 caller_label=f"{caller_label}_strict_thread_fallback",
-                source_event_id=event_id,
             )
         return _ThreadContextLookup.proven_thread(
             thread_id,
@@ -980,7 +973,6 @@ class ConversationResolver:
         room_id: str,
         thread_id: str,
         *,
-        source_event_id: str,
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Read one thread without waiting for the homeserver.
@@ -993,7 +985,6 @@ class ConversationResolver:
             thread_id,
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label=caller_label,
-            source_event_id=source_event_id,
         )
 
     async def fetch_thread_history(
@@ -1009,5 +1000,4 @@ class ConversationResolver:
             thread_id,
             mode=ThreadReadMode.STRICT_FULL,
             caller_label=caller_label,
-            source_event_id=None,
         )

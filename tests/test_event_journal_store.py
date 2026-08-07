@@ -125,18 +125,6 @@ async def bodies(store: PrincipalStore, *, thread_id: str | None = None, limit: 
     return [str(m.content["body"]) for m in page.messages]
 
 
-async def test_other_admitted_room_event_excludes_the_current_event(alice: PrincipalStore) -> None:
-    """Current admission alone means fresh; any other room admission means known history."""
-    await admit(alice, "$current")
-
-    assert not await alice.has_other_admitted_room_event(room_id=ROOM, event_id="$current")
-
-    await admit(alice, "$prior", event_class=EventClass.CONTEXT_ONLY)
-
-    assert await alice.has_other_admitted_room_event(room_id=ROOM, event_id="$current")
-    assert not await alice.has_other_admitted_room_event(room_id=OTHER_ROOM, event_id="$current")
-
-
 class TestPrincipalIsolation:
     """One database, many bots, no way to reach across."""
 

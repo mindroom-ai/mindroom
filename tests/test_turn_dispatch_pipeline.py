@@ -100,7 +100,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
-from tests.threading_helpers import seed_thread_history
+from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -860,6 +860,11 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
         empty_page = ConversationPage(messages=(), refresh_pending=(), next_cursor=None)
+        # A snapshot read is allowed to skip the homeserver only when hydration
+        # already proved what the thread holds. Leaving the journal empty would
+        # make this pass because nothing was known rather than because the
+        # command declined to wait.
+        await seed_hydrated_conversation(bot, room_id=room.room_id, thread_id="$thread_root")
 
         with (
             patch.object(
