@@ -35,9 +35,10 @@ from mindroom.commands.config_confirmation import (
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.event_journal_open import open_event_journal_store
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
@@ -1769,6 +1770,44 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
         "cleared": "openai-realtime",
         "inherited": "openai-realtime",
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_refuses_a_journal_move_with_the_api_disabled(tmp_path: Path) -> None:
+    """`mindroom run --no-api` opens the journal and publishes no API snapshot at all.
+
+    The chat `!config` command and the config tools still write through the
+    same persist path, so a rule that decides "has anything adopted a journal?"
+    from the list of registered API apps answers "no" for a process that has
+    one open and is being asked to move it, and the move lands on disk.
+    """
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "event_journal": {"backend": "sqlite", "database_url": "postgresql://journal.invalid/moved"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    # Exactly what the orchestrator does before the first bot starts, API or not.
+    open_event_journal_store(
+        load_config(runtime_paths).event_journal,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_paths.storage_root,
+    )
+    assert not [
+        state for state in config_lifecycle._registered_api_states() if state.snapshot.runtime_paths == runtime_paths
+    ], "this runtime must publish no API snapshot, or the test proves nothing about --no-api"
+
+    response = await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+
+    assert "event_journal cannot change while MindRoom is running" in response
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["event_journal"]["backend"] == "sqlite", "the refused journal move was written to the config file"
 
 
 @pytest.mark.asyncio

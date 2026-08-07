@@ -136,12 +136,13 @@ path = "mindroom.event_journal_change"
 depends_on = ["mindroom.logging_config"]
 visibility = [
     "mindroom.api.config_lifecycle",
+    "mindroom.event_journal_open",
     "mindroom.orchestration.config_lifecycle",
 ]
 
 [[modules]]
 path = "mindroom.event_journal_open"
-depends_on = ["mindroom.event_journal"]
+depends_on = ["mindroom.event_journal", "mindroom.event_journal_change"]
 visibility = [
     "mindroom.bot",
     "mindroom.thread_export.service",

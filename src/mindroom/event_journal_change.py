@@ -21,6 +21,14 @@ that never changed. A writer that does not refuse is worse still, because it
 moves published state onto the new journal and every later comparison then
 agrees with it, retiring the rule for the rest of the process.
 
+Which journal is open is owned here, by the module that opens it, and not by any
+of those three. Each of them only holds a view of the config file, and a view
+can be missing: ``mindroom run --no-api`` starts the orchestrator with no API
+snapshot at all, and the chat ``!config`` command and the config tools still
+write through the same persist path, so an authority that asks "is an API
+snapshot published?" answers "no journal is open" for a process that has one
+open and is writing to it.
+
 What counts as a move is only what changes the database actually opened. The
 field carries settings that ``open_event_journal_store`` never reads for the
 backend in force, and refusing over those would stop unrelated reloads for a
@@ -30,16 +38,26 @@ config that later reloads are compared against.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.config.matrix import EventJournalConfig
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+# Keyed by config path rather than by the whole runtime context: the runtime
+# context carries the resolution environment, which is not part of which
+# database got opened, and two authorities resolving the same config file
+# independently must land on the same key.
+_OPENED_DATABASES: dict[Path, tuple[str, str | None]] = {}
+_OPENED_DATABASES_LOCK = threading.Lock()
 
 EVENT_JOURNAL_CHANGE_REASON = "the event journal database cannot change without restarting the process"
 EVENT_JOURNAL_CHANGE_MESSAGE = (
@@ -72,6 +90,43 @@ def _opened_database(
         return ("postgres", None)
 
 
+def record_opened_event_journal(
+    journal_config: EventJournalConfig,
+    *,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Record the database this process just opened for ``runtime_paths``.
+
+    Called from the one function that opens the store, so the fact is written
+    where it becomes true rather than inferred from whichever authority happens
+    to hold a config view.
+    """
+    with _OPENED_DATABASES_LOCK:
+        _OPENED_DATABASES[runtime_paths.config_path] = _opened_database(journal_config, runtime_paths)
+
+
+def _committed_database(
+    current_config: Config | None,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, str | None] | None:
+    """Return the database this process is committed to, or ``None`` if none yet.
+
+    A recorded open wins over the caller's adopted config. The two agree once a
+    journal is open, because the config it was opened from is the adopted one
+    and no move past that point is accepted. Where they can disagree is the
+    startup window before the store opens, in which the API may have adopted a
+    file the orchestrator has not read yet; there the record names the database
+    that actually got opened, which is the one that cannot move.
+    """
+    with _OPENED_DATABASES_LOCK:
+        opened = _OPENED_DATABASES.get(runtime_paths.config_path)
+    if opened is not None:
+        return opened
+    if current_config is None:
+        return None
+    return _opened_database(current_config.event_journal, runtime_paths)
+
+
 def refuses_event_journal_change(
     current_config: Config | None,
     new_config: Config,
@@ -81,17 +136,20 @@ def refuses_event_journal_change(
 ) -> bool:
     """Return whether ``new_config`` moves a journal this process already opened.
 
-    ``current_config`` is ``None`` when nothing has been adopted yet -- the
-    first load of a process -- where the journal ``new_config`` names is the one
-    about to be opened and there is nothing to refuse.
+    ``current_config`` is the caller's adopted config, consulted only until the
+    store is actually opened; passing ``None`` means the caller has adopted
+    nothing and is content to be answered from the opened-journal record alone.
+    Both being absent -- the first load of a process, before anything is open --
+    means the journal ``new_config`` names is the one about to be opened and
+    there is nothing to refuse.
 
     Logs the refusal here so one decision produces one message, whichever caller
     reached it first. The resolved DSN never reaches the log: it can carry
     credentials, and whether it changed is the whole of what a reader needs.
     """
-    if current_config is None:
+    opened = _committed_database(current_config, runtime_paths)
+    if opened is None:
         return False
-    opened = _opened_database(current_config.event_journal, runtime_paths)
     requested = _opened_database(new_config.event_journal, runtime_paths)
     if opened == requested:
         return False
@@ -109,5 +167,6 @@ def refuses_event_journal_change(
 __all__ = [
     "EVENT_JOURNAL_CHANGE_MESSAGE",
     "EVENT_JOURNAL_CHANGE_REASON",
+    "record_opened_event_journal",
     "refuses_event_journal_change",
 ]

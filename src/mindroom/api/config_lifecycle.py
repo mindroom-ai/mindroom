@@ -335,14 +335,13 @@ def persist_runtime_validated_config(
     which is precisely the split the rule exists to prevent -- and it would move
     published state onto the new journal, so the disk loader's comparison would
     then agree with it and never refuse again.
+
+    The rule runs whether or not this process publishes API snapshots. Under
+    ``mindroom run --no-api`` there are none to iterate, and the orchestrator
+    has still opened the journal that these same writers can reach.
     """
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
-    if not matching_states:
-        # No published snapshot means no runtime in this process to disagree
-        # with: nothing has adopted a journal here, so there is none to move.
-        _save_config_to_file(validated_payload, runtime_paths=runtime_paths, committed_source_files=None)
-        return
 
     with ExitStack() as stack:
         locked_snapshots: list[tuple[ApiState, ApiSnapshot]] = []
@@ -353,8 +352,12 @@ def persist_runtime_validated_config(
                 continue
             locked_snapshots.append((state, snapshot))
 
+        # The journal the runtime opened first, because that fact holds with no
+        # snapshots at all; then each snapshot's own adopted config, which is
+        # all there is to compare against before the store has been opened.
+        _raise_if_event_journal_changed(None, runtime_config, runtime_paths)
         for _state, snapshot in locked_snapshots:
-            _raise_if_event_journal_changed(snapshot, runtime_config)
+            _raise_if_event_journal_changed(snapshot.runtime_config, runtime_config, runtime_paths)
 
         committed_source_files = next(
             (snapshot.source_files for _, snapshot in locked_snapshots if snapshot.source_files is not None),
@@ -501,7 +504,11 @@ def _event_journal_refused_http_error(exc: _EventJournalChangeRefusedError) -> H
     return HTTPException(status_code=409, detail=str(exc))
 
 
-def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> None:
+def _raise_if_event_journal_changed(
+    current_config: Config | None,
+    candidate: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
     """Reject a write that moves the journal this process already opened.
 
     Told rather than dropped: the write also persists the config file, so
@@ -515,9 +522,9 @@ def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> 
     paths translate it to 409 at their boundary.
     """
     if not refuses_event_journal_change(
-        current.runtime_config,
+        current_config,
         candidate,
-        runtime_paths=current.runtime_paths,
+        runtime_paths=runtime_paths,
         refused_by="api_config_write",
     ):
         return
@@ -582,7 +589,7 @@ def _commit_mutated_snapshot[T](
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current, validated_config)
+        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -642,7 +649,7 @@ def _commit_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current, validated_config)
+        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -677,7 +684,7 @@ def _commit_raw_replaced_snapshot(
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current, validated_config)
+        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
