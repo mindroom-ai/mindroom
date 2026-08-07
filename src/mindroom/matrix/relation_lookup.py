@@ -81,15 +81,14 @@ class RelationLookup:
     async def admitted_thread_id(self, room_id: str, event_id: str) -> str | None:
         """Return the thread one event belongs to, asking only what is already here.
 
-        The journal-only half of ``thread_id``, for callers that must not pay a
-        homeserver round trip to find out. The degraded replay guard sweeps up
-        to a page of recent room events looking for positive same-thread proof;
-        letting each unproven one fetch would turn one skipped message into
-        hundreds of sequential requests inside a turn.
+        The journal-only half of ``thread_id``, for a caller that has already
+        asked the homeserver about this exact event and been told nothing. A
+        second round trip resolves nothing it did not resolve the first time,
+        so local state is the whole answer.
 
-        Not knowing is reported as not in the thread, which is the same answer
-        the guard wants: it acts only on proof, so an event it cannot place
-        must not cause a skip.
+        Not knowing is reported as not in a thread. That is the conservative
+        direction for the room scan that asks: an event it cannot place stays
+        where it is rather than being reattached to a thread on a guess.
         """
         try:
             admitted, thread_id = await self.store.admitted_thread_id(room_id=room_id, event_id=event_id)

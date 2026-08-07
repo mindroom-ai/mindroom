@@ -200,6 +200,15 @@ _INDEXES = (
     WHERE state = 'pending'
     """,
     """
+    -- The replay guard asks whether one conversation holds newer unfinished
+    -- work. `journal_events_pending` orders the principal's whole pending set
+    -- by receipt, so answering from it means filtering every pending row in
+    -- every room; this one goes straight to the thread and the timestamp.
+    CREATE INDEX IF NOT EXISTS journal_events_pending_thread
+    ON journal_events (principal_id, room_id, thread_id, origin_server_ts)
+    WHERE state = 'pending'
+    """,
+    """
     CREATE INDEX IF NOT EXISTS visible_messages_page
     ON visible_messages (principal_id, room_id, thread_id, created_ts, logical_event_id)
     """,

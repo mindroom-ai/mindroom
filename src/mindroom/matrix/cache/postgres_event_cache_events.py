@@ -102,35 +102,6 @@ async def load_event(
     return None if row is None else json.loads(row[0])
 
 
-async def load_recent_room_events(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    event_type: str,
-    since_ts_ms: int,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Return recent cached room events of one type, newest first."""
-    if limit <= 0:
-        return []
-    rows = await fetchall(
-        db,
-        """
-        SELECT event_json
-        FROM mindroom_event_cache_events
-        WHERE namespace = %s
-            AND room_id = %s
-            AND origin_server_ts >= %s
-            AND event_json::jsonb ->> 'type' = %s
-        ORDER BY origin_server_ts DESC, write_seq DESC
-        LIMIT %s
-        """,
-        (namespace, room_id, since_ts_ms, event_type, limit),
-    )
-    return [json.loads(row[0]) for row in rows]
-
-
 async def load_latest_edit(
     db: AsyncConnection,
     *,

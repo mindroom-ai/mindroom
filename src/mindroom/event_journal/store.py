@@ -139,6 +139,28 @@ class PrincipalStore:
             lambda transaction: journal.pending_of_kind(transaction, self._principal_id, kind, limit=limit),
         )
 
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        after_origin_server_ts: int,
+        excluding_event_id: str,
+        limit: int = _DEFAULT_PENDING_LIMIT,
+    ) -> tuple[JournalEvent, ...]:
+        """Return unsettled events in one thread newer than a timestamp."""
+        return await self._backend.read(
+            lambda transaction: journal.pending_thread_events_after(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                after_origin_server_ts=after_origin_server_ts,
+                excluding_event_id=excluding_event_id,
+                limit=limit,
+            ),
+        )
+
     async def claim_semantic_consumer(
         self,
         event_id: str,

@@ -55,8 +55,10 @@ from mindroom.edit_regenerator import EditRegenerator
 from mindroom.event_journal import (
     ConversationPage,
     DeliveryStage,
+    JournalEvent,
     OutboxDelivery,
     OutboxView,
+    PendingTurnView,
     RelationView,
     VisibleMessage,
 )
@@ -987,7 +989,6 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None
     event_cache.get_mxc_texts.return_value = {}
-    event_cache.get_recent_room_events.return_value = []
     event_cache.get_thread_events.return_value = None
     event_cache.get_thread_cache_gap.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
@@ -1281,6 +1282,34 @@ ignore_final_delivery_handoff = TurnHandoff(
     sources_for_turn=lambda _turn_id: (),
     released=lambda _event_ids: None,
 )
+
+
+@dataclass
+class FakePendingTurnStore:
+    """A journal holding no unfinished work, for tests that are not about the replay guard.
+
+    The empty answer is the one that changes nothing: the degraded replay
+    guard acts only on positive proof, so a store with nothing pending never
+    suppresses a turn. Tests that are about the guard admit into a real journal
+    instead, because the filtering they exercise happens in SQL.
+    """
+
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,  # noqa: ARG002 - part of the view's shape
+        thread_id: str,  # noqa: ARG002 - part of the view's shape
+        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
+        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
+        limit: int = 256,  # noqa: ARG002 - part of the view's shape
+    ) -> tuple[JournalEvent, ...]:
+        """Return no unsettled events in this thread."""
+        return ()
+
+
+def make_pending_turn_view() -> PendingTurnView:
+    """Return a journal view that reports no unfinished work in any conversation."""
+    return cast("PendingTurnView", FakePendingTurnStore())
 
 
 @dataclass
