@@ -106,8 +106,10 @@ class ConfigReloadLifecycle:
     _response_admission_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
-    # Source files of the last reload attempt that failed to load, so the
-    # config watcher can cover include files the last good config never saw.
+    # Source files of the last reload attempt that was read but not adopted --
+    # a failed load or a refused one -- so the config watcher can cover include
+    # files the last good config never saw. Owned by ``_update_config``, which
+    # is the only place that knows whether an attempt was adopted.
     failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
 
     def request_reload(self) -> None:
@@ -141,6 +143,7 @@ class ConfigReloadLifecycle:
             new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
             current_config = self.current_config()
             if current_config is None:
+                self.failed_reload_source_files = None
                 return await self.load_initial_config(new_config)
             # Refused rather than applied, because there is no correct way to
             # apply it here; see mindroom.event_journal_change, which is the one
@@ -151,7 +154,14 @@ class ConfigReloadLifecycle:
                 runtime_paths=self.runtime_paths,
                 refused_by="orchestrator_config_reload",
             ):
+                # Read but not adopted, so the attempt's own source set is
+                # retained exactly as a failed load's is. A journal moved into a
+                # brand new include file is otherwise invisible to the watcher,
+                # which knows only the last good set, and correcting the very
+                # file the operator added could never trigger another reload.
+                self.failed_reload_source_files = new_config.source_files
                 return False
+            self.failed_reload_source_files = None
 
             agent_bots = self.agent_bots()
             plugin_changes = plugin_change_paths(current_config, new_config)
@@ -301,7 +311,6 @@ class ConfigReloadLifecycle:
             if failed_files is not None:
                 self.failed_reload_source_files = failed_files
             return
-        self.failed_reload_source_files = None
         if updated:
             logger.info("Configuration update applied to affected agents")
         else:

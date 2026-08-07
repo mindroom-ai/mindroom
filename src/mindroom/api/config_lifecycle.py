@@ -854,39 +854,39 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             runtime_paths=runtime_paths,
             refused_by="api_config_publish",
         ):
-            # Publishing it would advance the generation for a change the
-            # orchestrator refuses to apply, and everything bound to the
-            # generation it was published at -- external trigger delivery --
-            # would start rejecting work against a runtime that never changed.
+            # A refusal is a load that parsed and was then not adopted, so it
+            # publishes as a failed load and takes everything a failed load
+            # gets: the failure is recorded, the payload and runtime config stay
+            # on the last good ones, and the watcher keeps the union of source
+            # sets below. Recording the failure is what stops a later write from
+            # deep-copying the pre-edit payload back over whatever else the
+            # operator changed in the same save, and it is the only thing that
+            # tells a runtime which cannot adopt its own config file apart from
+            # a healthy one.
             #
-            # The load still failed, though, and saying so is the whole
-            # difference between a refusal and silence. The committed payload no
-            # longer describes the file on disk, so a later write that
-            # deep-copies it would save the pre-edit config back over whatever
-            # else the operator changed in the same edit; recording the failure
-            # is what stops that, exactly as it does for a config that will not
-            # parse. It is also the only thing that makes a runtime which cannot
-            # adopt its own config file tell itself apart from a healthy one.
-            #
-            # Generation, payload, and source fingerprint all stay put, so
-            # putting the journal field back recovers on the next load with no
-            # generation churn and nothing left to rebind.
-            current_state.snapshot = _published_snapshot(
-                current,
-                increment_generation=False,
-                config_load_result=ConfigLoadResult(
-                    success=False,
-                    error_status_code=409,
-                    error_detail=EVENT_JOURNAL_CHANGE_MESSAGE,
-                ),
+            # What a refusal does not do is advance the generation: everything
+            # bound to the generation it was published at -- external trigger
+            # delivery -- would start rejecting work against a runtime that
+            # never changed. Pinning the fingerprint to the last good one is how
+            # that survives the shared publication below, and it also makes
+            # putting the journal field back recover with nothing to rebind.
+            result = ConfigLoadResult(
+                success=False,
+                error_status_code=409,
+                error_detail=EVENT_JOURNAL_CHANGE_MESSAGE,
             )
-            return False
+            validated_payload = None
+            runtime_config = None
+            source_fingerprint = current.source_fingerprint
         same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
         # A failed load publishes the union of the last good source set and the
         # files the failed attempt read, so the watcher never loses last-good
         # coverage while still covering newly added include files whose edit
         # broke the config; the next successful load replaces the union with
-        # the real set, shrinking it back.
+        # the real set, shrinking it back. A refusal reaches here too, and needs
+        # it just as badly: a journal moved into a brand new include file would
+        # otherwise leave that file unwatched, so correcting the very file the
+        # operator added could never trigger another load.
         published_source_files = source_files if source_files is not None else current.source_files
         if not result.success and source_files is not None and current.source_files is not None:
             published_source_files = source_files | current.source_files

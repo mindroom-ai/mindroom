@@ -558,6 +558,33 @@ class TestEventJournalChangeRefusal:
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk == hand_edited, "a request pinned before the refusal flattened the operator's on-disk edits"
 
+    def test_a_refused_move_into_a_new_include_keeps_that_file_watched(self, loaded_app: FastAPI) -> None:
+        """The operator has to be able to escape by correcting the file they just added.
+
+        A refusal parses the whole source set and adopts none of it. Publishing
+        only the last good set leaves the new include unwatched, so editing it
+        never fires another load and the only way out is a restart.
+        """
+        before = _snapshot(loaded_app)
+        assert before.source_files == frozenset({before.runtime_paths.config_path.resolve()})
+        journal_path = before.runtime_paths.config_dir / "journal.yaml"
+        journal_path.write_text(yaml.dump(dict(self.JOURNAL_MOVE)), encoding="utf-8")
+        before.runtime_paths.config_path.write_text(
+            yaml.dump(copy.deepcopy(VALID_CONFIG)) + "event_journal: !include journal.yaml\n",
+            encoding="utf-8",
+        )
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
+
+        refused = _snapshot(loaded_app)
+        assert refused.source_files is not None
+        assert journal_path.resolve() in refused.source_files, (
+            "the file the operator must correct is unwatched, so correcting it can never reload"
+        )
+        assert before.runtime_paths.config_path.resolve() in refused.source_files, (
+            "the refusal dropped last-good watch coverage"
+        )
+
     def test_reverting_the_journal_field_recovers_without_a_generation_bump(self, loaded_app: FastAPI) -> None:
         """Putting the field back is the documented way out, so it has to actually work."""
         before = _snapshot(loaded_app)
