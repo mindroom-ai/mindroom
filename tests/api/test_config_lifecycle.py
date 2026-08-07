@@ -481,6 +481,61 @@ class TestEventJournalChangeRefusal:
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
 
+    def test_refused_disk_load_stops_a_later_write_from_flattening_the_file(self, loaded_app: FastAPI) -> None:
+        """A refused load leaves a payload that no longer describes disk, and must say so.
+
+        Reporting the load as successful would let the next committed write
+        deep-copy the pre-edit payload and save it back, silently undoing every
+        unrelated edit the operator made in the same save -- and would leave a
+        runtime that cannot adopt its own config file indistinguishable from a
+        healthy one.
+        """
+        before = _snapshot(loaded_app)
+        hand_edited = copy.deepcopy(VALID_CONFIG)
+        hand_edited["event_journal"] = dict(self.JOURNAL_MOVE)
+        hand_edited["agents"]["hand_written"] = {
+            "display_name": "Hand Written",
+            "role": "Added by hand in the same save",
+        }
+        _write_config(before.runtime_paths.config_path, hand_edited)
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
+        refused = _snapshot(loaded_app)
+        assert refused.config_load_result is not None
+        assert refused.config_load_result.success is False
+        assert refused.config_load_result.error_status_code == 409
+        assert "event_journal" in str(refused.config_load_result.error_detail)
+        assert refused.generation == before.generation, "a refused load advanced the generation"
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.write_committed_config(
+                _request_for(loaded_app),
+                lambda config: config["defaults"].__setitem__("markdown", False),
+                error_prefix="test write",
+            )
+
+        assert exc_info.value.status_code == 409
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert on_disk == hand_edited, "an unrelated write flattened the operator's on-disk edits"
+
+    def test_reverting_the_journal_field_recovers_without_a_generation_bump(self, loaded_app: FastAPI) -> None:
+        """Putting the field back is the documented way out, so it has to actually work."""
+        before = _snapshot(loaded_app)
+        bound = self._bind_trigger_runtime(loaded_app)
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = dict(self.JOURNAL_MOVE)
+        _write_config(before.runtime_paths.config_path, moved)
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
+
+        _write_config(before.runtime_paths.config_path, copy.deepcopy(VALID_CONFIG))
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        after = _snapshot(loaded_app)
+        assert after.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+        assert after.generation == bound.config_generation, (
+            "recovering from a refusal stranded external trigger delivery on the old binding"
+        )
+
     def test_a_sqlite_database_url_edit_opens_the_same_file_and_is_adopted(self, loaded_app: FastAPI) -> None:
         """Only a change of opened database is a move; nothing else in the field is one.
 

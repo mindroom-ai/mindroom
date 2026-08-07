@@ -840,6 +840,28 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             # orchestrator refuses to apply, and everything bound to the
             # generation it was published at -- external trigger delivery --
             # would start rejecting work against a runtime that never changed.
+            #
+            # The load still failed, though, and saying so is the whole
+            # difference between a refusal and silence. The committed payload no
+            # longer describes the file on disk, so a later write that
+            # deep-copies it would save the pre-edit config back over whatever
+            # else the operator changed in the same edit; recording the failure
+            # is what stops that, exactly as it does for a config that will not
+            # parse. It is also the only thing that makes a runtime which cannot
+            # adopt its own config file tell itself apart from a healthy one.
+            #
+            # Generation, payload, and source fingerprint all stay put, so
+            # putting the journal field back recovers on the next load with no
+            # generation churn and nothing left to rebind.
+            current_state.snapshot = _published_snapshot(
+                current,
+                increment_generation=False,
+                config_load_result=ConfigLoadResult(
+                    success=False,
+                    error_status_code=409,
+                    error_detail=EVENT_JOURNAL_CHANGE_MESSAGE,
+                ),
+            )
             return False
         same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
         # A failed load publishes the union of the last good source set and the
