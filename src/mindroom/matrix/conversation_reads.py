@@ -35,18 +35,12 @@ logger = get_logger(__name__)
 _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES = 50
 
 
-def projected_thread_history(
-    page: ConversationPage,
-    *,
-    complete: bool,
-    source_degraded: bool = False,
-) -> ThreadHistoryResult:
-    """Render one projected page as the history shape the prompt path consumes.
+def projected_visible_messages(page: ConversationPage) -> list[ResolvedVisibleMessage]:
+    """Render one projected page as the visible messages every consumer reads.
 
-    ``complete`` is the caller's guarantee, not something the page can report:
-    a strict read has hydrated and resolved every refresh, a non-blocking read
-    has done neither. It stays separate because a page that omitted a message
-    and a conversation that never had one look identical from here.
+    The single conversion from a projection row to the shape the rest of
+    MindRoom renders, so a prompt and an exported thread cannot disagree about
+    which revision is current or when it was made.
     """
     messages = [
         ResolvedVisibleMessage.from_message_data(
@@ -65,6 +59,23 @@ def projected_thread_history(
     for message, projected in zip(messages, page.messages, strict=True):
         if projected.revision_event_id != projected.logical_event_id:
             message.edited_timestamp = projected.revision_ts
+    return messages
+
+
+def projected_thread_history(
+    page: ConversationPage,
+    *,
+    complete: bool,
+    source_degraded: bool = False,
+) -> ThreadHistoryResult:
+    """Render one projected page as the history shape the prompt path consumes.
+
+    ``complete`` is the caller's guarantee, not something the page can report:
+    a strict read has hydrated and resolved every refresh, a non-blocking read
+    has done neither. It stays separate because a page that omitted a message
+    and a conversation that never had one look identical from here.
+    """
+    messages = projected_visible_messages(page)
     diagnostics = (
         {
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,

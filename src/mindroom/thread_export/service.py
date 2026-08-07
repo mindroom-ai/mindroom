@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
+from mindroom.event_journal_open import open_event_journal_store
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
@@ -20,6 +21,7 @@ from mindroom.thread_export.models import (
     failure_for_target,
 )
 from mindroom.thread_export.policy import target_accepts_room
+from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import (
     build_export_groups,
     export_rooms,
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.matrix.users import AgentMatrixUser
 
 
 logger = get_logger(__name__)
@@ -182,12 +186,23 @@ def _validated_targets(
     return tuple(prepared)
 
 
+def _journal_principal_id(user: AgentMatrixUser) -> str:
+    """Return the journal principal one export login reads the projection as.
+
+    The same identity the running bot for that account writes under, built the
+    same way. A different spelling would not fail: it would open an empty
+    projection and export every thread as if the room had no history.
+    """
+    return f"{user.agent_name}@{user.matrix_id.full_id}"
+
+
 async def _run_export_group(
     group: ThreadExportGroup,
     *,
     homeserver: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    journal_store: EventJournalStore,
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
 ) -> None:
@@ -200,6 +215,12 @@ async def _run_export_group(
     try:
         group_accumulators = await export_threads_for_targets_for_client(
             client=client,
+            reader=export_conversation_reader(
+                client=client,
+                config=config,
+                store=journal_store.principal(_journal_principal_id(group.user)),
+                self_sender=group.user.matrix_id.full_id,
+            ),
             config=config,
             runtime_paths=runtime_paths,
             rooms=group.rooms,
@@ -222,6 +243,7 @@ async def export_threads_to_targets_once(
     targets: Sequence[ThreadExportTarget],
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
+    prefer_cache: bool = True,
 ) -> tuple[ThreadExportStats, ...]:
     """Login with persisted Matrix accounts and export once to every target.
 
@@ -229,14 +251,27 @@ async def export_threads_to_targets_once(
     Invited rooms are exported with the invited entity's own account, because the primary export
     account is not necessarily a member of user-created rooms.
 
-    Thread bodies always come from a direct Matrix pagination walk, so an export never depends on
-    another process having kept a cache warm and never writes out rows the homeserver has moved past.
+    Thread bodies come from the journal's visible-message projection, read as the same principal a
+    running bot writes it under, so an export reduces edits, redactions, and sidecars exactly the
+    way the prompt path does. A thread nobody has read yet is hydrated from the homeserver once;
+    after that the body costs no Matrix history call at all.
+
+    ``prefer_cache`` is retained for released first-party plugins and only ``True`` is meaningful:
+    there is one read path and it is the projection. ``False`` used to request a full per-thread
+    room scan, and is rejected rather than silently ignored, because a caller asking for that is
+    asking for a guarantee this no longer offers.
 
     Each source thread is fetched once per room and fanned out to every authorized target.
     Scoped targets export only rooms where their required member is currently joined.
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
     A successful check that proves the member absent removes the prior room export.
     """
+    if not prefer_cache:
+        msg = (
+            "Thread export reads thread bodies from the journal projection; prefer_cache=False "
+            "asked for a direct per-thread Matrix scan, which no longer exists. Drop the argument."
+        )
+        raise ValueError(msg)
     if not targets:
         return ()
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
@@ -273,15 +308,24 @@ async def export_threads_to_targets_once(
         else:
             ready_groups.append(group)
 
-    for group in ready_groups:
-        await _run_export_group(
-            group,
-            homeserver=homeserver,
-            config=config,
-            runtime_paths=runtime_paths,
-            accumulators=validated_targets,
-            max_thread_roots=max_thread_roots,
-        )
+    journal_store = open_event_journal_store(
+        config.cache,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_paths.storage_root,
+    )
+    try:
+        for group in ready_groups:
+            await _run_export_group(
+                group,
+                homeserver=homeserver,
+                config=config,
+                runtime_paths=runtime_paths,
+                journal_store=journal_store,
+                accumulators=validated_targets,
+                max_thread_roots=max_thread_roots,
+            )
+    finally:
+        await journal_store.close()
 
     if room_filter is None:
         _reconcile_full_pass(validated_targets)
@@ -295,6 +339,7 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
+    prefer_cache: bool = True,
     required_member_user_id: str | None = None,
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
@@ -311,5 +356,6 @@ async def export_threads_once(
         ),
         room_filter=room_filter,
         max_thread_roots=max_thread_roots,
+        prefer_cache=prefer_cache,
     )
     return stats[0]
