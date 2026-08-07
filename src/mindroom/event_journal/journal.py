@@ -77,6 +77,18 @@ def store_generation(transaction: Transaction, *, new_generation: str) -> str:
     return str(row["generation"])
 
 
+def read_generation(transaction: Transaction) -> str | None:
+    """Return this database's generation, or ``None`` when it has never been opened.
+
+    Deliberately does not mint. The caller asking this question is deciding
+    whether the database belongs to this install, and a database that answers
+    "none" has never been used by anything -- a fact that writing a generation
+    on the way past would destroy.
+    """
+    row = transaction.fetchone("SELECT generation FROM journal_identity WHERE singleton = ?", (True,))
+    return None if row is None else str(row["generation"])
+
+
 def current_membership_epoch(
     transaction: Transaction,
     principal_id: str,

@@ -8,6 +8,12 @@ from urllib.parse import quote
 
 import pytest
 
+from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal_open import (
+    EventJournalBinding,
+    EventJournalBindingError,
+    write_event_journal_binding,
+)
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
 from mindroom.thread_export.models import ThreadExportGroupFailure, ThreadExportRoom
@@ -44,6 +50,45 @@ async def test_export_threads_once_records_group_failure_and_closes_resources(tm
     client.close.assert_awaited_once()
     assert stats.failures == 2
     assert all("Export group failed: export failed" in failure.error for failure in stats.failed_items)
+
+
+@pytest.mark.asyncio
+async def test_export_refuses_a_journal_this_install_is_not_bound_to(tmp_path: Path) -> None:
+    """Export runs in its own process, so it is the opener most likely to read a stranger.
+
+    It also fails the quietest way: reading someone else's projection reports
+    the wrong history rather than raising, and the operator gets a plausible
+    file full of conversations that never happened here.
+    """
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path, account_keys=("agent_general",))
+
+    journal_file = runtime_paths.storage_root / "tracking" / "event_journal.db"
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+    stranger = EventJournalStore.open_sqlite(journal_file)
+    try:
+        await stranger.generation(new_generation="another-install")
+    finally:
+        await stranger.close()
+    write_event_journal_binding(
+        runtime_paths.storage_root,
+        EventJournalBinding(generation="ours", database="sqlite tracking/event_journal.db"),
+    )
+
+    client = Mock()
+    client.close = AsyncMock()
+    with (
+        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch(
+            "mindroom.thread_export.service.export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=successful_group_result),
+        ) as export_group,
+        pytest.raises(EventJournalBindingError),
+    ):
+        await export_threads_once(config=config, runtime_paths=runtime_paths)
+
+    export_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio

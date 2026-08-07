@@ -38,7 +38,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.event_journal_open import open_event_journal_store
+from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
@@ -1773,13 +1773,39 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_apply_config_change_refuses_a_journal_move_with_the_api_disabled(tmp_path: Path) -> None:
-    """`mindroom run --no-api` opens the journal and publishes no API snapshot at all.
+async def test_apply_config_change_saves_a_journal_edit_and_says_it_waits_for_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The journal is opened once at startup, so saying "affects new interactions" would be false."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
 
-    The chat `!config` command and the config tools still write through the
-    same persist path, so a rule that decides "has anything adopted a journal?"
-    from the list of registered API apps answers "no" for a process that has
-    one open and is being asked to move it, and the move lands on disk.
+    response = await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+
+    assert "Configuration updated successfully" in response
+    assert "applies after MindRoom restarts" in response
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["event_journal"]["backend"] == "postgres", "the edit the operator asked for was not saved"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_journal_edit_survives_a_later_unrelated_write(tmp_path: Path) -> None:
+    """The authored file is the operator's, and nothing may quietly put it back.
+
+    The in-force journal is a separate runtime fact, so it must never be stamped
+    onto the adopted config: an authored dump carrying the in-force value would
+    make the next structured write revert an edit the operator deliberately made
+    and was told had been saved.
     """
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
@@ -1787,27 +1813,21 @@ async def test_apply_config_change_refuses_a_journal_move_with_the_api_disabled(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "event_journal": {"backend": "sqlite", "database_url": "postgresql://journal.invalid/moved"},
             },
         ),
         encoding="utf-8",
     )
     runtime_paths = _runtime_paths_for_config(config_path)
-    # Exactly what the orchestrator does before the first bot starts, API or not.
-    open_event_journal_store(
-        load_config(runtime_paths).event_journal,
-        runtime_paths=runtime_paths,
-        storage_path=runtime_paths.storage_root,
-    )
-    assert not [
-        state for state in config_lifecycle._registered_api_states() if state.snapshot.runtime_paths == runtime_paths
-    ], "this runtime must publish no API snapshot, or the test proves nothing about --no-api"
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
+    await apply_config_change("event_journal.database_url", "postgresql://journal.invalid/moved", runtime_paths)
+    await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+    after_journal_edit = yaml.safe_load(config_path.read_text(encoding="utf-8"))["event_journal"]
 
-    response = await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+    await apply_config_change("defaults.markdown", False, runtime_paths)
 
-    assert "event_journal cannot change while MindRoom is running" in response
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert saved["event_journal"]["backend"] == "sqlite", "the refused journal move was written to the config file"
+    assert saved["defaults"]["markdown"] is False
+    assert saved["event_journal"] == after_journal_edit, "an unrelated write reverted the operator's journal edit"
 
 
 @pytest.mark.asyncio

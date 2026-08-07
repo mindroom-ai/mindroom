@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
@@ -112,7 +111,7 @@ from .event_journal import (
     PrincipalStore,
     SemanticConsumer,
 )
-from .event_journal_open import open_event_journal_store
+from .event_journal_open import bind_event_journal, open_event_journal_store
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -475,8 +474,19 @@ class AgentBot:
         self._init_runtime_components()
 
     async def _resolve_journal_generation(self) -> str | None:
-        """Return the event journal's durable identity, minting it on first open."""
-        return await self._journal_store.generation(new_generation=uuid.uuid4().hex)
+        """Return the event journal's durable identity, refusing a database that is not ours.
+
+        A bot built outside the orchestrator opens its own store, so this is
+        the first async moment at which that store can be checked against the
+        journal this install is bound to. Orchestrator-run bots borrow a store
+        the startup bind already accepted, and reach the same answer here.
+        """
+        return await bind_event_journal(
+            self._journal_store,
+            journal_config=self.config.event_journal,
+            runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
+        )
 
     def _journal_principal(self) -> PrincipalStore:
         """Return this bot's principal-bound store, once the journal is open."""

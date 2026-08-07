@@ -8,7 +8,7 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 import copy
 import threading
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 import yaml
@@ -17,7 +17,8 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config
+from mindroom.event_journal_open import record_opened_event_journal
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -365,184 +366,27 @@ class TestExternalWriterPublishing:
         assert on_disk == after.config_data
 
 
-class TestEventJournalChangeRefusal:
-    """A journal move must be refused by every config authority in the process, not just one."""
+class TestCommitRevision:
+    """Every publication gets a commit identity, including ones the generation ignores."""
 
-    JOURNAL_MOVE: ClassVar[dict[str, str]] = {
-        "backend": "postgres",
-        "database_url": "postgresql://localhost/journal",
-    }
+    def test_a_write_pinned_before_a_republication_is_rejected(self, loaded_app: FastAPI) -> None:
+        """Generation is a consumer identity and deliberately stands still sometimes.
 
-    @staticmethod
-    async def _never_ready(_delivery_snapshot: object) -> bool:
-        return False
-
-    def _bind_trigger_runtime(self, api_app: FastAPI) -> config_lifecycle.ExternalTriggerRuntime:
-        """Bind trigger delivery exactly as the orchestrator does, pinning today's generation."""
-        from mindroom.api import main as api_main  # noqa: PLC0415
-
-        api_main.bind_external_trigger_runtime(
-            api_app,
-            client=object(),
-            conversation_reader=object(),
-            is_trigger_snapshot_ready=self._never_ready,
-        )
-        runtime = config_lifecycle.app_state(api_app).external_trigger_runtime
-        assert runtime is not None
-        return runtime
-
-    def test_refused_journal_change_leaves_trigger_runtime_on_the_live_generation(
-        self,
-        loaded_app: FastAPI,
-    ) -> None:
-        """The API publisher refuses the same journal move the orchestrator refuses.
-
-        The orchestrator keeps the store it opened and returns without
-        resyncing or rebinding the API. If this loader published the change
-        anyway, the generation would advance past the runtime binding and every
-        external trigger would 503 until the next successful reload or a
-        restart.
-        """
-        before = _snapshot(loaded_app)
-        bound = self._bind_trigger_runtime(loaded_app)
-        assert bound.config_generation == before.generation
-
-        moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = dict(self.JOURNAL_MOVE)
-        _write_config(before.runtime_paths.config_path, moved)
-
-        published = config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app)
-
-        after = _snapshot(loaded_app)
-        assert after.generation == bound.config_generation, (
-            "the API published a generation for a journal change the runtime refused, "
-            "stranding external trigger delivery on the old binding"
-        )
-        assert published is False
-        assert after.runtime_config is before.runtime_config
-        assert after.runtime_config is not None
-        assert after.runtime_config.event_journal.backend == "sqlite"
-
-    def test_committed_write_that_moves_the_journal_is_rejected(self, loaded_app: FastAPI) -> None:
-        """A dashboard save carrying a journal move is refused instead of silently dropped."""
-        before = _snapshot(loaded_app)
-        moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = dict(self.JOURNAL_MOVE)
-
-        with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_committed_config(
-                _request_for(loaded_app),
-                moved,
-                error_prefix="test replace",
-            )
-
-        assert exc_info.value.status_code == 409
-        assert _snapshot(loaded_app) is before
-        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
-
-    def test_raw_source_write_that_moves_the_journal_is_rejected(self, loaded_app: FastAPI) -> None:
-        """The raw YAML editor is the widest door onto event_journal, so it carries the rule too."""
-        before = _snapshot(loaded_app)
-        moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = dict(self.JOURNAL_MOVE)
-
-        with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_raw_config_source(
-                _request_for(loaded_app),
-                yaml.dump(moved),
-                error_prefix="test raw replace",
-            )
-
-        assert exc_info.value.status_code == 409
-        assert _snapshot(loaded_app) is before
-        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
-
-    def test_external_persist_that_moves_the_journal_is_refused(self, loaded_app: FastAPI) -> None:
-        """The writer behind the chat command and the config tools carries the rule too.
-
-        This path writes the file and republishes every registered snapshot at
-        generation+1 without going through the HTTP commit paths. Left
-        unguarded, a `!config set event_journal.database_url ...` reports
-        success and moves published state onto a journal the orchestrator goes
-        on refusing -- and, because published state then names the new journal,
-        the disk loader's comparison agrees with it and never refuses again.
-        """
-        before = _snapshot(loaded_app)
-        moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = dict(self.JOURNAL_MOVE)
-
-        with pytest.raises(ConfigRuntimeValidationError):
-            config_lifecycle.validate_and_persist_config_payload(moved, before.runtime_paths)
-
-        after = _snapshot(loaded_app)
-        assert after is before, "a refused write advanced the published snapshot"
-        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
-
-    def test_refused_disk_load_stops_a_later_write_from_flattening_the_file(self, loaded_app: FastAPI) -> None:
-        """A refused load leaves a payload that no longer describes disk, and must say so.
-
-        Reporting the load as successful would let the next committed write
-        deep-copy the pre-edit payload and save it back, silently undoing every
-        unrelated edit the operator made in the same save -- and would leave a
-        runtime that cannot adopt its own config file indistinguishable from a
-        healthy one.
-        """
-        before = _snapshot(loaded_app)
-        hand_edited = copy.deepcopy(VALID_CONFIG)
-        hand_edited["event_journal"] = dict(self.JOURNAL_MOVE)
-        hand_edited["agents"]["hand_written"] = {
-            "display_name": "Hand Written",
-            "role": "Added by hand in the same save",
-        }
-        _write_config(before.runtime_paths.config_path, hand_edited)
-
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
-        refused = _snapshot(loaded_app)
-        assert refused.config_load_result is not None
-        assert refused.config_load_result.success is False
-        assert refused.config_load_result.error_status_code == 409
-        assert "event_journal" in str(refused.config_load_result.error_detail)
-        assert refused.generation == before.generation, "a refused load advanced the generation"
-
-        with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
-                _request_for(loaded_app),
-                lambda config: config["defaults"].__setitem__("markdown", False),
-                error_prefix="test write",
-            )
-
-        assert exc_info.value.status_code == 409
-        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == hand_edited, "an unrelated write flattened the operator's on-disk edits"
-
-    def test_a_write_pinned_before_the_refusal_cannot_overwrite_it(self, loaded_app: FastAPI) -> None:
-        """A refusal holds the generation still on purpose, so it needs a separate commit identity.
-
-        Holding the generation is what lets reverting the journal field recover
-        with nothing to rebind. The cost, if the generation is also the only
-        thing writers compare against, is that a request pinned before the
-        refusal still passes the commit check and saves its stale copy of the
-        last good payload -- flattening both the operator's unrelated edit and
-        the journal edit, and publishing success over the refusal.
+        A byte-identical reload republishes the snapshot without advancing the
+        generation, because nothing a consumer binds to changed. A writer that
+        used the generation as its own compare-and-swap identity would be blind
+        to exactly those publications, and would commit a payload built against
+        a snapshot that is no longer the current one. The separate revision is
+        what a writer checks.
         """
         before = _snapshot(loaded_app)
         request = _request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
-        hand_edited = copy.deepcopy(VALID_CONFIG)
-        hand_edited["agents"]["hand_written"] = {
-            "display_name": "Hand Written",
-            "role": "Added by hand in the same save",
-        }
-        hand_edited["event_journal"] = dict(self.JOURNAL_MOVE)
-        _write_config(before.runtime_paths.config_path, hand_edited)
-
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
-        refused = _snapshot(loaded_app)
-        assert refused.generation == pinned.generation, "this test only bites while the refusal holds the generation"
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        republished = _snapshot(loaded_app)
+        assert republished.generation == pinned.generation, "this test only bites while the generation stands still"
+        assert republished.revision > pinned.revision
 
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.write_committed_config(
@@ -552,143 +396,38 @@ class TestEventJournalChangeRefusal:
             )
 
         assert exc_info.value.status_code == 409
-        assert _snapshot(loaded_app).config_load_result == refused.config_load_result, (
-            "a stale pinned write published success over the refusal"
-        )
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == hand_edited, "a request pinned before the refusal flattened the operator's on-disk edits"
+        assert on_disk["defaults"]["markdown"] is True, "a write pinned before the republication still committed"
 
-    def test_a_refused_move_into_a_new_include_keeps_that_file_watched(self, loaded_app: FastAPI) -> None:
-        """The operator has to be able to escape by correcting the file they just added.
 
-        A refusal parses the whole source set and adopts none of it. Publishing
-        only the last good set leaves the new include unwatched, so editing it
-        never fires another load and the only way out is a restart.
-        """
+class TestEventJournalPendingRestart:
+    """The saved event_journal is not always the one in force, and the API says which."""
+
+    def test_no_pending_restart_when_the_saved_journal_is_the_open_one(self, loaded_app: FastAPI) -> None:
+        """A flag is only meaningful if it is quiet by default."""
+        snapshot = _snapshot(loaded_app)
+        assert snapshot.runtime_config is not None
+        record_opened_event_journal(snapshot.runtime_config.event_journal, runtime_paths=snapshot.runtime_paths)
+
+        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is False
+
+    def test_a_saved_journal_move_is_reported_as_pending_a_restart(self, loaded_app: FastAPI) -> None:
+        """The dashboard shows the saved value, so it has to be told the value is not live yet."""
         before = _snapshot(loaded_app)
-        assert before.source_files == frozenset({before.runtime_paths.config_path.resolve()})
-        journal_path = before.runtime_paths.config_dir / "journal.yaml"
-        journal_path.write_text(yaml.dump(dict(self.JOURNAL_MOVE)), encoding="utf-8")
-        before.runtime_paths.config_path.write_text(
-            yaml.dump(copy.deepcopy(VALID_CONFIG)) + "event_journal: !include journal.yaml\n",
-            encoding="utf-8",
-        )
+        assert before.runtime_config is not None
+        record_opened_event_journal(before.runtime_config.event_journal, runtime_paths=before.runtime_paths)
 
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
-
-        refused = _snapshot(loaded_app)
-        assert refused.source_files is not None
-        assert journal_path.resolve() in refused.source_files, (
-            "the file the operator must correct is unwatched, so correcting it can never reload"
-        )
-        assert before.runtime_paths.config_path.resolve() in refused.source_files, (
-            "the refusal dropped last-good watch coverage"
-        )
-
-    def test_reverting_the_journal_field_recovers_without_a_generation_bump(self, loaded_app: FastAPI) -> None:
-        """Putting the field back is the documented way out, so it has to actually work."""
-        before = _snapshot(loaded_app)
-        bound = self._bind_trigger_runtime(loaded_app)
         moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = dict(self.JOURNAL_MOVE)
-        _write_config(before.runtime_paths.config_path, moved)
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is False
-
-        _write_config(before.runtime_paths.config_path, copy.deepcopy(VALID_CONFIG))
-
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
-        after = _snapshot(loaded_app)
-        assert after.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        assert after.generation == bound.config_generation, (
-            "recovering from a refusal stranded external trigger delivery on the old binding"
-        )
-
-    def test_a_sqlite_database_url_edit_opens_the_same_file_and_is_adopted(self, loaded_app: FastAPI) -> None:
-        """Only a change of opened database is a move; nothing else in the field is one.
-
-        ``open_event_journal_store`` derives the SQLite path from the runtime
-        storage root and reads no ``event_journal`` field to do it, so this edit
-        opens exactly the same file. Refusing it would stop an adoption for a
-        store that did not move -- and because a refusal never advances the
-        adopted config, every later unrelated reload would be refused too.
-        """
-        before = _snapshot(loaded_app)
-        same_store = copy.deepcopy(VALID_CONFIG)
-        same_store["event_journal"] = {
-            "backend": "sqlite",
-            "database_url": "postgresql://localhost/never-opened-under-sqlite",
-            "database_url_env": "OTHER_DATABASE_URL",
-        }
-        _write_config(before.runtime_paths.config_path, same_store)
-
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
-        adopted = _snapshot(loaded_app)
-        assert adopted.generation == before.generation + 1
-        assert adopted.config_data["event_journal"]["database_url_env"] == "OTHER_DATABASE_URL"
-
-        later = copy.deepcopy(same_store)
-        later["agents"]["probe"] = {"display_name": "Probe", "role": "Added after the journal edit"}
-        _write_config(before.runtime_paths.config_path, later)
-
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
-        assert "probe" in _snapshot(loaded_app).config_data["agents"]
-
-    def test_a_sqlite_database_url_write_is_saved_rather_than_rejected(self, loaded_app: FastAPI) -> None:
-        """The write paths read the same rule, so they must agree that this is not a move."""
-        before = _snapshot(loaded_app)
-        same_store = copy.deepcopy(VALID_CONFIG)
-        same_store["event_journal"] = {"backend": "sqlite", "database_url_env": "OTHER_DATABASE_URL"}
-
+        moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://journal.invalid/moved"}
         config_lifecycle.replace_committed_config(
             _request_for(loaded_app),
-            same_store,
+            moved,
             error_prefix="test replace",
         )
 
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk["event_journal"]["database_url_env"] == "OTHER_DATABASE_URL"
-
-    def test_a_postgres_dsn_reached_by_another_route_is_the_same_database(self, tmp_path: Path) -> None:
-        """For PostgreSQL it is the resolved DSN that picks the database, not how it was written."""
-        dsn = "postgresql://localhost/journal"
-        config_path = tmp_path / "config.yaml"
-        by_env = copy.deepcopy(VALID_CONFIG)
-        by_env["event_journal"] = {"backend": "postgres"}
-        _write_config(config_path, by_env)
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path / "storage",
-            process_env={"MINDROOM_EVENT_CACHE_DATABASE_URL": dsn},
-        )
-        api_app = _make_api_app(runtime_paths)
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
-
-        by_url = copy.deepcopy(VALID_CONFIG)
-        by_url["event_journal"] = {"backend": "postgres", "database_url": dsn}
-        _write_config(config_path, by_url)
-
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
-        assert _snapshot(api_app).config_data["event_journal"]["database_url"] == dsn
-
-    def test_a_postgres_dsn_change_is_still_refused(self, tmp_path: Path) -> None:
-        """Loosening the comparison must not loosen it past the database actually opened."""
-        config_path = tmp_path / "config.yaml"
-        opened = copy.deepcopy(VALID_CONFIG)
-        opened["event_journal"] = {"backend": "postgres", "database_url": "postgresql://localhost/journal"}
-        _write_config(config_path, opened)
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path / "storage",
-            process_env={},
-        )
-        api_app = _make_api_app(runtime_paths)
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
-
-        moved = copy.deepcopy(VALID_CONFIG)
-        moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://localhost/elsewhere"}
-        _write_config(config_path, moved)
-
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is False
+        assert on_disk["event_journal"]["backend"] == "postgres", "the write was rejected instead of saved"
+        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is True
 
 
 class TestConcurrencySmoke:

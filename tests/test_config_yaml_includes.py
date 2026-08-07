@@ -716,35 +716,6 @@ class TestFailedReloadWatchSet:
         assert lifecycle.failed_reload_source_files is None
 
     @pytest.mark.asyncio
-    async def test_refused_journal_move_into_a_new_include_stays_watched(self, tmp_path: Path) -> None:
-        """A refused reload parsed every file and adopted none, so the watcher still needs them.
-
-        The refusal is not an exception, so the attempt's source set is not
-        recorded by the failure path. Left there, a journal moved into a brand
-        new include file is invisible to the watcher -- which knows only the
-        last good set -- and correcting the file the operator just added can
-        never trigger the retry that would accept the correction.
-        """
-        base_source = "models:\n  default:\n    provider: ollama\n    id: test-model\n"
-        config_path = _write(tmp_path / "config.yaml", base_source)
-        lifecycle = _reload_lifecycle(config_path)
-        adopted = load_config(lifecycle.runtime_paths)
-        lifecycle.current_config = lambda: adopted
-
-        journal_path = _write(
-            tmp_path / "journal.yaml",
-            "backend: postgres\ndatabase_url: postgresql://journal.invalid/moved\n",
-        )
-        _write(config_path, base_source + "event_journal: !include journal.yaml\n")
-
-        await lifecycle._apply_queued_config_reload()
-
-        assert lifecycle.failed_reload_source_files is not None
-        assert journal_path.resolve() in lifecycle.failed_reload_source_files, (
-            "the file the operator must correct is unwatched, so correcting it can never reload"
-        )
-
-    @pytest.mark.asyncio
     async def test_broken_new_include_file_stays_watched_until_fixed(self, tmp_path: Path) -> None:
         """A syntax error in a newly referenced include file is watched; fixing only it recovers."""
         config_path = _write(

@@ -59,12 +59,14 @@ app = typer.Typer(
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
+journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(threads_app, name="threads")
+app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
 
@@ -371,6 +373,84 @@ def _threads_export_command(
             include_invited_rooms=invited_rooms,
         ),
     )
+
+
+async def _journal_adopt(*, config_path: Path | None, storage_path: Path | None, yes: bool) -> None:
+    """Bind this install to whatever event-journal database is configured right now."""
+    from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
+        EventJournalBindingError,
+        bind_event_journal,
+        clear_event_journal_binding,
+        describe_event_journal,
+        open_event_journal_store,
+        read_event_journal_binding,
+    )
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    description = describe_event_journal(config.event_journal, runtime_paths)
+    try:
+        previous = read_event_journal_binding(runtime_paths.storage_root)
+    except EventJournalBindingError:
+        # Adopting is the repair for an unreadable binding, so it must not be
+        # the one command that cannot run while one is present.
+        previous = None
+    if previous is not None and not yes:
+        console.print(f"This install is bound to [bold]{previous.database}[/bold].")
+        console.print(
+            f"Adopting [bold]{description}[/bold] gives up the deduplication, delivery, and recovery "
+            "history held in the bound journal.",
+        )
+        if not typer.confirm("Adopt the configured event journal?"):
+            raise typer.Exit(1)
+
+    clear_event_journal_binding(runtime_paths.storage_root)
+    store = open_event_journal_store(
+        config.event_journal,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_paths.storage_root,
+    )
+    try:
+        generation = await bind_event_journal(
+            store,
+            journal_config=config.event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
+    finally:
+        await store.close()
+    console.print(f"[green]Bound[/green] this install to {description} (generation {generation}).")
+
+
+@journal_app.command("adopt")
+def _journal_adopt_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Adopt without confirming, even when another journal is already bound.",
+    ),
+) -> None:
+    """Bind this install to the configured event-journal database.
+
+    MindRoom refuses to start against a journal it is not bound to, because
+    using a different one loses turn deduplication, delivery ownership, and
+    recovery ownership without any error. This is how you say the change was
+    deliberate.
+    """
+    asyncio.run(_journal_adopt(config_path=config_path, storage_path=storage_path, yes=yes))
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:

@@ -71,6 +71,7 @@ _DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGI
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+    config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
 )
 _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3003",
@@ -768,9 +769,13 @@ async def load_config(
     payload = config_lifecycle.read_committed_config(request, lambda config_data: dict(config_data))
     _set_config_generation_header(response, generation)
     # The payload is the config itself, so the includes flag rides in a header
-    # like the generation does.
+    # like the generation does, and so does the notice that the saved
+    # event_journal is not the one this process has open.
     response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] = (
         "true" if config_lifecycle.config_uses_includes(request) else "false"
+    )
+    response.headers[config_lifecycle.CONFIG_PENDING_RESTART_HEADER] = (
+        "true" if config_lifecycle.config_pending_restart(request) else "false"
     )
     return payload
 

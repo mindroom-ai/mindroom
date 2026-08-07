@@ -3289,6 +3289,7 @@ def test_cors_exposes_config_generation_header_for_credentialed_origins(tmp_path
     assert exposed == {
         config_lifecycle.CONFIG_GENERATION_HEADER,
         config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+        config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
     }
 
 

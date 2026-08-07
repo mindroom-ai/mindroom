@@ -906,6 +906,17 @@ class EventJournalStore:
             lambda transaction: journal.store_generation(transaction, new_generation=new_generation),
         )
 
+    async def existing_generation(self) -> str | None:
+        """Return this database's identity without minting one, or ``None`` if unused.
+
+        The distinction matters to the caller that decides whether this install
+        may use the database at all: a database with no generation has never
+        been opened by anything, which is a different operator problem from one
+        carrying another install's generation. Minting on the way past would
+        erase that difference.
+        """
+        return await self.backend.read(journal.read_generation)
+
     def turn_records(self, agent_name: str) -> TurnRecordStore:
         """Return the agent-scoped turn-record view.
 

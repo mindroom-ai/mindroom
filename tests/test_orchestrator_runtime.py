@@ -33,12 +33,14 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
+from mindroom.orchestration import config_lifecycle as config_lifecycle_module
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
@@ -3226,18 +3228,20 @@ class TestMultiAgentOrchestrator:
         mock_sync_support.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_update_config_refuses_an_event_journal_change(self, tmp_path: Path) -> None:
-        """A journal backend cannot change under a running process, so the reload is refused.
+    async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A journal edit is adopted, not refused, and the operator is told it is inert until restart.
 
-        The store is opened once and shared by every bot, so restarting
-        entities cannot replace it. Applying the change would leave turns
-        committing to the old database while published state named the new
-        one, and the next process start would open the new database without
-        that history -- replay and delivery dedupe would both begin from a past
-        that never happened. Refusing says so; the planner cannot, because it
-        classifies this as a support-only change and restarts nothing.
+        The store is opened once at startup and every bot borrows that one, and
+        the update planner has no journal case, so a reload cannot move it. That
+        makes refusing the whole reload the wrong answer -- it would strand every
+        unrelated edit in the same save. Applying it silently is the other wrong
+        answer, because the field then reads as live when it is not.
         """
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         current_config = MagicMock()
         current_config.authorization.global_users = []
         current_config.event_journal = EventJournalConfig()
@@ -3248,37 +3252,7 @@ class TestMultiAgentOrchestrator:
             database_url="postgresql://journal.invalid/moved",
         )
         orchestrator.config = current_config
-
-        with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan") as mock_plan,
-        ):
-            updated = await orchestrator.config_reload._update_config()
-
-        assert updated is False, "a journal change must not report a successful reload"
-        mock_plan.assert_not_called()
-        assert orchestrator.config is current_config, "the refused config was adopted anyway"
-
-    @pytest.mark.asyncio
-    async def test_update_config_adopts_a_journal_edit_that_opens_the_same_database(self, tmp_path: Path) -> None:
-        """Only a change of opened database is a move, and nothing else in the field is one.
-
-        ``open_event_journal_store`` derives the SQLite path from the runtime
-        storage root and reads no ``event_journal`` field to do it, so a
-        ``database_url`` written under ``backend: sqlite`` opens exactly the
-        same file. Refusing it would stop the reload for a store that did not
-        move -- and because a refusal never advances the adopted config, every
-        later unrelated reload would be refused too, until the field was put
-        back or the process restarted.
-        """
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        current_config = MagicMock()
-        current_config.authorization.global_users = []
-        current_config.event_journal = EventJournalConfig()
-        new_config = MagicMock()
-        new_config.authorization.global_users = []
-        new_config.event_journal = EventJournalConfig(database_url="postgresql://journal.invalid/unused")
-        orchestrator.config = current_config
+        record_opened_event_journal(current_config.event_journal, runtime_paths=runtime_paths)
         plan = SimpleNamespace(
             mindroom_user_changed=False,
             new_config=new_config,
@@ -3300,10 +3274,13 @@ class TestMultiAgentOrchestrator:
             ) as mock_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(config_lifecycle_module.logger, "warning") as mock_warning,
         ):
             await orchestrator.config_reload._update_config()
 
-        mock_plan.assert_called_once()
+        mock_plan.assert_called_once(), "the reload was refused instead of applied around the inert field"
+        warned = [call for call in mock_warning.call_args_list if "pending_restart" in str(call)]
+        assert warned, "a journal edit that cannot take effect until restart was applied silently"
 
     @pytest.mark.asyncio
     async def test_update_config_does_not_swap_hook_runtime_on_failed_reload(self, tmp_path: Path) -> None:

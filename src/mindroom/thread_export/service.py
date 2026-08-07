@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
-from mindroom.event_journal_open import open_event_journal_store
+from mindroom.event_journal_open import bind_event_journal, open_event_journal_store
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
@@ -314,6 +314,15 @@ async def export_threads_to_targets_once(
         storage_path=runtime_paths.storage_root,
     )
     try:
+        # Its own process, so nothing has vouched for this database yet. An
+        # export reading a stranger's journal reports the wrong history rather
+        # than failing, which is the quietest way to be wrong.
+        await bind_event_journal(
+            journal_store,
+            journal_config=config.event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
         for group in ready_groups:
             await _run_export_group(
                 group,

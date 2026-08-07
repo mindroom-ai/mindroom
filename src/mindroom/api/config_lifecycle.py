@@ -27,7 +27,7 @@ from mindroom.config.yaml_includes import (
     partial_source_files,
     source_files_fingerprint,
 )
-from mindroom.event_journal_change import EVENT_JOURNAL_CHANGE_MESSAGE, refuses_event_journal_change
+from mindroom.event_journal_open import pending_event_journal_restart
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -43,6 +43,7 @@ _UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes"
+CONFIG_PENDING_RESTART_HEADER = "x-mindroom-config-pending-restart"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
 
@@ -336,20 +337,7 @@ def persist_runtime_validated_config(
     runtime_config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    """Persist one already-validated config and immediately publish matching committed API snapshots.
-
-    The chat ``!config`` command and the config tools write through here rather
-    than through the HTTP commit paths, so the event-journal rule has to be
-    applied here too. Without it this function would save the moved journal and
-    publish it at generation+1 while the orchestrator kept refusing to adopt it,
-    which is precisely the split the rule exists to prevent -- and it would move
-    published state onto the new journal, so the disk loader's comparison would
-    then agree with it and never refuse again.
-
-    The rule runs whether or not this process publishes API snapshots. Under
-    ``mindroom run --no-api`` there are none to iterate, and the orchestrator
-    has still opened the journal that these same writers can reach.
-    """
+    """Persist one already-validated config and immediately publish matching committed API snapshots."""
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
 
@@ -361,13 +349,6 @@ def persist_runtime_validated_config(
             if snapshot.runtime_paths != runtime_paths:
                 continue
             locked_snapshots.append((state, snapshot))
-
-        # The journal the runtime opened first, because that fact holds with no
-        # snapshots at all; then each snapshot's own adopted config, which is
-        # all there is to compare against before the store has been opened.
-        _raise_if_event_journal_changed(None, runtime_config, runtime_paths)
-        for _state, snapshot in locked_snapshots:
-            _raise_if_event_journal_changed(snapshot.runtime_config, runtime_config, runtime_paths)
 
         committed_source_files = next(
             (snapshot.source_files for _, snapshot in locked_snapshots if snapshot.source_files is not None),
@@ -501,47 +482,6 @@ def _published_snapshot(
     )
 
 
-class _EventJournalChangeRefusedError(ConfigRuntimeValidationError):
-    """Config write rejected because it moves the event journal this process opened."""
-
-
-def _event_journal_refused_http_error(exc: _EventJournalChangeRefusedError) -> HTTPException:
-    """Return the journal-refusal 409 for the HTTP write paths.
-
-    A permanent rejection like the includes one, not the retryable stale-write
-    409: retrying changes nothing until the process restarts or the field is
-    put back.
-    """
-    return HTTPException(status_code=409, detail=str(exc))
-
-
-def _raise_if_event_journal_changed(
-    current_config: Config | None,
-    candidate: Config,
-    runtime_paths: constants.RuntimePaths,
-) -> None:
-    """Reject a write that moves the journal this process already opened.
-
-    Told rather than dropped: the write also persists the config file, so
-    silently ignoring the journal field would save a file the runtime disagrees
-    with and report success for a change that never happened.
-
-    Raised as a config-validation error rather than an ``HTTPException`` because
-    the writers are not all HTTP. The chat ``!config`` command and the config
-    tools reach the same rule through ``persist_runtime_validated_config``, and
-    they already render this exception type as a rejected-change reply; the HTTP
-    paths translate it to 409 at their boundary.
-    """
-    if not refuses_event_journal_change(
-        current_config,
-        candidate,
-        runtime_paths=runtime_paths,
-        refused_by="api_config_write",
-    ):
-        return
-    raise _EventJournalChangeRefusedError(EVENT_JOURNAL_CHANGE_MESSAGE)
-
-
 def _stale_snapshot_error() -> HTTPException:
     """Return the shared stale-write error used when state changed mid-request."""
     return HTTPException(
@@ -600,7 +540,6 @@ def _commit_mutated_snapshot[T](
         if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -660,7 +599,6 @@ def _commit_replaced_snapshot(
         current = current_state.snapshot
         if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
@@ -695,7 +633,6 @@ def _commit_raw_replaced_snapshot(
         current = current_state.snapshot
         if current.revision != expected_revision or current.runtime_paths != runtime_paths:
             raise _stale_snapshot_error()
-        _raise_if_event_journal_changed(current.runtime_config, validated_config, runtime_paths)
         _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
             current,
@@ -741,8 +678,6 @@ def _build_and_commit_mutation[T](
         raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
-    except _EventJournalChangeRefusedError as e:
-        raise _event_journal_refused_http_error(e) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
@@ -781,8 +716,6 @@ def _build_and_commit_replacement(
         raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
-    except _EventJournalChangeRefusedError as e:
-        raise _event_journal_refused_http_error(e) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
@@ -825,8 +758,6 @@ def _build_and_commit_raw_replacement(
         )
     except HTTPException:
         raise
-    except _EventJournalChangeRefusedError as exc:
-        raise _event_journal_refused_http_error(exc) from exc
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
     except Exception as exc:
@@ -848,45 +779,12 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
-        if runtime_config is not None and refuses_event_journal_change(
-            current.runtime_config,
-            runtime_config,
-            runtime_paths=runtime_paths,
-            refused_by="api_config_publish",
-        ):
-            # A refusal is a load that parsed and was then not adopted, so it
-            # publishes as a failed load and takes everything a failed load
-            # gets: the failure is recorded, the payload and runtime config stay
-            # on the last good ones, and the watcher keeps the union of source
-            # sets below. Recording the failure is what stops a later write from
-            # deep-copying the pre-edit payload back over whatever else the
-            # operator changed in the same save, and it is the only thing that
-            # tells a runtime which cannot adopt its own config file apart from
-            # a healthy one.
-            #
-            # What a refusal does not do is advance the generation: everything
-            # bound to the generation it was published at -- external trigger
-            # delivery -- would start rejecting work against a runtime that
-            # never changed. Pinning the fingerprint to the last good one is how
-            # that survives the shared publication below, and it also makes
-            # putting the journal field back recover with nothing to rebind.
-            result = ConfigLoadResult(
-                success=False,
-                error_status_code=409,
-                error_detail=EVENT_JOURNAL_CHANGE_MESSAGE,
-            )
-            validated_payload = None
-            runtime_config = None
-            source_fingerprint = current.source_fingerprint
         same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
         # A failed load publishes the union of the last good source set and the
         # files the failed attempt read, so the watcher never loses last-good
         # coverage while still covering newly added include files whose edit
         # broke the config; the next successful load replaces the union with
-        # the real set, shrinking it back. A refusal reaches here too, and needs
-        # it just as badly: a journal moved into a brand new include file would
-        # otherwise leave that file unwatched, so correcting the very file the
-        # operator added could never trigger another load.
+        # the real set, shrinking it back.
         published_source_files = source_files if source_files is not None else current.source_files
         if not result.success and source_files is not None and current.source_files is not None:
             published_source_files = source_files | current.source_files
@@ -907,14 +805,7 @@ def _publish_runtime_config_into_app(
     runtime_paths: constants.RuntimePaths,
     api_app: FastAPI,
 ) -> bool:
-    """Publish one already-validated runtime config into one API app's committed cache.
-
-    No event-journal rule here, unlike the disk loader and the write paths: this
-    publishes what the orchestrator has already adopted, so the journal it names
-    is the one actually open. Refusing it would reject the very publish that
-    makes the API agree with the runtime after a startup where the two read the
-    config file at different moments.
-    """
+    """Publish one already-validated runtime config into one API app's committed cache."""
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
@@ -1032,6 +923,19 @@ def replace_committed_config(
         initial_snapshot=request_snapshot(request),
         expected_generation=expected_generation,
     )
+
+
+def config_pending_restart(request: Request) -> bool:
+    """Return whether the committed config names an event journal that is not the open one.
+
+    ``event_journal`` is read once, when the store is opened, so an edit to it
+    is saved and then does nothing until a restart. The dashboard shows the
+    saved value either way, and this is what stops that from being a lie.
+    """
+    snapshot = _request_or_current_snapshot(request)
+    if snapshot.runtime_config is None:
+        return False
+    return pending_event_journal_restart(snapshot.runtime_config, snapshot.runtime_paths)
 
 
 def config_uses_includes(request: Request) -> bool:

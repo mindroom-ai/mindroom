@@ -91,7 +91,7 @@ from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
-from .event_journal_open import open_event_journal_store
+from .event_journal_open import bind_event_journal, open_event_journal_store
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
@@ -1001,6 +1001,7 @@ class _MultiAgentOrchestrator:
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
+        await self._bind_event_journal()
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
@@ -1881,6 +1882,22 @@ class _MultiAgentOrchestrator:
                 await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
 
         logger.info("Ensured room invitations for all configured responders and authorized users")
+
+    async def _bind_event_journal(self) -> None:
+        """Refuse startup unless the configured database is this install's journal.
+
+        Runs before any bot is created, so a store this install is not bound to
+        is never written to: opening a stranger's journal would take over its
+        outbox and recovery work, and opening a fresh one would replay and
+        re-answer a past that already happened.
+        """
+        config = self._require_config()
+        await bind_event_journal(
+            self._shared_journal_store(),
+            journal_config=config.event_journal,
+            runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
+        )
 
     def _shared_journal_store(self) -> EventJournalStore:
         """Return the one journal store every bot in this process borrows.
