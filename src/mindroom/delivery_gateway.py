@@ -40,7 +40,13 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.response_delivery import DeliveryStage, RecoveryOutcome, ResponseDelivery
+from mindroom.response_delivery import (
+    DeliveryStage,
+    OnFinalEnqueued,
+    RecoveryOutcome,
+    ResponseDelivery,
+    SendDelivery,
+)
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -349,6 +355,10 @@ class DeliveryGatewayDeps:
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbox: OutboxView
+    # Contract 2's handoff: the journal owns an actionable source until the
+    # turn's answer is durably owed to a room, and this is where that becomes
+    # true. Everything after it is the outbox's to recover.
+    on_final_delivery_enqueued: OnFinalEnqueued
 
 
 @dataclass(frozen=True)
@@ -573,6 +583,19 @@ class DeliveryGateway:
             raise _DeliveryRefusedError(msg)
         return delivered
 
+    def _response_delivery(self, send: SendDelivery) -> ResponseDelivery:
+        """Return the outbox writer used by a live delivery.
+
+        Recovery builds its own without the handoff: it resends rows that
+        already exist, and the source those rows answer was handed over when
+        they were first recorded.
+        """
+        return ResponseDelivery(
+            store=self.deps.outbox,
+            send=send,
+            on_final_enqueued=self.deps.on_final_delivery_enqueued,
+        )
+
     async def recover_deliveries(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome this process cannot know.
 
@@ -621,7 +644,7 @@ class DeliveryGateway:
             return delivered.event_id
 
         try:
-            event_id = await ResponseDelivery(store=self.deps.outbox, send=send).deliver(
+            event_id = await self._response_delivery(send).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=request.delivery_stage,
                 room_id=room_id,
@@ -757,7 +780,7 @@ class DeliveryGateway:
             return edited.event_id
 
         try:
-            event_id = await ResponseDelivery(store=self.deps.outbox, send=send).deliver(
+            event_id = await self._response_delivery(send).deliver(
                 turn_id=request.delivery_turn_id,
                 stage=DeliveryStage.FINAL,
                 room_id=room_id,

@@ -645,7 +645,6 @@ def _obligation_runner(
             source_has_live_owner=harness.gate.has_pending_source_event,
         ),
         room_for_id=lambda _room_id: room,
-        turn_is_terminal=harness.turn_store.is_durably_handled,
     )
 
 
@@ -1159,10 +1158,6 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
         principal_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
-    )
-    harness.turn_store.deps = replace(
-        harness.turn_store.deps,
-        on_terminal_turn_persisted=obligation_runner.release_terminal_turn_sources,
     )
     normalization_started = asyncio.Event()
     release_normalization = asyncio.Event()

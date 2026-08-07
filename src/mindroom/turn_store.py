@@ -59,7 +59,6 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
-    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +161,6 @@ class TurnStore:
             turn_record.indexed_event_ids,
             terminal_record,
             wait_for_persist=wait_for_persist,
-            on_persisted=self._notify_terminal_turn_persisted,
         )
 
     def is_handled(self, event_id: str) -> bool:
@@ -247,8 +245,6 @@ class TurnStore:
         self,
         response_event_id: str,
         update: Callable[[TurnRecord], TurnRecord],
-        *,
-        notify_terminal: bool = False,
     ) -> TurnRecord | None:
         """Durably update the sole turn that owns one visible response."""
         turn_record = self.turn_record_for_response_event_id(response_event_id)
@@ -270,7 +266,6 @@ class TurnStore:
             turn_record.indexed_event_ids,
             updated_record,
             wait_for_persist=True,
-            on_persisted=self._notify_terminal_turn_persisted if notify_terminal else None,
         )
 
     def record_user_stopped_response(
@@ -296,11 +291,7 @@ class TurnStore:
                 delivery_settled=delivery_settled,
             )
 
-        return self._update_response_turn(
-            response_event_id,
-            stopped_record,
-            notify_terminal=not turn_record.completed,
-        )
+        return self._update_response_turn(response_event_id, stopped_record)
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""
@@ -358,11 +349,6 @@ class TurnStore:
             merge_pending,
             wait_for_persist=True,
         )
-
-    def _notify_terminal_turn_persisted(self, turn_record: TurnRecord) -> None:
-        callback = self.deps.on_terminal_turn_persisted
-        if callback is not None:
-            callback(turn_record.indexed_event_ids)
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""

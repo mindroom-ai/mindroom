@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
+type OnFinalEnqueued = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,12 @@ class ResponseDelivery:
 
     store: OutboxView
     send: SendDelivery
+    # Called once a FINAL delivery is durably owed, which is where a turn stops
+    # being the journal's work and becomes the outbox's. Deliberately not
+    # called for `INITIAL`: a placeholder is not an answer, and handing the
+    # turn over on one would leave a crash before the model finished with
+    # nothing pending to replay and "Thinking..." in the room forever.
+    on_final_enqueued: OnFinalEnqueued | None = None
 
     async def deliver(
         self,
@@ -67,6 +74,13 @@ class ResponseDelivery:
         store refused the intent, or the fence deleted the row between
         recording it and claiming it. Both are the same fact arriving through
         different orderings, and neither is a failure to report.
+
+        A refusal is the one outcome that must leave the turn where it was.
+        Nothing durable owes the answer afterwards -- there is no row -- so
+        handing the turn over would leave no owner at all, which is the silent
+        loss this ordering exists to prevent. A row withdrawn after it was
+        recorded is different: the intent existed, and the fence decided
+        against it.
         """
         transaction_id = await self.store.enqueue_delivery(
             turn_id=turn_id,
@@ -79,6 +93,12 @@ class ResponseDelivery:
         if transaction_id is None:
             logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
             return None
+        # Before the send, not after it. Once the row exists the answer is
+        # recoverable without the model, and leaving the turn replayable until
+        # the network call returns would buy a second model run for a crash
+        # the outbox already covers.
+        if stage is DeliveryStage.FINAL and self.on_final_enqueued is not None:
+            await self.on_final_enqueued(turn_id)
         return await self.flush(turn_id=turn_id, stage=stage)
 
     async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
@@ -176,4 +196,4 @@ class ResponseDelivery:
                 recovered += 1
 
 
-__all__ = ["DeliveryStage", "RecoveryOutcome", "ResponseDelivery", "SendDelivery"]
+__all__ = ["DeliveryStage", "OnFinalEnqueued", "RecoveryOutcome", "ResponseDelivery", "SendDelivery"]

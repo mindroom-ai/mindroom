@@ -57,6 +57,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
     bind_runtime_paths,
+    ignore_final_delivery_handoff,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_outbox_mock,
@@ -755,6 +756,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
             outbox=make_outbox_mock(),
+            on_final_delivery_enqueued=ignore_final_delivery_handoff,
         ),
     )
 
