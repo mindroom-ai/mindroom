@@ -16,6 +16,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
+from .models import SettlementOutcome
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
         OutboxDelivery,
         RefreshRequest,
         SemanticConsumer,
-        SettlementOutcome,
         VisibleMessage,
     )
     from .projection import ProjectedEvent
@@ -375,6 +375,7 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
         """Record delivery intent, or refuse it as an answer to a membership that ended.
 
@@ -382,6 +383,14 @@ class PrincipalStore:
         caused it, and that event's journal row records which membership
         admitted it, so this needs no epoch from its caller and cannot be
         given a stale one.
+
+        ``settle_source_event_ids`` are the journal sources this delivery
+        discharges, and they are settled in the same transaction that records
+        it. That is the whole handoff: ownership of the turn moves from the
+        journal to the outbox at one commit, so there is no instant at which a
+        crash leaves both of them owning it. Two transactions would leave one,
+        and a process that died there would send the frozen answer *and*
+        replay the turn -- a second model run for a question already answered.
         """
         return await self._backend.write(
             lambda transaction: _enqueue_delivery(
@@ -393,6 +402,7 @@ class PrincipalStore:
                 thread_id=thread_id,
                 payload=payload,
                 edits_event_id=edits_event_id,
+                settle_source_event_ids=settle_source_event_ids,
             ),
         )
 
@@ -565,6 +575,7 @@ def _enqueue_delivery(
     thread_id: str | None,
     payload: Mapping[str, object],
     edits_event_id: str | None,
+    settle_source_event_ids: tuple[str, ...],
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -581,12 +592,17 @@ def _enqueue_delivery(
     would strand it unacknowledged forever while leaving whatever it sent
     visible. Only the frozen transaction ID can resolve that, by collapsing
     the retry onto the same event.
+
+    Settling the sources here rather than after the commit is what makes the
+    handoff one event. A refusal settles nothing, because nothing durable
+    would owe the answer afterwards; anything else settles every source the
+    delivery accounts for, atomically with the row that now answers them.
     """
     if not outbox.is_attempted(transaction, principal_id, turn_id=turn_id, stage=stage) and not (
         _turn_membership_is_current(transaction, principal_id, turn_id=turn_id, room_id=room_id)
     ):
         return None
-    return outbox.enqueue(
+    transaction_id = outbox.enqueue(
         transaction,
         principal_id,
         turn_id=turn_id,
@@ -596,6 +612,8 @@ def _enqueue_delivery(
         payload=payload,
         edits_event_id=edits_event_id,
     )
+    journal.settle_many(transaction, principal_id, settle_source_event_ids, SettlementOutcome.SUCCEEDED)
+    return transaction_id
 
 
 def _install_hydration(

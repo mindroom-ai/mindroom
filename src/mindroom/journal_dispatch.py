@@ -347,16 +347,18 @@ class JournalDispatcher:
             raise RuntimeError(msg)
         return event.receipt_order
 
-    async def settle_delivered_turn_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Hand a turn's sources to the outbox now that its answer is durable.
+    def release_delivered_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Forget sources the outbox has taken over, after their commit.
 
-        This is contract 2's handoff. It runs on the event loop, from the
-        delivery path that just recorded the intent, which is why nothing here
-        has to be reachable from a worker thread the way settling after model
-        execution did.
+        The durable half of contract 2's handoff belongs to the transaction
+        that recorded the answer: settling separately would leave a window in
+        which a crash left the journal and the outbox both owning the turn,
+        and the replay that follows would spend the model a second time on a
+        question already answered. What is left here is the in-memory half --
+        the worker still lists these events as deferred to a turn that has now
+        ended, and nothing else would ever clear them.
         """
         self._worker.release(event_ids)
-        await self.store.settle_many(event_ids, SettlementOutcome.SUCCEEDED)
 
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""

@@ -313,7 +313,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             ),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     return gateway, before_hooks, after_hooks

@@ -93,7 +93,7 @@ def _gateway(tmp_path: Path, outbox: OutboxView | None = None) -> DeliveryGatewa
             ),
             response_hooks=MagicMock(_apply_before_response=AsyncMock(), emit_after_response=AsyncMock()),
             outbox=outbox if outbox is not None else make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 

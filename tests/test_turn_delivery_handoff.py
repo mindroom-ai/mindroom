@@ -9,6 +9,11 @@ The handoff point is the FINAL outbox enqueue. Before it, the journal owns the
 source and a crash replays the turn. After it, the outbox owns the answer and
 recovery resends the frozen payload under the same transaction ID. The tests
 below pin both halves and the two ways the handoff must refuse to fire.
+
+"Before" and "after" are only meaningful because there is no "during": the
+answer and the settlement of what it answers commit together. A crash between
+two separate writes would leave both owners holding the same turn, and the
+restart would resend the frozen answer *and* run the model again for it.
 """
 
 from __future__ import annotations
@@ -21,14 +26,15 @@ import pytest
 
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, SettlementOutcome
+from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, SettlementOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.response_delivery import ResponseDelivery
+from mindroom.response_delivery import ResponseDelivery, TurnHandoff
 from mindroom.turn_record import canonicalize_turn_record
+from tests.conftest import CrashError, DiesAfterNextWriteCommit
 from tests.test_live_message_coalescing import _make_bot
 
 if TYPE_CHECKING:
@@ -36,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, OutboxDelivery, PrincipalStore
+    from mindroom.event_journal.views import OutboxView
     from mindroom.journal_dispatch import _MessageCallback
 
 pytestmark = pytest.mark.asyncio
@@ -99,6 +106,7 @@ async def deliver_answer(
     body: str = "the answer",
     stage: DeliveryStage = DeliveryStage.FINAL,
     sends: list[str] | None = None,
+    outbox: OutboxView | None = None,
 ) -> str | None:
     """Run one delivery through the production outbox path and its handoff.
 
@@ -112,9 +120,9 @@ async def deliver_answer(
         return f"$sent-{claimed.transaction_id}"
 
     delivery = ResponseDelivery(
-        store=bot._delivery_gateway.deps.outbox,
+        store=outbox if outbox is not None else bot._delivery_gateway.deps.outbox,
         send=send,
-        on_final_enqueued=bot._delivery_gateway.deps.on_final_delivery_enqueued,
+        handoff=bot._delivery_gateway.deps.turn_handoff,
     )
     return await delivery.deliver(
         turn_id=turn_id,
@@ -222,7 +230,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         delivery = ResponseDelivery(
             store=bot._delivery_gateway.deps.outbox,
             send=send,
-            on_final_enqueued=bot._delivery_gateway.deps.on_final_delivery_enqueued,
+            handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         await delivery.deliver(
             turn_id="$cause",
@@ -342,7 +350,7 @@ class TestWhatARestartOwesAfterTheHandoff:
         delivery = ResponseDelivery(
             store=outbox,
             send=crash,
-            on_final_enqueued=bot._delivery_gateway.deps.on_final_delivery_enqueued,
+            handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         with pytest.raises(RuntimeError, match="crashed after the claim committed"):
             await delivery.deliver(
@@ -447,7 +455,7 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         await dispatcher.drain_once()
         assert "$cause" in dispatcher._worker._deferred, "the deferral must survive to be released"
 
-        await dispatcher.settle_delivered_turn_sources(("$cause",))
+        dispatcher.release_delivered_turn_sources(("$cause",))
 
         assert dispatcher._worker._deferred == set()
 
@@ -481,6 +489,99 @@ class TestTheHandoffCarriesTheWholeTurn:
 
         assert replayed == []
         assert await pending_ids(bot) == []
+
+
+class TestTheHandoffIsOneCommit:
+    """Ownership transfers once, so no crash can land between two owners."""
+
+    async def test_a_crash_the_instant_the_answer_is_durable_costs_no_second_model_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The whole point of the handoff, measured where the user pays for it.
+
+        Two writes with a gap between them is two handoffs, not one. A process
+        that dies in that gap leaves the answer durable and every source still
+        pending, so the outbox sends the frozen answer *and* the journal replays
+        the turn -- a second model run, and every non-idempotent tool in it run
+        again, for a question that was already answered.
+
+        The count is the assertion. "The source was settled by send time" is
+        true of the broken ordering too, because it only ever observes the
+        process that did not crash.
+        """
+        bot = _make_bot(tmp_path)
+        batch = ["$one", "$two", "$caption"]
+        await admit(journal(bot), *(text_event(event_id, ts=1_000 + index) for index, event_id in enumerate(batch)))
+        adopt(bot, batch)
+        backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
+        crashing = EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id)
+        sends: list[str] = []
+        model_runs = 0
+
+        async def run_turn(_event: JournalEvent) -> SettlementOutcome | None:
+            nonlocal model_runs
+            model_runs += 1
+            await deliver_answer(
+                bot,
+                "$caption",
+                body=f"answer from run {model_runs}",
+                sends=sends,
+                outbox=crashing,
+            )
+            # The handoff settled this turn's sources; nothing else may.
+            return None
+
+        backend.armed = True
+        with pytest.raises(CrashError):
+            await run_turn(cast("Any", None))
+
+        # The restart: nothing in memory survives, and both recoveries run.
+        async def send(claimed: OutboxDelivery) -> str:
+            sends.append(claimed.transaction_id)
+            return f"$sent-{claimed.transaction_id}"
+
+        await ResponseDelivery(store=bot._delivery_gateway.deps.outbox, send=send).recover()
+        await PendingEventWorker(store=journal(bot), handle=run_turn).drain_once()
+
+        assert model_runs == 1, "the journal replayed a turn the outbox already owned"
+        assert len(set(sends)) == 1
+        assert await pending_ids(bot) == []
+
+    async def test_the_worker_is_told_only_once_the_commit_has_landed(self, tmp_path: Path) -> None:
+        """The in-memory half of the handoff follows the durable half.
+
+        Telling the worker first would let it re-dispatch a source that is
+        still pending, while the turn that owns it is mid-commit -- two live
+        turns for one message. The order is not an implementation detail;
+        it is the only thing keeping those two facts consistent.
+        """
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        adopt(bot, ["$cause"])
+        backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
+        handoff = bot._delivery_gateway.deps.turn_handoff
+        commits_when_released: list[int] = []
+
+        async def send(claimed: OutboxDelivery) -> str:
+            return f"$sent-{claimed.transaction_id}"
+
+        await ResponseDelivery(
+            store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
+            send=send,
+            handoff=TurnHandoff(
+                sources_for_turn=handoff.sources_for_turn,
+                released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),
+            ),
+        ).deliver(
+            turn_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the answer"},
+        )
+
+        assert commits_when_released == [1], "the worker was told before the answer was durable"
 
 
 class TestTheGatewayWiresTheHandoff:

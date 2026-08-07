@@ -42,10 +42,10 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.response_delivery import (
     DeliveryStage,
-    OnFinalEnqueued,
     RecoveryOutcome,
     ResponseDelivery,
     SendDelivery,
+    TurnHandoff,
 )
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
@@ -358,7 +358,7 @@ class DeliveryGatewayDeps:
     # Contract 2's handoff: the journal owns an actionable source until the
     # turn's answer is durably owed to a room, and this is where that becomes
     # true. Everything after it is the outbox's to recover.
-    on_final_delivery_enqueued: OnFinalEnqueued
+    turn_handoff: TurnHandoff
 
 
 @dataclass(frozen=True)
@@ -593,7 +593,7 @@ class DeliveryGateway:
         return ResponseDelivery(
             store=self.deps.outbox,
             send=send,
-            on_final_enqueued=self.deps.on_final_delivery_enqueued,
+            handoff=self.deps.turn_handoff,
         )
 
     async def recover_deliveries(self) -> RecoveryOutcome:

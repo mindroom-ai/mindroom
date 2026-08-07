@@ -4,6 +4,11 @@ Ordering here is the whole design. The model result becomes durable, then the
 delivery is enqueued, then it is claimed, and only then does the network call
 happen. Every crash boundary between those steps resolves to one terminal turn
 and at most one visible message.
+
+The first of those steps is also where the turn changes hands, and that is one
+commit rather than two. Recording the answer and settling the journal sources
+it answers happen in a single write, so no crash can find the journal and the
+outbox both owning the same turn.
 """
 
 from __future__ import annotations
@@ -22,7 +27,24 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 type SendDelivery = Callable[[OutboxDelivery], Awaitable[str]]
-type OnFinalEnqueued = Callable[[str], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class TurnHandoff:
+    """Which journal sources one FINAL answer discharges, and who to tell.
+
+    The two halves are split by the commit, not by preference. Resolving the
+    sources has to happen before the write, because the settlement travels
+    inside it; telling the in-process worker has to happen after it, because a
+    transaction that rolled back handed nothing over and the worker would
+    otherwise re-dispatch a turn it still owns.
+    """
+
+    # The turn is keyed on its anchor event, but a coalesced batch answers
+    # several sources at once, and every one of them is discharged together.
+    sources_for_turn: Callable[[str], tuple[str, ...]]
+    # In-memory only: the pending-event worker no longer holds these.
+    released: Callable[[tuple[str, ...]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,12 +66,12 @@ class ResponseDelivery:
 
     store: OutboxView
     send: SendDelivery
-    # Called once a FINAL delivery is durably owed, which is where a turn stops
-    # being the journal's work and becomes the outbox's. Deliberately not
-    # called for `INITIAL`: a placeholder is not an answer, and handing the
-    # turn over on one would leave a crash before the model finished with
-    # nothing pending to replay and "Thinking..." in the room forever.
-    on_final_enqueued: OnFinalEnqueued | None = None
+    # Where a turn stops being the journal's work and becomes the outbox's.
+    # Deliberately unused for `INITIAL`: a placeholder is not an answer, and
+    # handing the turn over on one would leave a crash before the model
+    # finished with nothing pending to replay and "Thinking..." in the room
+    # forever.
+    handoff: TurnHandoff | None = None
 
     async def deliver(
         self,
@@ -81,7 +103,14 @@ class ResponseDelivery:
         loss this ordering exists to prevent. A row withdrawn after it was
         recorded is different: the intent existed, and the fence decided
         against it.
+
+        The handoff rides inside the enqueue rather than following it. Both
+        halves of "the outbox owes this answer, the journal no longer does"
+        commit together, so the send below is the only step a crash can leave
+        half done -- and resending a frozen row is what recovery is for.
         """
+        handoff = self.handoff if stage is DeliveryStage.FINAL else None
+        handed_over = handoff.sources_for_turn(turn_id) if handoff is not None else ()
         transaction_id = await self.store.enqueue_delivery(
             turn_id=turn_id,
             stage=stage,
@@ -89,16 +118,13 @@ class ResponseDelivery:
             thread_id=thread_id,
             payload=payload,
             edits_event_id=edits_event_id,
+            settle_source_event_ids=handed_over,
         )
         if transaction_id is None:
             logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
             return None
-        # Before the send, not after it. Once the row exists the answer is
-        # recoverable without the model, and leaving the turn replayable until
-        # the network call returns would buy a second model run for a crash
-        # the outbox already covers.
-        if stage is DeliveryStage.FINAL and self.on_final_enqueued is not None:
-            await self.on_final_enqueued(turn_id)
+        if handoff is not None:
+            handoff.released(handed_over)
         return await self.flush(turn_id=turn_id, stage=stage)
 
     async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
@@ -196,4 +222,4 @@ class ResponseDelivery:
                 recovered += 1
 
 
-__all__ = ["DeliveryStage", "OnFinalEnqueued", "RecoveryOutcome", "ResponseDelivery", "SendDelivery"]
+__all__ = ["DeliveryStage", "RecoveryOutcome", "ResponseDelivery", "SendDelivery", "TurnHandoff"]

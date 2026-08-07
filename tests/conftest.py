@@ -93,6 +93,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_delivery import TurnHandoff
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -120,6 +121,8 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.backend import Backend, Operation
+    from mindroom.event_journal.schema import Dialect
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1058,6 +1061,8 @@ class FakeOutbox:
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
+        # The journal sources each FINAL enqueue handed over, in order.
+        self.handed_over: list[tuple[str, ...]] = []
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Return whether a turn still speaks for the room's current membership."""
@@ -1073,6 +1078,7 @@ class FakeOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
 
@@ -1086,7 +1092,15 @@ class FakeOutbox:
         reason production exempts it: its outcome is unknown, so the retry has
         to go out under the frozen transaction rather than strand whatever it
         may already have made visible.
+
+        The handed-over sources are kept rather than dropped, because they are
+        a durable effect of this call in production and a double that swallowed
+        them would let a lost handoff pass unnoticed. There is no journal here
+        to settle them in; whether the settlement really shares this
+        transaction is pinned against the real backends.
         """
+        if settle_source_event_ids:
+            self.handed_over.append(settle_source_event_ids)
         key = (turn_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
@@ -1160,13 +1174,120 @@ def make_outbox_mock() -> OutboxView:
     return cast("OutboxView", FakeOutbox())
 
 
-async def ignore_final_delivery_handoff(_turn_id: str) -> None:
-    """Drop contract 2's journal handoff, for tests that are not about it.
+class CrashError(RuntimeError):
+    """The process died here."""
 
-    Named rather than a bare lambda so a reader can see that the handoff was
-    deliberately stubbed here, not forgotten. Tests that care what the handoff
-    settles use a real journal store instead.
+
+@dataclass
+class DiesAfterNextWriteCommit:
+    """An event-journal backend whose process ends as its next write commits.
+
+    The window a two-commit handoff opens is *between* commits, so a probe for
+    it has to sit at the commit boundary. A wrapper one layer up can only stop
+    between whole store calls, and would step straight over a store method that
+    quietly runs two write transactions of its own -- passing while the very
+    ordering it was written to forbid is back in production.
     """
+
+    inner: "Backend"
+    armed: bool = False
+    # How many write transactions have committed through this view, so a test
+    # can say which side of a commit something else happened on.
+    commits: int = 0
+
+    @property
+    def dialect(self) -> "Dialect":
+        """Return the SQL spelling the wrapped backend uses."""
+        return self.inner.dialect
+
+    async def write[T](self, operation: "Operation[T]") -> T:
+        """Commit one write transaction, then die if this was the armed one."""
+        result = await self.inner.write(operation)
+        self.commits += 1
+        if self.armed:
+            self.armed = False
+            msg = "crashed the instant a write committed"
+            raise CrashError(msg)
+        return result
+
+    async def read[T](self, operation: "Operation[T]") -> T:
+        """Run one read transaction."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Do nothing: the wrapped backend outlives this view of it."""
+
+
+@dataclass
+class DiesAfterAcknowledgement:
+    """One principal's outbox, whose process ends as an outcome is recorded.
+
+    Only useful for boundaries that are one store call and one write, which
+    acknowledgement is. A crash between two writes inside a single store call
+    is invisible from here, so probing for that needs
+    ``DiesAfterNextWriteCommit`` instead.
+    """
+
+    inner: OutboxView
+
+    async def enqueue_delivery(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        """Record delivery intent."""
+        return await self.inner.enqueue_delivery(
+            turn_id=turn_id,
+            stage=stage,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            edits_event_id=edits_event_id,
+            settle_source_event_ids=settle_source_event_ids,
+        )
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
+
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before network I/O and return what to send."""
+        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+
+    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Return one delivery without claiming it."""
+        return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
+
+    async def acknowledge_delivery(self, *, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
+        """Record the Matrix outcome, then die before anything else can run."""
+        await self.inner.acknowledge_delivery(turn_id=turn_id, stage=stage, event_id=event_id)
+        msg = "crashed the instant the outcome was recorded"
+        raise CrashError(msg)
+
+    async def unacknowledged_deliveries(
+        self,
+        *,
+        limit: int = 256,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[OutboxDelivery, ...]:
+        """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        return await self.inner.unacknowledged_deliveries(limit=limit, after=after)
+
+
+# Drops contract 2's journal handoff, for tests that are not about it. Named
+# rather than a bare lambda so a reader can see that the handoff was
+# deliberately stubbed here, not forgotten. Tests that care what the handoff
+# settles use a real journal store instead.
+ignore_final_delivery_handoff = TurnHandoff(
+    sources_for_turn=lambda _turn_id: (),
+    released=lambda _event_ids: None,
+)
 
 
 @dataclass

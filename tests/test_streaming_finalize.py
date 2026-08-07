@@ -143,7 +143,7 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
             resolver=SimpleNamespace(deps=SimpleNamespace()),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -441,7 +441,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -488,7 +488,7 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -679,7 +679,7 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -860,7 +860,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -995,7 +995,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
@@ -1060,7 +1060,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -1139,7 +1139,7 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
             resolver=Mock(),
             response_hooks=response_hooks,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 

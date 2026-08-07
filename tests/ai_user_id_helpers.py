@@ -421,7 +421,7 @@ def _build_response_runner(
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbox=make_outbox_mock(),
-            on_final_delivery_enqueued=ignore_final_delivery_handoff,
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     _set_gateway_method(

@@ -3939,7 +3939,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbox=make_outbox_mock(),
-                on_final_delivery_enqueued=ignore_final_delivery_handoff,
+                turn_handoff=ignore_final_delivery_handoff,
             ),
         )
         object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -4043,7 +4043,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbox=make_outbox_mock(),
-                on_final_delivery_enqueued=ignore_final_delivery_handoff,
+                turn_handoff=ignore_final_delivery_handoff,
             ),
         )
         outcome = await gateway.finalize_streamed_response(
@@ -4149,7 +4149,7 @@ class TestStreamingBehavior:
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
                 outbox=make_outbox_mock(),
-                on_final_delivery_enqueued=ignore_final_delivery_handoff,
+                turn_handoff=ignore_final_delivery_handoff,
             ),
         )
 

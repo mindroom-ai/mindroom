@@ -9,12 +9,20 @@ The model is counted as well. Enqueueing is what makes an answer durable, so a
 crash before it costs a model run and a crash after it must not: the stored
 payload is the answer, and asking the model for another one would only produce
 a result that can never become visible.
+
+The turn below has no "have I already answered this?" check, deliberately,
+because production has none either -- `JournalDispatcher` hands every pending
+source to its callback and lets the turn engine decide. What stops the second
+model run is that the source stops being pending in the same transaction that
+records the answer. A handler that consulted the outbox first would pass every
+test here while production still ran the model twice.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import nio
 import pytest
@@ -22,16 +30,18 @@ import pytest
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
+    EventJournalStore,
     EventKind,
     SettlementOutcome,
 )
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.response_delivery import ResponseDelivery
+from mindroom.response_delivery import ResponseDelivery, TurnHandoff
+from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import EventJournalStore, JournalEvent, OutboxDelivery, PrincipalStore
+    from mindroom.event_journal import JournalEvent, OutboxDelivery, OutboxView, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,10 +49,7 @@ ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
 BOT = "@mindroom_general:example.org"
 SOURCE = "$inbound"
-
-
-class CrashError(RuntimeError):
-    """The process died here."""
+PRINCIPAL = "agent@alice"
 
 
 @dataclass
@@ -80,53 +87,68 @@ class FakeHomeserver:
         return len(self.events)
 
 
+# A turn here answers exactly one source, and hands over exactly that one.
+_SETTLE_THE_SOURCE = TurnHandoff(sources_for_turn=lambda turn_id: (turn_id,), released=lambda _event_ids: None)
+
+
 @dataclass
 class TurnRuntime:
     """Everything that would be rebuilt by a restart."""
 
     store: PrincipalStore
+    crashing_backend: DiesAfterNextWriteCommit
     homeserver: FakeHomeserver
     model_runs: int = 0
     crash_after_model: bool = False
     crash_after_enqueue: bool = False
-    crash_before_settle: bool = False
+    crash_after_acknowledgement: bool = False
 
     @property
     def delivery(self) -> ResponseDelivery:
         """Return a fresh delivery view, as a restart would."""
         return ResponseDelivery(store=self.store, send=self.homeserver.send)
 
-    async def handle(self, event: JournalEvent) -> SettlementOutcome:
-        """Run one turn: model, durable result, enqueue, claim, send, settle.
+    def _outbox(self) -> OutboxView:
+        """Return the outbox this attempt writes through, crashes and all.
 
-        A turn whose answer is already durable resumes from it. Spending the
-        model again could only produce an answer the outbox would discard, so
-        a restart picks up where the durable result left off.
+        The enqueue crash sits at the backend's commit, not at the store call
+        around it: the point of that boundary is the instant *between* two
+        commits, and a probe outside the store call would step over a store
+        that ran two of them.
         """
-        durable = await self.store.load_delivery(turn_id=event.event_id, stage=DeliveryStage.FINAL)
-        if durable is None:
-            self.model_runs += 1
-            answer = f"answer to {event.event_id}"
-            if self.crash_after_model:
-                msg = "crashed after the model finished"
-                raise CrashError(msg)
+        self.crashing_backend.armed = self.crash_after_enqueue
+        principal = EventJournalStore(backend=cast("Any", self.crashing_backend)).principal(PRINCIPAL)
+        if not self.crash_after_acknowledgement:
+            return principal
+        return cast("OutboxView", DiesAfterAcknowledgement(principal))
 
-            await self.store.enqueue_delivery(
-                turn_id=event.event_id,
-                stage=DeliveryStage.FINAL,
-                room_id=event.room_id,
-                thread_id=event.thread_id,
-                payload={"msgtype": "m.text", "body": answer},
-            )
-        if self.crash_after_enqueue:
-            msg = "crashed after enqueue, before claim"
+    async def handle(self, event: JournalEvent) -> SettlementOutcome | None:
+        """Run one turn: model, the durable handoff, then claim and send.
+
+        Nothing here asks whether this turn was already answered. It cannot:
+        the handoff settles the source inside the transaction that records the
+        answer, so the worker never offers the same source twice.
+        """
+        self.model_runs += 1
+        answer = f"answer to {event.event_id}"
+        if self.crash_after_model:
+            msg = "crashed after the model finished"
             raise CrashError(msg)
 
-        await self.delivery.flush(turn_id=event.event_id, stage=DeliveryStage.FINAL)
-        if self.crash_before_settle:
-            msg = "crashed after acknowledgement, before settlement"
-            raise CrashError(msg)
-        return SettlementOutcome.SUCCEEDED
+        await ResponseDelivery(
+            store=self._outbox(),
+            send=self.homeserver.send,
+            handoff=_SETTLE_THE_SOURCE,
+        ).deliver(
+            turn_id=event.event_id,
+            stage=DeliveryStage.FINAL,
+            room_id=event.room_id,
+            thread_id=event.thread_id,
+            payload={"msgtype": "m.text", "body": answer},
+        )
+        # The handoff already settled this source. Reporting an outcome as
+        # well would be a second authority over the same fact.
+        return None
 
     def worker(self) -> PendingEventWorker:
         """Return a fresh worker, as a restart would."""
@@ -136,7 +158,11 @@ class TurnRuntime:
 @pytest.fixture
 def runtime(journal_store: EventJournalStore) -> TurnRuntime:
     """Return one turn runtime over a real store."""
-    return TurnRuntime(store=journal_store.principal("agent@alice"), homeserver=FakeHomeserver())
+    return TurnRuntime(
+        store=journal_store.principal(PRINCIPAL),
+        crashing_backend=DiesAfterNextWriteCommit(inner=journal_store.backend),
+        homeserver=FakeHomeserver(),
+    )
 
 
 def inbound(event_id: str = SOURCE) -> nio.Event:
@@ -246,11 +272,16 @@ class TestCrashMatrix:
         await assert_settled_once(runtime)
         assert runtime.model_runs == 2
 
-    async def test_six_after_enqueue_before_the_claim_commits(
+    async def test_six_after_the_handoff_before_the_claim_commits(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """Six after enqueue before the claim commits."""
+        """The first boundary the outbox owns outright.
+
+        The answer and the settlement committed together, so the journal has
+        nothing left to replay and the model must not run again. Everything
+        still owed is a row the outbox knows how to resend.
+        """
         await admit(runtime.store)
         runtime.crash_after_enqueue = True
         await runtime.worker().drain_once()
@@ -259,8 +290,10 @@ class TestCrashMatrix:
         assert stored is not None
         assert stored.acknowledged_event_id is None
         assert runtime.homeserver.sends == 0
+        assert await runtime.store.pending() == (), "the answer and its handoff commit together"
 
         runtime.crash_after_enqueue = False
+        await runtime.delivery.recover()
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
@@ -311,22 +344,31 @@ class TestCrashMatrix:
         await assert_settled_once(runtime)
         assert runtime.model_runs == 1
 
-    async def test_nine_after_acknowledgement_before_settlement(
+    async def test_nine_after_the_acknowledgement_commits(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """The retry must not produce a second message."""
+        """The last boundary, and the one the handoff made uneventful.
+
+        Settlement used to be a separate write that happened here, which made
+        this a real interruption point: the answer was durable, the source was
+        not settled, and the restart replayed the turn on top of an answer
+        already in the room. Now everything durable is already written, so a
+        crash at this instant owes nobody anything.
+        """
         await admit(runtime.store)
-        runtime.crash_before_settle = True
+        runtime.crash_after_acknowledgement = True
         await runtime.worker().drain_once()
 
-        assert await runtime.store.pending() != ()
+        assert await runtime.store.pending() == ()
         assert runtime.homeserver.visible_messages == 1
 
-        runtime.crash_before_settle = False
+        runtime.crash_after_acknowledgement = False
+        await runtime.delivery.recover()
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
+        assert runtime.homeserver.sends == 1
         assert runtime.model_runs == 1
 
 
@@ -454,8 +496,9 @@ class TestModelIsNotRerun:
         Matrix accepted the answer and the acknowledgement was lost, so the
         bot cannot know whether the message exists. It then leaves and rejoins
         the room, which drops everything derived from the old membership. The
-        turn is still pending, so it runs again — and the room must still hold
-        exactly one answer at the end of it.
+        answer was already handed to the outbox, so what survives the rejoin
+        is an attempted row and its frozen transaction — and resending that is
+        what leaves the room holding exactly one answer.
         """
         await admit(runtime.store)
         runtime.homeserver.lose_acknowledgement = True
@@ -463,6 +506,7 @@ class TestModelIsNotRerun:
         assert runtime.homeserver.visible_messages == 1
 
         await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.delivery.recover()
         await runtime.worker().drain_once()
 
         await assert_settled_once(runtime)
@@ -482,21 +526,95 @@ class TestModelIsNotRerun:
 
         assert runtime.homeserver.sends == sends_before
 
-    async def test_a_send_failure_leaves_the_turn_retryable(
+    async def test_a_send_failure_leaves_the_delivery_retryable_not_the_turn(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """A send failure leaves the turn retryable."""
+        """What a failed send owes is a resend, not another answer.
+
+        The handoff committed before the network call, so the journal is done
+        with this source whether or not the message reached Matrix. The row is
+        unacknowledged and recovery resends the payload it froze -- which is
+        the point of freezing it, because the model is not going to be asked
+        for a second one.
+        """
         await admit(runtime.store)
         runtime.homeserver.fail_next_send = True
 
         await runtime.worker().drain_once()
-        assert await runtime.store.pending() != ()
+        assert await runtime.store.pending() == ()
         assert runtime.homeserver.visible_messages == 0
+        assert await runtime.store.unacknowledged_deliveries() != ()
 
-        await runtime.worker().drain_once()
+        assert (await runtime.delivery.recover()).recovered == 1
 
         await assert_settled_once(runtime)
+        assert runtime.model_runs == 1
+
+
+class TestTheHandoffIsOneTransaction:
+    """The answer and the settlement of what it answers commit together.
+
+    Pinned at the store rather than through a delivery, because this is the
+    property the backend provides and both backends have to provide it. Two
+    transactions would leave an instant where the answer is durable and the
+    source is still pending -- the state a restart turns into a second model
+    run for a question that was already answered.
+    """
+
+    async def test_a_settlement_that_cannot_be_written_rolls_the_answer_back(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """No route may leave a durable answer whose sources are still pending.
+
+        The failure is injected at the per-event write rather than at
+        ``settle_many``, which is a no-op for an empty set: a split
+        implementation that settled afterwards could still call the batch
+        function with nothing in it, and a patch there would fire inside the
+        enqueue's own transaction and roll it back for the wrong reason.
+        """
+        await admit(runtime.store)
+
+        with (
+            patch(
+                "mindroom.event_journal.store.journal.settle",
+                side_effect=CrashError("the settlement could not be written"),
+            ),
+            pytest.raises(CrashError),
+        ):
+            await runtime.store.enqueue_delivery(
+                turn_id=SOURCE,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "the answer"},
+                settle_source_event_ids=(SOURCE,),
+            )
+
+        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
+        assert [event.event_id for event in await runtime.store.pending()] == [SOURCE]
+
+    async def test_a_refused_enqueue_settles_nothing(self, runtime: TurnRuntime) -> None:
+        """A fenced answer leaves no row, so it must leave the source owed.
+
+        Settling here would retire work with no owner left to do it, which is
+        the silent loss the ordering exists to prevent.
+        """
+        await admit(runtime.store)
+        await runtime.store.advance_membership_epoch(ROOM)
+
+        transaction_id = await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the answer"},
+            settle_source_event_ids=(SOURCE,),
+        )
+
+        assert transaction_id is None
+        assert [event.event_id for event in await runtime.store.pending()] == [SOURCE]
 
 
 class TestInitialAndFinalStages:
