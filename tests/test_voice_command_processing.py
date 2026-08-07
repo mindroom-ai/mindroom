@@ -30,7 +30,7 @@ from mindroom.constants import (
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import TurnInputSnapshot, TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -846,6 +846,13 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
             ["$voice_event"],
             response_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
+            # Audio is normalized into a text event before coalescing, so the
+            # turn records the registered attachment rather than a media source.
+            input_snapshot=TurnInputSnapshot(
+                message_attachment_ids=(expected_attachment_id,),
+                trusted_attachment_ids=(expected_attachment_id,),
+                raw_audio_fallback=True,
+            ),
         ),
         response_owner="home",
         requester_id="@alice:example.com",
