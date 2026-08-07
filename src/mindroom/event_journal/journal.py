@@ -154,6 +154,31 @@ def advance_membership_epoch(
         """,
         (principal_id, room_id),
     )
+    # Work still pending from the membership that just ended can never finish.
+    # Its answer would have to be enqueued, and enqueue refuses any turn whose
+    # admitted epoch is not the room's current one -- correctly, because that
+    # answer belongs to a conversation this bot is no longer in.
+    #
+    # Leaving those rows pending makes the refusal permanent rather than final:
+    # the worker offers the source again on every replay, the model runs again,
+    # and the enqueue refuses again, forever. Settling them here is what turns
+    # "cannot be answered" into "will not be attempted". The rows themselves
+    # survive, as everything above does, because they are still the proof that
+    # these events already had their one turn.
+    transaction.execute(
+        """
+        UPDATE journal_events
+        SET state = ?, outcome = ?, settled_at_ns = ?, source_json = '', semantic_consumer = NULL
+        WHERE principal_id = ? AND room_id = ? AND state = 'pending'
+        """,
+        (
+            SETTLED_STATE,
+            SettlementOutcome.INTENTIONALLY_IGNORED.value,
+            time.time_ns(),
+            principal_id,
+            room_id,
+        ),
+    )
     return epoch
 
 

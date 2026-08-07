@@ -696,14 +696,23 @@ class TestTheHandoffIsOneTransaction:
         assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
         assert [event.event_id for event in await runtime.store.pending()] == [SOURCE]
 
-    async def test_a_refused_enqueue_settles_nothing(self, runtime: TurnRuntime) -> None:
-        """A fenced answer leaves no row, so it must leave the source owed.
+    async def test_a_refused_enqueue_hands_nothing_over(self, runtime: TurnRuntime) -> None:
+        """A fenced answer leaves no row, and hands over nothing of its own.
 
-        Settling here would retire work with no owner left to do it, which is
-        the silent loss the ordering exists to prevent.
+        The enqueue's settlement rides inside its write, so a refused enqueue
+        must not settle anything: there would be no row owing the answer it
+        just discharged.
+
+        The source is nonetheless terminal here, and not by this enqueue -- the
+        fence retired it. That distinction is the whole point. An earlier
+        version left it pending on the reasoning that work must keep an owner,
+        but no owner exists: every future enqueue for a turn admitted under the
+        old epoch is refused by the same fence, so the source could only be
+        offered, re-run, and refused again on every restart.
         """
         await admit(runtime.store)
         await runtime.store.advance_membership_epoch(ROOM)
+        assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
         transaction_id = await runtime.store.enqueue_delivery(
             turn_id=SOURCE,
@@ -715,7 +724,9 @@ class TestTheHandoffIsOneTransaction:
         )
 
         assert transaction_id is None
-        assert [event.event_id for event in await runtime.store.pending()] == [SOURCE]
+        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL) is None
+        settled = await runtime.store.load_event(SOURCE)
+        assert settled is not None, "the journal row is still the proof this event had its turn"
 
 
 class TestInitialAndFinalStages:

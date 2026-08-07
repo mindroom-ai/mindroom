@@ -246,12 +246,16 @@ class TestTheHandoffIsTheDurableEnqueue:
         self,
         tmp_path: Path,
     ) -> None:
-        """A refusal leaves no row, so it must leave the turn where it was.
+        """A refusal leaves no row, and hands nothing over of its own.
 
-        The fence refuses an answer that belongs to a membership that ended.
-        Nothing durable owes it afterwards, so settling the source here would
-        leave no owner at all -- the silent loss this ordering exists to
-        prevent. Leaving it pending is what keeps the work attributable.
+        The fence refuses an answer belonging to a membership that ended, and
+        the enqueue that was refused must not settle anything -- its settlement
+        travels inside the write that did not happen.
+
+        The source is still terminal, retired by the fence rather than by this
+        enqueue. Leaving it pending would not keep the work attributable, it
+        would only keep offering it: every retry is refused by the same fence,
+        so the turn would re-run on each restart and never resolve.
         """
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
@@ -263,7 +267,7 @@ class TestTheHandoffIsTheDurableEnqueue:
 
         assert event_id is None
         assert sends == []
-        assert await pending_ids(bot) == ["$cause"]
+        assert await pending_ids(bot) == [], "unanswerable work stayed on offer"
 
     async def test_a_turn_that_owes_no_answer_still_settles_as_ignored(self, tmp_path: Path) -> None:
         """Commands, router decisions, and ignored inputs keep their own path.
@@ -607,4 +611,40 @@ class TestTheGatewayWiresTheHandoff:
             )
 
         assert sent == "$sent"
+        assert await pending_ids(bot) == []
+
+
+class TestAFenceRetiresWhatItMakesUnanswerable:
+    """Membership fencing has to be terminal, not merely obstructive.
+
+    Refusing to answer into a membership that ended is correct. Leaving the
+    work pending while refusing it forever is not: enqueue compares the turn's
+    admitted epoch against the room's current one, so a source admitted before
+    the fence can never produce a row again. Offered-but-unanswerable means the
+    model runs on every restart and nothing ever resolves.
+    """
+
+    async def test_the_fence_settles_work_it_has_made_unanswerable(self, tmp_path: Path) -> None:
+        """One fence, and the pending set for that room empties."""
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        assert await pending_ids(bot) == ["$cause"]
+
+        await journal(bot).advance_membership_epoch(ROOM)
+
+        assert await pending_ids(bot) == []
+        assert await journal(bot).load_event("$cause") is not None, "the dedup proof was deleted with the work"
+
+    async def test_a_retry_after_the_fence_neither_sends_nor_reoffers(self, tmp_path: Path) -> None:
+        """The state a restart finds is terminal, so the model does not run again."""
+        bot = _make_bot(tmp_path)
+        await admit(journal(bot), text_event("$cause"))
+        adopt(bot, ["$cause"])
+        await journal(bot).advance_membership_epoch(ROOM)
+        sends: list[str] = []
+
+        assert await deliver_answer(bot, "$cause", sends=sends) is None
+        assert await deliver_answer(bot, "$cause", sends=sends) is None
+
+        assert sends == []
         assert await pending_ids(bot) == []
