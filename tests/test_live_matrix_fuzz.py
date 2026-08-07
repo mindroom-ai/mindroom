@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
+from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from scripts.testing import fuzz_live_matrix
@@ -113,20 +114,6 @@ class _RestartBoundaryStack(ManagedTuwunelStack):
             self.order.append("durable-callback")
         return True
 
-    def wait_for_projected_restart_event_pairs(
-        self,
-        room_id: str,
-        event_ids: tuple[str, str],
-        *,
-        minimum: int,
-        timeout: float,
-    ) -> bool:
-        assert room_id == "!restart:example"
-        assert event_ids == ("$restart-old-text", "$restart-old-media")
-        assert minimum == 4
-        assert timeout == 1
-        return True
-
     def projected_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         assert room_id == "!restart:example"
         assert event_ids == ("$restart-old-text", "$restart-old-media")
@@ -182,7 +169,9 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
         return RestartRegressionObservation(
             historical_output_counts=(0, 0),
             historical_callback_counts=(0, 0),
-            cached_event_pair_count=4,
+            projected_after_answer_count=0,
+            context_only_count=4,
+            historical_projected_on_room_read=0,
             fresh_agent_output_count=1,
             fresh_router_output_count=0,
             fresh_response_complete=True,
@@ -194,6 +183,17 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
             historical_in_fresh_prompt=False,
             orderly_drain_completed=True,
         )
+
+    async def _read_historical_room_projection(
+        self,
+        *,
+        room_id: str,
+        historical_event_ids: tuple[str, str],
+    ) -> int:
+        assert room_id == "!restart:example"
+        assert historical_event_ids == ("$restart-old-text", "$restart-old-media")
+        cast("_RestartBoundaryStack", self.stack).order.append("room-read")
+        return 2
 
 
 @pytest.mark.asyncio
@@ -452,7 +452,9 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     passing = RestartRegressionObservation(
         historical_output_counts=(0, 0),
         historical_callback_counts=(0, 0),
-        cached_event_pair_count=4,
+        projected_after_answer_count=0,
+        context_only_count=4,
+        historical_projected_on_room_read=2,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
         fresh_response_complete=True,
@@ -472,7 +474,9 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
-            cached_event_pair_count=0,
+            projected_after_answer_count=0,
+            context_only_count=0,
+            historical_projected_on_room_read=0,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_response_complete=False,
@@ -486,7 +490,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
-    assert any("invariant=historical_event_pairs_cached" in failure for failure in failures)
+    assert any("invariant=historical_events_projected_on_room_read" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_response_complete" in failure for failure in failures)
@@ -596,12 +600,16 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart() -
 
         await runner._run_restart_regression()
 
+        # The room read is last on purpose: hydration writes to the projection,
+        # so a read that ran any earlier would manufacture the evidence the
+        # other invariants are supposed to find on their own.
         assert stack.order == [
             "durable-callback",
             "obligation-pending",
             "model-in-flight",
             "sync-checkpoint",
             "hard-restart",
+            "room-read",
         ]
     finally:
         stack.close()
@@ -632,16 +640,27 @@ async def test_restart_regression_refuses_hard_kill_before_fresh_checkpoint() ->
 
 
 @pytest.mark.asyncio
-async def test_restart_regression_does_not_send_fresh_event_before_historical_cache_boundary(
+async def test_restart_regression_releases_fresh_event_without_waiting_for_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lifecycle completion alone must not release the fresh event."""
+    """The fresh event follows the replacement boundary with no historical wait.
+
+    Hydration is lazy, so nothing fetches this room's history until something
+    reads it. A pre-condition wait for that history would never be satisfied,
+    which is why the profile releases the fresh event straight after the
+    lifecycle boundary and reads the room afterwards instead.
+    """
     stack = ManagedTuwunelStack()
+    history_reads: list[object] = []
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         monkeypatch.setattr(stack, "apply_replacement_config", lambda _room_id: None)
         monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda *_args, **_kwargs: 3)
+        monkeypatch.setattr(
+            stack,
+            "projected_restart_event_pair_count",
+            lambda *args: history_reads.append(args) or 0,
+        )
         dormant = _RecordingDormantClient()
         runner = LiveFuzzRunner(
             stack,
@@ -651,10 +670,15 @@ async def test_restart_regression_does_not_send_fresh_event_before_historical_ca
             settle_seconds=0,
         )
 
-        with pytest.raises(AssertionError, match="historical_event_pairs_cached"):
+        with pytest.raises(AssertionError, match="fresh_dispatch_obligation_unsettled_before_restart"):
             await runner._run_restart_regression()
 
-        assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+        assert dormant.sent_txn_ids == [
+            "restart-old-text",
+            "restart-old-media",
+            "restart-fresh",
+        ]
+        assert not history_reads
     finally:
         stack.close()
 
@@ -729,6 +753,263 @@ def test_restart_regression_projection_evidence_uses_production_schema_and_exact
         event_ids = ("$old-text", "$old-media")
         assert stack.projected_restart_event_pair_count("!target:example", event_ids) == 4
     finally:
+        stack.close()
+
+
+def _seed_journal_event(
+    stack: ManagedTuwunelStack,
+    *,
+    principal: str,
+    event_id: str,
+    room_id: str,
+    event_class: str = "context_only",
+    state: str = "settled",
+    outcome: str | None = None,
+) -> None:
+    """Write one journal row through the production schema."""
+    database_path = stack.storage_path / "tracking" / "event_journal.db"
+    EventJournalStore.open_sqlite(database_path)
+    with closing(sqlite3.connect(database_path)) as fixture_database:
+        fixture_database.execute(
+            """
+            INSERT INTO journal_events(
+                principal_id,
+                event_id,
+                room_id,
+                thread_id,
+                kind,
+                event_class,
+                sender,
+                origin_server_ts,
+                source_json,
+                membership_epoch,
+                created_at_ns,
+                state,
+                outcome
+            ) VALUES (?, ?, ?, '', 'message', ?, '@sender:example', 1, '{}', 0, 1, ?, ?)
+            """,
+            (principal, event_id, room_id, event_class, state, outcome),
+        )
+        fixture_database.commit()
+
+
+def _seed_qualifying_restart_history(stack: ManagedTuwunelStack, **overrides: object) -> None:
+    """Seed the four qualifying rows, optionally spoiling exactly one.
+
+    Spoiling one row is what isolates a clause: ``(principal_id, event_id)`` is
+    unique, so a clause can only be probed by making a row that would otherwise
+    count stop counting.
+    """
+    rows = (
+        ("general@@agent:example", "$old-text"),
+        ("general@@agent:example", "$old-media"),
+        ("router@@router:example", "$old-text"),
+        ("router@@router:example", "$old-media"),
+    )
+    for index, (principal, event_id) in enumerate(rows):
+        _seed_journal_event(
+            stack,
+            principal=principal,
+            event_id=event_id,
+            room_id="!target:example",
+            **(cast("Any", overrides) if index == 0 else {}),
+        )
+
+
+def test_restart_context_only_measurement_uses_production_schema_and_exact_filters() -> None:
+    """Principal, room, and event filters must reject plausible distractor rows."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        _seed_qualifying_restart_history(stack)
+        _seed_journal_event(
+            stack,
+            principal="general@@wrong:example",
+            event_id="$old-text",
+            room_id="!target:example",
+        )
+        _seed_journal_event(
+            stack,
+            principal="general@@agent:example",
+            event_id="$wrong-event",
+            room_id="!target:example",
+        )
+
+        event_ids = ("$old-text", "$old-media")
+        assert stack.context_only_restart_event_pair_count("!target:example", event_ids) == 4
+        # The room filter cannot be probed with a colliding row, because
+        # (principal_id, event_id) is unique. Ask a different room instead.
+        assert stack.context_only_restart_event_pair_count("!wrong:example", event_ids) == 0
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize(
+    ("spoiled", "reason"),
+    [
+        ({"event_class": "actionable"}, "an actionable event is the turn this measurement excludes"),
+        ({"outcome": "succeeded"}, "an outcome means a turn ran"),
+        ({"state": "pending"}, "an unsettled event has not finished being nothing"),
+    ],
+)
+def test_restart_context_only_measurement_requires_every_clause(
+    spoiled: dict[str, str],
+    reason: str,
+) -> None:
+    """Class, outcome, and settlement must each independently drop the count."""
+    assert reason
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        _seed_qualifying_restart_history(stack, **spoiled)
+
+        assert stack.context_only_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 3
+    finally:
+        stack.close()
+
+
+def _seed_visible_message(
+    stack: ManagedTuwunelStack,
+    *,
+    principal: str,
+    room_id: str,
+    logical_event_id: str,
+    thread_id: str = "",
+) -> None:
+    """Write one projection row through the production schema."""
+    database_path = stack.storage_path / "tracking" / "event_journal.db"
+    EventJournalStore.open_sqlite(database_path)
+    with closing(sqlite3.connect(database_path)) as fixture_database:
+        fixture_database.execute(
+            """
+            INSERT INTO visible_messages(
+                principal_id,
+                room_id,
+                logical_event_id,
+                thread_id,
+                sender,
+                created_ts,
+                revision_event_id,
+                revision_ts,
+                content_json,
+                membership_epoch
+            ) VALUES (?, ?, ?, ?, '@sender:example', 1, ?, 1, '{}', 0)
+            """,
+            (principal, room_id, logical_event_id, thread_id, logical_event_id),
+        )
+        fixture_database.commit()
+
+
+async def _no_network_hydration(
+    _self: ConversationHydrator,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> None:
+    """Stand in for hydration so the read runs against exactly the seeded rows."""
+    assert room_id
+    del thread_id
+
+
+@pytest.mark.asyncio
+async def test_restart_room_read_finds_history_the_answer_never_projected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The room read must reach main-timeline history, not the fresh thread.
+
+    This is the whole content of the assertion. Answering the fresh event
+    hydrates the fresh *thread*, and the pre-gap history is not in it, so a
+    read pointed at that thread finds nothing. Pointing the read at the room
+    conversation is what separates "the history is gone" from "the history
+    appears when something asks".
+    """
+    stack = ManagedTuwunelStack()
+    room, thread = "!target:example", "$fresh-root"
+    runner = None
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        agent = f"general@{stack.agent_id}"
+        for logical_event_id in ("$old-text", "$old-media"):
+            _seed_visible_message(stack, principal=agent, room_id=room, logical_event_id=logical_event_id)
+        _seed_visible_message(
+            stack,
+            principal=agent,
+            room_id=room,
+            logical_event_id="$fresh-reply",
+            thread_id=thread,
+        )
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            "accounts:\n  agent_general:\n    username: general\n    access_token: token\n    device_id: DEVICE\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(ConversationHydrator, "ensure_hydrated", _no_network_hydration)
+        runner = LiveFuzzRunner(
+            stack,
+            (LiveMatrixClient("http://matrix.invalid", room),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        assert (
+            await runner._read_historical_room_projection(
+                room_id=room,
+                historical_event_ids=("$old-text", "$old-media"),
+            )
+            == 2
+        )
+    finally:
+        if runner is not None:
+            await asyncio.gather(*(client.close() for client in runner.clients))
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_room_read_without_persisted_credentials_fails_the_invariant() -> None:
+    """A run that never persisted the agent account must not read as a quiet success."""
+    stack = ManagedTuwunelStack()
+    runner = None
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        runner = LiveFuzzRunner(
+            stack,
+            (LiveMatrixClient("http://matrix.invalid", "!target:example"),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        observed = await runner._read_historical_room_projection(
+            room_id="!target:example",
+            historical_event_ids=("$old-text", "$old-media"),
+        )
+
+        assert observed == 0
+        assert any(
+            "invariant=historical_events_projected_on_room_read" in failure
+            for failure in evaluate_restart_regression(
+                RestartRegressionObservation(
+                    historical_output_counts=(0, 0),
+                    historical_callback_counts=(0, 0),
+                    projected_after_answer_count=0,
+                    context_only_count=4,
+                    historical_projected_on_room_read=observed,
+                    fresh_agent_output_count=1,
+                    fresh_router_output_count=0,
+                    fresh_response_complete=True,
+                    fresh_semantic_ingress_count_before_restart=1,
+                    fresh_semantic_ingress_count=2,
+                    recovered_generation_response_observed=True,
+                    fresh_obligation_recovered=True,
+                    fresh_prompt_observed=True,
+                    historical_in_fresh_prompt=False,
+                    orderly_drain_completed=True,
+                ),
+            )
+        )
+    finally:
+        if runner is not None:
+            await asyncio.gather(*(client.close() for client in runner.clients))
         stack.close()
 
 
@@ -1394,7 +1675,7 @@ async def test_restart_observation_samples_real_evidence_when_deadline_already_e
     )
 
     assert stop_calls == [0]
-    assert observation.cached_event_pair_count == 4
+    assert observation.projected_after_answer_count == 4
     assert observation.fresh_agent_output_count == 1
     assert observation.fresh_response_complete
     assert observation.fresh_semantic_ingress_count == 2
