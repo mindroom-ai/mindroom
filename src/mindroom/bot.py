@@ -222,7 +222,7 @@ def _create_best_effort_task_wrapper(
 
     Use this only for auxiliary consumers or Matrix inputs without a stable
     source event ID.
-    Correctness-critical source-backed events use ``DispatchObligationRunner``.
+    Correctness-critical source-backed events are admitted to the event journal.
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:

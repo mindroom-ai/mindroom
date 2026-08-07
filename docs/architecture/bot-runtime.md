@@ -60,17 +60,17 @@ Matrix callback
 
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
 Every principal shares one durable store at `tracking/event_journal.db`, or one PostgreSQL database, and each bot reads only its own principal-bound view of it.
-This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
+Writes are serialized per store rather than per entity, so one principal's admission waits behind another's write transaction; the reader pool is separate, so reads do not.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while unsettled rows retain the original room and event source for replay.
 Unsettled rows distinguish callbacks that still need execution from callbacks that completed and deferred their source to downstream turn work.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
-Each entity database therefore grows by one compact row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
+`journal_events` grows by one row per admitted event, and a settled row is retained rather than deleted so a replayed Matrix event is recognised by ID instead of admitted twice.
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM journal_events GROUP BY state;` against that store.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
-Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity compact their exact dispatch-obligation tombstones directly.
+Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly with an intentionally-ignored outcome.
 This keeps ignored high-volume traffic out of the handled-turn JSON ledger without weakening exact callback de-duplication.
 An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
 Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
@@ -83,7 +83,7 @@ To repair corruption, stop MindRoom, back up the affected database, and restore 
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
-The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
+The sync callback admits each relevant event to the journal, in the same transaction that updates the projection, before any background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
 Sync continuity is owned separately by `SyncCheckpointTrust`, so a pending journal event is sufficient to preserve a certified checkpoint.
 Classic clients disable nio token and recovery persistence, so the store-generation-validated MindRoom checkpoint is the only durable Classic cursor.
@@ -99,7 +99,7 @@ Consecutive rejected rebuilds use capped exponential backoff so a persistent rec
 Transient sync errors retain the initial cursor, filter, and full-state request until a successful response completes the rebuild.
 Classic startup clears legacy nio cursor, recovery, and Sliding window rows so a previous transport mode cannot later resurrect them.
 Sliding Sync retains its own persisted recovery lane but does not become a Classic cursor authority.
-Already-admitted callbacks remain recoverable from MindRoom's exact dispatch-obligation store, and Matrix replay idempotently re-admits returned events by event ID.
+Already-admitted events remain recoverable from the journal, and Matrix replay is idempotent because admission is keyed by event ID.
 `SyncCheckpointTrust` certifies only locally complete responses and requests a transient nio reset for every rejected Classic response.
 Rewinding cannot shrink a gap measured from a fixed checkpoint to an advancing live position, so a room that stays unrecovered across repeated attempts from one unchanging checkpoint would otherwise never converge.
 `SyncRecoveryStallTracker` counts those failures per room against the checkpoint they were measured from, and a checkpoint that advances between attempts is forward progress that restarts the count.
@@ -120,7 +120,7 @@ The resolved encryption state is frozen before large-message or media upload, so
 Application first-sync readiness remains separate from Classic transport rebuild state, so a reset requests full state without repeating the once-only `bot:ready` lifecycle.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 Admission projects every historical event into `visible_messages` before applying the cold-history fence, so `/messages` recovery cannot complete without its projected rows and redaction effects. Events carrying nio's `HISTORY` provenance are admitted `CONTEXT_ONLY`, so cold history is readable and starts no turn.
-`ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
+`matrix/journal_ingress.py` classifies by nio provenance rather than by a separate fence: `HISTORY` is admitted `CONTEXT_ONLY`, so cold history is readable and owes no turn, while live and recovered events are admitted `ACTIONABLE`.
 The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 Checkpoint mutations serialize their epoch check, durable transform, and runtime publication, while continuity revisions prevent older completed tasks from overwriting newer join-fence state.
 Malformed or future continuity records are durably repaired to an empty cold record before startup room lifecycle restoration.
@@ -133,7 +133,7 @@ Invite and response-owned lifecycle paths use the same runner directly because t
 Current invite callbacks bypass cold-history admission because they represent live membership work, while their callback runner still provides exact durable retry.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
-To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
+To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.
 
 ## Completed Simplifications
 
