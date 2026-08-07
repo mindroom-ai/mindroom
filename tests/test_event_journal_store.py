@@ -2435,6 +2435,51 @@ class TestApprovalCards:
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
+    async def test_rejoining_drops_the_previous_memberships_cards(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A card the fence made unanswerable has to go, not merely stop being visible.
+
+        Every read of a card is filtered to the current membership, so a row
+        the fence steps over has no reader left and nothing that will ever
+        remove it. Nor is it inert while it sits there: a decision is recorded
+        against the card's event rather than against the epoch, so the
+        stranded row keeps accepting answers that no read can retrieve and no
+        startup can redeliver.
+        """
+        await self.remember(alice, "$card")
+
+        await alice.advance_membership_epoch(ROOM)
+
+        unanswerable = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+        assert unanswerable.recorded is False
+        assert unanswerable.resolution is None
+
+    async def test_rejoining_drops_only_the_room_that_was_left(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One room's fence says nothing about a card waiting in another room."""
+        await self.remember(alice, "$card")
+        await alice.claim_approval_card(
+            room_id=OTHER_ROOM,
+            transaction_id="txn-other",
+            card=self.card("$other"),
+            sending_device_id=DEVICE,
+        )
+        await alice.acknowledge_approval_card(
+            transaction_id="txn-other",
+            card_event_id="$other",
+            card=self.card("$other"),
+        )
+
+        await alice.advance_membership_epoch(ROOM)
+
+        stored = await alice.pending_approval_card(room_id=OTHER_ROOM, card_event_id="$other")
+        assert stored is not None
+        assert stored.transaction_id == "txn-other"
+
     async def test_one_principals_cards_are_invisible_to_another(
         self,
         journal_store: EventJournalStore,

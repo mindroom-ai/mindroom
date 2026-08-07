@@ -166,6 +166,25 @@ def advance_membership_epoch(
         """,
         (principal_id, room_id),
     )
+    # An approval card goes the other way from an attempted delivery, and the
+    # asymmetry is the same one the recovery pass already makes: a lost answer
+    # is unacceptable, so the outbox risks a duplicate; a card is a question,
+    # and asking it twice gets one answer to two prompts. Nothing here can
+    # duplicate anything either way, because the turn that would have posted a
+    # second card is settled just below rather than left to run again.
+    #
+    # So the only question is whether these rows are worth keeping, and they
+    # are not. Every read of a card is filtered to the room's current
+    # membership -- deliberately, because expiring or redelivering one would
+    # edit an event in a conversation this bot has already stopped trusting,
+    # answering a question nobody in the new membership asked. Kept, they are
+    # rows with no reader and no other remover, still answering writes keyed on
+    # the card's event rather than on the epoch. Dropped, they simply stop
+    # existing at the same moment they stopped meaning anything.
+    transaction.execute(
+        "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
     # Turn-backed work still pending from the membership that just ended can
     # never finish. Its answer would have to be enqueued, and enqueue refuses
     # any turn whose admitted epoch is not the room's current one -- correctly,
