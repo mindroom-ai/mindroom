@@ -1703,3 +1703,20 @@ class TestConcurrency:
 
         assert results.count(AdmissionResult.ADMITTED) == 1
         assert [event.event_id for event in await alice.pending()] == ["$contended"]
+
+
+class TestConnectionSecretsStayOutOfLogs:
+    """A DSN carries a password, so it must not ride along in a repr."""
+
+    async def test_the_postgres_backend_repr_omits_its_connection_string(self) -> None:
+        """The Postgres backend repr omits its connection string."""
+        pytest.importorskip("psycopg")
+        from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
+
+        backend = PostgresBackend(database_url="postgresql://someone:hunter2@db.example:5432/journal")
+
+        rendered = repr(backend)
+
+        assert "hunter2" not in rendered
+        assert "someone" not in rendered
+        assert "db.example" not in rendered

@@ -70,7 +70,9 @@ class _PostgresTransaction:
 class PostgresBackend:
     """A PostgreSQL store with a serialized writer and pooled readers."""
 
-    database_url: str
+    # Kept out of the repr because a DSN carries a password, and a dataclass
+    # repr reaches logs and tracebacks without anyone choosing to print it.
+    database_url: str = field(repr=False)
     _writer: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
     _writer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
