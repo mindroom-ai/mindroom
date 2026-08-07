@@ -25,12 +25,13 @@ from mindroom.matrix.sync_recovery_escape import (
     SkippedRecoveryGap,
     SyncRecoveryStallTracker,
 )
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import RecordedHistoryDebts, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.event_journal import HistoryDebtRecordView
 
 _CACHE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
@@ -63,14 +64,16 @@ class _Runtime:
         self.event_cache = _EventCache()
 
 
-def _trust(tmp_path: Path) -> SyncCacheTrust:
+def _trust(tmp_path: Path, *, history_debt: HistoryDebtRecordView | None = None) -> SyncCacheTrust:
     """Build one principal's real cache trust over a temporary continuity store."""
+    recorder = RecordedHistoryDebts() if history_debt is None else history_debt
     return SyncCacheTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
         runtime=cast("BotRuntimeView", _Runtime()),
         logger=get_logger(),
         state=SyncTrustState.PENDING,
         store_generation=_CACHE_GENERATION,
+        history_debt_provider=lambda: recorder,
     )
 
 
@@ -222,6 +225,42 @@ async def test_an_unconvergent_rebuild_escapes_and_certifies_forward(tmp_path: P
     assert checkpoint is not None
     assert checkpoint.token == f"s_live_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
     assert trust.retry_token() == f"s_live_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
+
+
+@pytest.mark.asyncio
+async def test_a_permanently_wedged_room_keeps_advancing_the_watermark(tmp_path: Path) -> None:
+    """A room that can never be rebuilt must not freeze the checkpoint forever.
+
+    One escape only proves the first skip lands. The freeze this guards against
+    is the cycle after it: the skip certifies a checkpoint, the client restarts
+    from it, the same room fails again, and the principal must keep moving. So
+    this drives many rounds and asserts the durable token advanced every time,
+    by value, rather than that any single response was certified.
+    """
+    save_sync_token(tmp_path, "code", _STUCK, cache_generation=_CACHE_GENERATION)
+    trust = _trust(tmp_path)
+    assert await trust.prepare_startup() == _STUCK
+
+    rounds = 4
+    certified_tokens = []
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT * rounds):
+        state, _reset = await _certify_unrecovered(
+            trust,
+            next_batch=f"s_live_{attempt}",
+            unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
+        )
+        if state is SyncTrustState.CERTIFIED:
+            durable = load_sync_checkpoint(tmp_path, "code")
+            assert durable is not None
+            certified_tokens.append(durable.token)
+
+    # One escape per full stall window, each from the checkpoint the previous
+    # escape established, so the watermark never stops moving.
+    assert certified_tokens == [
+        f"s_live_{window * _CLASSIC_SYNC_RECOVERY_STALL_LIMIT + _CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
+        for window in range(rounds)
+    ]
+    assert trust.retry_token() == certified_tokens[-1]
 
 
 @pytest.mark.asyncio

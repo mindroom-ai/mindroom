@@ -11,10 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from . import approvals, journal, outbox, reads
+from . import approvals, history_debt, journal, outbox, reads
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
+)
+from .history_debt import (
+    HistoryDebtOutcome,
+    RoomHistoryDebt,
 )
 from .projection import drop_refetched_message, install_refetched_revision
 
@@ -330,6 +334,47 @@ class PrincipalStore:
             ),
         )
 
+    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
+        """Write down the history a skipped sync gap left this room owing."""
+        return await self._backend.write(
+            lambda transaction: history_debt.record(transaction, self._principal_id, room_id),
+        )
+
+    async def room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
+        """Return the history this room still owes a walk, or nothing."""
+        return await self._backend.read(
+            lambda transaction: history_debt.outstanding(transaction, self._principal_id, room_id),
+        )
+
+    async def repay_room_history_debt(
+        self,
+        debt: RoomHistoryDebt,
+        *,
+        events: tuple[ProjectedEvent, ...],
+        complete: bool,
+        reached_ts: int | None,
+        expected_membership_epoch: int,
+    ) -> HistoryDebtOutcome:
+        """Install one room walk and settle the debt it was run for, together.
+
+        Two facts that must not be able to disagree: the events the walk found
+        and whether the hole they were fetched for is closed. Settling in a
+        second transaction would leave a crash between them owing history the
+        projection already holds, or -- far worse the other way round -- holding
+        a repaired room that still reads as indebted forever.
+        """
+        return await self._backend.write(
+            lambda transaction: _repay_history_debt(
+                transaction,
+                self._principal_id,
+                debt,
+                events=events,
+                complete=complete,
+                reached_ts=reached_ts,
+                expected_membership_epoch=expected_membership_epoch,
+            ),
+        )
+
     async def install_refetched_revision(
         self,
         request: RefreshRequest,
@@ -596,6 +641,30 @@ def _enqueue_delivery(
         payload=payload,
         edits_event_id=edits_event_id,
     )
+
+
+def _repay_history_debt(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    debt: RoomHistoryDebt,
+    *,
+    events: tuple[ProjectedEvent, ...],
+    complete: bool,
+    reached_ts: int | None,
+    expected_membership_epoch: int,
+) -> HistoryDebtOutcome:
+    """Install a repayment walk as the room conversation's hydration, and settle."""
+    if not _install_hydration(
+        transaction,
+        principal_id,
+        room_id=debt.room_id,
+        thread_id=None,
+        events=events,
+        complete=complete,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return HistoryDebtOutcome.SUPERSEDED
+    return history_debt.settle(transaction, principal_id, debt, reached_ts=reached_ts)
 
 
 def _install_hydration(

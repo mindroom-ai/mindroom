@@ -254,21 +254,41 @@ def _current_hydration(
     room_id: str,
     thread_id: str | None,
 ) -> Row | None:
-    """Return this conversation's hydration row, if it survived the membership."""
+    """Return this conversation's hydration row, if it still speaks for the room.
+
+    A marker speaks for a conversation only while the membership it was written
+    under is the room's current one, and only while the room owes no history. An
+    outstanding debt names a hole this marker was written before anyone knew
+    about, so the marker is withheld and the conversation reads as unhydrated:
+    that is what sends the next read to the server, which is where the hole gets
+    filled.
+
+    Loss is different from debt and is reported rather than hidden. A room whose
+    walk finished without covering its debt keeps its marker -- re-walking would
+    only fetch the same short answer forever -- but everything it can say about
+    completeness is now no.
+    """
     row = transaction.fetchone(
         """
         SELECT hydration.membership_epoch AS hydrated_epoch,
                hydration.complete AS complete,
-               COALESCE(membership.membership_epoch, 0) AS current_epoch
+               COALESCE(membership.membership_epoch, 0) AS current_epoch,
+               debt.owed_through_ts AS owed_through_ts,
+               COALESCE(debt.history_lost, 0) AS history_lost
         FROM conversation_hydration AS hydration
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = hydration.principal_id
          AND membership.room_id = hydration.room_id
+        LEFT JOIN room_history_debt AS debt
+          ON debt.principal_id = hydration.principal_id
+         AND debt.room_id = hydration.room_id
         WHERE hydration.principal_id = ? AND hydration.room_id = ? AND hydration.thread_id = ?
         """,
         (principal_id, room_id, encode_thread_id(thread_id)),
     )
     if row is None or int(row["hydrated_epoch"]) != int(row["current_epoch"]):
+        return None
+    if row["owed_through_ts"] is not None:
         return None
     return row
 
@@ -299,9 +319,13 @@ def conversation_is_complete(
     correctness is completeness rather than recency -- an export, not a prompt --
     asks this one, because a bounded walk leaves a warm marker over a partial
     conversation and nothing else distinguishes the two.
+
+    A room that lost history to a skipped sync gap is never complete again,
+    however thoroughly a later walk ran. The hole is behind the walk, not in
+    front of it.
     """
     row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
-    return row is not None and bool(row["complete"])
+    return row is not None and bool(row["complete"]) and not bool(row["history_lost"])
 
 
 def conversation_hydration_was_truncated(
@@ -323,9 +347,14 @@ def conversation_hydration_was_truncated(
     `conversation_is_complete` and refuses anything less. A prompt, whose
     correctness is recency, asks this and accepts everything except a proven
     truncation.
+
+    A room that lost history to a skipped sync gap is a proven truncation of the
+    other kind: the missing messages are behind what the walk returned rather
+    than before it, and a caller told the page was whole would report a thread
+    length that never existed.
     """
     row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
-    return row is not None and not bool(row["complete"])
+    return row is not None and (not bool(row["complete"]) or bool(row["history_lost"]))
 
 
 def mark_conversation_hydrated(
