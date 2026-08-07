@@ -81,10 +81,33 @@ _MUST_NOT_FINISH_SECONDS = 0.25
 # How long a worker thread waits to be let go. Never reached unless the test is
 # already failing, so it only bounds the damage.
 _WORKER_WAIT_SECONDS = 5.0
+# The pause an operation leaves between the statements it holds a connection
+# with. Short next to anything it is racing, long enough to cost no core.
+_STATEMENT_GAP_SECONDS = 0.001
 
 # A statement against a real table, so the connection a test's operation holds
 # is genuinely in use rather than merely borrowed.
 _INSERT_MEMBERSHIP = "INSERT INTO room_membership (principal_id, room_id, membership_epoch) VALUES (?, ?, ?)"
+
+
+def _hold_the_connection(
+    transaction: Transaction,
+    running: threading.Event,
+    release: threading.Event,
+) -> None:
+    """Keep real statements on a real connection until the test lets go.
+
+    Statements rather than a parked thread, because a connection taken away
+    from an operation that is between statements only raises, while one taken
+    away mid-statement is what ends the process. Spaced rather than in a tight
+    loop: pinning a core for the whole grace window destabilizes unrelated
+    timing-sensitive tests sharing the machine, and the connection is
+    continuously in use either way.
+    """
+    transaction.fetchall("SELECT 1 AS one")
+    running.set()
+    while not release.wait(_STATEMENT_GAP_SECONDS):
+        transaction.fetchall("SELECT 1 AS one")
 
 
 async def _finished_within_grace(work: asyncio.Task[object]) -> bool:
@@ -2429,11 +2452,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
 
         def busy(transaction: Transaction) -> str:
             transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
-            running.set()
-            while not release.is_set():
-                # Genuinely executing, not parked: a connection closed under a
-                # statement in flight is the shape that crashes.
-                transaction.fetchall("SELECT 1 AS one")
+            _hold_the_connection(transaction, running, release)
             return "landed"
 
         writing = asyncio.create_task(journal_store.backend.write(busy))
@@ -2459,9 +2478,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         release = threading.Event()
 
         def busy(transaction: Transaction) -> str:
-            running.set()
-            while not release.is_set():
-                transaction.fetchall("SELECT 1 AS one")
+            _hold_the_connection(transaction, running, release)
             return "read"
 
         reading = asyncio.create_task(journal_store.backend.read(busy))
