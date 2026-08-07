@@ -31,7 +31,7 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock
+from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_relation_lookup
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -125,6 +125,7 @@ def _make_context(
         config=effective_config,
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=room,
         storage_path=tmp_path,

@@ -171,18 +171,20 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            target = envelope["m.relates_to"]["event_id"]
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append((target, body))
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.send_message_result",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -533,13 +535,14 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,  # noqa: ARG001
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append(text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append(body)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         error_messages = [
             "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
@@ -555,7 +558,7 @@ class TestAIErrorDisplay:
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.delivery_gateway.edit_message_result",
+                    "mindroom.delivery_gateway.send_message_result",
                     new=AsyncMock(side_effect=mock_gateway_edit_message),
                 ),
             ):

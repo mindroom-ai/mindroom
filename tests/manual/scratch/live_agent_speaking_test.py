@@ -51,7 +51,7 @@ import certifi
 import httpx
 import nio
 
-from tests.conftest import make_conversation_reader_mock
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 SRC = str(Path(__file__).resolve().parents[3] / "src")
 sys.path.insert(0, SRC)
@@ -564,6 +564,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                         config=config,
                         runtime_paths=paths,
                         conversation_cache=SimpleNamespace(),
+                        relations=make_relation_lookup(),
                         conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,
                     )

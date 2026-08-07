@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -44,6 +44,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -172,6 +173,7 @@ def _tool_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=AsyncMock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=runtime_root,
@@ -350,28 +352,7 @@ async def test_thread_bookkeeping_removes_boolean_wrapper_entrypoints() -> None:
 async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() -> None:
     """Client-side message classification should expose the canonical threaded impact, not only a bool."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread-root:localhost" if (room_id, event_id) == ("!room:localhost", "$thread-reply:localhost") else None
-    )
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$thread-reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "thread reply",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "event_id": "$thread-root:localhost",
-                    "rel_type": "m.thread",
-                },
-            },
-        },
-    )
-
+    relations = make_relation_lookup(threads={"$thread-reply:localhost": "$thread-root:localhost"})
     impact = await resolve_event_thread_impact_for_client(
         client,
         "!room:localhost",
@@ -381,7 +362,7 @@ async def test_resolve_event_thread_impact_for_client_returns_threaded_impact() 
             "msgtype": "m.text",
             "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert impact == MutationThreadImpact.threaded("$thread-root:localhost")
@@ -400,25 +381,27 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
 ) -> None:
     """Client-side reply and reference walks must enforce the conversation-family boundary."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.return_value = None
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$sticker:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.sticker",
-            "content": {
-                "body": "sticker",
-                "m.relates_to": {
-                    "event_id": "$thread-root:localhost",
-                    "rel_type": "m.thread",
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$sticker:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.sticker",
+                "content": {
+                    "body": "sticker",
+                    "m.relates_to": {
+                        "event_id": "$thread-root:localhost",
+                        "rel_type": "m.thread",
+                    },
+                    "url": "mxc://localhost/sticker",
                 },
-                "url": "mxc://localhost/sticker",
             },
-        },
+        ),
     )
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_event_thread_impact_for_client(
         client,
@@ -429,7 +412,7 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
             "msgtype": "m.text",
             "m.relates_to": relation,
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert impact.state is MutationThreadImpactState.UNKNOWN
@@ -440,9 +423,9 @@ async def test_resolve_event_thread_impact_for_client_rejects_non_message_ancest
 async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_failures() -> None:
     """Lookup failures must stay explicit in the authoritative impact API."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_thread_id_for_event.return_value = None
-    conversation_cache.get_event.side_effect = RuntimeError("boom")
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_event_thread_impact_for_client(
         client,
@@ -453,7 +436,7 @@ async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_f
             "msgtype": "m.text",
             "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
         },
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert impact.state is MutationThreadImpactState.UNKNOWN
@@ -464,29 +447,32 @@ async def test_resolve_event_thread_impact_for_client_preserves_unknown_lookup_f
 async def test_resolve_redaction_thread_impact_for_client_returns_room_level_for_reactions() -> None:
     """Client-side redaction classification should expose room-level reaction handling directly."""
     client = AsyncMock()
-    conversation_cache = AsyncMock()
-    conversation_cache.get_event.return_value = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$reaction:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.reaction",
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$thread-reply:localhost",
-                    "key": "👍",
+    relations_client = MagicMock()
+    relations_client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.reaction",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": "$thread-reply:localhost",
+                        "key": "👍",
+                    },
                 },
             },
-        },
+        ),
     )
+    relations = make_relation_lookup(client=relations_client)
 
     impact = await resolve_redaction_thread_impact_for_client(
         client,
         "!room:localhost",
         event_id="$reaction:localhost",
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert impact == MutationThreadImpact.room_level()

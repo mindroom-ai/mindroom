@@ -591,10 +591,15 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
     """An exhausted final-edit retry should still run placeholder failure settlement."""
     gateway = _delivery_gateway(tmp_path)
     barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
-    with patch(
-        "mindroom.delivery_gateway.edit_message_result",
-        new=AsyncMock(side_effect=[barrier_error, None]),
-    ) as edit:
+    # The two attempts take different primitives now. The answer's edit carries a
+    # delivery turn and goes out through the outbox as a frozen replace envelope;
+    # the placeholder failure notice has no turn and edits directly.
+    durable_edit = AsyncMock(side_effect=barrier_error)
+    failure_edit = AsyncMock(return_value=None)
+    with (
+        patch("mindroom.delivery_gateway.send_message_result", new=durable_edit),
+        patch("mindroom.delivery_gateway.edit_message_result", new=failure_edit),
+    ):
         outcome = await gateway.deliver_final(
             FinalDeliveryRequest(
                 target=MessageTarget.resolve("!room:localhost", None, "$reply"),
@@ -611,9 +616,10 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
             ),
         )
 
-    assert edit.await_count == 2
-    assert edit.await_args_list[0].kwargs["retry_sync_recovery"] is True
-    assert edit.await_args_list[1].kwargs["retry_sync_recovery"] is False
+    assert durable_edit.await_count == 1
+    assert durable_edit.await_args.kwargs["retry_sync_recovery"] is True
+    assert failure_edit.await_count == 1
+    assert failure_edit.await_args.kwargs["retry_sync_recovery"] is False
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
     assert outcome.failure_reason == "delivery_failed"

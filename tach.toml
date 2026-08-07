@@ -1117,6 +1117,7 @@ depends_on = [
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_room_scan",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.runtime_context",
@@ -4508,14 +4509,18 @@ exclusive = true
 
 [[interfaces]]
 expose = [
-    "RoomScanConversationCache",
+    "RoomScanRelations",
     "fetch_event_info_for_client",
-    "fetch_event_info_from_conversation_cache",
-    "lookup_thread_id_from_conversation_cache",
+    "resolve_thread_root_event_id_for_client",
     "room_scan_membership_access_for_client",
 ]
 from = ["mindroom.matrix.thread_room_scan"]
-visibility = ["mindroom.matrix.conversation_cache", "mindroom.matrix.thread_bookkeeping"]
+visibility = [
+    "mindroom.custom_tools.thread_summary",
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_bookkeeping",
+]
 exclusive = true
 
 [[interfaces]]

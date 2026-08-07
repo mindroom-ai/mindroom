@@ -26,6 +26,7 @@ from tests.conftest import (
     make_conversation_cache_mock,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -40,6 +41,8 @@ def _make_context(
     *,
     room_id: str = "!room:localhost",
     conversation_cache: object | None = None,
+    threads: dict[str, str | None] | None = None,
+    relations: object | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -51,7 +54,15 @@ def _make_context(
     client.room_get_state_event = AsyncMock()
     client.room_put_state = AsyncMock()
     client.room_redact = AsyncMock()
-    client.room_get_event = AsyncMock()
+    # The relation lookup resolves an unadmitted target through the homeserver,
+    # which is where the default answer for this room's target event now lives.
+    client.room_get_event = AsyncMock(
+        return_value=_event_response(
+            event_id="$target:localhost",
+            room_id=room_id,
+            content={"body": "message", "msgtype": "m.text"},
+        ),
+    )
     client._send = AsyncMock()
     resolved_conversation_cache = make_conversation_cache_mock() if conversation_cache is None else conversation_cache
     resolved_conversation_cache.get_event = AsyncMock(
@@ -73,6 +84,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=resolved_conversation_cache,
+        relations=(make_relation_lookup(threads=threads, client=client) if relations is None else relations),
         conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=runtime_root,
@@ -352,10 +364,7 @@ async def test_matrix_api_send_event_ignores_cache_failure_after_successful_send
 async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thread_bookkeeping() -> None:
     """Plain replies to threaded targets should reuse the shared inherited-thread rule."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
-    )
+    ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
     content = {
         "body": "bridged reply",
         "msgtype": "m.text",
@@ -437,10 +446,9 @@ async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeep
     """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$room-message",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "room message", "msgtype": "m.text"},
     )
     ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -487,8 +495,11 @@ async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeep
 async def test_matrix_api_send_event_room_mode_edit_errors_when_thread_lookup_fails() -> None:
     """Room-mode edits should fail closed when thread classification cannot be resolved."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = RuntimeError("db broken")
+    # The journal is unreadable, so nothing local can classify the target.
+    broken = make_relation_lookup()
+    broken.store.failure = RuntimeError("db broken")  # type: ignore[attr-defined]
+    ctx = _make_context(relations=broken)
+    ctx.client.room_get_event.side_effect = RuntimeError("db broken")
     content = {
         "body": "* updated",
         "msgtype": "m.text",
@@ -525,8 +536,7 @@ async def test_matrix_api_send_event_errors_when_thread_classification_fails() -
     """send_event should fail closed when threaded classification cannot be resolved."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.side_effect = RuntimeError("lookup boom")
+    ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
     content = {
         "body": "bridged reply",
         "msgtype": "m.text",
@@ -627,11 +637,10 @@ async def test_matrix_api_put_state_happy_path() -> None:
 async def test_matrix_api_redact_happy_path() -> None:
     """Threaded redactions should call room_redact and notify threaded cache bookkeeping."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "threaded message", "msgtype": "m.text"},
     )
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
@@ -701,10 +710,9 @@ async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeepi
     """Room-level redactions should delete local point-cache rows before the sync echo."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "room message", "msgtype": "m.text"},
     )
     ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -749,8 +757,7 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
     """Redact should fail closed when thread classification cannot be resolved."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = None
-    ctx.conversation_cache.get_event.side_effect = RuntimeError("lookup boom")
+    ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -773,14 +780,13 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() -> None:
-    """Threaded redaction detection should resolve the thread through the conversation facade."""
+async def test_matrix_api_redact_thread_lookup_uses_the_journal_relation_view() -> None:
+    """Threaded redaction detection resolves the thread through the journal, not a cache index."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.return_value = "$thread:localhost"
-    ctx.conversation_cache.get_event.return_value = _event_response(
+    ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
+    ctx.client.room_get_event.return_value = _event_response(
         event_id="$target:localhost",
-        room_id=ctx.room_id,
+        room_id="!room:localhost",
         content={"body": "threaded message", "msgtype": "m.text"},
     )
 
@@ -796,10 +802,7 @@ async def test_matrix_api_redact_thread_lookup_uses_conversation_cache_facade() 
 
     assert payload["status"] == "ok"
     assert payload["dry_run"] is True
-    ctx.conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
-        ctx.room_id,
-        "$target:localhost",
-    )
+    assert ctx.relations.store.asked == [(ctx.room_id, "$target:localhost")]
 
 
 @pytest.mark.asyncio
@@ -839,11 +842,8 @@ async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> N
 async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bookkeeping() -> None:
     """Transitive-threaded redactions should reuse the shared resolver instead of cache-only lookup rows."""
     tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
-        "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
-    )
-    ctx.conversation_cache.get_event.side_effect = lambda room_id, event_id: _event_response(
+    ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
+    ctx.client.room_get_event.side_effect = lambda room_id, event_id: _event_response(
         event_id=event_id,
         room_id=room_id,
         sender="@bridge:localhost",
@@ -873,7 +873,7 @@ async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bo
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.get_event.assert_any_await(ctx.room_id, "$plain-two")
+    ctx.client.room_get_event.assert_any_await(ctx.room_id, "$plain-two")
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolRuntimeContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.conftest import make_conversation_cache_mock, make_conversation_reader_mock
+from tests.conftest import make_conversation_cache_mock, make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -372,6 +372,7 @@ def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> 
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
 

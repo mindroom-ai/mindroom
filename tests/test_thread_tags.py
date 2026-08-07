@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, enumerate_room_thread_root_ids
+from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
@@ -27,6 +27,7 @@ from mindroom.thread_tags import (
     set_thread_tag,
     set_thread_tags_if_empty,
 )
+from tests.conftest import make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -2309,6 +2310,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_root_for_root_eve
         client,
         "!room:localhost",
         "$thread-root:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2346,6 +2348,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_unproven
         client,
         "!room:localhost",
         "$thread-root:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2375,6 +2378,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_t
         client,
         "!room:localhost",
         "$thread-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2391,6 +2395,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_blank_in
         client,
         "!room:localhost",
         event_id,
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2429,6 +2434,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_p
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2458,6 +2464,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_missing_
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2502,6 +2509,7 @@ async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_thr
         client,
         "!room:localhost",
         "$plain-reply-2:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2573,6 +2581,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_p
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2624,6 +2633,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_re
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2675,6 +2685,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_re
         client,
         "!room:localhost",
         "$reply-two:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2693,31 +2704,30 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_when_lookup_
         client,
         "!room:localhost",
         "$reply-one:localhost",
+        relations=make_relation_lookup(client=client),
     )
     assert normalized is None
     client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-one:localhost")
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_lookup_misses() -> None:
-    """Cache-backed normalization should still work when the homeserver lookup misses."""
+async def test_resolve_thread_root_event_id_for_client_uses_the_journal_when_the_lookup_misses() -> None:
+    """A homeserver that cannot parse the event falls back to what the journal admitted."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(return_value=object())
-    conversation_cache = MagicMock()
-    conversation_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
+    relations = make_relation_lookup(
+        threads={"$fresh-local-reply:localhost": "$thread-root:localhost"},
+        client=client,
+    )
 
     normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$fresh-local-reply:localhost",
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert normalized == "$thread-root:localhost"
-    conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
-        "!room:localhost",
-        "$fresh-local-reply:localhost",
-    )
 
 
 @pytest.mark.asyncio
@@ -2750,6 +2760,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2797,6 +2808,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_reply_edi
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2853,6 +2865,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2927,6 +2940,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_root_edit
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2967,6 +2981,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_cyclic_e
         client,
         "!room:localhost",
         "$edit-a:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None

@@ -24,6 +24,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -62,6 +63,7 @@ def _make_context(
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=None,
     )

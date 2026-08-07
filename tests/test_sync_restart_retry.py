@@ -179,7 +179,7 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
     edit_message = AsyncMock(return_value=delivered_matrix_event("$edit"))
     with (
         patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
-        patch("mindroom.delivery_gateway.edit_message_result", new=edit_message),
+        patch("mindroom.delivery_gateway.send_message_result", new=edit_message),
     ):
         response = await runner.generate_team_response_helper(
             request,
@@ -222,7 +222,7 @@ async def test_team_resolution_fallback_without_terminal_note_does_not_register_
 
     with (
         patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
-        patch("mindroom.delivery_gateway.edit_message_result", new=edit_message),
+        patch("mindroom.delivery_gateway.send_message_result", new=edit_message),
     ):
         response = await runner.generate_team_response_helper(
             request,

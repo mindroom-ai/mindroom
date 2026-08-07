@@ -55,6 +55,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_event_cache_mock,
     make_outbox_mock,
+    make_relation_lookup,
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -345,6 +346,7 @@ def _build_response_runner(
     bot._conversation_resolver.deps = SimpleNamespace(
         conversation_cache=SimpleNamespace(),
         conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(

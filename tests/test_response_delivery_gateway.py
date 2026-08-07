@@ -309,7 +309,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
 
-        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)) as edit:
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)) as edit:
             outcome = await gateway.deliver_final(
                 replace(self._final_request("the answer"), existing_event_id="$placeholder"),
             )
@@ -318,11 +318,56 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].edits_event_id == "$placeholder"
         assert edit.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+        assert edit.await_args.kwargs["operation"] == "edit_message"
         # The stored payload is the finished replace event, because recovery
         # sends the row verbatim and cannot rebuild an envelope.
         stored = outbox.rows["$cause", "final"].payload
         assert stored["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}
         assert stored["m.new_content"]["body"] == "the answer"
+
+    async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A rerun after a claimed edit must send the bytes the first attempt froze.
+
+        The row freezes on claim, transaction ID included. If the second run
+        were allowed to send its own text under that same transaction, one of
+        two things happens and both are wrong: the first attempt did reach
+        Matrix, so the homeserver dedupes the retry and returns the *old*
+        event while every local record describes the new one -- or it did not,
+        and the new text becomes visible while the durable row still says the
+        old. Either way the room and the outbox disagree permanently.
+
+        Reaching this needs a first attempt that is claimed and then fails, so
+        the row is frozen but unacknowledged, which is exactly the "Matrix
+        accepted it but the client never found out" window.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        request = replace(self._final_request("first answer"), existing_event_id="$placeholder")
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            refused = await gateway.deliver_final(request)
+        assert refused.terminal_status == "error"
+        assert refused.failure_reason == "delivery_failed"
+
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["m.new_content"]["body"] == "first answer"
+
+        delivered = SimpleNamespace(event_id="$placeholder", content_sent=dict(frozen))
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)) as resend:
+            await gateway.deliver_final(
+                replace(self._final_request("regenerated answer"), existing_event_id="$placeholder"),
+            )
+
+        sent = resend.await_args.args[2]
+        assert sent["m.new_content"]["body"] == "first answer", (
+            "the rerun sent its own text under the frozen transaction"
+        )
+        assert resend.await_args.kwargs["transaction_id"] == "tx-$cause-final"
+        assert outbox.rows["$cause", "final"].payload["m.new_content"]["body"] == "first answer"
 
     async def test_a_rerun_turn_does_not_edit_the_answer_in_twice(
         self,
@@ -339,7 +384,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         edited = SimpleNamespace(event_id="$placeholder", content_sent={"msgtype": "m.text", "body": "the answer"})
         edit = AsyncMock(return_value=edited)
 
-        with patch("mindroom.delivery_gateway.edit_message_result", edit):
+        with patch("mindroom.delivery_gateway.send_message_result", edit):
             first = await gateway.deliver_final(
                 replace(self._final_request("the answer"), existing_event_id="$placeholder"),
             )
@@ -372,9 +417,14 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         assert terminal is not None
 
+        # The two edits take different primitives on purpose: a placeholder
+        # edit has no delivery turn and rebuilds its envelope, while the
+        # answer's edit sends the row the outbox froze.
         direct = AsyncMock(return_value=edited)
+        durable = AsyncMock(return_value=edited)
         with (
             patch("mindroom.delivery_gateway.edit_message_result", direct),
+            patch("mindroom.delivery_gateway.send_message_result", durable),
         ):
             # The stream ends on the placeholder, so its terminal edit is not
             # this turn's answer and must not claim the turn's final delivery.
@@ -386,7 +436,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             )
 
         assert outcome.event_id == "$placeholder"
-        assert direct.await_count == 2, "the placeholder edit or the answer did not go out"
+        assert direct.await_count == 1, "the placeholder edit did not go out"
+        assert durable.await_count == 1, "the answer did not go out through the outbox"
         assert list(outbox.rows) == [("$cause", "final")]
 
     async def test_a_real_terminal_edit_does_settle_the_turn(
@@ -407,7 +458,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         assert terminal is not None
 
-        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock(return_value=edited)):
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)):
             await terminal(AsyncMock(), _ROOM_ID, "$streamed", {"body": "streamed"}, "streamed")
 
         assert list(outbox.rows) == [("$cause", "final")]

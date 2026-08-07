@@ -27,6 +27,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
 )
 
@@ -564,6 +565,7 @@ class TestDelegateKnowledge:
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             correlation_id="corr-parent",
             tool_function_filter=tool_function_filter,
@@ -653,6 +655,7 @@ class TestDelegateKnowledge:
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
             active_model_name="default",
         )

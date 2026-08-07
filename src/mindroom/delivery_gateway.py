@@ -759,17 +759,19 @@ class DeliveryGateway:
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
-            # Live sends still go through the edit helper, which rebuilds the
-            # identical envelope from the identical inputs. Recovery cannot,
-            # having no request to rebuild from, so it sends the frozen one --
-            # the same bytes either way.
+            # The frozen row, not the request that produced it. `edit_message_result`
+            # would rebuild the envelope from the current closure, which is the same
+            # bytes on a first attempt and the wrong ones on a second: a row is frozen
+            # once attempted, so a regenerated answer would go out under a transaction
+            # ID the homeserver has already seen -- dropped as a duplicate if the first
+            # attempt landed, visible while the durable row says otherwise if it did
+            # not. The stored envelope already is what that helper would build.
             nonlocal delivered
-            edited = await edit_message_result(
+            edited = await send_message_result(
                 client,
                 claimed.room_id,
-                request.event_id,
-                content,
-                request.new_text,
+                dict(claimed.payload),
+                operation="edit_message",
                 retry_sync_recovery=request.retry_sync_recovery,
                 transaction_id=claimed.transaction_id,
             )

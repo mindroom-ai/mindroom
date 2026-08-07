@@ -146,8 +146,13 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert mock_send_message.await_args.args[2]["body"] == "🤝 Team Response: Thinking..."
-        assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
+        # Both the placeholder and its edit go out through the outbox now, so
+        # they are the two calls on one mock: the first is the placeholder, the
+        # second the frozen replace envelope.
+        placeholder, edit = (call.args[2] for call in mock_send_message.await_args_list)
+        assert placeholder["body"] == "🤝 Team Response: Thinking..."
+        assert edit["m.new_content"]["body"] == "Team reply [hooked]"
+        assert mock_edit_message.await_count == 0
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
     @pytest.mark.asyncio
@@ -386,14 +391,15 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        assert len(sent_contents) == 1
-        content = sent_contents[0]
+        # Two sends now: the placeholder, then its frozen replace envelope.
+        assert len(sent_contents) == 2
+        content, edit = sent_contents
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
-        mock_edit_message.assert_awaited_once()
-        assert mock_edit_message.await_args.args[2] == "$team"
-        assert mock_edit_message.await_args.args[4] == "Team reply"
+        assert edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$team"}
+        assert edit["m.new_content"]["body"] == "Team reply"
+        assert mock_edit_message.await_count == 0
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(

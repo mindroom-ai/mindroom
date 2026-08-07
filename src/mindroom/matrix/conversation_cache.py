@@ -45,12 +45,6 @@ from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.room_history_reads import get_room_threads_page
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.thread_membership import resolve_event_thread_membership
-from mindroom.matrix.thread_room_scan import (
-    fetch_event_info_for_client,
-    lookup_thread_id_from_conversation_cache,
-    room_scan_membership_access_for_client,
-)
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -77,56 +71,11 @@ __all__ = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
-    "resolve_thread_root_event_id_for_client",
 ]
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_MAX_SCAN_PAGES = 20
-
-
-async def resolve_thread_root_event_id_for_client(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    *,
-    conversation_cache: ConversationCacheProtocol | None = None,
-) -> str | None:
-    """Resolve one event ID into a canonical thread root when thread membership can prove one."""
-    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
-    if not normalized_event_id:
-        return None
-
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
-    if event_info is None:
-        return await lookup_thread_id_from_conversation_cache(
-            conversation_cache,
-            room_id,
-            normalized_event_id,
-        )
-
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        event_id=normalized_event_id,
-        allow_current_root=True,
-        access=room_scan_membership_access_for_client(
-            client,
-            conversation_cache=conversation_cache,
-            fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(
-                client,
-                lookup_room_id,
-                lookup_event_id,
-                strict=False,
-            ),
-        ),
-    )
-    return resolution.thread_id
 
 
 class ConversationCacheProtocol(Protocol):

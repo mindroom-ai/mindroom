@@ -103,6 +103,26 @@ class RelationLookup:
             return None
         return thread_id if admitted else None
 
+    async def strict_thread_id(self, room_id: str, event_id: str) -> str | None:
+        """Return the thread one event belongs to, raising if that cannot be established.
+
+        The fail-closed sibling of `thread_id`. A caller classifying an
+        outbound mutation -- deciding whether a send or a redaction lands in a
+        thread or at room level -- must not be told "no thread" by a lookup
+        that simply failed. Degrading there silently reclassifies threaded work
+        as room-level, which is how the cache-backed index behaved before it
+        was replaced: it propagated its failures, and the tool turned them into
+        an explicit error rather than a wrong send.
+
+        Journal-only, and deliberately so. This stands in for the cache index
+        the mutation path used to consult, which answered from local rows or
+        not at all. The access object that calls this already fetches the
+        event's own relation metadata separately, so falling back to the
+        homeserver here would fetch the same event twice per classification.
+        """
+        admitted, thread_id = await self.store.admitted_thread_id(room_id=room_id, event_id=event_id)
+        return thread_id if admitted else None
+
     async def thread_id(self, room_id: str, event_id: str) -> str | None:
         """Return the thread one event belongs to, or nothing.
 

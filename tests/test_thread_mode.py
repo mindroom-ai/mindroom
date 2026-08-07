@@ -56,6 +56,7 @@ from tests.conftest import (
     install_send_response_mock,
     make_conversation_cache_mock,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     sync_bot_runtime_state,
     unwrap_extracted_collaborator,
@@ -620,6 +621,7 @@ class TestCreateSessionIdWithNoneThread:
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
         )
 

@@ -18,6 +18,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -44,6 +45,7 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         config=config,
         runtime_paths=runtime_paths_for(config),
         conversation_cache=MagicMock(),
+        relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),
         storage_path=None,
