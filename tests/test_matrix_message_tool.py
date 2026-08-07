@@ -18,12 +18,18 @@ from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
+    STREAM_VISIBLE_BODY_KEY,
+)
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
+from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
@@ -1915,10 +1921,6 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
             "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(),
-        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
@@ -1939,7 +1941,6 @@ async def test_matrix_message_room_threads_uses_bundled_replacement_preview_for_
         limit=1,
         page_token=None,
     )
-    mock_extract.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1972,17 +1973,12 @@ async def test_matrix_message_room_threads_prefers_trusted_canonical_bundled_pre
             "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(),
-        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
 
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "Final root message"
-    mock_extract.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2018,10 +2014,6 @@ async def test_matrix_message_room_threads_uses_nested_bundled_replacement_previ
             "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([thread_root], None)),
         ) as mock_get_page,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(),
-        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=1))
@@ -2042,7 +2034,6 @@ async def test_matrix_message_room_threads_uses_nested_bundled_replacement_previ
         limit=1,
         page_token=None,
     )
-    mock_extract.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2282,10 +2273,6 @@ async def test_matrix_message_room_threads_has_more_false_without_next_token() -
             "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=(thread_roots, None)),
         ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(side_effect=[{"body": "First thread"}, {"body": "Second thread"}]),
-        ),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads", limit=2))
@@ -2454,10 +2441,6 @@ async def test_matrix_message_room_threads_encrypted_preview_is_redacted() -> No
             "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
             new=AsyncMock(return_value=([encrypted_root], None)),
         ),
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(),
-        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="room-threads"))
@@ -2465,7 +2448,6 @@ async def test_matrix_message_room_threads_encrypted_preview_is_redacted() -> No
     assert payload["status"] == "ok"
     assert payload["threads"][0]["body_preview"] == "[encrypted]"
     assert payload["threads"][0]["reply_count"] == 0
-    mock_extract.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2491,25 +2473,18 @@ async def test_matrix_message_read_room_happy_path() -> None:
     )
     ctx.client.room_messages.return_value = response
 
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(return_value={"event_id": "$evt", "body": "hello"}),
-        ) as mock_extract,
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", limit=5))
 
     assert payload["status"] == "ok"
     assert payload["limit"] == 5
-    assert payload["messages"] == [{"event_id": "$evt", "body": "hello"}]
+    assert [(message["event_id"], message["body"]) for message in payload["messages"]] == [("$evt", "hello")]
     ctx.client.room_messages.assert_awaited_once_with(
         ctx.room_id,
         limit=5,
         direction=nio.MessageDirection.back,
         message_filter={"types": ["m.room.message"]},
     )
-    mock_extract.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2541,44 +2516,20 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
         ctx.room_id,
     )
     ctx.client.room_messages.return_value = response
-    extracted_messages = {
-        "$text": {"event_id": "$text", "body": "hello"},
-        "$notice": {"event_id": "$notice", "body": "Compacted 12 messages", "msgtype": "m.notice"},
-    }
 
-    async def _extract(
-        event: nio.Event,
-        _client: nio.AsyncClient,
-        *,
-        config: Config,
-        runtime_paths: object,
-        trusted_sender_ids: frozenset[str],
-    ) -> dict[str, object]:
-        assert config is ctx.config
-        assert runtime_paths == ctx.runtime_paths
-        assert trusted_sender_ids
-        return extracted_messages[event.event_id]
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(side_effect=_extract),
-        ) as mock_extract,
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", limit=5))
 
     assert payload["status"] == "ok"
-    assert payload["messages"] == [
-        {"event_id": "$text", "body": "hello"},
-        {"event_id": "$notice", "body": "Compacted 12 messages", "msgtype": "m.notice"},
+    assert [(message["event_id"], message["body"], message.get("msgtype")) for message in payload["messages"]] == [
+        ("$text", "hello", None),
+        ("$notice", "Compacted 12 messages", "m.notice"),
     ]
-    assert mock_extract.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_matrix_message_read_room_precomputes_trusted_sender_ids_once() -> None:
-    """Room reads should resolve the trust set once and pass it through every extraction."""
+    """Room reads should derive the trust set once and resolve every message under it."""
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id=None)
     response = nio.RoomMessagesResponse.from_dict(
@@ -2586,10 +2537,14 @@ async def test_matrix_message_read_room_precomputes_trusted_sender_ids_once() ->
             "chunk": [
                 {
                     "type": "m.room.message",
-                    "event_id": "$notice",
-                    "sender": "@mindroom:localhost",
+                    "event_id": "$agent",
+                    "sender": "@mindroom_general:localhost",
                     "origin_server_ts": 2,
-                    "content": {"msgtype": "m.notice", "body": "Compacted 12 messages"},
+                    "content": {
+                        "msgtype": "m.notice",
+                        "body": "Answer\n\n⏳ Preparing isolated worker...",
+                        STREAM_VISIBLE_BODY_KEY: "Answer",
+                    },
                 },
                 {
                     "type": "m.room.message",
@@ -2605,43 +2560,79 @@ async def test_matrix_message_read_room_precomputes_trusted_sender_ids_once() ->
         ctx.room_id,
     )
     ctx.client.room_messages.return_value = response
-    trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
-
-    async def _extract(
-        event: nio.Event,
-        _client: nio.AsyncClient,
-        *,
-        config: Config,
-        runtime_paths: object,
-        trusted_sender_ids: frozenset[str],
-    ) -> dict[str, object]:
-        assert config is ctx.config
-        assert runtime_paths == ctx.runtime_paths
-        assert trusted_sender_ids is trusted_sender_ids_for_assertion
-        return {"event_id": event.event_id, "body": event.source["content"]["body"]}
-
-    trusted_sender_ids_for_assertion = trusted_sender_ids
 
     with (
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.trusted_visible_sender_ids",
-            return_value=trusted_sender_ids,
+            wraps=trusted_visible_sender_ids,
         ) as mock_trusted_sender_ids,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(side_effect=_extract),
-        ) as mock_extract,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="read", limit=5))
 
     assert payload["status"] == "ok"
-    assert payload["messages"] == [
-        {"event_id": "$text", "body": "hello"},
-        {"event_id": "$notice", "body": "Compacted 12 messages"},
+    # The trusted sender's canonical body wins over its transport text, which is
+    # only true if the derived trust set reached the resolution.
+    assert [(message["event_id"], message["body"]) for message in payload["messages"]] == [
+        ("$text", "hello"),
+        ("$agent", "Answer"),
     ]
     mock_trusted_sender_ids.assert_called_once_with(ctx.config, ctx.runtime_paths)
-    assert mock_extract.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_collapses_edits_into_one_message() -> None:
+    """A room read must report an edited message once, at its newest revision.
+
+    The thread read reads the projection, which stores one row per logical
+    message, so an edit revises a message rather than adding one. A room read
+    paginates the raw timeline, where every revision is its own
+    ``m.room.message`` event, and a model handed one message per revision reads
+    a corrected sentence as several people saying nearly the same thing.
+    """
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    revisions = [
+        {
+            "type": "m.room.message",
+            "event_id": f"$edit-{index}",
+            "sender": "@alice:localhost",
+            "origin_server_ts": index,
+            "content": {
+                "msgtype": "m.text",
+                "body": f"* revision {index}",
+                "m.new_content": {"msgtype": "m.text", "body": f"revision {index}"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+        for index in (3, 2)
+    ]
+    response = nio.RoomMessagesResponse.from_dict(
+        {
+            "chunk": [
+                *revisions,
+                {
+                    "type": "m.room.message",
+                    "event_id": "$original",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 1,
+                    "content": {"msgtype": "m.text", "body": "first draft"},
+                },
+            ],
+            "start": "s",
+            "end": "e",
+        },
+        ctx.room_id,
+    )
+    ctx.client.room_messages.return_value = response
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", limit=5))
+
+    assert payload["status"] == "ok"
+    assert [message["event_id"] for message in payload["messages"]] == ["$original"]
+    assert payload["messages"][0]["body"] == "revision 3"
+    assert payload["messages"][0]["latest_event_id"] == "$edit-3"
 
 
 @pytest.mark.asyncio
@@ -2667,19 +2658,15 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
     )
     ctx.client.room_messages.return_value = response
 
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.extract_and_resolve_message",
-            new=AsyncMock(return_value={"event_id": "$evt", "body": "hello from room"}),
-        ) as mock_extract,
-        tool_runtime_context(ctx),
-    ):
+    with tool_runtime_context(ctx):
         payload = json.loads(await tool.matrix_message(action="read", thread_id="room", limit=5))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "read"
     assert payload["limit"] == 5
-    assert payload["messages"] == [{"event_id": "$evt", "body": "hello from room"}]
+    assert [(message["event_id"], message["body"]) for message in payload["messages"]] == [
+        ("$evt", "hello from room"),
+    ]
     assert "thread_id" not in payload
     ctx.client.room_messages.assert_awaited_once_with(
         ctx.room_id,
@@ -2687,7 +2674,6 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
         direction=nio.MessageDirection.back,
         message_filter={"types": ["m.room.message"]},
     )
-    mock_extract.assert_awaited_once()
     ctx.conversation_reader.read_strict.assert_not_awaited()
 
 

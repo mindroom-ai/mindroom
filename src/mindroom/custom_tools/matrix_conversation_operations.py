@@ -26,9 +26,9 @@ from mindroom.interactive import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
-from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
     message_preview,
+    resolve_latest_visible_messages,
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
@@ -409,24 +409,25 @@ class MatrixMessageOperations:
                 response=str(response),
             )
 
-        trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
-        resolved = [
-            await extract_and_resolve_message(
-                event,
-                context.client,
-                config=context.config,
-                runtime_paths=context.runtime_paths,
-                trusted_sender_ids=trusted_sender_ids,
-            )
-            for event in reversed(response.chunk)
-            if isinstance(event, self.VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
-        ]
+        # Edits are folded onto the messages they revise, the same thing the
+        # thread read gets for free: it reads the projection, which holds one
+        # row per logical message. A raw timeline has no such row, so a message
+        # edited three times is three `m.room.message` events, and a model
+        # handed all three reads one corrected sentence as three near-identical
+        # ones. Ordered by the original's timestamp, because an edit corrects a
+        # message rather than moving it to the end of the room.
+        resolved = await resolve_latest_visible_messages(
+            [event for event in reversed(response.chunk) if isinstance(event, self.VISIBLE_ROOM_MESSAGE_EVENT_TYPES)],
+            context.client,
+            trusted_sender_ids=trusted_visible_sender_ids(context.config, context.runtime_paths),
+        )
+        messages = sorted(resolved.values(), key=lambda message: message.timestamp)
         return self._result(
             "ok",
             action="read",
             room_id=room_id,
             limit=read_limit,
-            messages=resolved,
+            messages=[message.to_dict() for message in messages],
         )
 
     @staticmethod
