@@ -25,8 +25,8 @@ from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.client_thread_history import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.room_history_reads import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.stale_stream_cleanup import (
     _auto_resume_interrupted_threads as auto_resume_interrupted_threads,
 )

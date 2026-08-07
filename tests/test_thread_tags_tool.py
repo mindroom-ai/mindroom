@@ -16,7 +16,7 @@ from mindroom import thread_tag_vocabulary
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
-from mindroom.matrix.client_thread_history import RoomThreadsPageError
+from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsListing, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name

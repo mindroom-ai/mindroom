@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
-_VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 
 
 @dataclass(slots=True)
@@ -299,7 +299,7 @@ async def bundled_replacement_body(
 
 def _event_fallback_body(event: nio.Event) -> str:
     """Return one best-effort Matrix body for preview fallback."""
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         return event.body
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content")
@@ -577,6 +577,7 @@ async def resolve_latest_visible_messages(
 
 
 __all__ = [
+    "VISIBLE_ROOM_MESSAGE_EVENT_TYPES",
     "ResolvedVisibleMessage",
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",

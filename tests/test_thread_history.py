@@ -26,14 +26,13 @@ from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADA
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_thread_history import (
-    _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
-    _group_scanned_sources_by_thread,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.client_visible_messages import ThreadEditCandidates
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
+from mindroom.matrix.room_history_reads import _event_source_for_cache, _group_scanned_sources_by_thread
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,

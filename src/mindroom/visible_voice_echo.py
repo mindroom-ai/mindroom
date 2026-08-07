@@ -24,7 +24,7 @@ from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_handoff import PreparedTextEvent, payload_metadata_from_source
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:

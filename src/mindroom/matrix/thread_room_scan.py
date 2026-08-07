@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.room_history_reads import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:

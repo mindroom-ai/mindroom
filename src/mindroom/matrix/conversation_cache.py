@@ -38,7 +38,6 @@ from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
-    get_room_threads_page,
     log_thread_history_refresh,
     refresh_thread_history_from_source,
     thread_ids_needing_refill,
@@ -51,6 +50,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
+from mindroom.matrix.room_history_reads import get_room_threads_page
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import resolve_event_thread_membership

@@ -42,13 +42,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
-from aiohttp import ClientError
-from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
@@ -61,15 +59,13 @@ from mindroom.matrix.cache.thread_cache_gap import (
     mark_thread_gap_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
+    VISIBLE_ROOM_MESSAGE_EVENT_TYPES,
     ResolvedVisibleMessage,
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
 )
-from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
-from mindroom.matrix.event_normalization import (
-    is_opaque_encrypted_event_source,
-    normalize_nio_event_for_cache,
-)
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_normalization import is_opaque_encrypted_event_source
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -80,6 +76,13 @@ from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
+)
+from mindroom.matrix.room_history_reads import (
+    OpaqueEncryptedThreadHistoryError,
+    UnresolvedOpaqueRoomHistoryError,
+    bulk_scan_thread_event_sources,
+    fetch_thread_event_sources_via_room_messages,
+    is_room_message_event,
 )
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -92,15 +95,9 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.thread_membership import (
-    ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,
-    map_backed_thread_membership_access,
-    resolve_event_thread_membership,
 )
 from mindroom.matrix.thread_projection import (
-    ordered_event_ids_from_scanned_event_sources,
-    resolve_thread_ids_for_event_infos,
-    sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
 )
 from mindroom.matrix.visible_body import visible_body_from_event_source
@@ -110,10 +107,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
-_VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
-_ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
-_MAX_ENUMERATED_THREAD_ROOTS = 2000
-_MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
@@ -122,14 +115,6 @@ type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
     Awaitable[ThreadHistoryResult],
 ]
-
-
-class OpaqueEncryptedThreadHistoryError(RuntimeError):
-    """Raised when a thread reconstruction depends on still-undecryptable encrypted events."""
-
-
-class _UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
-    """Raised when opaque room history cannot be assigned to a specific thread."""
 
 
 async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
@@ -158,16 +143,6 @@ class _ThreadHistoryFetchResult:
     scanned_event_count: int
     resolution_ms: float
     sidecar_hydration_ms: float
-    homeserver_scan_parse_cpu_ms: float = 0.0
-
-
-@dataclass(slots=True)
-class _ThreadEventSourceScanResult:
-    """Raw event sources plus scan metadata for one room-history thread fetch."""
-
-    event_sources: list[dict[str, Any]]
-    page_count: int
-    scanned_event_count: int
     homeserver_scan_parse_cpu_ms: float = 0.0
 
 
@@ -248,49 +223,9 @@ def _report_direct_source_refresh(
     return result
 
 
-class RoomThreadsPageError(ValueError):
-    """Raised when a single /threads page request fails."""
-
-    def __init__(
-        self,
-        *,
-        response: str,
-        errcode: str | None = None,
-        retry_after_ms: int | None = None,
-    ) -> None:
-        super().__init__(response)
-        self.response = response
-        self.errcode = errcode
-        self.retry_after_ms = retry_after_ms
-
-
-def _room_threads_page_error_from_response(response: object) -> RoomThreadsPageError:
-    """Preserve nio response details for /threads pagination failures."""
-    if isinstance(response, nio.ErrorResponse):
-        return RoomThreadsPageError(
-            response=str(response),
-            errcode=response.status_code,
-            retry_after_ms=response.retry_after_ms,
-        )
-    return RoomThreadsPageError(response=str(response))
-
-
-def _room_threads_page_error_from_exception(exc: BaseException) -> RoomThreadsPageError:
-    """Normalize transport failures into the same structured /threads error."""
-    detail = str(exc)
-    response = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
-    return RoomThreadsPageError(response=response)
-
-
-def _is_room_message_event(event: nio.Event) -> bool:
-    """Return whether one nio event is a readable Matrix room message."""
-    event_source = event.source if isinstance(event.source, dict) else {}
-    return event_source.get("type") == "m.room.message"
-
-
 def _room_message_fallback_body(event: nio.Event) -> str:
     """Return one best-effort fallback body for a room message event."""
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         return event.body
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content")
@@ -340,7 +275,7 @@ def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
         return None
     # nio's parser returns BadEvent even though its public return type is Event.
     event = cast("nio.Event", parsed_event)
-    return event if _is_room_message_event(event) else None
+    return event if is_room_message_event(event) else None
 
 
 def _parse_visible_text_message_event(
@@ -349,11 +284,6 @@ def _parse_visible_text_message_event(
     """Parse one event dict into a visible text or notice message when possible."""
     parsed_event = _parse_room_message_event(event_source)
     return parsed_event if isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)) else None
-
-
-def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
-    """Normalize one nio event source for persistent cache storage."""
-    return normalize_nio_event_for_cache(event)
 
 
 def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
@@ -463,12 +393,12 @@ async def _resolve_thread_history_from_event_sources_timed(
         bundled_replacement_source = _bundled_replacement_source(event.source)
         if bundled_replacement_source is not None:
             bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
-            if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+            if isinstance(bundled_replacement, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
                 edit_candidates.record(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
                 )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
+        if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
             event,
             event_info=event_info,
         ):
@@ -885,7 +815,7 @@ async def refresh_thread_history_from_source(
             expected_membership_epoch=fetch_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
-    except _UnresolvedOpaqueRoomHistoryError:
+    except UnresolvedOpaqueRoomHistoryError:
         await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
         raise
     except Exception as exc:
@@ -1029,7 +959,7 @@ async def _resolve_thread_history_message(
     trusted_sender_ids: Collection[str] = (),
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         message_data = await extract_and_resolve_message(
             event,
             client,
@@ -1265,145 +1195,6 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
-def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) -> bool:
-    """Return whether one scanned payload is undecrypted ciphertext with exposed thread-affecting relations."""
-    if not is_opaque_encrypted_event_source(event_source):
-        return False
-    event_info = EventInfo.from_event(dict(event_source))
-    return is_thread_affecting_relation(event_info, event_type=event_info.event_type)
-
-
-def _record_scanned_room_message_source(
-    event: nio.Event,
-    *,
-    edit_candidates: ThreadEditCandidates,
-    scanned_message_sources: dict[str, dict[str, Any]],
-) -> str | None:
-    """Record one scanned room-message source and return the recorded event ID."""
-    event_source = event.source if isinstance(event.source, dict) else {}
-    if _is_opaque_thread_affecting_event_source(event_source):
-        # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
-        # thread membership through its exposed relation and poisons only that reconstruction.
-        scanned_message_sources[event.event_id] = _event_source_for_cache(event)
-        return event.event_id
-    if not _is_room_message_event(event):
-        return None
-
-    event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
-        event,
-        event_info=event_info,
-    ):
-        return None
-    if event_info.is_edit:
-        return None
-
-    scanned_message_sources[event.event_id] = _event_source_for_cache(event)
-    return event.event_id
-
-
-async def fetch_thread_event_sources_via_room_messages(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> _ThreadEventSourceScanResult:
-    """Fetch one thread's event sources by scanning room history pages."""
-    scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=(thread_id,))
-    if thread_id in scan_result.missing_root_ids:
-        msg = f"thread root {thread_id} not found during room scan"
-        logger.warning(
-            "Thread room scan ended without finding root",
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=client.user_id,
-            room_scan_pages=scan_result.page_count,
-            scanned_event_count=scan_result.scanned_event_count,
-        )
-        raise ThreadRoomScanRootNotFoundError(msg)
-    if scan_result.unresolved_opaque_event_ids:
-        logger.warning(
-            "Thread room scan contains opaque encrypted relations with unresolved impact",
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=client.user_id,
-            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
-        )
-        msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
-        raise _UnresolvedOpaqueRoomHistoryError(msg)
-    return _ThreadEventSourceScanResult(
-        event_sources=scan_result.thread_event_sources[thread_id],
-        page_count=scan_result.page_count,
-        scanned_event_count=scan_result.scanned_event_count,
-        homeserver_scan_parse_cpu_ms=scan_result.homeserver_scan_parse_cpu_ms,
-    )
-
-
-async def find_response_event_ids_via_room_messages(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    response_sender: str,
-    source_event_ids: Collection[str],
-    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
-) -> frozenset[str]:
-    """Find original responses to exact source events in recent room history."""
-    sources = set(source_event_ids)
-    remaining_sources = set(sources)
-    response_event_ids: set[str] = set()
-    from_token: str | None = None
-    seen_pagination_tokens: set[str] = set()
-
-    while remaining_sources:
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"response recovery room scan failed for {room_id}: {response}"
-            raise RuntimeError(msg)  # noqa: TRY004
-        if not response.chunk:
-            break
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            remaining_sources.discard(event.event_id)
-            event_source = event.source if isinstance(event.source, dict) else {}
-            event_info = EventInfo.from_event(event_source)
-            if (
-                event_source.get("sender") == response_sender
-                and not event_info.is_edit
-                and not event_info.is_thread_fallback
-                and event_info.reply_to_event_id in sources
-                and (response_source_filter is None or response_source_filter(event_source))
-            ):
-                response_event_ids.add(event.event_id)
-        if not response.end:
-            break
-        if response.end in seen_pagination_tokens:
-            msg = f"response recovery room scan repeated pagination token for {room_id}"
-            raise RuntimeError(msg)
-        seen_pagination_tokens.add(response.end)
-        from_token = response.end
-
-    return frozenset(response_event_ids)
-
-
-@dataclass(frozen=True)
-class _BulkThreadScanResult:
-    """Per-thread event sources recovered by one backward room scan."""
-
-    thread_event_sources: dict[str, list[dict[str, Any]]]
-    missing_root_ids: frozenset[str]
-    unresolved_opaque_event_ids: frozenset[str]
-    page_count: int
-    scanned_event_count: int
-    scan_truncated: bool
-    homeserver_scan_parse_cpu_ms: float = 0.0
-
-
 @dataclass(frozen=True)
 class BulkThreadRefreshStats:
     """Summary for one bulk thread-cache refresh pass over a room."""
@@ -1414,184 +1205,6 @@ class BulkThreadRefreshStats:
     room_scan_pages: int
     scanned_event_count: int
     scan_truncated: bool = False
-
-
-async def _unresolved_opaque_relation_event_ids(
-    room_id: str,
-    *,
-    event_infos: dict[str, EventInfo],
-    scanned_message_sources: dict[str, dict[str, Any]],
-    resolved_thread_ids: dict[str, str],
-) -> frozenset[str]:
-    """Return scanned opaque relation-bearing events whose thread impact stays unknown."""
-    access = map_backed_thread_membership_access(
-        event_infos=event_infos,
-        resolved_thread_ids=resolved_thread_ids,
-    )
-    unresolved_event_ids: set[str] = set()
-    for event_id, event_source in scanned_message_sources.items():
-        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
-            continue
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            event_infos[event_id],
-            access=access,
-        )
-        if resolution.state is ThreadResolutionState.INDETERMINATE:
-            unresolved_event_ids.add(event_id)
-    return frozenset(unresolved_event_ids)
-
-
-def _scanned_event_sender(event_source: dict[str, Any] | None) -> str | None:
-    """Return one scanned event's sender, or None when the event was never scanned."""
-    if event_source is None:
-        return None
-    sender = event_source.get("sender")
-    return sender if isinstance(sender, str) else None
-
-
-async def _group_scanned_sources_by_thread(
-    *,
-    room_id: str,
-    thread_root_ids: Collection[str],
-    scanned_message_sources: dict[str, dict[str, Any]],
-    edit_candidates: ThreadEditCandidates,
-) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
-    """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
-    grouped: dict[str, dict[str, dict[str, Any]]] = {
-        root_id: {root_id: scanned_message_sources[root_id]}
-        for root_id in thread_root_ids
-        if root_id in scanned_message_sources
-    }
-    if not grouped:
-        return {}, frozenset()
-    event_infos = {
-        event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
-    }
-    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
-    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        room_id,
-        event_infos=event_infos,
-        ordered_event_ids=ordered_event_ids,
-    )
-    for event_id in ordered_event_ids:
-        root_id = resolved_thread_ids.get(event_id)
-        if root_id is None or root_id == event_id:
-            continue
-        bucket = grouped.get(root_id)
-        if bucket is None or event_id in bucket:
-            continue
-        bucket[event_id] = scanned_message_sources[event_id]
-
-    unresolved_opaque_event_ids = await _unresolved_opaque_relation_event_ids(
-        room_id,
-        event_infos=event_infos,
-        scanned_message_sources=scanned_message_sources,
-        resolved_thread_ids=resolved_thread_ids,
-    )
-
-    edits_by_root: dict[str, list[dict[str, Any]]] = {}
-    for original_event_id in edit_candidates.original_event_ids():
-        winner = edit_candidates.winner_for(
-            original_event_id,
-            sender=_scanned_event_sender(scanned_message_sources.get(original_event_id)),
-        )
-        if winner is None:
-            continue
-        edit_event, edit_thread_id = winner
-        target_roots = {
-            root_id
-            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
-            if root_id in grouped
-        }
-        for root_id in target_roots:
-            edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
-
-    grouped_sources = {
-        root_id: sort_thread_event_sources_root_first(
-            [*bucket.values(), *edits_by_root.get(root_id, [])],
-            thread_id=root_id,
-        )
-        for root_id, bucket in grouped.items()
-    }
-    return grouped_sources, unresolved_opaque_event_ids
-
-
-async def _bulk_scan_thread_event_sources(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    thread_root_ids: Collection[str],
-    max_scan_pages: int | None = None,
-) -> _BulkThreadScanResult:
-    """Walk room history backward once and recover every requested thread's event sources."""
-    if max_scan_pages is not None and max_scan_pages < 1:
-        msg = "max_scan_pages must be at least 1"
-        raise ValueError(msg)
-    edit_candidates = ThreadEditCandidates()
-    scanned_message_sources: dict[str, dict[str, Any]] = {}
-    remaining_root_ids = set(thread_root_ids)
-    from_token: str | None = None
-    page_count = 0
-    scanned_event_count = 0
-    scan_truncated = False
-    homeserver_scan_parse_cpu_ms = 0.0
-
-    while remaining_root_ids:
-        if max_scan_pages is not None and page_count >= max_scan_pages:
-            scan_truncated = True
-            break
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            msg = f"bulk room scan failed for {room_id}: {response}"
-            logger.error(
-                "Failed bulk thread history scan",
-                room_id=room_id,
-                user_id=client.user_id,
-                error=str(response),
-            )
-            raise RuntimeError(msg)  # noqa: TRY004
-        if not response.chunk:
-            break
-        page_count += 1
-        parse_cpu_started = time.thread_time()
-        for event in response.chunk:
-            if not isinstance(event, nio.Event):
-                continue
-            scanned_event_count += 1
-            recorded_event_id = _record_scanned_room_message_source(
-                event,
-                edit_candidates=edit_candidates,
-                scanned_message_sources=scanned_message_sources,
-            )
-            if recorded_event_id is not None:
-                remaining_root_ids.discard(recorded_event_id)
-        homeserver_scan_parse_cpu_ms += elapsed_ms_since(parse_cpu_started, clock=time.thread_time)
-        if not response.end:
-            break
-        from_token = response.end
-
-    thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
-        room_id=room_id,
-        thread_root_ids=thread_root_ids,
-        scanned_message_sources=scanned_message_sources,
-        edit_candidates=edit_candidates,
-    )
-    return _BulkThreadScanResult(
-        thread_event_sources=thread_event_sources,
-        missing_root_ids=frozenset(remaining_root_ids),
-        unresolved_opaque_event_ids=unresolved_opaque_event_ids,
-        page_count=page_count,
-        scanned_event_count=scanned_event_count,
-        scan_truncated=scan_truncated,
-        homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
-    )
 
 
 async def bulk_refresh_room_thread_histories(
@@ -1617,7 +1230,7 @@ async def bulk_refresh_room_thread_histories(
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    scan_result = await _bulk_scan_thread_event_sources(
+    scan_result = await bulk_scan_thread_event_sources(
         client,
         room_id,
         thread_root_ids=thread_root_ids,
@@ -1704,172 +1317,13 @@ async def thread_ids_needing_refill(
     )
 
 
-async def get_room_threads_page(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    limit: int,
-    page_token: str | None = None,
-) -> tuple[list[nio.Event], str | None]:
-    """Fetch a single page of thread roots for a room."""
-    if not client.access_token:
-        raise RoomThreadsPageError(
-            response="Matrix client access token is required for room thread pagination.",
-        )
-
-    method, path = nio.Api.room_get_threads(
-        client.access_token,
-        room_id,
-        paginate_from=page_token,
-        limit=limit,
-    )
-    try:
-        response = await client._send(
-            RoomThreadsResponse,
-            method,
-            path,
-            response_data=(room_id,),
-        )
-    except (ClientError, TimeoutError) as exc:
-        raise _room_threads_page_error_from_exception(exc) from exc
-    if not isinstance(response, RoomThreadsResponse):
-        raise _room_threads_page_error_from_response(response)
-
-    return response.thread_roots, response.next_batch
-
-
-def _append_unique_thread_root_ids(
-    thread_roots: Iterable[nio.Event],
-    thread_root_ids: list[str],
-    seen_thread_root_ids: set[str],
-    *,
-    max_thread_roots: int,
-) -> tuple[int, bool]:
-    """Append unseen thread roots up to the cap and report discarded roots."""
-    new_root_count = 0
-    for thread_root in thread_roots:
-        thread_root_id = thread_root.event_id
-        if not thread_root_id:
-            continue
-        if thread_root_id in seen_thread_root_ids:
-            continue
-        if len(thread_root_ids) >= max_thread_roots:
-            return new_root_count, True
-        seen_thread_root_ids.add(thread_root_id)
-        thread_root_ids.append(thread_root_id)
-        new_root_count += 1
-
-    return new_root_count, False
-
-
-def _non_empty_thread_root_page_truncated(
-    *,
-    discarded_due_to_cap: bool,
-    next_token: str | None,
-    new_root_count: int,
-    thread_root_count: int,
-    max_thread_roots: int,
-) -> bool:
-    """Report whether a non-empty /threads page exhausted enumeration safety guards."""
-    return (
-        discarded_due_to_cap
-        or (next_token is not None and new_root_count == 0)
-        or (next_token is not None and thread_root_count >= max_thread_roots)
-    )
-
-
-async def enumerate_room_thread_root_ids(
-    client: nio.AsyncClient,
-    room_id: str,
-    *,
-    max_thread_roots: int = _MAX_ENUMERATED_THREAD_ROOTS,
-    page_size: int = 100,
-) -> tuple[list[str], bool]:
-    """Return unique room thread-root IDs in /threads order."""
-    thread_root_ids: list[str] = []
-    truncated = max_thread_roots <= 0
-    if truncated:
-        return thread_root_ids, truncated
-
-    seen_thread_root_ids: set[str] = set()
-    seen_next_tokens: set[str] = set()
-    page_token: str | None = None
-    pages_fetched = 0
-
-    while not truncated:
-        thread_roots, next_token = await get_room_threads_page(
-            client,
-            room_id,
-            limit=page_size,
-            page_token=page_token,
-        )
-        pages_fetched += 1
-        if thread_roots:
-            new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
-                thread_roots,
-                thread_root_ids,
-                seen_thread_root_ids,
-                max_thread_roots=max_thread_roots,
-            )
-            if _non_empty_thread_root_page_truncated(
-                discarded_due_to_cap=discarded_due_to_cap,
-                next_token=next_token,
-                new_root_count=new_root_count,
-                thread_root_count=len(thread_root_ids),
-                max_thread_roots=max_thread_roots,
-            ):
-                truncated = True
-                break
-        elif next_token is not None:
-            logger.warning(
-                "Room thread enumeration stopped on empty page with pagination token",
-                room_id=room_id,
-                page_count=pages_fetched,
-                thread_root_count=len(thread_root_ids),
-            )
-            truncated = True
-            break
-        if next_token is None:
-            break
-        if next_token in seen_next_tokens:
-            logger.warning(
-                "Room thread enumeration stopped on repeated pagination token",
-                room_id=room_id,
-                page_count=pages_fetched,
-                thread_root_count=len(thread_root_ids),
-            )
-            truncated = True
-            break
-        if pages_fetched >= _MAX_THREAD_ENUMERATION_PAGES:
-            logger.warning(
-                "Room thread enumeration stopped at page cap",
-                room_id=room_id,
-                page_count=pages_fetched,
-                thread_root_count=len(thread_root_ids),
-                max_pages=_MAX_THREAD_ENUMERATION_PAGES,
-            )
-            truncated = True
-            break
-
-        seen_next_tokens.add(next_token)
-        page_token = next_token
-
-    return thread_root_ids, truncated
-
-
 __all__ = [
     "BulkThreadRefreshStats",
-    "OpaqueEncryptedThreadHistoryError",
-    "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
-    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
-    "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
-    "find_response_event_ids_via_room_messages",
-    "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
     "thread_ids_needing_refill",

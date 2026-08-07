@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
+from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportRoom,

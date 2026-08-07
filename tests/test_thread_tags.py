@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
+from mindroom.matrix.room_history_reads import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
@@ -1692,7 +1692,7 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1716,7 +1716,7 @@ async def test_enumerate_room_thread_root_ids_skips_blank_event_ids() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             return_value=(
                 [_thread_root_event(""), _thread_root_event("$root:localhost")],
@@ -1736,7 +1736,7 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([], "next_token_1"),
@@ -1758,7 +1758,7 @@ async def test_enumerate_room_thread_root_ids_does_not_follow_consecutive_empty_
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([], "empty-1"),
@@ -1788,7 +1788,7 @@ async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop()
         assert page_count <= 110
         return [], f"token-{page_count}"
 
-    with patch("mindroom.matrix.client_thread_history.get_room_threads_page", new=get_empty_page):
+    with patch("mindroom.matrix.room_history_reads.get_room_threads_page", new=get_empty_page):
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
 
     assert thread_root_ids == []
@@ -1802,7 +1802,7 @@ async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_tru
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
@@ -1836,7 +1836,7 @@ async def test_enumerate_room_thread_root_ids_truncates_at_cap() -> None:
         pages.append((roots, f"token-{page_index}"))
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(side_effect=pages),
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
@@ -1854,7 +1854,7 @@ async def test_enumerate_room_thread_root_ids_repeated_token_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1874,7 +1874,7 @@ async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1894,7 +1894,7 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
@@ -1917,7 +1917,7 @@ async def test_list_tagged_threads_include_untagged_propagates_room_threads_page
 
     with (
         patch(
-            "mindroom.matrix.client_thread_history.get_room_threads_page",
+            "mindroom.matrix.room_history_reads.get_room_threads_page",
             new=AsyncMock(side_effect=error),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,

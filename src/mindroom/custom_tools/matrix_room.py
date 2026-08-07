@@ -15,12 +15,12 @@ from aiohttp import ClientError
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import (
     message_preview,
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
+from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 

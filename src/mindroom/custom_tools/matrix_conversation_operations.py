@@ -26,7 +26,6 @@ from mindroom.interactive import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
-from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
     message_preview,
@@ -37,6 +36,7 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
+from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,7 +59,7 @@ class MatrixMessageOperationResult:
 class MatrixMessageOperations:
     """Run Matrix message operations below the model-facing tool adapter."""
 
-    _VISIBLE_ROOM_MESSAGE_EVENT_TYPES: tuple[type[nio.RoomMessageText], type[nio.RoomMessageNotice]] = (
+    VISIBLE_ROOM_MESSAGE_EVENT_TYPES: tuple[type[nio.RoomMessageText], type[nio.RoomMessageNotice]] = (
         nio.RoomMessageText,
         nio.RoomMessageNotice,
     )
@@ -419,7 +419,7 @@ class MatrixMessageOperations:
                 trusted_sender_ids=trusted_sender_ids,
             )
             for event in reversed(response.chunk)
-            if isinstance(event, self._VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
+            if isinstance(event, self.VISIBLE_ROOM_MESSAGE_EVENT_TYPES)
         ]
         return self._result(
             "ok",

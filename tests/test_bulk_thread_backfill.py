@@ -10,11 +10,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.matrix.client_thread_history import (
-    OpaqueEncryptedThreadHistoryError,
     bulk_refresh_room_thread_histories,
+    thread_ids_needing_refill,
+)
+from mindroom.matrix.room_history_reads import (
+    OpaqueEncryptedThreadHistoryError,
     fetch_thread_event_sources_via_room_messages,
     find_response_event_ids_via_room_messages,
-    thread_ids_needing_refill,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from tests.event_cache_test_support import raw_nio_event, replace_thread_unconditionally

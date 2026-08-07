@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
