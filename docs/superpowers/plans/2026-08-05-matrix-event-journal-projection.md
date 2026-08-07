@@ -498,7 +498,10 @@ MindRoom was already right about this. `_REQUIRED_RECURSION_DEPTH` is 0, and the
 
 So the defect was in the harness, not the runtime: it asserted one server's answer as a contract, which made it fail on the other and therefore never be run there — the opposite of what a two-server proof is for. That check is now a measurement (`Findings.note`), reported without a verdict.
 
-Run against the upstream `matrixdotorg/synapse:latest` image the local dev stack uses. The MindRoom Synapse fork's own delta is compact-edit collapsing, which the edit-churn check exercises from the client side; running the harness against a build of the fork itself is still outstanding.
+Run first against the upstream `matrixdotorg/synapse:latest` image the local dev stack uses, and then against a build of the MindRoom Synapse fork itself: `ghcr.io/mindroom-ai/synapse:latest`, digest `sha256:fc4d4b8e50f1172d973b53179064dfe93d90070435d9a4642f8824b11f9471ff`, revision `69c5aa228f6b5130529863d43a43a4409dbfab82`, published by the fork's own Docker workflow.
+All 22 required checks pass on the fork, with `mindroom_compact_edits_enabled` both on and off, and the fork reports the same `recursion_depth=3` as upstream.
+
+The fork's delta is compact-edit collapsing, and the earlier claim that the edit-churn check exercises it was wrong. That check admits each edit with `room_get_event`, which the fork does not touch; collapsing applies to `/sync`, Sliding Sync, `/messages` pagination and `/context`. The path where the delta can actually reach the journal is cold hydration, which walks `/messages`. Measured on the fork: 25 edits to one message return 25 `m.replace` events from `/messages` with collapsing off and 1 with it on, and hydration lands on one logical row carrying the newest body either way. The projection is invariant to the delta because it already reduces an edit chain to one row, so collapsing removes work it was going to discard rather than information it needed.
 
 Manual integration scripts follow the repository's existing `tests/manual/` convention.
 
