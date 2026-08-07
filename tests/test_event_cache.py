@@ -23,11 +23,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.event_journal import ConversationPage
+from mindroom.matrix import event_normalization
 from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadAppendOutcome,
     ThreadCacheGap,
-    event_normalization,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
     thread_cache_rejection_reason,

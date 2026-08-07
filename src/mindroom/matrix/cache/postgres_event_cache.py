@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import psycopg
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_normalization import normalize_event_source_for_cache
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
-from .event_normalization import normalize_event_source_for_cache
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import (

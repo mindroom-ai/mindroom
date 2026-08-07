@@ -53,8 +53,6 @@ from nio.responses import RoomThreadsResponse
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadCacheGap,
-    is_opaque_encrypted_event_source,
-    normalize_nio_event_for_cache,
     thread_cache_gap_reason,
     thread_cache_rejection_reason,
 )
@@ -68,6 +66,10 @@ from mindroom.matrix.client_visible_messages import (
     apply_latest_edits_to_messages,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
+from mindroom.matrix.event_normalization import (
+    is_opaque_encrypted_event_source,
+    normalize_nio_event_for_cache,
+)
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,

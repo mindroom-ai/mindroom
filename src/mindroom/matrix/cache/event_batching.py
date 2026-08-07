@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .event_normalization import normalize_event_source_for_cache
+from mindroom.matrix.event_normalization import normalize_event_source_for_cache
 
 
 def group_lookup_events_by_room(

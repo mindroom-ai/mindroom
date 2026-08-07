@@ -28,12 +28,13 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.matrix.event_normalization import normalize_event_source_for_cache
+
 from .event_cache_events import (
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
 )
-from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
     allocate_write_sequences,
     delete_cached_events,

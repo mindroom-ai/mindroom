@@ -2,7 +2,6 @@
 
 Developer note:
 - `event_cache.py` owns the storage-agnostic durable cache protocol.
-- `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
 - `event_cache_events.py` owns backend-neutral serialized event values, indexes, and redaction decisions.
 - `cache_maintenance.py` owns backend-neutral maintenance reports.
 - `thread_cache_state.py` owns backend-neutral durable gap-marker values and the two rules that govern them.
@@ -26,8 +25,9 @@ Main invariants:
 - Thread gap marking is durable state first, with fail-closed deletion only when markers cannot be written.
 """
 
+from mindroom.matrix.event_normalization import is_opaque_encrypted_event_source, normalize_nio_event_for_cache
+
 from .event_cache import ConversationEventCache, SharedConversationEventCache
-from .event_normalization import is_opaque_encrypted_event_source, normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_gap_reason, thread_cache_rejection_reason
 from .thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 from .write_coordinator import EventCacheWriteCoordinator

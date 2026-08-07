@@ -1,4 +1,11 @@
-"""Storage-agnostic Matrix event payload normalization for cache backends."""
+"""Canonical shaping of one Matrix event payload before it is stored.
+
+Nothing here reads or writes storage. It decides what a stored event source
+should contain -- runtime-only keys dropped, the identity fields a raw
+payload may omit filled in from the parsed event -- which is why it lives
+outside any one store rather than inside the cache package that first
+needed it.
+"""
 
 from __future__ import annotations
 

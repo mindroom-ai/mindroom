@@ -28,7 +28,6 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    normalize_nio_event_for_cache,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -45,6 +44,7 @@ from mindroom.matrix.client_thread_history import (
     thread_ids_needing_refill,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_normalization import normalize_nio_event_for_cache
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,

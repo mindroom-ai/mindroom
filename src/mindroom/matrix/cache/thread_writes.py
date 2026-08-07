@@ -40,6 +40,10 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
+from mindroom.matrix.event_normalization import (
+    is_opaque_encrypted_event_source,
+    normalize_nio_event_for_cache,
+)
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -49,11 +53,6 @@ from mindroom.matrix.thread_bookkeeping import (
     ThreadMutationResolver,
 )
 from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
-
-from .event_normalization import (
-    is_opaque_encrypted_event_source,
-    normalize_nio_event_for_cache,
-)
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps

@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import aiosqlite
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_normalization import normalize_event_source_for_cache
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
-from .event_normalization import normalize_event_source_for_cache
 from .sqlite_cache_maintenance import (
     run_startup_maintenance,
     with_sqlite_storage_bytes,
