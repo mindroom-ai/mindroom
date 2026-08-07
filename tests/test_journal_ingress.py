@@ -21,6 +21,7 @@ from mindroom.constants import (
 from mindroom.event_journal import EventClass, EventKind, SettlementOutcome, VisibleMessage
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
     JournalIngress,
@@ -286,6 +287,49 @@ class TestEventKinds:
         )
         assert isinstance(event, nio.Event)
         assert _event_kind(event) is None
+
+    @pytest.mark.parametrize(
+        ("msgtype", "extra_content"),
+        [
+            ("m.text", {}),
+            ("m.emote", {}),
+            ("m.notice", {}),
+            ("m.image", {"url": "mxc://example.org/i"}),
+            ("m.file", {"url": "mxc://example.org/f"}),
+            ("m.video", {"url": "mxc://example.org/v"}),
+            ("m.audio", {"url": "mxc://example.org/a"}),
+        ],
+    )
+    async def test_every_room_message_admission_matches_what_hydration_projects(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """Watching a conversation and rebuilding it must agree on what is in it.
+
+        Hydration admits any `m.room.message`, so admission has to as well. It
+        did not: the rules enumerated msgtypes, and each one left out was found
+        only after shipping -- notices first, then emotes. A user sending
+        `/me waves` was journaled live as nothing at all, and then appeared out
+        of nowhere the first time the thread was rebuilt.
+
+        Parametrized over msgtypes rather than asserting the base class so the
+        two implementations are compared against each other rather than against
+        the same assumption twice.
+        """
+        source = {
+            "event_id": f"$msg-{msgtype}",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {"msgtype": msgtype, "body": "body", **extra_content},
+        }
+        event = nio.Event.parse_event(source)
+        assert not isinstance(event, nio.BadEvent), f"{msgtype} fixture is malformed"
+
+        projected = _projected_from_event(ROOM, event, self_sender="@someone-else:localhost")
+
+        assert (_event_kind(event) is not None) == (projected is not None)
 
 
 class TestAdmissionAdapter:

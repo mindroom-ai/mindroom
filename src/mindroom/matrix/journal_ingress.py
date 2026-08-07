@@ -63,22 +63,26 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
 
 
-# Ordered: the first matching rule owns the event. Media types are checked
-# before the approval predicate because they are concrete nio classes, while an
-# approval is an `UnknownEvent` distinguished only by its type string.
+# Ordered: the first matching rule owns the event. Media is matched before the
+# general message rule because every media class subclasses `RoomMessage` and
+# would otherwise be swallowed by it, and both are matched before the approval
+# predicate because they are concrete nio classes while an approval is an
+# `UnknownEvent` distinguished only by its type string.
 _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
-    (lambda event: isinstance(event, nio.RoomMessageText), EventKind.MESSAGE),
-    # A notice is a message. `RoomMessageNotice` is a sibling of
-    # `RoomMessageText` rather than a subclass, so leaving it out dropped every
-    # notice from live admission while hydration -- which accepts any
-    # `m.room.message` -- kept them. One conversation therefore read
-    # differently depending on whether it was hydrated or watched, which is the
-    # divergence this projection exists to remove. What a notice never becomes
-    # is work; see `_event_class_for`.
-    (lambda event: isinstance(event, nio.RoomMessageNotice), EventKind.MESSAGE),
     (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
     (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
     (lambda event: isinstance(event, MATRIX_MEDIA_EVENT_TYPES), EventKind.MEDIA),
+    # Every `m.room.message`, matched at the base class rather than by listing
+    # msgtypes. Hydration admits any `m.room.message`, so any msgtype this rule
+    # misses makes one conversation read differently depending on whether it
+    # was watched or rebuilt -- which is the divergence this projection exists
+    # to remove. Enumerating instead of generalizing dropped notices first and
+    # then emotes, both found only after they had shipped; `RoomMessageText`,
+    # `RoomMessageNotice`, and `RoomMessageEmote` are siblings under
+    # `RoomMessage`, so no list of them is self-maintaining. What a message
+    # becomes -- work or context -- is `_event_class_for`'s question, not this
+    # one's.
+    (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
     (_is_tool_approval_response, EventKind.APPROVAL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
 )
