@@ -55,6 +55,11 @@ __all__ = [
 ]
 
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
+# How long a flush may wait on the rest of a sender's burst before the wait is
+# reported. Voice readiness legitimately takes seconds, so this is set well
+# past any real burst: reaching it means the lane is not going to settle, and
+# the batch would otherwise sit admitted and undispatched with nothing logged.
+_LANE_WAIT_STALL_SECONDS = 60.0
 logger = get_logger(__name__)
 
 
@@ -342,13 +347,17 @@ class CoalescingGate:
 
     async def _wait_for_lane_slots(self, gate: _GateEntry, slots: list[LaneSlot]) -> None:
         """Wait for undelivered same-sender ingress, releasing it on bounded drains."""
+        reported_stall = False
         while True:
             unsettled = [slot for slot in slots if not slot.settled.is_set()]
             if not unsettled:
                 return
             drain_context = self._current_drain_context(gate)
             if not self._is_bounded_drain(drain_context):
-                await asyncio.gather(*(slot.settled.wait() for slot in unsettled))
+                reported_stall = await self._await_lane_settlement(
+                    unsettled,
+                    reported_stall=reported_stall,
+                )
                 continue
             assert drain_context is not None
             try:
@@ -359,6 +368,33 @@ class CoalescingGate:
             except TimeoutError:
                 await self._abandon_lane_slots(unsettled, drain_context)
                 return
+
+    @staticmethod
+    async def _await_lane_settlement(slots: list[LaneSlot], *, reported_stall: bool) -> bool:
+        """Await undelivered slots, reporting once when the wait stops looking live.
+
+        The wait itself stays unbounded: a burst that is still resolving must
+        still be coalesced with. Only its silence is bounded, so a lane that
+        will never settle leaves a record instead of an admitted batch that
+        nothing ever dispatches.
+        """
+        settled = asyncio.gather(*(slot.settled.wait() for slot in slots))
+        if reported_stall:
+            await settled
+            return True
+        try:
+            async with asyncio.timeout(_LANE_WAIT_STALL_SECONDS):
+                await settled
+        except TimeoutError:
+            logger.warning(
+                "coalescing_gate_lane_wait_stalled",
+                room_id=slots[0].room_id,
+                sender_id=slots[0].sender_id,
+                unsettled_slot_count=len(slots),
+                waited_seconds=_LANE_WAIT_STALL_SECONDS,
+            )
+            return True
+        return False
 
     async def _abandon_lane_slots(self, slots: list[LaneSlot], drain_context: _DrainContext) -> None:
         for slot in slots:

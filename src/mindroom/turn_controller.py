@@ -2063,15 +2063,27 @@ class TurnController:
         turn_claim: TurnRecord,
         *,
         source_event_id: str,
+        lane_reservation: _PromptIngressReservationOwner | None = None,
     ) -> TurnRecord | TurnDispatchOutcome:
-        """Claim one live source or return its explicit competing-owner outcome."""
+        """Claim one live source or return its explicit competing-owner outcome.
+
+        A contended claim waits for the competing owner's turn to settle, and
+        that wait must not hold an ingress lane slot. The competing owner's
+        coalesced batch does not flush until every undelivered slot in the
+        sender's lane settles, and its turn does not settle until it flushes,
+        so a held slot wedges both sides permanently and silently.
+        """
         if self.deps.turn_store.try_claim_turn(turn_claim):
             return turn_claim
 
+        if lane_reservation is not None:
+            await lane_reservation.release()
         await self.deps.turn_store.wait_for_turn_settled(turn_claim.indexed_event_ids)
         if await asyncio.to_thread(self.deps.turn_store.is_durably_handled, source_event_id):
             return TurnDispatchOutcome.DEFERRED
         if self.deps.turn_store.try_claim_turn(turn_claim):
+            if lane_reservation is not None:
+                lane_reservation.reenter_lane()
             return turn_claim
         # A settled discovery-alias owner or a newer competing claimant owns
         # this duplicate semantic turn.
@@ -2148,7 +2160,11 @@ class TurnController:
                 discovery_event_ids=claim_aliases,
                 completed=False,
             )
-            turn_claim = await self._claim_live_turn(pending_turn, source_event_id=event.event_id)
+            turn_claim = await self._claim_live_turn(
+                pending_turn,
+                source_event_id=event.event_id,
+                lane_reservation=reservation_owner,
+            )
             if isinstance(turn_claim, TurnDispatchOutcome):
                 return turn_claim
             reservation_owner.pending_turn_claim = turn_claim

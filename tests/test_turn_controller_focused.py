@@ -1230,6 +1230,44 @@ async def test_router_alias_claim_loser_reclaims_after_failed_owner(config: Conf
 
 
 @pytest.mark.asyncio
+async def test_contended_claim_does_not_strand_the_winner_in_the_senders_lane(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A losing duplicate callback must not hold the lane its winner's flush waits on.
+
+    Duplicate delivery runs two callbacks for one event concurrently. The loser
+    waits for the winner's turn to settle; the winner's coalesced batch cannot
+    flush until every undelivered slot in that sender's lane settles. A loser
+    that keeps its slot across the wait closes the cycle: the batch is admitted
+    to the gate and never dispatched, with no error logged anywhere.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event(
+        f"{_entity_user_id(config, 'general')} answer once",
+        event_id="$duplicate-delivery:localhost",
+    )
+
+    winner = asyncio.create_task(harness.controller.handle_text_event(room, event))
+    await asyncio.sleep(0)
+    loser = asyncio.create_task(harness.controller.handle_text_event(room, event))
+    try:
+        async with asyncio.timeout(10):
+            outcomes = await asyncio.gather(winner, loser)
+            await harness.gate.drain_all()
+            await harness.runner.settle_inbox_responses()
+    finally:
+        for task in (winner, loser):
+            task.cancel()
+
+    assert outcomes == [TurnDispatchOutcome.DEFERRED, TurnDispatchOutcome.DEFERRED]
+    assert [batch.primary_event.event_id for batch in harness.gate_batches] == [event.event_id]
+    assert len(harness.runner.requests) == 1
+    assert harness.gate.lanes.all_settled()
+
+
+@pytest.mark.asyncio
 async def test_router_relay_ignored_by_this_agent_compacts_exact_callback(
     config: Config,
     tmp_path: Path,

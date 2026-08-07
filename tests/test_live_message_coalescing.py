@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
+from mindroom import coalescing
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
@@ -1746,6 +1747,64 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_flush_waiting_on_a_lane_that_never_settles_reports_the_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst wait that stops looking live must leave a record, then keep waiting.
+
+    An admitted batch held by an undelivered lane slot is invisible: the gate
+    logs the enqueue and then nothing at all. The wait stays unbounded so a
+    slow burst still coalesces, but a lane that is not going to settle has to
+    be diagnosable from the log rather than only from a missing reply.
+    """
+    monkeypatch.setattr(coalescing, "_LANE_WAIT_STALL_SECONDS", 0.01)
+    room = _make_room()
+    text = _text_event(event_id="$text", body="answer me", server_timestamp=1000)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey(room.room_id, None, "@user:localhost")
+    text_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+    stuck_slot = gate.enter_lane(room_id=room.room_id, sender_id="@user:localhost")
+
+    with capture_logs() as logs:
+        gate.submit_lane_slot(
+            text_slot,
+            key=key,
+            source_event_id="$text",
+            source_kind="message",
+            ready_result=ReadyPendingEvent(
+                pending_event=PendingEvent(event=text, room=room, source_kind="message"),
+            ),
+        )
+        await _wait_for(
+            lambda: any(entry["event"] == "coalescing_gate_lane_wait_stalled" for entry in logs),
+        )
+        assert calls == []
+
+        gate.release_lane_slot(stuck_slot)
+        await _wait_for(lambda: calls == [["$text"]])
+
+    stalls = [entry for entry in logs if entry["event"] == "coalescing_gate_lane_wait_stalled"]
+    # One report per wait, not one per polling interval: the flush keeps
+    # waiting for the burst after reporting rather than restarting the wait.
+    assert len(stalls) == 1
+    stalled = stalls[0]
+    assert stalled["log_level"] == "warning"
+    assert stalled["room_id"] == room.room_id
+    assert stalled["sender_id"] == "@user:localhost"
+    assert stalled["unsettled_slot_count"] == 1
     assert _coalescing_gate_is_idle(gate)
 
 
