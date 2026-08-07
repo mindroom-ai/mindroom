@@ -352,13 +352,28 @@ class ApprovalView(Protocol):
         room_id: str,
         transaction_id: str,
         card: Mapping[str, Any],
-        sending_device_id: str | None,
     ) -> None:
         """Record one approval card as awaiting a decision, before it is sent.
 
         Committed ahead of the send so that nothing clickable can exist without
-        a row that accounts for it. The device is recorded with it, because the
-        transaction ID only deduplicates for the device that used it.
+        a row that accounts for it. The row is unattempted until the send is
+        actually about to run, because a claim alone proves nothing reached the
+        room.
+        """
+        ...
+
+    async def mark_approval_card_attempted(
+        self,
+        *,
+        transaction_id: str,
+        sending_device_id: str | None,
+    ) -> bool:
+        """Record that one claimed card is about to be offered, and from which device.
+
+        Committed before the send, because the fact that has to survive a crash
+        is that something may already be in the room under this transaction.
+        Returns whether a row was still there to mark; nothing may be sent for
+        one that has gone.
         """
         ...
 

@@ -38,6 +38,11 @@ MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 SendingDeviceProvider = Callable[[], str | None]
+# Read the room for the card one approval became: (room_id, card_sender,
+# approval_id). None is the room's own answer that no such card exists; raising
+# says the question could not be put, which is a different fact and must not be
+# mistaken for the first.
+ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 _POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -275,9 +280,10 @@ class _IdentifiedCard:
     """One recovered row's card, or why this pass could not name its event."""
 
     card: StoredApprovalCard | None
-    # Whether a missing card is finished with rather than owed. An unsendable
-    # claim is dropped on purpose and must not keep the sweep coming back; a
-    # resend whose outcome is unknown must.
+    # Whether a missing card is finished with rather than owed. A row proven to
+    # have put nothing in the room is dropped on purpose and must not keep the
+    # sweep coming back; a repeat or a room lookup whose outcome is unknown
+    # must.
     settled: bool = False
 
 
@@ -338,6 +344,7 @@ class _ApprovalManager:
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
+        locate_card: ApprovalCardLocator | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -346,6 +353,7 @@ class _ApprovalManager:
         self._approval_room_ids = approval_room_ids
         self._transport_sender = transport_sender
         self._sending_device = sending_device
+        self._locate_card = locate_card
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -690,6 +698,7 @@ class _ApprovalManager:
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
+        locate_card: ApprovalCardLocator | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -704,6 +713,8 @@ class _ApprovalManager:
             self._transport_sender = transport_sender
         if sending_device is not None:
             self._sending_device = sending_device
+        if locate_card is not None:
+            self._locate_card = locate_card
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -722,7 +733,14 @@ class _ApprovalManager:
         if self._send_event is None:
             return None
 
-        send_task = asyncio.ensure_future(self._send_event(room_id, thread_id, content, transaction_id))
+        send_task = asyncio.ensure_future(
+            self._mark_attempted_then_send(
+                room_id=room_id,
+                thread_id=thread_id,
+                content=content,
+                transaction_id=transaction_id,
+            ),
+        )
         active_send = _ActiveApprovalSend(
             done_future=Future(),
             owner_loop=asyncio.get_running_loop(),
@@ -756,9 +774,10 @@ class _ApprovalManager:
                 raise
 
             if sent_event is None:
-                # The transport reports a send it knows did not happen, so the
-                # claim describes a card that will never exist and would only
-                # be resurrected by the next startup's recovery send.
+                # Either the transport reports a send it knows did not happen,
+                # or the attempt could not be committed before one was made.
+                # Both say the claim describes a card that will never exist,
+                # and it would only be resurrected by a later recovery send.
                 await self._forget_card(transaction_id)
                 return None
             waiter = self._bind_live_waiter(
@@ -1237,7 +1256,6 @@ class _ApprovalManager:
                 room_id=room_id,
                 transaction_id=transaction_id,
                 card=card,
-                sending_device_id=self._sending_device_id(),
             )
         except Exception:
             logger.warning(
@@ -1248,6 +1266,57 @@ class _ApprovalManager:
             )
             return False
         return True
+
+    async def _mark_card_attempted(self, transaction_id: str) -> bool:
+        """Record that this device is about to use one card's frozen transaction.
+
+        Returns whether the send may go ahead. Refusing on a failed write is
+        the only safe answer: an unmarked row reads as "nothing ever left this
+        process", and recovery drops such a row without looking at the room --
+        so sending under one would strand the card it created. A refused
+        approval costs a tool call that fails closed.
+        """
+        if self._cards is None:
+            return True
+        try:
+            return await self._cards.mark_approval_card_attempted(
+                transaction_id=transaction_id,
+                sending_device_id=self._sending_device_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record an approval card send before making it",
+                transaction_id=transaction_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _mark_attempted_then_send(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        content: dict[str, Any],
+        transaction_id: str,
+    ) -> SentApprovalEvent | None:
+        """Commit the attempt, then make it.
+
+        One task rather than two awaited steps, because the caller registers
+        this send as in flight straight after creating it and nothing may run
+        in between. A bare ``await`` on the marking would open a window in
+        which the startup sweep sees a row no live send is registered against
+        and acts on it, which is the duplicate card that registration exists
+        to prevent.
+
+        Nothing means the attempt could not be committed, which is the same
+        answer the transport gives for a send it knows did not happen, and the
+        caller retires the claim on either.
+        """
+        if not await self._mark_card_attempted(transaction_id):
+            return None
+        if self._send_event is None:
+            return None
+        return await self._send_event(room_id, thread_id, content, transaction_id)
 
     async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> None:
         """Point one claimed row at the Matrix event the send produced.
@@ -1319,7 +1388,8 @@ class _ApprovalManager:
 
         An unrecorded device on either side is not "unchanged", it is a device
         nobody can name, and a repeat cannot be proven safe against a device
-        that cannot be named.
+        that cannot be named. Only attempted rows are asked, so a null device
+        here means the sending process could not name its own.
         """
         current = self._sending_device_id()
         if stored.sending_device_id is None or current is None:
@@ -1327,45 +1397,67 @@ class _ApprovalManager:
         return stored.sending_device_id == current
 
     async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
-        """Establish which Matrix event one claimed card became, sending it again if need be.
+        """Establish which Matrix event one claimed card became, by whichever means is sound.
 
         A row with no event id is the crash window claiming turns from
-        unrecoverable into merely unknown: the card may be in the room, or the
-        process may have died before it left. Presenting the frozen transaction
-        again decides that without reading the room, because the homeserver
-        collapses a repeat onto the event it already accepted and otherwise
-        accepts the card now. Either way this pass ends up holding an event it
-        can expire.
+        unrecoverable into merely unknown, and the attempt marker is what
+        narrows "unknown" down. An unattempted row is proof: the send was never
+        reached, so the room holds nothing and the claim can simply go, with no
+        homeserver asked and no card resent.
 
-        Unless the device changed, in which case the repeat is not a repeat and
-        the card is dropped unsent. This is the opposite call from the response
-        outbox, which reconciles against the room and sends anyway, and the
-        asymmetry is the point: a lost answer is unacceptable, so the outbox
-        risks a duplicate to avoid one. A card is a prompt for a human
-        decision. Two of them ask a question that has one answer, and the
-        answer to the copy resolves nothing, while a card that never appears
-        costs only a tool call that fails closed. So a stale card dies here
-        rather than reappearing, and the row goes with it -- keeping it would
-        just re-ask the same unanswerable question on the next startup.
+        An attempted row really may be clickable somewhere, and there are two
+        ways to find out which event it is. Presenting the frozen transaction
+        again is the cheap one, and it works because the homeserver collapses a
+        repeat onto the event it already accepted -- but only for the device
+        that used the transaction. From any other device the "repeat" is a
+        second card, so that route is closed by a re-login and the room has to
+        be read instead, the way the response outbox reads it.
 
-        A repeat that fails leaves the row alone. The outcome is still unknown,
-        and dropping the claim would abandon whatever did reach the room; the
-        next sweep asks again -- which is why the two empty answers here are
-        not the same answer. A card dropped because no device can present it
-        is finished with; one whose repeat did not come back is still owed.
+        Where this parts company with the outbox is what happens with what it
+        finds. A lost answer is unacceptable, so the outbox reconciles and then
+        sends anyway. A card is a prompt for a human decision: two of them ask
+        a question that has one answer, and answering the copy resolves
+        nothing. So a card found in the room is adopted and expired where it
+        stands, and never resent.
+
+        Only after that does a row become safe to forget. Forgetting one whose
+        card is still in the room retires the only thing that could expire it
+        or honour a click on it, and nothing comes back for it -- which is why
+        an absence has to be established rather than assumed, and why a lookup
+        that could not run leaves the row owed for the next sweep.
+
+        A repeat that fails leaves the row alone for the same reason. Hence the
+        two empty answers here are not the same answer: a row proven to have no
+        card is finished with, while one whose outcome is still unestablished
+        is owed.
         """
         if stored.card_event_id is not None:
             return _IdentifiedCard(card=stored)
-        if not self._repeat_would_deduplicate(stored):
+        if not stored.attempted:
             logger.info(
-                "approval_startup_card_expired_unsendable_device",
+                "approval_startup_card_dropped_never_attempted",
                 room_id=room_id,
                 transaction_id=stored.transaction_id,
-                claimed_by_device=stored.sending_device_id,
-                sending_device=self._sending_device_id(),
             )
             await self._forget_card(stored.transaction_id)
             return _IdentifiedCard(card=None, settled=True)
+        if not self._repeat_would_deduplicate(stored):
+            return await self._card_a_previous_device_left(room_id, stored)
+        return await self._card_the_frozen_transaction_recovers(room_id, stored)
+
+    async def _card_the_frozen_transaction_recovers(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+    ) -> _IdentifiedCard:
+        """Present one attempted card's transaction again, from the device that used it.
+
+        The homeserver collapses the repeat onto the event it already accepted,
+        or accepts the card now if the first attempt never landed, so this ends
+        up holding an event either way without reading the room. A repeat that
+        does not come back leaves the row owed, because the outcome is still
+        unknown and dropping the claim would abandon whatever did arrive.
+        """
         cards = self._cards
         content = stored.card.get("content")
         if cards is None or self._send_event is None or not isinstance(content, dict):
@@ -1385,15 +1477,118 @@ class _ApprovalManager:
             card_event_id=sent_event.event_id,
             card=card,
         )
-        return _IdentifiedCard(
-            card=StoredApprovalCard(
-                card=card,
-                resolution=stored.resolution,
+        return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=sent_event.event_id, card=card))
+
+    async def _card_a_previous_device_left(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+        """Read the room for one attempted card whose transaction can no longer be repeated.
+
+        Located by the approval id rather than the transaction: the transaction
+        belongs to the device that used it, which is the whole reason this
+        lookup is happening. The approval id is a per-request ``uuid4`` frozen
+        into the card body before the send, so at most one original card in the
+        room carries it.
+
+        Three outcomes, and they are three because a missing card and an
+        unanswered question are not the same thing. Found is adopted, so the
+        caller expires it where it stands. Established as absent retires the
+        row. Anything else -- no way to ask, or an ask that failed -- keeps the
+        row and reports it owed, because dropping it on a guess is precisely
+        how a clickable card ends up with nothing behind it.
+        """
+        approval_id = self._stored_card_approval_id(stored)
+        card_sender = stored.card.get("sender")
+        locate_card = self._locate_card
+        if approval_id is None or not isinstance(card_sender, str) or not card_sender:
+            # A body naming neither an approval nor a sender describes nothing
+            # this pass could look for, and no later sweep reads it
+            # differently, so it is retired rather than retried.
+            logger.warning(
+                "approval_startup_card_unidentifiable",
+                room_id=room_id,
                 transaction_id=stored.transaction_id,
-                card_event_id=sent_event.event_id,
-                sending_device_id=stored.sending_device_id,
-                created_at_ns=stored.created_at_ns,
-            ),
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            await self._forget_card(stored.transaction_id)
+            return _IdentifiedCard(card=None, settled=True)
+        if locate_card is None:
+            # The question is answerable, just not by this process yet. Owed,
+            # never guessed: a wrong absence here retires a clickable card's
+            # only owner.
+            logger.warning(
+                "approval_startup_card_lookup_unavailable",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            return _IdentifiedCard(card=None)
+        try:
+            card_event_id = await locate_card(room_id, card_sender, approval_id)
+        except Exception:
+            logger.warning(
+                "approval_startup_card_lookup_failed",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                exc_info=True,
+            )
+            return _IdentifiedCard(card=None)
+        if card_event_id is None:
+            logger.info(
+                "approval_startup_card_absent_after_device_change",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            await self._forget_card(stored.transaction_id)
+            return _IdentifiedCard(card=None, settled=True)
+        logger.info(
+            "approval_startup_card_adopted_after_device_change",
+            room_id=room_id,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            claimed_by_device=stored.sending_device_id,
+            sending_device=self._sending_device_id(),
+        )
+        # The claimed body is the best this pass has: the transport may have
+        # diverged from it when it sent, but nothing here can read the room's
+        # copy, and an expiry needs only the event id and the approval it
+        # names.
+        card = {**stored.card, "event_id": card_event_id}
+        if self._cards is not None:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=stored.transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+        return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=card_event_id, card=card))
+
+    @staticmethod
+    def _stored_card_approval_id(stored: StoredApprovalCard) -> str | None:
+        """Return the per-request id frozen into one stored card's body."""
+        content = stored.card.get("content")
+        if not isinstance(content, dict):
+            return None
+        approval_id = content.get("approval_id")
+        return approval_id if isinstance(approval_id, str) and approval_id else None
+
+    @staticmethod
+    def _adopted_card(
+        stored: StoredApprovalCard,
+        *,
+        card_event_id: str,
+        card: dict[str, Any],
+    ) -> StoredApprovalCard:
+        """Return one recovered row as it now stands, with its event established."""
+        return StoredApprovalCard(
+            card=card,
+            resolution=stored.resolution,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            attempted=stored.attempted,
+            sending_device_id=stored.sending_device_id,
+            created_at_ns=stored.created_at_ns,
         )
 
     async def shutdown(self, *, reason: str) -> None:
@@ -1809,6 +2004,7 @@ def initialize_approval_store(
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
     sending_device: SendingDeviceProvider | None = None,
+    locate_card: ApprovalCardLocator | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -1821,6 +2017,7 @@ def initialize_approval_store(
             approval_room_ids=approval_room_ids,
             transport_sender=transport_sender,
             sending_device=sending_device,
+            locate_card=locate_card,
         )
         return _MANAGER
 
@@ -1836,6 +2033,7 @@ def initialize_approval_store(
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
         sending_device=sending_device,
+        locate_card=locate_card,
     )
     return _MANAGER
 

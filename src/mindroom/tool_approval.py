@@ -17,6 +17,7 @@ from mindroom.approval_manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
+    ApprovalCardLocator,
     ApprovalDecision,
     ApprovalRoomProvider,
     ApprovalStartupSweep,
@@ -340,6 +341,7 @@ def initialize_approval_runtime(
     approval_room_ids: ApprovalRoomProvider,
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
+    locate_card: ApprovalCardLocator,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -350,6 +352,7 @@ def initialize_approval_runtime(
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
         sending_device=sending_device,
+        locate_card=locate_card,
     )
 
 

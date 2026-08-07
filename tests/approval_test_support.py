@@ -29,9 +29,13 @@ class _StoredRow:
     # there, and the two must not be allowed to look alike here.
     card_event_id: str | None = None
     resolution: dict[str, Any] | None = None
-    # The device that claimed the row. Only that device's repeat of the frozen
-    # transaction collapses onto the same event, so a row claimed elsewhere is
-    # one recovery must expire rather than present again.
+    # Whether the send was ever reached. False is the one state that proves the
+    # room holds nothing for this row, so recovery may drop it unasked.
+    attempted: bool = False
+    # The device the attempt used. Only that device's repeat of the frozen
+    # transaction collapses onto the same event, so a row attempted elsewhere
+    # is one recovery must reconcile against the room rather than present
+    # again.
     sending_device_id: str | None = None
     # Claim order, which is the order the room scan reads in and therefore what
     # a paging caller resumes from.
@@ -64,6 +68,7 @@ class FakeApprovalCards:
         # Transactions this instance wrote a row for, so a test can see
         # redundant writes, and the ones a send outcome later settled.
         self.claimed: list[str] = []
+        self.attempted: list[tuple[str, str | None]] = []
         self.acknowledged: list[tuple[str, str]] = []
         # Stands in for the claim timestamp the real table records, which is
         # what orders the room scan and what a page cursor is built from.
@@ -95,7 +100,6 @@ class FakeApprovalCards:
         room_id: str,
         transaction_id: str,
         card: Mapping[str, Any],
-        sending_device_id: str | None = None,
     ) -> None:
         """Record one card as pending before it is sent, keeping the first body seen."""
         if transaction_id in self.rows:
@@ -105,9 +109,23 @@ class FakeApprovalCards:
         self.rows[transaction_id] = _StoredRow(
             room_id=room_id,
             card=dict(card),
-            sending_device_id=sending_device_id,
             created_at_ns=self._claims,
         )
+
+    async def mark_approval_card_attempted(
+        self,
+        *,
+        transaction_id: str,
+        sending_device_id: str | None,
+    ) -> bool:
+        """Record that a send is about to be made, and from which device."""
+        row = self.rows.get(transaction_id)
+        if row is None:
+            return False
+        self.attempted.append((transaction_id, sending_device_id))
+        row.attempted = True
+        row.sending_device_id = sending_device_id
+        return True
 
     async def acknowledge_approval_card(
         self,
@@ -176,6 +194,10 @@ class FakeApprovalCards:
         """Seed one card as if a previous process had sent it and recorded the event."""
         transaction_id = transaction_id_for(card_event_id)
         await self.claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+        await self.mark_approval_card_attempted(
+            transaction_id=transaction_id,
+            sending_device_id=CLAIMING_DEVICE_ID,
+        )
         await self.acknowledge_approval_card(
             transaction_id=transaction_id,
             card_event_id=card_event_id,
@@ -189,19 +211,26 @@ class FakeApprovalCards:
         card: dict[str, Any],
         *,
         sending_device_id: str | None = CLAIMING_DEVICE_ID,
+        attempted: bool = True,
     ) -> None:
         """Seed one card as if a previous process had claimed it and then died.
 
-        Claimed from ``CLAIMING_DEVICE_ID`` by default. Pass a different device,
-        or None, to seed the row a recovery pass cannot prove it may present
-        again.
+        Attempted from ``CLAIMING_DEVICE_ID`` by default, which is the row a
+        crash around the send leaves: something may be in the room. Pass a
+        different device, or None, to seed the row whose transaction a recovery
+        pass cannot present again; pass ``attempted=False`` for the narrower
+        crash between the claim and the send, where nothing can have left.
         """
         await self.claim_approval_card(
             room_id=room_id,
             transaction_id=transaction_id,
             card=card,
-            sending_device_id=sending_device_id,
         )
+        if attempted:
+            await self.mark_approval_card_attempted(
+                transaction_id=transaction_id,
+                sending_device_id=sending_device_id,
+            )
 
 
 def transaction_id_for(card_event_id: str) -> str:
@@ -215,6 +244,7 @@ def _stored(transaction_id: str, row: _StoredRow) -> StoredApprovalCard:
         resolution=row.resolution,
         transaction_id=transaction_id,
         card_event_id=row.card_event_id,
+        attempted=row.attempted,
         sending_device_id=row.sending_device_id,
         created_at_ns=row.created_at_ns,
     )
@@ -243,7 +273,6 @@ class UnclaimableApprovalCards(FakeApprovalCards):
         room_id: str,  # noqa: ARG002 - matches the view it stands in for
         transaction_id: str,
         card: Mapping[str, Any],  # noqa: ARG002 - matches the view it stands in for
-        sending_device_id: str | None = None,  # noqa: ARG002 - matches the view it stands in for
     ) -> None:
         """Fail loudly, the way a store that cannot take the row does."""
         msg = f"cannot claim the card {transaction_id!r}"

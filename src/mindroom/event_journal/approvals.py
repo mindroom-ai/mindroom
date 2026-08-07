@@ -27,6 +27,14 @@ harmless one, a row for a card that may not exist, and the frozen transaction
 ID is what tells the two apart -- presenting it again collapses onto the event
 the homeserver already accepted, or creates the card if it never landed.
 
+That last step has a boundary, and the row records where it ends. A transaction
+ID is idempotent only within the device that used it, so the marker for "a send
+was reached, from this device" is written separately from the claim and only by
+the path about to send. An unattempted row is proof the room holds nothing and
+can simply be dropped; an attempted one whose device cannot be matched has to be
+reconciled against the room, because presenting it again would ask a human the
+same question twice.
+
 Only cards this bot authored are ever stored, because only those are ever
 recovered; a card another sender wrote is not this bot's to resolve.
 """
@@ -47,7 +55,8 @@ _DEFAULT_ROOM_CARD_LIMIT = 256
 _CARD_COLUMNS = """
     cards.card_json AS card_json, cards.resolution_json AS resolution_json,
     cards.transaction_id AS transaction_id, cards.card_event_id AS card_event_id,
-    cards.sending_device_id AS sending_device_id, cards.created_at_ns AS created_at_ns
+    cards.attempted AS attempted, cards.sending_device_id AS sending_device_id,
+    cards.created_at_ns AS created_at_ns
 """
 
 
@@ -67,9 +76,13 @@ class StoredApprovalCard:
     # that the send failed -- so the event ID has to be established before the
     # card can be edited at all.
     card_event_id: str | None
-    # The device that claimed the row, which is the device the transaction ID
-    # belongs to. Only that device can present it again and get the same event
-    # back; None means no device was recorded and none can be proven.
+    # Whether the send was ever reached. False is the one state that proves the
+    # room holds nothing, which is what lets recovery drop such a row without
+    # asking the homeserver about it.
+    attempted: bool
+    # The device the transaction ID belongs to, recorded with the attempt. Only
+    # that device can present it again and get the same event back; None on an
+    # attempted row means no device was recorded and none can be proven.
     sending_device_id: str | None
     # When the row was claimed. Half of the room scan's ordering, and therefore
     # half of the cursor a caller resumes that scan from.
@@ -141,7 +154,6 @@ def claim(
     room_id: str,
     transaction_id: str,
     card: Mapping[str, Any],
-    sending_device_id: str | None,
 ) -> None:
     """Record one card as pending under the current membership, before sending it.
 
@@ -150,16 +162,18 @@ def claim(
     send would present, and it stays frozen for exactly as long as a repeat is
     still possible.
 
-    The device is written here rather than after the send, because a Matrix
-    transaction ID belongs to the device that used it and this row exists to
-    say whether a repeat is safe. Recording it early can only be wrong in the
-    safe direction: a re-login between the claim and the send leaves a device
-    that no longer matches, and a mismatch expires the card rather than
-    duplicating it.
+    Written unattempted, and no device is recorded, because neither is true
+    yet. Claiming says this bot intends to ask; it does not say the ask
+    happened, and it certainly does not say which device made it -- a re-login
+    between here and the send would make that a lie in the one direction that
+    matters, since a device recorded but never used reads as "a repeat from
+    this device is safe" for a transaction the homeserver has never seen.
+    ``mark_attempted`` records both, once the send is actually about to run.
 
     Doing nothing on conflict keeps that promise across a retried claim: a row
     whose send may already have been attempted must not have its body replaced
-    under a transaction ID the homeserver could be holding.
+    under a transaction ID the homeserver could be holding, nor be walked back
+    to unattempted.
     """
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
@@ -168,21 +182,51 @@ def claim(
     transaction.execute(
         """
         INSERT INTO approval_cards (
-            principal_id, room_id, transaction_id, sending_device_id,
+            principal_id, room_id, transaction_id, attempted, sending_device_id,
             card_json, membership_epoch, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, 0, NULL, ?, ?, ?)
         ON CONFLICT (principal_id, transaction_id) DO NOTHING
         """,
         (
             principal_id,
             room_id,
             transaction_id,
-            sending_device_id,
             json.dumps(dict(card), ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             0 if epoch is None else int(epoch["membership_epoch"]),
             time.time_ns(),
         ),
     )
+
+
+def mark_attempted(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    transaction_id: str,
+    sending_device_id: str | None,
+) -> bool:
+    """Record that this device is about to offer one claimed card, before it does.
+
+    Committed ahead of the send for the reason the claim is: a crash mid-send
+    has to leave behind the fact that something may already be in the room
+    under this transaction, and which device's namespace it was posted in.
+    Written together because they are one fact -- an attempt nobody can
+    attribute to a device is an attempt no repeat can be proven safe against,
+    and recovery reads it exactly that way.
+
+    Returns whether a row was there to mark. A membership fence can delete the
+    row between the claim and here, and a caller that sent anyway would put a
+    card in a room that no longer accounts for it.
+    """
+    marked = transaction.fetchone(
+        """
+        UPDATE approval_cards SET attempted = 1, sending_device_id = ?
+        WHERE principal_id = ? AND transaction_id = ?
+        RETURNING transaction_id
+        """,
+        (sending_device_id, principal_id, transaction_id),
+    )
+    return marked is not None
 
 
 def acknowledge(
@@ -320,6 +364,7 @@ def _card(row: Row) -> StoredApprovalCard:
         resolution=_resolution(row["resolution_json"]),
         transaction_id=str(row["transaction_id"]),
         card_event_id=row["card_event_id"],
+        attempted=bool(row["attempted"]),
         sending_device_id=row["sending_device_id"],
         created_at_ns=int(row["created_at_ns"]),
     )

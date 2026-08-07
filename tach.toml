@@ -572,6 +572,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
+    "mindroom.matrix.room_history_reads",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
 ]
@@ -2392,6 +2393,7 @@ depends_on = [
 visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.thread_summary",
+    "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
@@ -4101,6 +4103,7 @@ expose = [
     "parse_room_message_event",
     "room_message_fallback_body",
     "fetch_thread_event_sources_via_room_messages",
+    "find_approval_card_event_id_via_room_messages",
     "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "is_room_message_event",

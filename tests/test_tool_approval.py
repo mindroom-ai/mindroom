@@ -64,7 +64,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator
+    from collections.abc import Awaitable, Callable, Generator, Mapping
     from pathlib import Path
 
 
@@ -2438,13 +2438,16 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
     would add a second one, and a duplicated prompt for a human decision is
     worse than a stale one -- answering the copy resolves nothing.
 
-    So the card dies here. The row goes with it, because keeping it would only
-    re-ask the same unanswerable question on the next startup.
+    So the card dies here. The row goes with it, because the room has said it
+    holds no such card, and keeping it would only re-ask the same unanswerable
+    question on the next startup.
     """
     cards = FakeApprovalCards()
     await cards.store_unsent_card("txn-stranded", "!room:localhost", _claimed_card_body("stranded-approval"))
     sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
     editor = AsyncMock(return_value=True)
+    # The room's own answer: nothing this approval id names is in it.
+    locate_card = AsyncMock(return_value=None)
     restarted = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -2453,6 +2456,7 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
         approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: restarted_device,
+        locate_card=locate_card,
     )
 
     assert (await restarted.discard_pending_on_startup()).discarded == 0
@@ -2462,6 +2466,131 @@ async def test_a_restart_expires_an_unsent_card_it_cannot_prove_the_device_for(
     editor.assert_not_awaited()
     # Expired for good rather than left for the next startup to retry, which
     # would be a retry that can never succeed.
+    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_adopts_and_expires_the_card_a_previous_device_left(tmp_path: Path) -> None:
+    """The other half of a device change: the card really did reach the room.
+
+    A row can be attempted, unacknowledged, and answered by the homeserver all
+    at once -- that is what a crash between the send and the acknowledgement
+    leaves. Forgetting it would retire the only thing that could ever expire
+    the card or honour a click on it, so the room is read first, the card found
+    there is adopted, and it is expired where it stands.
+
+    Still no resend, which is the rule this does not touch: the card is
+    addressed by the event id the room gave up, not by a transaction this
+    device cannot present.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card(
+        "txn-stranded",
+        "!room:localhost",
+        _claimed_card_body("stranded-approval"),
+        sending_device_id="ANOTHERDEVICE",
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
+    editor = AsyncMock(return_value=True)
+    locate_card = AsyncMock(return_value="$stranded")
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=locate_card,
+    )
+
+    assert (await restarted.discard_pending_on_startup()).discarded == 1
+    # Located by the approval id, which is device-independent, and never by the
+    # transaction, which is not.
+    assert locate_card.await_args.args == ("!room:localhost", "@mindroom_router:localhost", "stranded-approval")
+    sender.assert_not_awaited()
+    assert editor.await_args.args[:2] == ("!room:localhost", "$stranded")
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert cards.acknowledged == [("txn-stranded", "$stranded")]
+    # And only now is the row safe to drop: nothing clickable is left behind it.
+    assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_keeps_a_card_whose_room_lookup_could_not_run(tmp_path: Path) -> None:
+    """A question that could not be put is not an answer of "no card".
+
+    Failing to reach the homeserver says nothing about what is in the room, and
+    a row dropped on that guess takes a clickable card's only owner with it. So
+    it stays, and it is reported owed so the sweep's retry owner comes back.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card(
+        "txn-stranded",
+        "!room:localhost",
+        _claimed_card_body("stranded-approval"),
+        sending_device_id="ANOTHERDEVICE",
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(side_effect=RuntimeError("the homeserver is unreachable")),
+    )
+
+    sweep = await restarted.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    assert sweep.complete is False
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
+    remaining = await cards.pending_approval_cards(room_id="!room:localhost")
+    assert [card.transaction_id for card in remaining] == ["txn-stranded"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_drops_a_claim_whose_send_was_never_attempted(tmp_path: Path) -> None:
+    """An unattempted row is the one case that needs no evidence at all.
+
+    The claim is committed before the send is reached, so a process that died
+    in between leaves a row that provably put nothing in the room. Nothing to
+    resend, nothing to reconcile, and no reason to spend a room scan proving
+    what the row already says.
+    """
+    cards = FakeApprovalCards()
+    await cards.store_unsent_card(
+        "txn-unattempted",
+        "!room:localhost",
+        _claimed_card_body("unattempted-approval"),
+        sending_device_id=None,
+        attempted=False,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$second-card"))
+    editor = AsyncMock(return_value=True)
+    locate_card = AsyncMock(return_value="$never-happened")
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=locate_card,
+    )
+
+    sweep = await restarted.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
+    locate_card.assert_not_awaited()
     assert await cards.pending_approval_cards(room_id="!room:localhost") == ()
 
 
@@ -2499,16 +2628,34 @@ async def test_a_restart_still_expires_an_acknowledged_card_from_another_device(
 
 
 @pytest.mark.asyncio
-async def test_a_claim_records_the_device_that_will_send_the_card(tmp_path: Path) -> None:
-    """The device is on the row before the send, not added after it.
+async def test_the_sending_device_is_recorded_before_the_card_goes_out(tmp_path: Path) -> None:
+    """The device is committed before the send, and never before that.
 
     Recording it afterwards would leave exactly the rows that matter -- the
     ones a crash interrupted around the send -- with no device on them, and a
-    row whose device is unknown is one recovery has to expire rather than
-    present again.
+    row whose device is unknown is one recovery has to reconcile against the
+    room rather than present again.
+
+    Recording it at claim time is the other way to get it wrong: a re-login
+    between the claim and the send would leave this device's name against a
+    transaction the homeserver never saw from it, and recovery would read that
+    as licence to present the transaction again.
     """
-    cards = FakeApprovalCards()
-    devices_when_sent: list[str | None] = []
+    rows_when_claimed: list[tuple[bool, str | None]] = []
+    rows_when_sent: list[tuple[bool, str | None]] = []
+
+    class _WatchedCards(FakeApprovalCards):
+        async def claim_approval_card(
+            self,
+            *,
+            room_id: str,
+            transaction_id: str,
+            card: Mapping[str, Any],
+        ) -> None:
+            await super().claim_approval_card(room_id=room_id, transaction_id=transaction_id, card=card)
+            rows_when_claimed.extend((row.attempted, row.sending_device_id) for row in self.rows.values())
+
+    cards = _WatchedCards()
 
     async def sender(
         _room_id: str,
@@ -2516,7 +2663,7 @@ async def test_a_claim_records_the_device_that_will_send_the_card(tmp_path: Path
         _content: dict[str, Any],
         _transaction_id: str,
     ) -> SentApprovalEvent:
-        devices_when_sent.extend(row.sending_device_id for row in cards.rows.values())
+        rows_when_sent.extend((row.attempted, row.sending_device_id) for row in cards.rows.values())
         return SentApprovalEvent("$approval")
 
     store = _ApprovalManager(
@@ -2539,7 +2686,75 @@ async def test_a_claim_records_the_device_that_will_send_the_card(tmp_path: Path
     )
     await _wait_for_pending(store, sender=store._send_event)  # type: ignore[arg-type] - the AsyncMock above
 
-    assert devices_when_sent == [CLAIMING_DEVICE_ID]
+    assert rows_when_claimed == [(False, None)]
+    assert rows_when_sent == [(True, CLAIMING_DEVICE_ID)]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_landing_inside_the_attempt_write_leaves_the_send_alone(tmp_path: Path) -> None:
+    """The attempt is committed inside the registered send, never ahead of it.
+
+    Marking the row and registering the send as in flight cannot be two awaited
+    steps. A sweep suspended into the gap between them finds an attempted row
+    this device could present again with nothing saying it is spoken for, and
+    presents it -- a second prompt in the room while the first send is still
+    on its way, then expired out from under the request waiting on it.
+
+    Driven by running the sweep from inside the store write itself, which is
+    the innermost point the ordering has to hold at.
+    """
+    sweeps: list[ApprovalStartupSweep] = []
+
+    class _SweepingCards(FakeApprovalCards):
+        async def mark_approval_card_attempted(
+            self,
+            *,
+            transaction_id: str,
+            sending_device_id: str | None,
+        ) -> bool:
+            marked = await super().mark_approval_card_attempted(
+                transaction_id=transaction_id,
+                sending_device_id=sending_device_id,
+            )
+            sweeps.append(await store.discard_pending_on_startup())
+            return marked
+
+    cards = _SweepingCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    # The sweep saw the row and left it alone: one card sent, none expired, and
+    # the request still waiting on an answer nobody has given.
+    assert sweeps == [ApprovalStartupSweep(discarded=0, failed=0)]
+    assert sender.await_count == 1
+    editor.assert_not_awaited()
+    assert pending.card_event_id == "$approval"
+    assert set(cards.rows) == {_approval_transaction_id(pending.approval_id)}
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -3478,7 +3693,7 @@ async def test_a_card_left_unsettled_is_reported_as_still_owed(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_a_card_no_device_can_resend_is_not_reported_as_owed(tmp_path: Path) -> None:
-    """Dropping an unsendable claim finishes it, so the sweep must not keep asking.
+    """Dropping a claim the room disowns finishes it, so the sweep must not keep asking.
 
     The card is expired deliberately rather than presented again from a device
     the homeserver would not deduplicate against. Counting that as owed would
@@ -3498,6 +3713,7 @@ async def test_a_card_no_device_can_resend_is_not_reported_as_owed(tmp_path: Pat
         approval_room_ids=lambda: {"!room:localhost"},
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: CLAIMING_DEVICE_ID,
+        locate_card=AsyncMock(return_value=None),
     )
 
     sweep = await store.discard_pending_on_startup()

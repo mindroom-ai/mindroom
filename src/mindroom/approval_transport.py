@@ -18,6 +18,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
+from mindroom.matrix.room_history_reads import find_approval_card_event_id_via_room_messages
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
@@ -156,6 +157,7 @@ class ApprovalMatrixTransport:
             approval_room_ids=self.configured_approval_room_ids,
             transport_sender=self.transport_sender_id,
             sending_device=self.transport_device_id,
+            locate_card=self.locate_approval_card,
         )
 
     async def _run_on_runtime_loop(
@@ -275,6 +277,43 @@ class ApprovalMatrixTransport:
             response=str(response),
         )
         return None
+
+    async def locate_approval_card(
+        self,
+        room_id: str,
+        card_sender: str,
+        approval_id: str,
+    ) -> str | None:
+        """Find the Matrix event one unacknowledged approval card became."""
+        return await self._run_on_runtime_loop(
+            lambda: self.locate_approval_card_now(room_id, card_sender, approval_id),
+        )
+
+    async def locate_approval_card_now(
+        self,
+        room_id: str,
+        card_sender: str,
+        approval_id: str,
+    ) -> str | None:
+        """Read the room for one approval card on the current loop.
+
+        Raising and returning None mean different things to the caller: None is
+        the room's answer that no such card exists, and an exception says the
+        question could not be put. So a transport that cannot read the room
+        raises rather than reporting an absence it did not establish -- a
+        wrong absence there retires the row, and the card it belongs to stays
+        clickable with nothing behind it forever.
+        """
+        bot = self.transport_bot(room_id)
+        if bot is None or bot.client is None:
+            msg = f"Router approval transport cannot read {room_id} to locate a card"
+            raise ToolApprovalTransportError(msg)
+        return await find_approval_card_event_id_via_room_messages(
+            bot.client,
+            room_id,
+            card_sender=card_sender,
+            approval_id=approval_id,
+        )
 
     async def edit_approval_event(
         self,

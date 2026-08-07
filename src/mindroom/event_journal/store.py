@@ -655,7 +655,6 @@ class PrincipalStore:
         room_id: str,
         transaction_id: str,
         card: Mapping[str, Any],
-        sending_device_id: str | None,
     ) -> None:
         """Record one approval card as awaiting a decision, before it is sent."""
         await self._backend.write(
@@ -665,6 +664,21 @@ class PrincipalStore:
                 room_id=room_id,
                 transaction_id=transaction_id,
                 card=card,
+            ),
+        )
+
+    async def mark_approval_card_attempted(
+        self,
+        *,
+        transaction_id: str,
+        sending_device_id: str | None,
+    ) -> bool:
+        """Record that one claimed approval card is about to be offered to Matrix."""
+        return await self._backend.write(
+            lambda transaction: approvals.mark_attempted(
+                transaction,
+                self._principal_id,
+                transaction_id=transaction_id,
                 sending_device_id=sending_device_id,
             ),
         )

@@ -218,11 +218,17 @@ _TABLES = (
         -- again is what settles which, because the homeserver collapses a
         -- repeat onto the event it already accepted.
         card_event_id TEXT,
-        -- The device that claimed this card, and therefore the only device
-        -- whose transaction ID the homeserver will deduplicate against. A
-        -- repeat from any other device is a second card rather than the same
-        -- one, so a row whose device cannot be matched is expired instead of
-        -- presented again.
+        -- Whether this card was ever offered to the homeserver. Claiming is not
+        -- offering: the row is committed first, so a process that dies in
+        -- between leaves a claim for a card that provably never left it. Only
+        -- an attempted row can have put something clickable in the room, and
+        -- only an attempted row therefore has to be reconciled against it.
+        attempted INTEGER NOT NULL DEFAULT 1,
+        -- The device whose transaction-ID namespace was used, written with
+        -- `attempted` and only by the path that is about to send. Only that
+        -- device's repeat is deduplicated by the homeserver; from any other it
+        -- is a second card, so a row whose device cannot be matched is
+        -- reconciled against the room instead of presented again.
         sending_device_id TEXT,
         card_json TEXT NOT NULL,
         -- The decision this bot committed to before it tried to show it. A
@@ -369,6 +375,14 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # twice; the cost is one room scan for a row that is simultaneously
     # unacknowledged, attempted, and older than this column.
     ("response_outbox", "sending_device_id", "TEXT"),
+    # One means "this row may already have put a card in the room", which for a
+    # row that predates the column is the only answer that can be defended:
+    # nothing recorded whether its send was reached, and the claim it was
+    # written by was made by a process that may well have gone on to send. The
+    # opposite default would let recovery drop such a row without looking, which
+    # is the strand this column exists to make impossible. Every row this code
+    # writes names the column, so the default is only ever read by an upgrade.
+    ("approval_cards", "attempted", "INTEGER NOT NULL DEFAULT 1"),
     # The anchor is what says a debt is outstanding, so a row that predates this
     # column reads as owing nothing however its timestamp was left. That is the
     # only direction that terminates: a debt whose anchor cannot be named can

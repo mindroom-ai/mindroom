@@ -2224,12 +2224,15 @@ class TestApprovalCards:
 
     @classmethod
     async def remember(cls, store: PrincipalStore, event_id: str, *, sender: str = ALICE) -> None:
-        """Leave one card in the state a completed send leaves it: claimed and acknowledged."""
+        """Leave one card in the state a completed send leaves it: claimed, attempted, acknowledged."""
         card = cls.card(event_id, sender=sender)
         await store.claim_approval_card(
             room_id=ROOM,
             transaction_id=cls.transaction(event_id),
             card=card,
+        )
+        await store.mark_approval_card_attempted(
+            transaction_id=cls.transaction(event_id),
             sending_device_id=DEVICE,
         )
         await store.acknowledge_approval_card(
@@ -2255,21 +2258,91 @@ class TestApprovalCards:
         exists -- but the room scan startup drives sees it, which is the whole
         point of writing the row before the send.
 
-        It carries the claiming device, because that is what decides whether
-        the recovery pass may present the frozen transaction again or has to
-        expire the card instead.
+        It carries no attempt and no device, because neither has happened. That
+        is the state that proves nothing reached the room, and it is the only
+        one a recovery pass may retire without asking the homeserver anything.
         """
         await alice.claim_approval_card(
             room_id=ROOM,
             transaction_id="txn",
             card=self.card("$card"),
-            sending_device_id=DEVICE,
         )
 
         scanned = await alice.pending_approval_cards(room_id=ROOM)
         assert [(entry.transaction_id, entry.card_event_id) for entry in scanned] == [("txn", None)]
-        assert [entry.sending_device_id for entry in scanned] == [DEVICE]
+        assert [(entry.attempted, entry.sending_device_id) for entry in scanned] == [(False, None)]
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+
+    async def test_an_attempt_records_the_device_the_transaction_belongs_to(self, alice: PrincipalStore) -> None:
+        """The marker and the device are one fact, committed before the send.
+
+        A crash after this leaves a row that says something may already be in
+        the room and whose namespace it went out under, which is exactly what
+        recovery needs to decide between repeating the transaction and reading
+        the room.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+
+        assert await alice.mark_approval_card_attempted(transaction_id="txn", sending_device_id=DEVICE) is True
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [(entry.attempted, entry.sending_device_id) for entry in scanned] == [(True, DEVICE)]
+
+    async def test_an_attempt_on_a_withdrawn_row_reports_that_it_marked_nothing(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A row a fence removed must not be sent under.
+
+        The claim is what accounts for a card in the room, so a send made after
+        the row went would put a clickable prompt somewhere nothing owns it --
+        the state claiming before sending exists to make impossible.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.forget_approval_card(transaction_id="txn")
+
+        assert await alice.mark_approval_card_attempted(transaction_id="txn", sending_device_id=DEVICE) is False
+
+    async def test_a_row_predating_the_attempt_column_reads_as_attempted(self, alice: PrincipalStore) -> None:
+        """The upgrade's default has to be the answer that cannot strand a card.
+
+        A row written before this column existed was claimed by a process that
+        may well have gone on to send, and nothing recorded which. Read as
+        unattempted it would be dropped on the next sweep without the room ever
+        being asked, which is exactly the stranded card the column was added to
+        prevent -- so the default says "may already be visible" instead.
+
+        Written as a real insert that omits the column, because the value a
+        backfilled row gets is the column default and nothing else.
+        """
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                INSERT INTO approval_cards (
+                    principal_id, room_id, transaction_id, card_json, membership_epoch, created_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("agent@alice", ROOM, "txn-legacy", json.dumps(self.card("$legacy")), 0, 1),
+            ),
+        )
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [(entry.transaction_id, entry.attempted) for entry in scanned] == [("txn-legacy", True)]
+
+    async def test_a_second_claim_cannot_walk_an_attempt_back(self, alice: PrincipalStore) -> None:
+        """Claiming again over an attempted row would erase the fact that it may be visible.
+
+        The conflict clause does nothing on purpose. If a retried claim reset
+        the marker, recovery would read a row whose card is in the room as one
+        that provably never left, and drop it without expiring it.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.mark_approval_card_attempted(transaction_id="txn", sending_device_id=DEVICE)
+
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [(entry.attempted, entry.sending_device_id) for entry in scanned] == [(True, DEVICE)]
 
     async def test_a_claim_cannot_carry_a_decision_before_its_send_returns(self, alice: PrincipalStore) -> None:
         """A decision is recorded against an event, so there is nothing to record against yet.
@@ -2281,7 +2354,6 @@ class TestApprovalCards:
             room_id=ROOM,
             transaction_id="txn",
             card=self.card("$card"),
-            sending_device_id=DEVICE,
         )
 
         refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
@@ -2300,7 +2372,6 @@ class TestApprovalCards:
             room_id=ROOM,
             transaction_id="txn",
             card=self.card("$card"),
-            sending_device_id=DEVICE,
         )
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=self.card("$card"))
         await alice.acknowledge_approval_card(
@@ -2325,7 +2396,6 @@ class TestApprovalCards:
             room_id=ROOM,
             transaction_id="txn",
             card=self.card("$card"),
-            sending_device_id=DEVICE,
         )
         sent = {**self.card("$card"), "content": {"approval_id": "card", "status": "pending", "approvable": False}}
         await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=sent)
@@ -2344,7 +2414,6 @@ class TestApprovalCards:
             room_id=ROOM,
             transaction_id="txn-unsent",
             card=self.card("$unsent"),
-            sending_device_id=DEVICE,
         )
         await self.remember(alice, "$sent")
 
@@ -2477,13 +2546,11 @@ class TestApprovalCards:
             room_id=ROOM,
             transaction_id="txn",
             card=self.card("$card"),
-            sending_device_id=DEVICE,
         )
         await alice.claim_approval_card(
             room_id=ROOM,
             transaction_id="txn",
             card={**self.card("$card"), "sender": BOB},
-            sending_device_id=DEVICE,
         )
 
         # Read while it is still frozen. Acknowledging first would rewrite the
@@ -2575,7 +2642,6 @@ class TestApprovalCards:
             room_id=OTHER_ROOM,
             transaction_id="txn-other",
             card=self.card("$other"),
-            sending_device_id=DEVICE,
         )
         await alice.acknowledge_approval_card(
             transaction_id="txn-other",
