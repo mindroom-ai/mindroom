@@ -119,6 +119,8 @@ Reconciliation is the way out, and the branch already has the piece: `VisibleRes
 
 The injection point is narrower than it looks: every bot — router, team, agent — is built by the single factory at `bot.py:275-310`, so one optional `journal_store` parameter threaded there covers all three. The part that needs care is ownership at shutdown: `bot.py:1949` closes the store, and a shared one closed by the first bot to stop would break the rest, so an injected store must not be closed by its borrower. Do not let a default of "open my own" survive into production either — it is what makes this defect invisible in tests, where one bot is the normal case. And "is this turn finished?" is answered by both journal pending state and the `TurnStore` handled ledger, which live in different substrates and cannot share a transaction — load-bearing today, reachable by moving `TurnRecord` into the journal.
 
+Measured, so the next person can plan rather than discover: `turn_store.py` and `handled_turns.py` are 2,085 lines together, `TurnStore` exposes 29 public methods, and `src/` holds 90 call sites through it. The migration is not "add a table" — it is reimplementing that surface on SQL while every caller keeps working, plus reading the existing per-agent JSON ledgers forward. The payoff is real and already argued above: it collapses the last two-owner fact and lets `dispatch_replay_guard` stop reconciling. It is a phase of its own, not a follow-up patch.
+
 **Predates this work:** `matrix_conversation` tool room reads never collapse edits. Not made worse by it.
 
 ### What replaced `main`'s gap markers
