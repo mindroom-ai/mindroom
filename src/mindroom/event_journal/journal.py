@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -21,6 +22,9 @@ from mindroom.logging_config import get_logger
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     AdmissionResult,
+    DepartureObservation,
+    DepartureOutcome,
+    DepartureSource,
     EventClass,
     EventKind,
     JournalEvent,
@@ -108,6 +112,154 @@ def advance_membership_epoch(
         (principal_id, room_id),
     )
     return epoch
+
+
+def fence_departure(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    source: DepartureSource,
+) -> DepartureOutcome:
+    """Invalidate a room's derived state once per departure, however often it is seen.
+
+    One departure reaches the bot twice: locally, the moment it leaves, and
+    again in the sync response reporting the leave. Deciding which of the two
+    is a repeat is the whole job, and it happens inside the same transaction as
+    the invalidation so that a crash between deciding and invalidating is not a
+    state this can be left in. Recording "a report is still owed" for an
+    advance that never committed would cost the departure its only fence.
+
+    The two observers are not symmetric, so their bookkeeping is not either:
+
+    - A local departure is always followed by a sync report of it, so it leaves
+      a debt behind for that report to consume. A rejoin does not clear the
+      debt: the report is still owed, and when it comes it still describes the
+      departure that was already fenced.
+    - A sync report has no local counterpart to wait for -- most departures the
+      bot did not initiate never produce one -- so it leaves no debt. It marks
+      the room fenced instead, which is what suppresses the local observation
+      of the same departure when the sync response gets there first.
+    """
+    state = _membership_state(transaction, principal_id, room_id)
+    if source is DepartureSource.LOCAL and state.departure_fenced:
+        # Whoever saw this departure first already fenced it, and nothing has
+        # put the bot back in the room, so there is no second departure here.
+        return DepartureOutcome(
+            observation=DepartureObservation.ALREADY_FENCED,
+            membership_epoch=state.membership_epoch,
+            owed_reports=state.owed_reports,
+        )
+    if source is DepartureSource.REPORTED and state.owed_reports > 0:
+        owed_reports = state.owed_reports - 1
+        _write_departure_state(
+            transaction,
+            principal_id,
+            room_id,
+            membership_epoch=state.membership_epoch,
+            departure_fenced=state.departure_fenced,
+            owed_reports=owed_reports,
+        )
+        return DepartureOutcome(
+            observation=DepartureObservation.OWED_REPORT_CONSUMED,
+            membership_epoch=state.membership_epoch,
+            owed_reports=owed_reports,
+        )
+    membership_epoch = advance_membership_epoch(transaction, principal_id, room_id)
+    owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports
+    _write_departure_state(
+        transaction,
+        principal_id,
+        room_id,
+        membership_epoch=membership_epoch,
+        departure_fenced=True,
+        owed_reports=owed_reports,
+    )
+    return DepartureOutcome(
+        observation=DepartureObservation.FENCED,
+        membership_epoch=membership_epoch,
+        owed_reports=owed_reports,
+    )
+
+
+def note_membership_restarted(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Record that the bot is in a room again, so its next departure fences.
+
+    Only the fenced mark is cleared. An owed sync report survives a rejoin on
+    purpose: the report describes the departure that ended the *previous*
+    membership, and letting it fence the new one is exactly the deletion of a
+    freshly hydrated conversation this whole mechanism exists to prevent.
+    """
+    transaction.execute(
+        "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+
+
+def retire_owed_departure_reports(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Forget reports that can no longer arrive, so a real departure still fences."""
+    transaction.execute(
+        "UPDATE room_membership SET owed_departure_reports = 0 WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+
+
+def rooms_owing_departure_reports(transaction: Transaction, principal_id: str) -> frozenset[str]:
+    """Return every room whose local departure is still owed a sync report."""
+    rows = transaction.fetchall(
+        "SELECT room_id FROM room_membership WHERE principal_id = ? AND owed_departure_reports > 0",
+        (principal_id,),
+    )
+    return frozenset(row["room_id"] for row in rows)
+
+
+@dataclass(frozen=True, slots=True)
+class _DepartureState:
+    """One room's departure bookkeeping as the transaction found it."""
+
+    membership_epoch: int
+    departure_fenced: bool
+    owed_reports: int
+
+
+def _membership_state(transaction: Transaction, principal_id: str, room_id: str) -> _DepartureState:
+    row = transaction.fetchone(
+        """
+        SELECT membership_epoch, departure_fenced, owed_departure_reports
+        FROM room_membership WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    )
+    if row is None:
+        # No row means no departure has ever been fenced here, which is the
+        # same starting point as a room the bot has always been in.
+        return _DepartureState(membership_epoch=0, departure_fenced=False, owed_reports=0)
+    return _DepartureState(
+        membership_epoch=int(row["membership_epoch"]),
+        departure_fenced=bool(row["departure_fenced"]),
+        owed_reports=int(row["owed_departure_reports"]),
+    )
+
+
+def _write_departure_state(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    membership_epoch: int,
+    departure_fenced: bool,
+    owed_reports: int,
+) -> None:
+    transaction.execute(
+        """
+        INSERT INTO room_membership (principal_id, room_id, membership_epoch, departure_fenced, owed_departure_reports)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, room_id) DO UPDATE SET
+            departure_fenced = excluded.departure_fenced,
+            owed_departure_reports = excluded.owed_departure_reports
+        """,
+        (principal_id, room_id, membership_epoch, int(departure_fenced), owed_reports),
+    )
 
 
 def admit(

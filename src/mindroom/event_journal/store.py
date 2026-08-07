@@ -25,6 +25,8 @@ if TYPE_CHECKING:
         ConversationCursor,
         ConversationPage,
         DeliveryStage,
+        DepartureOutcome,
+        DepartureSource,
         EventKind,
         InboundEvent,
         JournalEvent,
@@ -169,6 +171,35 @@ class PrincipalStore:
         """Invalidate hydration for a room whose membership restarted."""
         return await self._backend.write(
             lambda transaction: journal.advance_membership_epoch(transaction, self._principal_id, room_id),
+        )
+
+    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        """Apply one observation of a departure, invalidating at most once per departure."""
+        return await self._backend.write(
+            lambda transaction: journal.fence_departure(
+                transaction,
+                self._principal_id,
+                room_id,
+                source=source,
+            ),
+        )
+
+    async def note_membership_restarted(self, room_id: str) -> None:
+        """Record a confirmed join, so the room's next departure fences again."""
+        await self._backend.write(
+            lambda transaction: journal.note_membership_restarted(transaction, self._principal_id, room_id),
+        )
+
+    async def retire_owed_departure_reports(self, room_id: str) -> None:
+        """Forget sync reports that can no longer arrive for one room."""
+        await self._backend.write(
+            lambda transaction: journal.retire_owed_departure_reports(transaction, self._principal_id, room_id),
+        )
+
+    async def rooms_owing_departure_reports(self) -> frozenset[str]:
+        """Return every room whose local departure is still owed a sync report."""
+        return await self._backend.read(
+            lambda transaction: journal.rooms_owing_departure_reports(transaction, self._principal_id),
         )
 
     async def read_conversation(

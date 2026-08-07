@@ -78,6 +78,41 @@ class DeliveryStage(StrEnum):
     FINAL = "final"
 
 
+class DepartureSource(StrEnum):
+    """Which of the two observers of one departure is speaking."""
+
+    # The bot left the room itself, and knows a sync report of it is coming.
+    LOCAL = "local"
+    # A sync response reported a departure, which may be the report a local
+    # departure is owed, or a departure the bot never initiated.
+    REPORTED = "reported"
+
+
+class DepartureObservation(StrEnum):
+    """What one observation of a departure did to the room's derived state."""
+
+    FENCED = "fenced"
+    # The sync report a local departure was waiting for. Fencing again would
+    # delete whatever the membership after it has already built.
+    OWED_REPORT_CONSUMED = "owed_report_consumed"
+    # The same departure reaching the same observer twice.
+    ALREADY_FENCED = "already_fenced"
+
+
+@dataclass(frozen=True, slots=True)
+class DepartureOutcome:
+    """What one durably applied departure observation decided."""
+
+    observation: DepartureObservation
+    membership_epoch: int
+    owed_reports: int
+
+    @property
+    def fenced(self) -> bool:
+        """Return whether this observation invalidated the room's derived state."""
+        return self.observation is DepartureObservation.FENCED
+
+
 @dataclass(frozen=True, slots=True)
 class InboundEvent:
     """One Matrix event offered to durable admission.

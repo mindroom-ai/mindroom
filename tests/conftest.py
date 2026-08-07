@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, LiteralString, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -713,25 +713,33 @@ async def journal_store(
         await store.close()
 
 
-_LEGACY_APPROVAL_CARDS_DDL = """
+_LEGACY_TABLE_DDL = (
+    """
     CREATE TABLE approval_cards (
         principal_id TEXT NOT NULL, room_id TEXT NOT NULL, card_event_id TEXT NOT NULL,
         card_json TEXT NOT NULL, membership_epoch BIGINT NOT NULL, created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
     )
-"""
+    """,
+    """
+    CREATE TABLE room_membership (
+        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id)
+    )
+    """,
+)
 
 
 @pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-async def legacy_approval_cards_store(
+async def legacy_journal_store(
     request: pytest.FixtureRequest,
     tmp_path: Path,
 ) -> AsyncGenerator["EventJournalStore", None]:
-    """Return a store opened onto an `approval_cards` table that predates `resolution_json`.
+    """Return a store opened onto tables that predate their later columns.
 
     `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it is, so
-    the column arrives only if the upgrade path runs. Both backends have their
-    own upgrade path and neither can vouch for the other.
+    a later column arrives only if the upgrade path runs. Both backends have
+    their own upgrade path and neither can vouch for the other.
     """
     import sqlite3  # noqa: PLC0415
 
@@ -740,7 +748,8 @@ async def legacy_approval_cards_store(
     if str(request.param) == "sqlite":
         database_path = tmp_path / "legacy_event_journal.db"
         with sqlite3.connect(database_path) as connection:
-            connection.execute(_LEGACY_APPROVAL_CARDS_DDL)
+            for statement in _LEGACY_TABLE_DDL:
+                connection.execute(statement)
         store = EventJournalStore.open_sqlite(database_path)
     else:
         import psycopg  # noqa: PLC0415
@@ -751,7 +760,8 @@ async def legacy_approval_cards_store(
         with psycopg.connect(database_url, autocommit=True) as db:
             db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
             db.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
-            db.execute(_LEGACY_APPROVAL_CARDS_DDL)
+            for statement in _LEGACY_TABLE_DDL:
+                db.execute(cast("LiteralString", statement))
         separator = "&" if "?" in database_url else "?"
         store = EventJournalStore.open_postgres(
             f"{database_url}{separator}options=-csearch_path%3D{schema}",

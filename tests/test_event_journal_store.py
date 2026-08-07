@@ -16,6 +16,8 @@ from mindroom.event_journal import (
     AdmissionResult,
     ConversationCursor,
     DeliveryStage,
+    DepartureObservation,
+    DepartureSource,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -784,7 +786,7 @@ class TestSchemaUpgrade:
 
     async def test_a_card_table_predating_its_resolution_column_still_works(
         self,
-        legacy_approval_cards_store: EventJournalStore,
+        legacy_journal_store: EventJournalStore,
     ) -> None:
         """Approval cards shipped before decisions were recorded on them.
 
@@ -792,7 +794,7 @@ class TestSchemaUpgrade:
         the upgrade has to have happened by then -- on both backends, since one
         guards the add itself and the other inspects the existing columns.
         """
-        store = legacy_approval_cards_store
+        store = legacy_journal_store
         try:
             principal = store.principal("agent@alice")
             await principal.remember_approval_card(room_id=ROOM, card_event_id="$card", card={"body": "run it?"})
@@ -814,11 +816,81 @@ class TestSchemaUpgrade:
         finally:
             await store.close()
 
+    async def test_a_membership_table_predating_its_departure_columns_still_works(
+        self,
+        legacy_journal_store: EventJournalStore,
+    ) -> None:
+        """Membership epochs shipped before departure bookkeeping sat beside them.
+
+        A room already fenced by the old code has a row with no departure
+        columns at all, and the very first departure observed after the upgrade
+        reads them.
+        """
+        store = legacy_journal_store
+        try:
+            alice = store.principal("agent@alice")
+            await alice.advance_membership_epoch(ROOM)
+
+            local = await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+            assert local.observation is DepartureObservation.FENCED
+            assert local.membership_epoch == 2
+
+            reported = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+            assert reported.observation is DepartureObservation.OWED_REPORT_CONSUMED
+            assert await alice.membership_epoch(ROOM) == 2
+        finally:
+            await store.close()
+
     async def test_every_added_column_is_declared_in_the_table_too(self) -> None:
         """The two lists are edited by hand and drift silently otherwise."""
         statements = " ".join(schema_statements(SQLITE_DIALECT))
         for _table, column, _definition in added_columns():
             assert column in statements
+
+
+class TestDepartureBookkeeping:
+    """One departure invalidates a room once, whichever observer sees it first."""
+
+    async def test_a_consumed_report_leaves_the_new_projection_alone(self, alice: PrincipalStore) -> None:
+        """Absorbing a report must not delete what the membership after it built."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.note_membership_restarted(ROOM)
+        await admit(alice, "$fresh", ts=5_000)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=5)
+        assert [m.logical_event_id for m in page.messages] == ["$fresh"]
+
+    async def test_a_departure_with_no_report_owed_invalidates(self, alice: PrincipalStore) -> None:
+        """A departure the bot never initiated drops what the old membership built."""
+        await admit(alice, "$stale", ts=5_000)
+
+        outcome = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
+
+        assert outcome.observation is DepartureObservation.FENCED
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=5)
+        assert page.messages == ()
+
+    async def test_owed_reports_are_scoped_to_one_principal(self, journal_store: EventJournalStore) -> None:
+        """One bot's owed report must not absorb another bot's departure."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        assert await bob.rooms_owing_departure_reports() == frozenset()
+        assert (await bob.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+
+    async def test_retiring_one_room_leaves_another_rooms_report_owed(self, alice: PrincipalStore) -> None:
+        """Giving up on one room's report says nothing about any other room."""
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await alice.fence_departure(OTHER_ROOM, source=DepartureSource.LOCAL)
+
+        await alice.retire_owed_departure_reports(ROOM)
+
+        assert await alice.rooms_owing_departure_reports() == frozenset({OTHER_ROOM})
+        assert (await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+        assert not (await alice.fence_departure(OTHER_ROOM, source=DepartureSource.REPORTED)).fenced
 
 
 class TestByteOrderPinning:

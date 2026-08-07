@@ -118,6 +118,15 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
+        -- A departure has been fenced and the bot has not been seen back in
+        -- the room since. The bot cannot leave a room it is not in, so a
+        -- second local departure while this holds is the same one arriving
+        -- twice rather than a new one.
+        departure_fenced INTEGER NOT NULL DEFAULT 0,
+        -- Departures already fenced locally whose sync report has not arrived.
+        -- A count rather than a flag: leave/rejoin/leave owes two reports, and
+        -- one bit would let the second echo fence a membership it did not end.
+        owed_departure_reports BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id)
     )
     """,
@@ -200,7 +209,11 @@ _INDEXES = (
 # these columns existed keeps working right up until the first statement that
 # names it, and then fails at runtime rather than at startup. Every column added
 # to an existing table has to be listed here as well as in the table above.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("approval_cards", "resolution_json", "TEXT"),)
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("approval_cards", "resolution_json", "TEXT"),
+    ("room_membership", "departure_fenced", "INTEGER NOT NULL DEFAULT 0"),
+    ("room_membership", "owed_departure_reports", "BIGINT NOT NULL DEFAULT 0"),
+)
 
 
 def added_columns() -> tuple[tuple[str, str, str], ...]:
