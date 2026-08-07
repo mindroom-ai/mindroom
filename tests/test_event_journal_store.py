@@ -1817,3 +1817,24 @@ class TestHotQueriesAreIndexCovered:
                 offenders[name] = plan
 
         assert offenders == {}
+
+    async def test_every_ordered_index_column_carries_the_byte_order_pin_on_postgres(self) -> None:
+        """Every ordered index column carries the byte-order pin on PostgreSQL.
+
+        A query-plan test can only measure the backend it runs on, and SQLite's
+        default text collation is already byte order -- so an index whose pin
+        failed to render looks perfect there and is silently unusable for
+        ordering on PostgreSQL, which declines it and sorts instead. This checks
+        the rendered DDL rather than a plan, because that is the part that
+        differs.
+        """
+        from mindroom.event_journal.schema import POSTGRES_DIALECT, schema_statements  # noqa: PLC0415
+
+        rendered = [" ".join(s.split()) for s in schema_statements(POSTGRES_DIALECT)]
+        indexes = [s for s in rendered if "CREATE INDEX" in s]
+
+        assert not [s for s in rendered if "/*bytes*/" in s], "byte-order marker left unexpanded"
+        ordered_text_indexes = [s for s in indexes if "turn_id" in s or "card_event_id" in s]
+        assert ordered_text_indexes, "expected indexes over the unpinned text columns"
+        for statement in ordered_text_indexes:
+            assert 'COLLATE "C"' in statement, statement

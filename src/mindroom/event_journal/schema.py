@@ -304,10 +304,23 @@ def add_column_statement(table: str, column: str, definition: str, *, if_not_exi
     return f"ALTER TABLE {table} ADD COLUMN {guard}{column} {definition}"
 
 
+def _expand_byte_order(sql: str, dialect: Dialect) -> str:
+    """Spell the byte-order pin for one backend."""
+    return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
+
+
 def schema_statements(dialect: Dialect) -> tuple[str, ...]:
-    """Return every DDL statement needed to create the schema."""
+    """Return every DDL statement needed to create the schema.
+
+    The byte-order marker is substituted here as well as in queries. An index
+    whose trailing columns sort in the server's own collation cannot satisfy an
+    ORDER BY that pins them to byte order -- PostgreSQL simply declines to use
+    it and sorts instead. Leaving the marker unexpanded is silent on SQLite,
+    whose default text collation is already byte order, so the mismatch shows up
+    only on the backend that is not measured by a local query-plan test.
+    """
     return tuple(
-        statement.format(
+        _expand_byte_order(statement, dialect).format(
             receipt_order_column=dialect.receipt_order_column,
             ordered_text=dialect.ordered_text,
         )
