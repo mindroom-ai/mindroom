@@ -2,6 +2,11 @@
 
 Every test here runs on SQLite and on PostgreSQL. A rule that holds on only one
 backend is a rule MindRoom does not actually have.
+
+The one exception is the acknowledgement race, which asks what two connections
+do to the same row. SQLite has no second connection to ask it of -- the backend
+is one process behind one writer -- so running it there would prove only that
+the fixture took turns. It is marked as PostgreSQL-only where it is defined.
 """
 
 from __future__ import annotations
@@ -10,14 +15,18 @@ import asyncio
 import json
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
+import pytest_asyncio
 
 from mindroom.event_journal import (
     AdmissionResult,
     ConversationCursor,
+    DeliveryAcknowledgement,
     DeliveryStage,
     DepartureObservation,
     DepartureSource,
@@ -37,9 +46,10 @@ from mindroom.event_journal.schema import (
     render,
     schema_statements,
 )
+from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.event_journal import OutboxDelivery, PrincipalStore
@@ -1549,6 +1559,112 @@ class TestMembershipEpoch:
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
+# How long a racer is given to queue behind the held row before the test calls
+# it a failure, and how often that is checked. Generous because the wait is a
+# condition rather than a delay: reaching it early costs nothing.
+_QUEUE_TIMEOUT_SECONDS = 20.0
+_QUEUE_POLL_SECONDS = 0.01
+
+# Connections parked on a heavyweight lock in this database. `current_database`
+# scopes the count to this test: an xdist worker owns its own database, and the
+# rest of a worker's connections are idle between statements rather than
+# waiting on anything.
+_QUEUED_WRITERS = """
+    SELECT count(*) FROM pg_stat_activity
+    WHERE datname = current_database()
+      AND wait_event_type = 'Lock'
+      AND pid <> pg_backend_pid()
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RivalStores:
+    """Two stores over one PostgreSQL database, and the DSN that reaches it.
+
+    Two stores rather than two coroutines, because a store serializes its own
+    writes behind one connection and one lock. Anything sharing that has
+    already been made to take turns, which is the opposite of the situation
+    worth testing.
+    """
+
+    first: EventJournalStore
+    second: EventJournalStore
+    database_url: str
+
+
+@pytest_asyncio.fixture
+async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores, None]:
+    """Open two independently connected stores onto one database.
+
+    PostgreSQL only, and deliberately not part of the backend parity sweep.
+    The SQLite backend is a single process holding a single writer, so a second
+    store over the same file is a second queue onto the same serialized write
+    -- there is no second connection to race, and forcing one would only prove
+    something about the fixture.
+    """
+    database_url = postgres_journal_schema_url(postgres_journal_url)
+    first = EventJournalStore.open_postgres(database_url)
+    second = EventJournalStore.open_postgres(database_url)
+    try:
+        yield RivalStores(first=first, second=second, database_url=database_url)
+    finally:
+        await first.close()
+        await second.close()
+
+
+@contextmanager
+def _outbox_row_held(database_url: str, *, principal_id: str, turn_id: str) -> Iterator[None]:
+    """Lock one outbox row from a third connection until the block exits.
+
+    The hold point has to be the row rather than anything in Python, because
+    the row is the one place both implementations of the write must pass
+    through. A caller parked here has finished whatever reading it does and
+    has not yet written, which is exactly the interleaving that decides who
+    owns the acknowledgement -- and it is the same point whether the caller
+    read first or is reading and writing in one statement.
+    """
+    import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
+
+    with psycopg.connect(database_url) as connection:
+        held = connection.execute(
+            "SELECT 1 FROM response_outbox WHERE principal_id = %s AND turn_id = %s FOR UPDATE",
+            (principal_id, turn_id),
+        ).fetchone()
+        assert held is not None, "there is no enqueued delivery to hold"
+        try:
+            yield
+        finally:
+            connection.rollback()
+
+
+async def _await_queued_writers(database_url: str, *, expected: int) -> None:
+    """Wait until ``expected`` connections are parked on a lock in this database.
+
+    A condition, not a delay. The row may only be released once every racer is
+    behind it, because a racer that has not started yet would read the bound
+    row and decline on its own -- which is the losing implementation passing
+    for a reason that has nothing to do with what it does under contention.
+    """
+    await asyncio.to_thread(_watch_queued_writers, database_url, expected)
+
+
+def _watch_queued_writers(database_url: str, expected: int) -> None:
+    """Poll until enough connections are waiting, or say how many turned up."""
+    import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
+
+    deadline = time.monotonic() + _QUEUE_TIMEOUT_SECONDS
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        while True:
+            row = connection.execute(_QUEUED_WRITERS).fetchone()
+            queued = 0 if row is None else int(row[0])
+            if queued >= expected:
+                return
+            if time.monotonic() > deadline:
+                msg = f"only {queued} of {expected} writers queued on the held outbox row"
+                raise AssertionError(msg)
+            time.sleep(_QUEUE_POLL_SECONDS)
+
+
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
@@ -1661,6 +1777,82 @@ class TestOutbox:
         assert len(unattempted) == 1, (
             f"{len(unattempted)} of two concurrent claims were told the row was unattempted, "
             "and every one of them would have sent without reading the room first"
+        )
+
+    async def test_two_connections_that_both_find_the_row_unbound_produce_one_winner(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """Ownership of the acknowledgement has to come from the write itself.
+
+        The sequential test above and this one prove different halves of the
+        same rule and neither is redundant. That one acknowledges twice in a
+        row, so the second caller meets a row that is already bound and is told
+        so; what it proves is that being told costs it the terminal record too.
+        It cannot prove this half, because by the time it runs there is no race
+        left to lose -- the losing implementation below passes it untouched.
+
+        This half is what happens when nobody has been told anything yet. Two
+        connections against one PostgreSQL database can both observe an unbound
+        row, and an implementation that reads the column and then updates it
+        hands each of them a win: the outbox keeps whichever event landed last,
+        while the caller that committed first goes on reporting its own. That
+        report is what every downstream record is built from, so the outbox and
+        the terminal record end up naming different events -- the disagreement
+        both of these tests exist to forbid, arrived at from the side the
+        sequential one cannot reach.
+
+        Both racers are parked on the row before either may write, so the
+        interleaving is produced rather than hoped for. Letting them start
+        freely would usually have the second one read a row the first had
+        already bound, and the broken implementation would decline correctly
+        for a reason that says nothing about contention.
+        """
+        principal_id = "agent@alice"
+        first = rival_stores.first.principal(principal_id)
+        second = rival_stores.second.principal(principal_id)
+        await first.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+
+        async def acknowledge(store: PrincipalStore, event_id: str) -> DeliveryAcknowledgement:
+            return await store.acknowledge_delivery(
+                turn_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                event_id=event_id,
+                terminal_turn=TerminalTurnWrite(
+                    agent_name="general",
+                    index_event_ids=("$source",),
+                    anchor_event_id="$source",
+                    record_json=json.dumps({"response_event_id": event_id}),
+                ),
+            )
+
+        with _outbox_row_held(rival_stores.database_url, principal_id=principal_id, turn_id="turn-1"):
+            racers = [
+                asyncio.create_task(acknowledge(first, "$first")),
+                asyncio.create_task(acknowledge(second, "$second")),
+            ]
+            await _await_queued_writers(rival_stores.database_url, expected=len(racers))
+        reported = await asyncio.gather(*racers)
+
+        stored = await first.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        winner = stored.acknowledged_event_id
+        assert winner in {"$first", "$second"}, "the row names an event neither caller sent"
+        assert [acknowledged.settled_event_id for acknowledged in reported] == [winner, winner], (
+            "a caller reported an event it did not bind the row to"
+        )
+        assert [acknowledged.bound for acknowledged in reported].count(True) == 1, (
+            "both callers were told their own write is what bound the row"
+        )
+        rows = await rival_stores.first.turn_records("general").load_all()
+        assert [json.loads(row[2])["response_event_id"] for row in rows] == [winner], (
+            "the terminal record names an event the outbox row does not"
         )
 
     async def test_the_transaction_id_is_derived_not_random(self) -> None:

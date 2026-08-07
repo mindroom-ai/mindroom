@@ -599,6 +599,25 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
             _remove_postgres_container(docker, container_name)
 
 
+def postgres_journal_schema_url(database_url: str) -> str:
+    """Return a DSN onto one fresh, empty schema of ``database_url``.
+
+    The Postgres server is shared by every test in a worker, so isolation has
+    to come from somewhere. A private schema pinned into the DSN gives it
+    without a private server, and because the pin travels with the DSN rather
+    than with a connection, two stores opened from the same string see the
+    same tables -- which is what a test about two connections racing needs.
+    """
+    import psycopg  # noqa: PLC0415
+    from psycopg import sql  # noqa: PLC0415
+
+    schema = f"journal_{uuid.uuid4().hex}"
+    with psycopg.connect(database_url, autocommit=True) as db:
+        db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    separator = "&" if "?" in database_url else "?"
+    return f"{database_url}{separator}options=-csearch_path%3D{schema}"
+
+
 @pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
 async def journal_database(
     request: pytest.FixtureRequest,
@@ -623,15 +642,7 @@ async def journal_database(
         def connect() -> EventJournalStore:
             return EventJournalStore.open_sqlite(database_path)
     else:
-        import psycopg  # noqa: PLC0415
-        from psycopg import sql  # noqa: PLC0415
-
-        database_url = request.getfixturevalue("postgres_journal_url")
-        schema = f"journal_{uuid.uuid4().hex}"
-        with psycopg.connect(database_url, autocommit=True) as db:
-            db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        separator = "&" if "?" in database_url else "?"
-        scoped_url = f"{database_url}{separator}options=-csearch_path%3D{schema}"
+        scoped_url = postgres_journal_schema_url(request.getfixturevalue("postgres_journal_url"))
 
         def connect() -> EventJournalStore:
             return EventJournalStore.open_postgres(scoped_url)
@@ -642,6 +653,7 @@ async def journal_database(
         store = connect()
         opened.append(store)
         return store
+
 
     try:
         yield opener
@@ -713,19 +725,12 @@ async def legacy_journal_store(
         store = EventJournalStore.open_sqlite(database_path)
     else:
         import psycopg  # noqa: PLC0415
-        from psycopg import sql  # noqa: PLC0415
 
-        database_url = request.getfixturevalue("postgres_journal_url")
-        schema = f"journal_{uuid.uuid4().hex}"
-        with psycopg.connect(database_url, autocommit=True) as db:
-            db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-            db.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        schema_url = postgres_journal_schema_url(request.getfixturevalue("postgres_journal_url"))
+        with psycopg.connect(schema_url, autocommit=True) as db:
             for statement in _LEGACY_TABLE_DDL:
                 db.execute(cast("LiteralString", statement))
-        separator = "&" if "?" in database_url else "?"
-        store = EventJournalStore.open_postgres(
-            f"{database_url}{separator}options=-csearch_path%3D{schema}",
-        )
+        store = EventJournalStore.open_postgres(schema_url)
     try:
         yield store
     finally:
