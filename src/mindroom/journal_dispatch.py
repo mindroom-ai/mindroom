@@ -429,6 +429,14 @@ class JournalDispatcher:
         caller records the joins this set does not cover as already seen, so an
         identity left out because a page filled up is a join hook that never
         runs and nothing ever asks about again.
+
+        A row the store could not read is that same hole arriving by a
+        different route, and it is the more dangerous one because the walk
+        would finish cleanly around it. There is no partial answer to give
+        here: the one thing this set is used for is deciding what may be
+        written off, so a walk that skipped a row refuses rather than
+        under-reporting. A lifecycle row whose payload is not a member event
+        already fails the same way two lines down.
         """
         members: set[tuple[str, str]] = set()
         cursor: int | None = None
@@ -438,15 +446,21 @@ class JournalDispatcher:
                 limit=_LIFECYCLE_PAGE_SIZE,
                 after_receipt_order=cursor,
             )
+            if page.unreadable_rows:
+                msg = (
+                    f"{page.unreadable_rows} unsettled room lifecycle row(s) could not be read, "
+                    "so the identities still owing a hook cannot be enumerated"
+                )
+                raise JournalCorruptionError(msg)
             for event in page:
                 parsed = parse_journal_event(event)
                 if not isinstance(parsed, nio.RoomMemberEvent):
                     msg = f"Room lifecycle event {event.event_id!r} is not a member event"
                     raise JournalCorruptionError(msg)
                 members.add((event.room_id, parsed.state_key))
-            if len(page) < _LIFECYCLE_PAGE_SIZE:
+            if page.reached_end:
                 return frozenset(members)
-            cursor = page[-1].receipt_order
+            cursor = page.resume_after
 
 
 @dataclass(frozen=True, slots=True)

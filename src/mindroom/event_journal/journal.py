@@ -29,6 +29,7 @@ from .models import (
     EventClass,
     EventKind,
     JournalEvent,
+    PendingPage,
     SemanticConsumer,
     SettlementOutcome,
 )
@@ -45,6 +46,17 @@ _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, event_class, sender,
     origin_server_ts, source_json, receipt_order, membership_epoch, semantic_consumer
 """
+
+# How many rows one page will step over without being able to read them.
+#
+# Filling a page from as many rows as it takes is what keeps a short page
+# meaning the end of the backlog, but "as many as it takes" across a corrupt
+# prefix is the whole pending table, read inside one transaction, on every
+# wake. So what is bounded is the stepping over: past this many unreadable
+# rows the pass stops, says it stopped short of the end, and reports the last
+# row it looked at -- so the next pass starts behind the corruption instead of
+# in front of it again.
+_MAX_UNREADABLE_ROWS_PER_PAGE = 128
 
 
 def store_generation(transaction: Transaction, *, new_generation: str) -> str:
@@ -498,10 +510,10 @@ def pending(
     *,
     limit: int,
     after_receipt_order: int | None = None,
-) -> tuple[JournalEvent, ...]:
+) -> PendingPage:
     """Return actionable events awaiting semantic work, in receipt order.
 
-    ``after_receipt_order`` resumes the scan past events a caller has already
+    ``after_receipt_order`` resumes the scan past rows a caller has already
     seen. Without it, a caller whose first page is entirely events it cannot
     act on yet — turns still running — could never reach the ones behind them.
 
@@ -510,9 +522,12 @@ def pending(
     worth of rows and returning what decoded would make a short page mean two
     different things — "the backlog ended" and "something in it could not be
     read" — and the caller that paginates on that would stop at the first
-    corrupt row and strand everything behind it. Here a short page means the
-    end of the backlog and nothing else, and the last event returned is a
-    resume point with no unread rows before it.
+    corrupt row and strand everything behind it.
+
+    Filling is not unbounded, though, so a short page still means two things —
+    and the page itself distinguishes them rather than leaving the caller to
+    guess. ``reached_end`` is the only statement that there is nothing behind
+    this page, and ``resume_after`` is where a pass that stopped short resumes.
     """
     return _pending_page(transaction, principal_id, limit=limit, after_receipt_order=after_receipt_order)
 
@@ -524,23 +539,46 @@ def _pending_page(
     limit: int,
     after_receipt_order: int | None,
     kind: EventKind | None = None,
-) -> tuple[JournalEvent, ...]:
+) -> PendingPage:
     """Return up to ``limit`` readable pending events, filled from raw rows."""
     events: list[JournalEvent] = []
+    unreadable_rows = 0
     cursor = after_receipt_order
-    while len(events) < limit:
+    while True:
+        wanted = limit - len(events)
         rows = _pending_rows(
             transaction,
             principal_id,
-            limit=limit - len(events),
+            limit=wanted,
             after_receipt_order=cursor,
             kind=kind,
         )
-        if not rows:
-            break
-        cursor = int(rows[-1]["receipt_order"])
-        events.extend(_decode_rows(rows))
-    return tuple(events)
+        if rows:
+            cursor = int(rows[-1]["receipt_order"])
+            readable = _decode_rows(rows)
+            unreadable_rows += len(rows) - len(readable)
+            events.extend(readable)
+        if len(rows) < wanted:
+            # The query had fewer rows to give than it was asked for, so there
+            # is nothing behind this page whatever its length turned out to be.
+            return _page(events, cursor, reached_end=True, unreadable_rows=unreadable_rows)
+        if len(events) == limit or unreadable_rows >= _MAX_UNREADABLE_ROWS_PER_PAGE:
+            return _page(events, cursor, reached_end=False, unreadable_rows=unreadable_rows)
+
+
+def _page(
+    events: list[JournalEvent],
+    cursor: int | None,
+    *,
+    reached_end: bool,
+    unreadable_rows: int,
+) -> PendingPage:
+    return PendingPage(
+        tuple(events),
+        resume_after=cursor,
+        reached_end=reached_end,
+        unreadable_rows=unreadable_rows,
+    )
 
 
 def _pending_rows(
@@ -712,11 +750,13 @@ def pending_of_kind(
     *,
     limit: int,
     after_receipt_order: int | None = None,
-) -> tuple[JournalEvent, ...]:
+) -> PendingPage:
     """Return pending events of one kind, in receipt order.
 
     Pages the same way ``pending`` does, so a caller that needs every one of
-    them can walk to the end and know when it got there.
+    them can walk to the end and know when it got there -- and can tell that a
+    row it walked past was one it could not read, which is the difference
+    between an enumeration that is complete and one that only looks it.
     """
     return _pending_page(
         transaction,

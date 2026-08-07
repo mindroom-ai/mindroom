@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         InboundEvent,
         JournalEvent,
         OutboxDelivery,
+        PendingPage,
         RefreshRequest,
         SemanticConsumer,
         SettlementOutcome,
@@ -63,7 +64,7 @@ class ReplayView(Protocol):
         *,
         limit: int = ...,
         after_receipt_order: int | None = None,
-    ) -> tuple[JournalEvent, ...]:
+    ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         ...
 
@@ -97,7 +98,7 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         *,
         limit: int = ...,
         after_receipt_order: int | None = None,
-    ) -> tuple[JournalEvent, ...]:
+    ) -> PendingPage:
         """Return pending events of one kind, in receipt order."""
         ...
 

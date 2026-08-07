@@ -673,19 +673,19 @@ class TestRedaction:
         assert page.refresh_pending == ()
 
 
+async def corrupt(store: PrincipalStore, *event_ids: str) -> None:
+    """Make some admitted rows' replay payloads undecodable."""
+    for event_id in event_ids:
+        await store._backend.write(
+            lambda transaction, event_id=event_id: transaction.execute(
+                "UPDATE journal_events SET source_json = ? WHERE event_id = ?",
+                ("{", event_id),
+            ),
+        )
+
+
 class TestUnreadableRowsDoNotEndTheBacklog:
     """A short page of pending work has to mean one thing, or paging is a lie."""
-
-    @staticmethod
-    async def _corrupt(store: PrincipalStore, *event_ids: str) -> None:
-        """Make some admitted rows' replay payloads undecodable."""
-        for event_id in event_ids:
-            await store._backend.write(
-                lambda transaction, event_id=event_id: transaction.execute(
-                    "UPDATE journal_events SET source_json = ? WHERE event_id = ?",
-                    ("{", event_id),
-                ),
-            )
 
     async def test_a_corrupt_row_does_not_shorten_the_page_it_sits_in(
         self,
@@ -700,7 +700,7 @@ class TestUnreadableRowsDoNotEndTheBacklog:
         """
         for index in range(5):
             await admit(alice, f"$m{index}", ts=1_000 + index)
-        await self._corrupt(alice, "$m1")
+        await corrupt(alice, "$m1")
 
         page = await alice.pending(limit=4)
 
@@ -713,7 +713,7 @@ class TestUnreadableRowsDoNotEndTheBacklog:
         """Otherwise the scan stalls: no events back, and no cursor to move past."""
         for index in range(3):
             await admit(alice, f"$m{index}", ts=1_000 + index)
-        await self._corrupt(alice, "$m0", "$m1")
+        await corrupt(alice, "$m0", "$m1")
 
         page = await alice.pending(limit=2)
 
@@ -729,6 +729,61 @@ class TestUnreadableRowsDoNotEndTheBacklog:
 
         assert len(await alice.pending(limit=10)) == 3
         assert await alice.pending(limit=10, after_receipt_order=1_000) == ()
+
+
+class TestAPageIsBoundedByTheRowsItReads:
+    """Filling a page from as many rows as it takes cannot mean the whole table."""
+
+    async def test_a_corrupt_prefix_does_not_cost_one_pass_the_whole_backlog(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bounded read that keeps querying until something decodes is not bounded.
+
+        The rows are read inside one transaction and every one of them is
+        logged, so a corrupt prefix long enough turns each wake of the pending
+        scan into a scan of the entire pending table. The pass has to be able
+        to stop part way and say so.
+        """
+        monkeypatch.setattr("mindroom.event_journal.journal._MAX_UNREADABLE_ROWS_PER_PAGE", 4)
+        for index in range(12):
+            await admit(alice, f"$m{index:02d}", ts=1_000 + index)
+        await corrupt(alice, *(f"$m{index:02d}" for index in range(11)))
+
+        page = await alice.pending(limit=4)
+
+        assert page == ()
+        assert page.unreadable_rows == 4
+        assert not page.reached_end
+        assert page.resume_after is not None
+
+    async def test_a_pass_that_ran_out_of_budget_resumes_past_what_it_read(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bounding the pass may not cost the events behind the corruption.
+
+        The resume point is the last row looked at rather than the last event
+        returned, which is the only version of it that exists when a page
+        decodes nothing at all.
+        """
+        monkeypatch.setattr("mindroom.event_journal.journal._MAX_UNREADABLE_ROWS_PER_PAGE", 4)
+        for index in range(12):
+            await admit(alice, f"$m{index:02d}", ts=1_000 + index)
+        await corrupt(alice, *(f"$m{index:02d}" for index in range(11)))
+
+        seen: list[str] = []
+        cursor: int | None = None
+        for _ in range(12):
+            page = await alice.pending(limit=4, after_receipt_order=cursor)
+            seen.extend(event.event_id for event in page)
+            if page.reached_end:
+                break
+            cursor = page.resume_after
+
+        assert seen == ["$m11"]
 
 
 class TestBoundedReads:

@@ -161,6 +161,41 @@ class JournalEvent:
     semantic_consumer: SemanticConsumer | None = None
 
 
+class PendingPage(tuple[JournalEvent, ...]):
+    """One bounded pass over the pending backlog, and where that pass stopped.
+
+    A page *is* the events it found, which is the only thing most callers ever
+    wanted, so it is the tuple of them rather than a wrapper around one. What a
+    length cannot say is the rest: whether stopping meant the backlog ended or
+    the pass ran out of rows it was allowed to look at, and which row the next
+    pass should start behind.
+
+    ``resume_after`` is the last raw row examined, not the last event returned.
+    A row whose payload cannot be read is dropped from the result but still
+    consumed, so a resume point taken from the events would step back onto that
+    row on every pass and never get past a stretch of them.
+    """
+
+    resume_after: int | None
+    reached_end: bool
+    unreadable_rows: int
+
+    def __new__(
+        cls,
+        events: tuple[JournalEvent, ...],
+        *,
+        resume_after: int | None,
+        reached_end: bool,
+        unreadable_rows: int,
+    ) -> PendingPage:
+        """Return one page of pending events alongside how its scan ended."""
+        page = super().__new__(cls, events)
+        page.resume_after = resume_after
+        page.reached_end = reached_end
+        page.unreadable_rows = unreadable_rows
+        return page
+
+
 @dataclass(frozen=True, slots=True)
 class VisibleMessage:
     """The latest visible revision of one logical conversation message."""

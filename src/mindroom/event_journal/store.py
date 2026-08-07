@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         InboundEvent,
         JournalEvent,
         OutboxDelivery,
+        PendingPage,
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
@@ -80,7 +81,7 @@ class PrincipalStore:
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
         after_receipt_order: int | None = None,
-    ) -> tuple[JournalEvent, ...]:
+    ) -> PendingPage:
         """Return actionable events awaiting semantic work, in receipt order."""
         return await self._backend.read(
             lambda transaction: journal.pending(
@@ -129,7 +130,7 @@ class PrincipalStore:
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
         after_receipt_order: int | None = None,
-    ) -> tuple[JournalEvent, ...]:
+    ) -> PendingPage:
         """Return pending events of one kind, in receipt order."""
         return await self._backend.read(
             lambda transaction: journal.pending_of_kind(

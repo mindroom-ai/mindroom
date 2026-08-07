@@ -39,8 +39,10 @@ _BATCH_SIZE = 128
 # bounds how long a lost owner goes unnoticed in a bot quiet enough that no
 # admission wakes the pump on its own.
 _DEFERRAL_SCAN_SECONDS = 30.0
-# How far one pass will scan looking for events it can act on. Reached only
-# when a very large backlog is in flight; the pass reports that more remains.
+# How many pages one pass will read looking for events it can act on. Each is
+# bounded in rows by the store, so this bounds the pass in rows too. Reached
+# only when a very large backlog is in flight, or when a long stretch of it
+# cannot be read; either way the pass reports that more remains.
 _MAX_SCAN_PAGES = 16
 
 # Returning ``None`` means the handler started work that outlives it — a turn
@@ -320,6 +322,12 @@ class PendingEventWorker:
         cannot act on -- a busy bot's in-flight turns, a room whose lane keeps
         failing -- and every pass spends the whole budget on the same prefix
         while the dispatchable events behind it are never reached at all.
+
+        Rows the store could not read are the same kind of prefix and get the
+        same treatment. They yield no event, so the resume point comes from the
+        page rather than from the last event on it: taken from the events, a
+        page that decoded nothing would leave the cursor where it was and every
+        later pass would spend its whole budget re-reading the same corruption.
         """
         by_room: dict[str, list[JournalEvent]] = {}
         cursor = self._scan_cursor
@@ -334,8 +342,8 @@ class PendingEventWorker:
                 if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
                     continue
                 by_room.setdefault(event.room_id, []).append(event)
-            if len(page) == _BATCH_SIZE:
-                cursor = page[-1].receipt_order
+            if not page.reached_end:
+                cursor = page.resume_after
                 continue
             if wrapped:
                 self._scan_cursor = None

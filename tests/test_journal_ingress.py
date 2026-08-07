@@ -21,6 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
+from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
 from mindroom.journal_dispatch import _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import _projected_from_event
@@ -34,11 +35,12 @@ from mindroom.matrix.journal_ingress import (
     projected_event,
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from tests.test_event_journal_store import corrupt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sized
 
-    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, JournalEvent, PendingPage, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -1890,6 +1892,24 @@ class TestUnsettledLifecycleIdentities:
         assert len(members) == count
         assert (ROOM, f"@user{count - 1:04d}:example.org") in members
 
+    async def test_an_identity_it_could_not_read_is_not_reported_as_absent(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A walk that steps over a row it cannot read finishes looking complete.
+
+        Which is worse than stopping short, because the caller writes off every
+        identity the set does not name. The hook owed to the member behind that
+        row then never runs, and nothing asks about it again.
+        """
+        for index in range(3):
+            member = member_event(f"$join{index}", user_id=f"@user{index}:example.org")
+            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
+        await corrupt(alice, "$join1")
+
+        with pytest.raises(JournalCorruptionError, match="could not be read"):
+            await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
+
 
 class TestABoundedScanIsFair:
     """A page budget bounds how much one pass looks at, not what it can reach."""
@@ -1981,6 +2001,38 @@ class TestABoundedScanIsFair:
         finally:
             await worker.stop()
 
+    async def test_a_corrupt_prefix_that_fills_a_page_is_scanned_through(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A page of nothing but unreadable rows still has to move the scan on.
+
+        Bounding what one page reads means a corrupt stretch can now outlast
+        the page it starts in, and such a page decodes no event to take a
+        resume point from. A pass that took its cursor from the events it got
+        back would stall at the front of that stretch and spend every page of
+        its budget re-reading it, and the backlog behind it is then durable
+        work no scan ever reaches.
+        """
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            handled.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        count = max(_BATCH_SIZE, _MAX_UNREADABLE_ROWS_PER_PAGE)
+        for index in range(count):
+            await self._admit(alice, text_event(f"$corrupt{index:04d}", ts=1_000 + index), ROOM)
+        await corrupt(alice, *(f"$corrupt{index:04d}" for index in range(count)))
+        await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=10)
+        finally:
+            await worker.stop()
+
 
 @dataclass
 class _FlakyReplayView:
@@ -1995,7 +2047,7 @@ class _FlakyReplayView:
         *,
         limit: int = 256,
         after_receipt_order: int | None = None,
-    ) -> tuple[JournalEvent, ...]:
+    ) -> PendingPage:
         return await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
 
     async def is_pending(self, event_id: str) -> bool:
