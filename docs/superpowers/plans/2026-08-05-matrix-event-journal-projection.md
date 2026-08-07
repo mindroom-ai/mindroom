@@ -111,7 +111,9 @@ The harness is already there, which an earlier note in this file denied: `FakeOu
 
 **Outbox idempotency rests on an unmeasured assumption.** Recovery retries under the same transaction ID but persists neither the sending device nor a retry horizon, so a re-login or a server that has expired its transaction mapping can turn one row into two visible answers.
 
-**Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization; the fix is to own one store at the orchestrator and inject principal views. And "is this turn finished?" is answered by both journal pending state and the `TurnStore` handled ledger, which live in different substrates and cannot share a transaction — load-bearing today, reachable by moving `TurnRecord` into the journal.
+**Two facts still have two owners.** Each bot opens its own `EventJournalStore` (`bot.py:480`), so N bots means N*5 PostgreSQL connections and no cross-principal writer serialization.
+
+The injection point is narrower than it looks: every bot — router, team, agent — is built by the single factory at `bot.py:275-310`, so one optional `journal_store` parameter threaded there covers all three. The part that needs care is ownership at shutdown: `bot.py:1949` closes the store, and a shared one closed by the first bot to stop would break the rest, so an injected store must not be closed by its borrower. Do not let a default of "open my own" survive into production either — it is what makes this defect invisible in tests, where one bot is the normal case. And "is this turn finished?" is answered by both journal pending state and the `TurnStore` handled ledger, which live in different substrates and cannot share a transaction — load-bearing today, reachable by moving `TurnRecord` into the journal.
 
 **Predates this work:** `matrix_conversation` tool room reads never collapse edits. Not made worse by it.
 
