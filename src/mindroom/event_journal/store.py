@@ -265,18 +265,35 @@ class PrincipalStore:
             ),
         )
 
+    async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation's hydration walk reached its end."""
+        return await self._backend.read(
+            lambda transaction: reads.conversation_is_complete(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
     async def install_hydrated_conversation(
         self,
         *,
         room_id: str,
         thread_id: str | None,
         events: tuple[ProjectedEvent, ...],
+        complete: bool,
         expected_membership_epoch: int,
     ) -> bool:
         """Install a completed hydration atomically, or install nothing.
 
         A partially applied hydration would look complete to the next reader,
         so the events and the completion marker share one transaction.
+
+        ``complete`` is the walk's own account of why it stopped, and it is
+        recorded rather than inferred because nothing downstream could recover
+        it: a conversation bounded by the prompt window and one that is simply
+        that short leave identical rows behind.
         """
         return await self._backend.write(
             lambda transaction: _install_hydration(
@@ -285,6 +302,7 @@ class PrincipalStore:
                 room_id=room_id,
                 thread_id=thread_id,
                 events=events,
+                complete=complete,
                 expected_membership_epoch=expected_membership_epoch,
             ),
         )
@@ -564,6 +582,7 @@ def _install_hydration(
     room_id: str,
     thread_id: str | None,
     events: tuple[ProjectedEvent, ...],
+    complete: bool,
     expected_membership_epoch: int,
 ) -> bool:
     from .projection import project  # noqa: PLC0415 - keeps the module import-light
@@ -573,6 +592,7 @@ def _install_hydration(
         principal_id,
         room_id=room_id,
         thread_id=thread_id,
+        complete=complete,
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
