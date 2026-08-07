@@ -33,6 +33,7 @@ from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
     StartupThreadPrewarmRegistry,
 )
+from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
 )
@@ -52,6 +53,8 @@ from tests.threading_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.event_journal.models import DepartureOutcome, DepartureSource
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
@@ -334,14 +337,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         departed_room_id = "!departed:localhost"
         joined_room_id = "!joined:localhost"
 
-        class BlockingStore:
+        class BlockingStore(FencedRoomRecorder):
             """Hold the membership fence open so the tracked phase stays in flight."""
 
-            async def advance_membership_epoch(self, _room_id: str) -> int:
+            async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
                 """Signal that the fence started, then wait to be released."""
                 fence_started.set()
                 await allow_fence_finish.wait()
-                return 1
+                return await super().fence_departure(room_id, source=source)
 
         response = self._sync_response(
             {joined_room_id: MagicMock(timeline=MagicMock(events=[]))},

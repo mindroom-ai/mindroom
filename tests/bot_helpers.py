@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -35,6 +35,11 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal.models import (
+    DepartureObservation,
+    DepartureOutcome,
+    DepartureSource,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnInputSnapshot, TurnMediaSource, TurnRecord
 from mindroom.history.types import HistoryScope
@@ -1080,3 +1085,34 @@ class AgentBotTestBase:
             ),
             runtime_root,
         )
+
+
+@dataclass
+class FencedRoomRecorder:
+    """A `MembershipView` that records which rooms a fence invalidated.
+
+    The three bot-level tests that use this care about *which* rooms the fence
+    touched and in what order relative to their neighbours, not about the
+    durable departure bookkeeping underneath. Reporting every observation as
+    `FENCED` with no report owed keeps `MembershipFence` on its simplest path,
+    so a test that spies on room identity never has to model debt it is not
+    asserting on. `test_journal_membership_fence.py` owns the real thing.
+    """
+
+    fenced_room_ids: list[str] = field(default_factory=list)
+
+    async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+        """Record one invalidation and hand back the room's new epoch."""
+        del source
+        self.fenced_room_ids.append(room_id)
+        return DepartureOutcome(DepartureObservation.FENCED, len(self.fenced_room_ids), 0)
+
+    async def note_membership_restarted(self, room_id: str) -> None:
+        """Accept a confirmed join without recording it."""
+
+    async def retire_owed_departure_reports(self, room_id: str) -> None:
+        """Accept a retirement that can never happen here: nothing is ever owed."""
+
+    async def rooms_owing_departure_reports(self) -> frozenset[str]:
+        """Return no debt, so the fence never opens a report window."""
+        return frozenset()

@@ -28,6 +28,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1441,17 +1442,9 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
 
     mock_client.room_leave = mock_room_leave
     install_runtime_cache_support(bot)
-    fenced_room_ids: list[str] = []
-
-    class RecordingStore:
-        """Record which rooms the departure fenced."""
-
-        async def advance_membership_epoch(self, room_id: str) -> int:
-            """Record one invalidation and return the room's new epoch."""
-            fenced_room_ids.append(room_id)
-            return len(fenced_room_ids)
-
-    bot._membership_fence.store = RecordingStore()
+    recorder = FencedRoomRecorder()
+    bot._membership_fence.store = recorder
+    fenced_room_ids = recorder.fenced_room_ids
 
     # Test that the bot leaves unconfigured rooms
     await bot.leave_unconfigured_rooms()

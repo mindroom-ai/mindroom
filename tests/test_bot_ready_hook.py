@@ -35,6 +35,7 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from tests.bot_helpers import FencedRoomRecorder
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -571,17 +572,9 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
             },
         },
     )
-    fenced_room_ids: list[str] = []
-
-    class RecordingStore:
-        """Record which rooms the fence invalidated."""
-
-        async def advance_membership_epoch(self, room_id: str) -> int:
-            """Record one invalidation and return the room's new epoch."""
-            fenced_room_ids.append(room_id)
-            return len(fenced_room_ids)
-
-    bot._membership_fence.store = RecordingStore()
+    recorder = FencedRoomRecorder()
+    bot._membership_fence.store = recorder
+    fenced_room_ids = recorder.fenced_room_ids
 
     await bot._apply_own_room_membership_from_sync(response)
 

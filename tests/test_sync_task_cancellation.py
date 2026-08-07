@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
@@ -70,6 +71,10 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
     shutdown_intent_for_entity,
 )
+from tests.bot_helpers import FencedRoomRecorder
+
+if TYPE_CHECKING:
+    from mindroom.event_journal.models import DepartureOutcome, DepartureSource
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1698,15 +1703,15 @@ async def test_sliding_sync_remote_departure_fences_and_purges(
     invalidation_count = 0
     membership_updates: list[tuple[set[str], set[str]]] = []
 
-    class BlockingStore:
+    class BlockingStore(FencedRoomRecorder):
         """Hold the fence open so the tracked membership phase stays in flight."""
 
-        async def advance_membership_epoch(self, room_id: str) -> int:
+        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
             """Record the fenced room, then wait to be released."""
             fenced_room_ids.append(room_id)
             fence_started.set()
             await allow_fence_finish.wait()
-            return len(fenced_room_ids)
+            return await super().fence_departure(room_id, source=source)
 
     async def invalidate() -> bool:
         nonlocal invalidation_count

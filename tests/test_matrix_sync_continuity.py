@@ -56,7 +56,11 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
-from tests.bot_helpers import _configured_team_test_config, _configured_team_user
+from tests.bot_helpers import (
+    FencedRoomRecorder,
+    _configured_team_test_config,
+    _configured_team_user,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -77,6 +81,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing import LaneSlot, _GateEntry
+    from mindroom.event_journal.models import DepartureOutcome, DepartureSource
     from mindroom.final_delivery import FinalDeliveryOutcome
 
 _CACHE_GENERATION = "test-cache-generation"
@@ -1246,13 +1251,13 @@ async def test_leave_fences_before_failing_call_reconciliation(
     response.rooms = MagicMock(join={}, leave={"!left:localhost": MagicMock()})
     operation_order: list[str] = []
 
-    class RecordingStore:
+    class OrderRecordingStore(FencedRoomRecorder):
         """Record that the fence ran before call cleanup."""
 
-        async def advance_membership_epoch(self, _room_id: str) -> int:
-            """Record one invalidation."""
+        async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
+            """Note where this invalidation fell relative to call cleanup."""
             operation_order.append("fence")
-            return 1
+            return await super().fence_departure(room_id, source=source)
 
     async def fail_call_cleanup(**_kwargs: object) -> None:
         operation_order.append("call")
@@ -1261,7 +1266,7 @@ async def test_leave_fences_before_failing_call_reconciliation(
     bot._call_manager = MagicMock()
     bot._call_manager.on_sync_room_membership = AsyncMock(side_effect=fail_call_cleanup)
 
-    bot._membership_fence.store = RecordingStore()
+    bot._membership_fence.store = OrderRecordingStore()
 
     with pytest.raises(type(call_cleanup_failure), match="call cleanup interrupted"):
         await bot._apply_own_room_membership_from_sync(response)
