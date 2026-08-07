@@ -733,6 +733,7 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 conversation_cache=self._conversation_cache,
                 relations=self._relations,
+                pending_turns=self._journal_store.principal(self._journal_principal_id),
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 command_executor=self._command_turn_executor,

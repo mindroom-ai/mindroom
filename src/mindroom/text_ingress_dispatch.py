@@ -355,7 +355,7 @@ async def _blocked_before_plan(
         and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
     )
     if prepared.replay_guard.degraded:
-        skips_turn = await controller._has_newer_unresponded_cached_thread_event(
+        skips_turn = await controller._has_newer_unresponded_journal_thread_event(
             room_id=room.room_id,
             event=prepared.event,
             requester_user_id=requester_user_id,

@@ -2,34 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, cast
 
 from mindroom.commands.parsing import command_parser
 from mindroom.dispatch_source import is_voice_event
-from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
     import structlog
 
     from mindroom.dispatch_handoff import TextDispatchEvent
+    from mindroom.event_journal import JournalEvent, PendingTurnView
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 type _RequesterResolver = Callable[[str, object], str]
 type _HandledLookup = Callable[[str], bool]
 type _VisibleRouterVoiceEchoLookup = Callable[[str, object], bool]
-type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
-# Implementations fail open by returning None after logging lookup failures.
-type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
-
-
-@dataclass(frozen=True)
-class _CachedEventView:
-    """Minimal event view used for trusted source-kind checks on raw cache rows."""
-
-    sender: str
-    source: Mapping[str, object]
 
 
 def has_newer_unresponded_in_thread(
@@ -83,131 +71,82 @@ def has_newer_unresponded_in_thread(
     return False
 
 
-async def _cached_event_is_in_thread(
-    event_source: dict[str, Any],
-    *,
-    room_id: str,
-    thread_id: str,
-    get_thread_id_for_event: _ThreadIdForEventLookup | None,
-) -> bool:
-    """Return whether raw event metadata or the cache index proves thread membership."""
-    event_info = EventInfo.from_event(event_source)
-    if thread_id in {event_info.thread_id, event_info.thread_id_from_edit}:
-        return True
-    if get_thread_id_for_event is None:
-        return False
-    event_id = event_source.get("event_id")
-    if not isinstance(event_id, str):
-        return False
-    return await get_thread_id_for_event(room_id, event_id) == thread_id
-
-
 def _unresponded_requester_event_id(
-    event_source: dict[str, Any],
+    journal_event: JournalEvent,
     *,
-    skipped_event_id: str,
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
     is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
-    """Return an unhandled requester event id from a cached event source when eligible."""
-    if EventInfo.from_event(event_source).is_edit:
-        return None
-    event_id = event_source.get("event_id")
-    sender = event_source.get("sender")
-    if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
-        return None
-    content = event_source.get("content")
+    """Return an unanswered requester event id from one pending journal event, when eligible.
+
+    The filters SQL cannot express. Whose turn an event really is depends on
+    trusted relay metadata inside its content, a router transcript echo is a
+    display artifact rather than a turn, and a command exits dispatch long
+    before a response would be owed -- so none of the three can be decided from
+    a column.
+
+    ``is_handled`` stays even though a pending row is the journal's own answer
+    to "unfinished". The two records settle at different moments: a source is
+    handed to the outbox when its answer becomes durable, and the handled-turn
+    ledger records the terminal outcome separately, so a turn recorded there
+    before a crash replays as a pending row afterwards. Trusting pending alone
+    would let an already-answered message suppress an older one forever.
+    """
+    sender = journal_event.sender
+    content = journal_event.source.get("content")
     if (
         is_visible_router_voice_echo(sender, content)
-        or requester_user_id_for_event(sender, event_source) != requester_user_id
+        or requester_user_id_for_event(sender, journal_event.source) != requester_user_id
     ):
         return None
-    if is_handled(event_id):
+    if is_handled(journal_event.event_id):
         return None
-    body = content.get("body") if isinstance(content, dict) else None
-    event_view = _CachedEventView(sender=sender, source=event_source)
+    body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
     if (
         isinstance(body, str)
-        and not is_voice_event(event_view, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
+        and not is_voice_event(journal_event, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
         and command_parser.parse(body.strip()) is not None
     ):
         return None
-    return event_id
+    return journal_event.event_id
 
 
-async def _newer_unresponded_cached_thread_event_id(
-    recent_events: Sequence[dict[str, Any]],
-    *,
-    room_id: str,
-    skipped_event_id: str,
-    skipped_event_ts_ms: int,
-    requester_user_id: str,
-    thread_id: str,
-    get_thread_id_for_event: _ThreadIdForEventLookup | None,
-    requester_user_id_for_event: _RequesterResolver,
-    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
-    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
-    is_handled: _HandledLookup,
-) -> str | None:
-    """Return the first newer cached event with positive same-thread proof."""
-    for event_source in recent_events:
-        event_ts = event_source.get("origin_server_ts")
-        # Match the full-history replay guard: equal millisecond timestamps are not newer-turn proof.
-        if not isinstance(event_ts, int) or event_ts <= skipped_event_ts_ms:
-            continue
-        if not await _cached_event_is_in_thread(
-            event_source,
-            room_id=room_id,
-            thread_id=thread_id,
-            get_thread_id_for_event=get_thread_id_for_event,
-        ):
-            continue
-        event_id = _unresponded_requester_event_id(
-            event_source,
-            skipped_event_id=skipped_event_id,
-            requester_user_id=requester_user_id,
-            requester_user_id_for_event=requester_user_id_for_event,
-            is_visible_router_voice_echo=is_visible_router_voice_echo,
-            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
-            is_handled=is_handled,
-        )
-        if event_id is not None:
-            return event_id
-    return None
-
-
-async def has_newer_unresponded_cached_thread_event(
+async def has_newer_unresponded_journal_thread_event(
     *,
     room_id: str,
     event: TextDispatchEvent,
     requester_user_id: str,
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,
-    get_recent_room_events: _RecentRoomEventsLookup | None,
-    get_thread_id_for_event: _ThreadIdForEventLookup | None,
+    pending_turns: PendingTurnView,
     requester_user_id_for_event: _RequesterResolver,
     is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
-    """Return positive cached-event proof for degraded dispatch replay history."""
+    """Return positive journal proof of a newer requester turn for degraded replay history.
+
+    The negative-proof sibling of ``has_newer_unresponded_in_thread``, for
+    turns whose thread history could not be read. It acts only on proof, so
+    every way of not knowing -- an unreadable journal included -- means the
+    older turn runs.
+    """
     if thread_id is None or event.server_timestamp is None or not may_be_superseded_by_newer_requester_turn:
         return False
-    if get_recent_room_events is None:
-        return False
     try:
-        recent_events = await get_recent_room_events(
-            room_id,
-            event_type="m.room.message",
-            since_ts_ms=int(event.server_timestamp),
+        candidates = await pending_turns.pending_thread_events_after(
+            room_id=room_id,
+            thread_id=thread_id,
+            after_origin_server_ts=int(event.server_timestamp),
+            excluding_event_id=event.event_id,
         )
     except Exception as exc:
         logger.warning(
-            "Failed to read cached room events for degraded thread replay guard",
+            "Failed to read pending thread events for degraded thread replay guard",
             event_id=event.event_id,
             room_id=room_id,
             thread_id=thread_id,
@@ -215,25 +154,21 @@ async def has_newer_unresponded_cached_thread_event(
         )
         return False
 
-    event_id = await _newer_unresponded_cached_thread_event_id(
-        recent_events,
-        room_id=room_id,
-        skipped_event_id=event.event_id,
-        skipped_event_ts_ms=int(event.server_timestamp),
-        requester_user_id=requester_user_id,
-        thread_id=thread_id,
-        get_thread_id_for_event=get_thread_id_for_event,
-        requester_user_id_for_event=requester_user_id_for_event,
-        is_visible_router_voice_echo=is_visible_router_voice_echo,
-        sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
-        is_handled=is_handled,
-    )
-    if event_id is not None:
-        logger.info(
-            "Skipping older message — newer cached event from same sender in degraded thread replay guard",
-            skipped_event_id=event.event_id,
-            newer_event_id=event_id,
-            thread_id=thread_id,
+    for candidate in candidates:
+        newer_event_id = _unresponded_requester_event_id(
+            candidate,
+            requester_user_id=requester_user_id,
+            requester_user_id_for_event=requester_user_id_for_event,
+            is_visible_router_voice_echo=is_visible_router_voice_echo,
+            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
+            is_handled=is_handled,
         )
-        return True
+        if newer_event_id is not None:
+            logger.info(
+                "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
+                skipped_event_id=event.event_id,
+                newer_event_id=newer_event_id,
+                thread_id=thread_id,
+            )
+            return True
     return False

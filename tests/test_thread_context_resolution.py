@@ -1538,7 +1538,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert dispatch.context.planning_thread_history == ()
             return _DispatchPlan(kind="ignore")
 
-        bot.event_cache.get_recent_room_events = AsyncMock(return_value=[])
         with (
             patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),

@@ -100,6 +100,27 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         ...
 
 
+class PendingTurnView(Protocol):
+    """Asking what unfinished work one conversation is already holding.
+
+    Deliberately not part of ``ReplayView``. The caller is a guard deciding
+    whether an older turn is still worth running, and it must be able to see
+    the pending set without being able to settle any of it.
+    """
+
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        after_origin_server_ts: int,
+        excluding_event_id: str,
+        limit: int = ...,
+    ) -> tuple[JournalEvent, ...]:
+        """Return unsettled events in one thread newer than a timestamp."""
+        ...
+
+
 class RelationView(Protocol):
     """Asking what the journal already knows about one event's place in a thread."""
 
@@ -306,6 +327,7 @@ __all__ = [
     "DispatchView",
     "HydrationView",
     "OutboxView",
+    "PendingTurnView",
     "PointLookupView",
     "ProjectionView",
     "RelationView",

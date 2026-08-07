@@ -112,6 +112,7 @@ depends_on = ["mindroom.logging_config", "mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.bot",
     "mindroom.delivery_gateway",
+    "mindroom.dispatch_replay_guard",
     "mindroom.event_journal_open",
     "mindroom.journal_dispatch",
     "mindroom.matrix.conversation_hydration",
@@ -122,6 +123,7 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -3759,7 +3761,6 @@ path = "mindroom.dispatch_replay_guard"
 depends_on = [
     "mindroom.commands.parsing",
     "mindroom.dispatch_source",
-    "mindroom.matrix.event_info",
 ]
 visibility = [
     "mindroom.turn_controller",

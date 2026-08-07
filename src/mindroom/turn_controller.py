@@ -50,7 +50,10 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
-from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
+from mindroom.dispatch_replay_guard import (
+    has_newer_unresponded_in_thread,
+    has_newer_unresponded_journal_thread_event,
+)
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -130,6 +133,7 @@ if TYPE_CHECKING:
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import PendingTurnView
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -434,6 +438,7 @@ class TurnControllerDeps:
     matrix_id: MatrixID
     conversation_cache: MatrixConversationCache
     relations: RelationLookup
+    pending_turns: PendingTurnView
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
     command_executor: CommandTurnExecutor
@@ -519,7 +524,7 @@ class TurnController:
             logger=self.deps.logger,
         )
 
-    async def _has_newer_unresponded_cached_thread_event(
+    async def _has_newer_unresponded_journal_thread_event(
         self,
         *,
         room_id: str,
@@ -528,16 +533,14 @@ class TurnController:
         thread_id: str | None,
         may_be_superseded_by_newer_requester_turn: bool,
     ) -> bool:
-        """Return positive replay proof from raw cached room events when thread history degraded."""
-        event_cache = self.deps.runtime.event_cache
-        return await has_newer_unresponded_cached_thread_event(
+        """Return positive replay proof from pending journal events when thread history degraded."""
+        return await has_newer_unresponded_journal_thread_event(
             room_id=room_id,
             event=event,
             requester_user_id=requester_user_id,
             thread_id=thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
-            get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
-            get_thread_id_for_event=self.deps.relations.admitted_thread_id,
+            pending_turns=self.deps.pending_turns,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,

@@ -445,6 +445,50 @@ def pending(
     return _decode_rows(rows)
 
 
+def pending_thread_events_after(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+    after_origin_server_ts: int,
+    excluding_event_id: str,
+    limit: int,
+) -> tuple[JournalEvent, ...]:
+    """Return unsettled events in one thread newer than a timestamp, oldest first.
+
+    The set a replay guard asks about: work this bot accepted in the
+    conversation it is about to answer and has not finished. Restricting it to
+    pending rows is not an optimization. Settlement clears the replay payload,
+    so a settled row has no body left to inspect -- and it is the wrong answer
+    anyway, because an event that already settled will never produce the turn
+    that would supersede an older one.
+
+    Strictly newer. Two events stamped in the same millisecond are not ordered
+    by their timestamps, and treating either as proof that the other is stale
+    would drop a message on a coin flip.
+    """
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_JOURNAL_COLUMNS} FROM journal_events
+        WHERE principal_id = ? AND state = 'pending'
+          AND room_id = ? AND thread_id = ?
+          AND origin_server_ts > ? AND event_id <> ?
+        ORDER BY origin_server_ts, receipt_order
+        LIMIT ?
+        """,  # noqa: S608 - a fixed column list, not interpolated input
+        (
+            principal_id,
+            room_id,
+            encode_thread_id(thread_id),
+            after_origin_server_ts,
+            excluding_event_id,
+            limit,
+        ),
+    )
+    return _decode_rows(rows)
+
+
 def _decode_rows(rows: tuple[Row, ...]) -> tuple[JournalEvent, ...]:
     """Decode pending rows, skipping any whose payload cannot be read.
 
