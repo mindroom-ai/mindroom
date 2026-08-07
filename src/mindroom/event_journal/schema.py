@@ -238,14 +238,37 @@ _INDEXES = (
     WHERE refresh_token IS NOT NULL
     """,
     """
-    CREATE INDEX IF NOT EXISTS response_outbox_unacknowledged
-    ON response_outbox (principal_id, created_at_ns)
+    -- Covers the recovery scan's whole ORDER BY, not just its prefix. Stopping
+    -- at `created_at_ns` left SQLite building a temporary b-tree for the last
+    -- two terms on every pass, and PostgreSQL cannot satisfy an ORDER BY from
+    -- an index that matches only its prefix either. The trailing columns carry
+    -- the same byte-order pin as the cursor comparison, because an index in the
+    -- server's own collation would not be usable for this ordering at all.
+    CREATE INDEX IF NOT EXISTS response_outbox_unacknowledged_scan
+    ON response_outbox (principal_id, created_at_ns, turn_id/*bytes*/, stage/*bytes*/)
     WHERE acknowledged_event_id IS NULL
     """,
     """
-    CREATE INDEX IF NOT EXISTS approval_cards_room
-    ON approval_cards (principal_id, room_id, created_at_ns)
+    CREATE INDEX IF NOT EXISTS approval_cards_room_scan
+    ON approval_cards (principal_id, room_id, created_at_ns, card_event_id/*bytes*/)
     """,
+    """
+    -- The startup repair's scan: delivered answers, oldest first. Its predicate
+    -- is the complement of the recovery scan's, so neither index serves both.
+    CREATE INDEX IF NOT EXISTS response_outbox_delivered_scan
+    ON response_outbox (principal_id, created_at_ns, turn_id/*bytes*/)
+    WHERE stage = 'final' AND acknowledged_event_id IS NOT NULL
+    """,
+)
+
+
+# Indexes an earlier schema created that a later one replaced. `CREATE INDEX IF
+# NOT EXISTS` cannot redefine one, so a widened index has to be given a new name
+# and its predecessor dropped -- otherwise every existing database keeps paying
+# to maintain an index nothing can use for its ordering.
+_DROPPED_INDEXES = (
+    "DROP INDEX IF EXISTS response_outbox_unacknowledged",
+    "DROP INDEX IF EXISTS approval_cards_room",
 )
 
 
@@ -288,7 +311,7 @@ def schema_statements(dialect: Dialect) -> tuple[str, ...]:
             receipt_order_column=dialect.receipt_order_column,
             ordered_text=dialect.ordered_text,
         )
-        for statement in (*_TABLES, *_INDEXES)
+        for statement in (*_TABLES, *_DROPPED_INDEXES, *_INDEXES)
     )
 
 

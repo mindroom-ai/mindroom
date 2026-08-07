@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 
@@ -1754,3 +1754,66 @@ class TestConnectionSecretsStayOutOfLogs:
         assert "hunter2" not in rendered
         assert "someone" not in rendered
         assert "db.example" not in rendered
+
+
+class TestHotQueriesAreIndexCovered:
+    """Every scan a running bot repeats must come from an index, ordering included."""
+
+    # The shapes the code actually issues, ORDER BY included. An earlier
+    # measurement of this dropped the trailing ORDER BY terms and reported all
+    # of them clean; two were building a temporary b-tree on every pass. An
+    # index that matches only the prefix of an ORDER BY cannot satisfy it, on
+    # either backend.
+    _QUERIES: ClassVar[dict[str, str]] = {
+        "worker pending scan": (
+            "SELECT * FROM journal_events WHERE principal_id=? AND state='pending' "
+            "AND receipt_order>? ORDER BY receipt_order LIMIT 50"
+        ),
+        "replay guard thread scan": (
+            "SELECT * FROM journal_events WHERE principal_id=? AND room_id=? AND thread_id=? "
+            "AND state='pending' AND origin_server_ts>? AND event_id<>?"
+        ),
+        "projection page": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=? "
+            "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
+        "revision point lookup": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND revision_event_id=?"
+        ),
+        "refresh-owing scan": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=? "
+            "AND refresh_token IS NOT NULL"
+        ),
+        "outbox recovery scan": (
+            "SELECT * FROM response_outbox WHERE principal_id=? AND acknowledged_event_id IS NULL "
+            "ORDER BY created_at_ns, turn_id, stage LIMIT 50"
+        ),
+        "approval card scan": (
+            "SELECT * FROM approval_cards WHERE principal_id=? AND room_id=? "
+            "ORDER BY created_at_ns, card_event_id LIMIT 50"
+        ),
+        "delivered-answer repair scan": (
+            "SELECT turn_id, acknowledged_event_id, created_at_ns FROM response_outbox "
+            "WHERE principal_id=? AND stage='final' AND acknowledged_event_id IS NOT NULL "
+            "ORDER BY created_at_ns, turn_id LIMIT 50"
+        ),
+    }
+
+    async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
+        """No hot query falls back to a table scan or a temporary sort."""
+        import sqlite3  # noqa: PLC0415 - the plan is a SQLite-specific measurement
+
+        from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements  # noqa: PLC0415
+
+        database = sqlite3.connect(tmp_path / "plans.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+
+        offenders = {}
+        for name, sql in self._QUERIES.items():
+            params = tuple("x" for _ in range(sql.count("?")))
+            plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, params))
+            if "TEMP B-TREE" in plan or "SCAN " in plan:
+                offenders[name] = plan
+
+        assert offenders == {}
