@@ -101,6 +101,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _retry_tasks() -> list[asyncio.Task[Any]]:
+    """Return the approval startup retries still alive on this loop.
+
+    Named tasks rather than the runtime's own handle, because the thing being
+    checked is that no retry outlives the handle -- asking the handle would
+    only ever confirm that it was set to None.
+    """
+    return [task for task in asyncio.all_tasks() if task.get_name() == "approval_startup_cleanup_retry"]
+
+
 async def _await_until(condition: Callable[[], bool]) -> None:
     """Yield to the loop until a background task has done what is expected of it.
 
@@ -1795,6 +1805,137 @@ class TestMultiAgentOrchestrator:
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
 
         await orchestrator._approval_transport.cancel_startup_cleanup_retry()
+        assert expire_orphaned_approval_cards_on_startup.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stop_retrying",
+        [
+            pytest.param("cancel", id="cancelled-at-shutdown"),
+            pytest.param("reset", id="cancelled-by-a-fresh-runtime-start"),
+        ],
+    )
+    async def test_a_startup_discard_that_keeps_failing_keeps_backing_off(
+        self,
+        tmp_path: Path,
+        stop_retrying: str,
+    ) -> None:
+        """One extra attempt is not a retry policy.
+
+        A retry runs the sweep itself, so the pass that discovers another
+        attempt is owed is running inside the task that would have to be
+        replaced. Refusing to arm a successor while a retry is live therefore
+        refuses to arm the successor of the retry asking for one: two
+        consecutive failures and the sweep gives up until the next restart,
+        with the backoff never reached at all.
+
+        The successor still has to be reachable once it is armed that way. A
+        retry chain nobody can stop is a task that outlives the runtime, so
+        both ways of standing it down are checked against the same chain.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        transport = orchestrator._approval_transport
+        # The wait each attempt was scheduled with, read as the sweep runs.
+        # Reading the runtime's own countdown is what tells a backoff that
+        # grows apart from one that is recomputed from the same start forever.
+        waits: list[float] = []
+
+        async def _never_finishes() -> ApprovalStartupSweep:
+            waits.append(transport._startup_cleanup_retry_delay)
+            return ApprovalStartupSweep(discarded=0, failed=1)
+
+        with (
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch(
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(side_effect=_never_finishes),
+            ) as expire_orphaned_approval_cards_on_startup,
+        ):
+            transport.reset_startup_cleanup_gate()
+            await transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+
+            # The first pass came from the startup gates; everything after it
+            # was arranged by the failure before it, with no gate involved.
+            await _await_until(lambda: expire_orphaned_approval_cards_on_startup.await_count >= 4)
+
+            waiting = _retry_tasks()
+            assert len(waiting) == 1
+            if stop_retrying == "cancel":
+                await transport.cancel_startup_cleanup_retry()
+            else:
+                transport.reset_startup_cleanup_gate()
+            await _await_until(waiting[0].done)
+            # Cancelled rather than left to expire, and nothing armed behind
+            # it: a chain that re-arms itself must still be stoppable at one
+            # point, or shutdown leaves a task running.
+            assert waiting[0].cancelled()
+            assert not _retry_tasks()
+
+        # Each attempt waited longer than the one before it, which is only
+        # true if every attempt was armed by its predecessor rather than the
+        # same first failure being answered once.
+        assert waits[:4] == sorted(waits[:4])
+        assert waits[0] < waits[3]
+
+    @pytest.mark.asyncio
+    async def test_a_finished_sweep_stands_down_the_retry_it_no_longer_needs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A retry made pointless is not thereby made harmless.
+
+        A startup gate can fire again while an earlier failure's retry is still
+        waiting, and that pass can be the one that finishes the work. The
+        waiting task is then sleeping for up to half a minute with nothing left
+        to do. Merely dropping the handle to it leaves a task no shutdown can
+        reach, so the sweep that made it unnecessary has to stand it down.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        transport = orchestrator._approval_transport
+        sweeps = [
+            ApprovalStartupSweep(discarded=0, failed=1),
+            ApprovalStartupSweep(discarded=1, failed=0),
+        ]
+        # The default delay, deliberately: the retry has to still be waiting
+        # when the second gate arrives, or it is not the case under test.
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(side_effect=sweeps),
+        ) as expire_orphaned_approval_cards_on_startup:
+            transport.reset_startup_cleanup_gate()
+            await transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+            waiting = _retry_tasks()
+            assert len(waiting) == 1
+
+            await transport.mark_startup_runtime_support_ready()
+            await _await_until(waiting[0].done)
+            # Cancelled, not merely finished. A task left to wake on its own
+            # ends the same way from the outside and is exactly the orphan
+            # this stands against, so the distinction is the whole assertion.
+            assert waiting[0].cancelled()
+
         assert expire_orphaned_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio

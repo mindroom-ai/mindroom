@@ -476,7 +476,7 @@ class ApprovalMatrixTransport:
                 self._schedule_startup_cleanup_retry()
                 return
             self._startup_cleanup_done = True
-            self._startup_cleanup_retry = None
+            self._retire_startup_cleanup_retry()
 
     async def _discard_orphaned_approval_cards_on_startup(self) -> bool:
         """Discard orphaned approval cards, reporting whether any are still owed."""
@@ -492,13 +492,35 @@ class ApprovalMatrixTransport:
         return sweep.complete
 
     def _schedule_startup_cleanup_retry(self) -> None:
-        """Arrange one later sweep, since no startup gate will fire again."""
-        if self._startup_cleanup_retry is not None and not self._startup_cleanup_retry.done():
+        """Arrange one later sweep, since no startup gate will fire again.
+
+        The guard is there so two different callers cannot each arm a task. It
+        deliberately does not count the caller's own retry: a retry runs the
+        sweep itself, so the pass that discovers another attempt is owed is
+        always running inside the very task a plain "is one live?" check would
+        find. Counting it would let a retry block its own successor, and the
+        whole backoff would collapse into one extra attempt -- which is the
+        failure this retry exists to prevent, arriving one round later.
+        """
+        pending = self._startup_cleanup_retry
+        if pending is not None and not pending.done() and pending is not asyncio.current_task():
             return
         self._startup_cleanup_retry = asyncio.create_task(
             self._run_startup_cleanup_after_delay(),
             name="approval_startup_cleanup_retry",
         )
+
+    def _retire_startup_cleanup_retry(self) -> None:
+        """Drop a waiting retry the finished sweep has made pointless.
+
+        Cancelled rather than merely forgotten, because a forgotten task is one
+        no shutdown can reach. The caller's own task is exempt: it is finishing
+        anyway, and cancelling it here would cancel the sweep reporting success.
+        """
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is not None and not retry.done() and retry is not asyncio.current_task():
+            retry.cancel()
 
     async def _run_startup_cleanup_after_delay(self) -> None:
         delay = self._startup_cleanup_retry_delay
