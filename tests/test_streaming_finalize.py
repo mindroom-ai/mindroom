@@ -1177,3 +1177,33 @@ def test_the_gateway_hands_the_final_transform_to_the_stream() -> None:
     source = inspect.getsource(DeliveryGateway.deliver_stream)
 
     assert "final_text_transform=self._final_text_transform(request.identity)" in source
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_edit_freezes_the_payload_matrix_receives(tmp_path: Path) -> None:
+    """The edit path freezes the wire event too, not just the send path.
+
+    An edit carries the whole replacement body, so it crosses the size limit
+    the same way a send does -- and its row is what recovery replays. Pinning
+    only the send left this half able to regress on its own.
+    """
+    from mindroom.delivery_gateway import EditTextRequest  # noqa: PLC0415 - a request type only this test builds
+
+    gateway = _delivery_gateway(tmp_path)
+
+    await gateway._edit_content(
+        EditTextRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$src"),
+            event_id="$original",
+            new_text="x" * 100_000,
+            delivery_turn_id="$turn",
+        ),
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
+
+    rows = gateway.deps.outbox.rows  # type: ignore[attr-defined]
+    assert rows, "the edit never reached the outbox"
+    frozen = next(iter(rows.values())).payload
+    body = frozen.get("m.new_content", frozen).get("body", "")
+    assert len(body) < 100_000, "the row kept the oversized original"

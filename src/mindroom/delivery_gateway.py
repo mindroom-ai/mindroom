@@ -649,7 +649,12 @@ class DeliveryGateway:
         # homeserver had already accepted. Preparing twice is harmless: an
         # already-prepared payload is below the size limit, so this is a no-op
         # for it, including on the recovery path.
-        content = await prepare_large_message(client, room_id, content)
+        content = await self._prepared_for_the_wire(
+            room_id,
+            content,
+            turn_id=request.delivery_turn_id,
+            stage=request.delivery_stage,
+        )
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
@@ -776,7 +781,12 @@ class DeliveryGateway:
         # original while Matrix received an MXC reference, and a resend would
         # upload again under a transaction ID already accepted. Preparing an
         # already-prepared payload is a no-op, so the recovery path is safe.
-        envelope = await prepare_large_message(client, room_id, envelope)
+        envelope = await self._prepared_for_the_wire(
+            room_id,
+            envelope,
+            turn_id=request.delivery_turn_id,
+            stage=DeliveryStage.FINAL,
+        )
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
@@ -1370,6 +1380,27 @@ class DeliveryGateway:
             )
 
         return terminal_send
+
+    async def _prepared_for_the_wire(
+        self,
+        room_id: str,
+        content: dict[str, Any],
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+    ) -> dict[str, Any]:
+        """Prepare a payload for the wire, unless a frozen one already exists.
+
+        Preparation can upload a sidecar, so it must not run for a turn whose
+        answer is already acknowledged. That row is what `flush` returns, its
+        payload is frozen and `enqueue` refuses to overwrite it, so preparing
+        again would upload an attachment nothing can ever reference -- or fail,
+        and take down a rerun whose answer is already durable and visible.
+        """
+        existing = await self.deps.outbox.load_delivery(turn_id=turn_id, stage=stage)
+        if existing is not None and existing.acknowledged_event_id is not None:
+            return content
+        return await prepare_large_message(self._client(), room_id, content)
 
     def _final_text_transform(self, identity: ResponseIdentity | None) -> FinalTextTransform | None:
         """Return the hook that shapes the answer before its terminal payload is built.
