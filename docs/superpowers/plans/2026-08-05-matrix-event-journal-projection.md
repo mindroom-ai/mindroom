@@ -2024,3 +2024,42 @@ restart.
 `src/mindroom/coalescing.py` and `src/mindroom/ingress_lanes.py` are where to
 look. This is a real open defect, distinct from the livelock, and it is the
 reason the live proof cannot yet be called green.
+
+### Found: a contended turn claim wedging its own flush
+
+Both correlations were one mechanism, and neither is in the gate's own
+scheduling. The flush task is created, alive, and on the right loop; it is
+blocked, in `_wait_for_lane_slots`, on a lane slot that will never settle.
+
+`_handle_message_inner` reserved the sender's lane slot and then claimed the
+turn, so a callback that lost the claim waited in `wait_for_turn_settled` while
+still holding its slot. The winner's batch does not flush until every
+undelivered slot in that sender's lane settles; the loser's slot does not
+settle until its callback returns; its callback does not return until the
+winner's turn settles. Load cannot break a cycle, which is why the wedge is
+restart-bound rather than load-bound: the duplicate callback that contends the
+claim comes from the recovery pass, and a run with no restart never produces
+one.
+
+The duplicate is not itself a defect. The journal deliberately allows one
+event's callback to run twice -- `PendingEventWorker.drain_once` does not
+consult the pump's per-room lanes, and `JournalDispatcher.drain_once` clears
+the deferral set first -- and relies on `TurnStore` claiming to make that safe,
+which its own docstring says. Two router relays sharing a human alias contend
+the same way with no restart involved. The claim wait now releases the lane
+before waiting and takes a fresh lane position if it goes on to reclaim, which
+is what the media path already did by claiming before reserving, and what the
+edit and interactive-selection paths already did by releasing first.
+
+The safety net could not have caught this. A turn-backed handler that defers
+returns `None`, which puts its event in `PendingEventWorker._deferred`, and
+`_collect_dispatchable` skips deferred events on every later scan. The durable
+row still says the work is owed, and nothing in the running process looks at it
+again: only `release`, `forget_all_deferrals`, settlement, or a restart clears
+the deferral. `pending` means both "never started" and "started, someone else
+owns it", and the only thing separating them is in memory, with no timeout and
+no liveness check on the owner. Any owner that dies without releasing produces
+this exact shape. Closing that class needs a bounded liveness check on deferred
+events rather than a fix in any one owner; until then, a flush waiting on a
+lane for more than a minute at least says so once
+(`coalescing_gate_lane_wait_stalled`) instead of going silent.
