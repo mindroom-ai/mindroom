@@ -215,7 +215,7 @@ class HydrationView(Protocol):
         *,
         events: tuple[ProjectedEvent, ...],
         complete: bool,
-        reached_ts: int | None,
+        saw_anchor: bool,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
         """Install one room walk and settle the debt it was run for, together."""

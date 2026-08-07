@@ -257,7 +257,11 @@ async def test_a_skipped_gap_moves_the_checkpoint_and_the_next_read_repays_it(
     assert checkpoint.token == f"s_live_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
     # The two messages sent during the gap are simply not there yet.
     assert await bodies(alice) == ["one", "two"]
-    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(room_id=ROOM, owed_through_ts=2_000)
+    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(
+        room_id=ROOM,
+        owed_through_ts=2_000,
+        owed_through_event_id="$two",
+    )
 
     # The server still has them, and the next read is what goes and gets them.
     client = FakeClient(
@@ -408,19 +412,22 @@ async def test_concurrent_readers_of_an_indebted_room_share_one_walk(
 async def test_reach_is_measured_over_what_the_walk_saw_not_what_it_kept(
     alice: PrincipalStore,
 ) -> None:
-    """A page of events the projection drops carries the walk just as far back.
+    """An anchor the projection drops carries the walk just as far back.
 
-    The oldest event here is redacted, so nothing about it survives projection.
-    Judging coverage by the projected rows would call this walk short and file
-    a repaired room as lost history.
+    The anchor here comes back redacted, so nothing about it survives
+    projection: it was the projection's newest message when the gap was skipped
+    and it has been redacted since. Judging coverage by the projected rows would
+    call this walk short and file a repaired room as permanently lost history --
+    a walk that reached the anchor's position in the timeline is a walk that
+    covered the hole, whatever the event turned out to still contain.
     """
-    await admit_all(alice, [raw("$anchor", "anchor", ts=2_000)])
+    await admit_all(alice, [raw("$anchor", "anchor", ts=1_000)])
     await alice.record_room_history_debt(ROOM)
-    redacted = raw("$gone", "gone", ts=1_000)
+    redacted = raw("$anchor", "anchor", ts=1_000)
     redacted["content"] = {}
     redacted["unsigned"] = {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}}
     client = FakeClient(
-        pages=[[raw("$new", "new", ts=3_000), raw("$anchor", "anchor", ts=2_000), redacted]],
+        pages=[[raw("$new", "new", ts=3_000), raw("$mid", "mid", ts=2_000), redacted]],
     )
 
     with capture_logs() as logs:
@@ -428,7 +435,79 @@ async def test_reach_is_measured_over_what_the_walk_saw_not_what_it_kept(
 
     settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
     assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.REPAID.value]
+    assert settled[0]["saw_anchor"]
     assert settled[0]["reached_ts"] == 1_000
+
+
+async def test_a_clock_skewed_event_at_the_tip_does_not_discharge_the_debt(
+    alice: PrincipalStore,
+) -> None:
+    """Coverage is a position in the room's history, not a reading of a clock.
+
+    ``origin_server_ts`` is the sending server's clock and nothing makes it
+    agree with the order the homeserver paginates in. Federated skew and a
+    bridge that rewrites timestamps both put an event older than its neighbours
+    at the tip of the timeline, and judging coverage by the oldest timestamp
+    seen anywhere lets that one event satisfy the whole debt on the first page.
+
+    The walk then stops with its window full, never asks for the pages the gap
+    is actually on, and the loss is filed as a repayment and logged at info as
+    success. Only reaching the anchor itself proves the walk went past the hole.
+    """
+    await admit_all(alice, [raw("$anchor", "anchor", ts=2_000)])
+    assert await alice.record_room_history_debt(ROOM) == RoomHistoryDebt(
+        room_id=ROOM,
+        owed_through_ts=2_000,
+        owed_through_event_id="$anchor",
+    )
+    client = FakeClient(
+        pages=[
+            [
+                raw("$new", "new", ts=5_000),
+                # A tip event whose clock reads older than the anchor's.
+                raw("$skewed", "skewed", ts=900),
+                raw("$also", "also", ts=4_000),
+            ],
+            [raw("$gap", "gap", ts=3_000), raw("$anchor", "anchor", ts=2_000)],
+        ],
+    )
+
+    with capture_logs() as logs:
+        await hydrator(alice, client, prompt_window_messages=3).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.REPAID.value]
+    # The second page is the one the anchor and the gap are on, and the walk has
+    # to ask for it: a repayment that stops on the first page is the defect.
+    assert client.calls == 2
+    assert await bodies(alice) == ["skewed", "anchor", "gap", "also", "new"]
+
+
+async def test_an_event_sharing_the_anchor_timestamp_is_not_the_anchor(
+    alice: PrincipalStore,
+) -> None:
+    """Two events can carry the same millisecond, and only one of them is owed.
+
+    Accepting equality discharges the debt against whichever event happens to
+    share the anchor's clock reading, which says nothing about whether the walk
+    reached the anchor's own position in the timeline.
+    """
+    await admit_all(alice, [raw("$anchor", "anchor", ts=2_000)])
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(
+        pages=[
+            [raw("$new", "new", ts=5_000), raw("$twin", "twin", ts=2_000)],
+            [raw("$gap", "gap", ts=3_000), raw("$anchor", "anchor", ts=2_000)],
+        ],
+    )
+
+    with capture_logs() as logs:
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.REPAID.value]
+    assert client.calls == 2
+    assert await bodies(alice) == ["anchor", "twin", "gap", "new"]
 
 
 async def test_a_repayment_walks_past_the_prompt_window_to_reach_its_anchor(
@@ -598,7 +677,11 @@ async def test_a_failed_repayment_leaves_the_debt_for_the_next_read(alice: Princ
     with pytest.raises(_HydrationError):
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
-    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000)
+    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(
+        room_id=ROOM,
+        owed_through_ts=1_000,
+        owed_through_event_id="$one",
+    )
     assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
@@ -662,8 +745,9 @@ async def test_a_second_skip_keeps_the_older_hole(alice: PrincipalStore) -> None
     await admit_all(alice, [raw("$two", "two", ts=5_000)])
     second = await alice.record_room_history_debt(ROOM)
 
-    assert first == RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000)
-    assert second == RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000)
+    older = RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000, owed_through_event_id="$one")
+    assert first == older
+    assert second == older
 
 
 async def test_a_walk_that_runs_out_of_server_history_still_owns_up_to_the_hole(
@@ -795,7 +879,11 @@ async def test_every_skipped_room_is_written_down_and_only_a_holed_one_owes(
 
     recorded = [(entry["room_id"], entry["owed_through_ts"]) for entry in logs if entry["event"] == _RECORDED_LOG]
     assert recorded == [(OTHER_ROOM, None), (ROOM, 1_000)]
-    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(room_id=ROOM, owed_through_ts=1_000)
+    assert await alice.room_history_debt(ROOM) == RoomHistoryDebt(
+        room_id=ROOM,
+        owed_through_ts=1_000,
+        owed_through_event_id="$one",
+    )
     assert await alice.room_history_debt(OTHER_ROOM) is None
 
 
@@ -818,7 +906,7 @@ async def test_a_walk_carrying_a_settled_debt_changes_nothing(alice: PrincipalSt
     debt = await alice.record_room_history_debt(ROOM)
     assert debt is not None
 
-    client = FakeClient(pages=[[raw("$gap", "gap", ts=1_000)]])
+    client = FakeClient(pages=[[raw("$gap", "gap", ts=1_000), raw("$old", "old", ts=1_000)]])
     await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
     assert await alice.room_history_debt(ROOM) is None
     assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
@@ -828,7 +916,7 @@ async def test_a_walk_carrying_a_settled_debt_changes_nothing(alice: PrincipalSt
         debt,
         events=(),
         complete=False,
-        reached_ts=9_000,
+        saw_anchor=False,
         expected_membership_epoch=await alice.membership_epoch(ROOM),
     )
 
@@ -906,10 +994,9 @@ async def test_a_ceiling_walk_leaves_the_room_repairable(alice: PrincipalStore) 
     # next read walks again. Under a sticky loss flag this stays False no matter
     # what the server hands back.
     await admit_all(alice, [raw("$new", "new", ts=5_000)])
-    await alice.record_room_history_debt(ROOM)
-    await hydrator(alice, FakeClient(pages=[[raw("$reached", "reached", ts=1_000)]])).ensure_hydrated(
-        room_id=ROOM,
-        thread_id=None,
-    )
+    debt = await alice.record_room_history_debt(ROOM)
+    assert debt is not None
+    reached = raw(debt.owed_through_event_id, "reached", ts=debt.owed_through_ts)
+    await hydrator(alice, FakeClient(pages=[[reached]])).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)

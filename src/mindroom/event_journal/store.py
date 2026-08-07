@@ -382,7 +382,7 @@ class PrincipalStore:
         *,
         events: tuple[ProjectedEvent, ...],
         complete: bool,
-        reached_ts: int | None,
+        saw_anchor: bool,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
         """Install one room walk and settle the debt it was run for, together.
@@ -400,7 +400,7 @@ class PrincipalStore:
                 debt,
                 events=events,
                 complete=complete,
-                reached_ts=reached_ts,
+                saw_anchor=saw_anchor,
                 expected_membership_epoch=expected_membership_epoch,
             ),
         )
@@ -795,7 +795,7 @@ def _repay_history_debt(
     *,
     events: tuple[ProjectedEvent, ...],
     complete: bool,
-    reached_ts: int | None,
+    saw_anchor: bool,
     expected_membership_epoch: int,
 ) -> HistoryDebtOutcome:
     """Install a repayment walk as the room conversation's hydration, and settle.
@@ -815,7 +815,7 @@ def _repay_history_debt(
     a different question, and this walk did not answer it.
     """
     current = history_debt.outstanding(transaction, principal_id, debt.room_id)
-    if current is None or current.owed_through_ts != debt.owed_through_ts:
+    if current != debt:
         return HistoryDebtOutcome.SUPERSEDED
     if not _install_hydration(
         transaction,
@@ -831,7 +831,7 @@ def _repay_history_debt(
         transaction,
         principal_id,
         debt,
-        reached_ts=reached_ts,
+        saw_anchor=saw_anchor,
         walk_exhausted_server=complete,
     )
 

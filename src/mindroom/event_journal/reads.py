@@ -261,7 +261,8 @@ def _current_hydration(
     outstanding debt names a hole this marker was written before anyone knew
     about, so the marker is withheld and the conversation reads as unhydrated:
     that is what sends the next read to the server, which is where the hole gets
-    filled.
+    filled. The anchor is what says a debt is outstanding, because it is the
+    only part of one a walk can settle.
 
     Loss is different from debt and is reported rather than hidden. A room whose
     walk finished without covering its debt keeps its marker -- re-walking would
@@ -273,7 +274,7 @@ def _current_hydration(
         SELECT hydration.membership_epoch AS hydrated_epoch,
                hydration.complete AS complete,
                COALESCE(membership.membership_epoch, 0) AS current_epoch,
-               debt.owed_through_ts AS owed_through_ts,
+               debt.owed_through_event_id AS owed_through_event_id,
                COALESCE(debt.history_lost, 0) AS history_lost
         FROM conversation_hydration AS hydration
         LEFT JOIN room_membership AS membership
@@ -288,7 +289,7 @@ def _current_hydration(
     )
     if row is None or int(row["hydrated_epoch"]) != int(row["current_epoch"]):
         return None
-    if row["owed_through_ts"] is not None:
+    if row["owed_through_event_id"] is not None:
         return None
     return row
 

@@ -167,16 +167,24 @@ class _Walk:
     correctness is completeness rather than recency has to be able to tell those
     apart instead of reading a warm marker as a whole conversation.
 
-    ``reached_ts`` is the oldest event the walk saw, over everything it fetched
-    rather than everything it kept, and it is what settles a history debt. A
-    page of redactions and state events carries the walk exactly as far back as
-    a page of messages; measuring reach by what survived projection would report
-    a walk as short when it was merely uneventful.
+    ``saw_anchor`` says a history debt's anchor event appeared in a chunk this
+    walk fetched, and it is what settles the debt. Counted over everything
+    fetched rather than everything kept: a page of redactions and state events
+    carries the walk exactly as far back as a page of messages, and a redacted
+    anchor is still the anchor.
+
+    ``reached_ts`` is the oldest timestamp the walk saw, and it settles nothing.
+    It is diagnostic: read next to the anchor's own timestamp in the settlement
+    log, it says whether the anchor was where the projection thought it was.
+    Coverage is deliberately not measured from it, because ``origin_server_ts``
+    is the sending server's clock and a skewed event at the tip would otherwise
+    prove a depth the walk never reached.
     """
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
     reached_ts: int | None = None
+    saw_anchor: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,12 +458,12 @@ class ConversationHydrator:
         there is no retry state to leak.
         """
         epoch = await self.store.membership_epoch(debt.room_id)
-        walk = await self._fetch_room(debt.room_id, owed_through_ts=debt.owed_through_ts)
+        walk = await self._fetch_room(debt.room_id, owed_through_event_id=debt.owed_through_event_id)
         outcome = await self.store.repay_room_history_debt(
             debt,
             events=walk.events,
             complete=walk.complete,
-            reached_ts=walk.reached_ts,
+            saw_anchor=walk.saw_anchor,
             expected_membership_epoch=epoch,
         )
         log = logger.info
@@ -469,7 +477,12 @@ class ConversationHydrator:
             "conversation_history_debt_settled",
             room_id=debt.room_id,
             outcome=outcome.value,
+            owed_through_event_id=debt.owed_through_event_id,
             owed_through_ts=debt.owed_through_ts,
+            # What proved coverage, and how far back the walk got. The second is
+            # diagnostic only: read against the first it says whether the
+            # anchor's clock agreed with its position in the timeline.
+            saw_anchor=walk.saw_anchor,
             reached_ts=walk.reached_ts,
             walk_complete=walk.complete,
         )
@@ -593,7 +606,7 @@ class ConversationHydrator:
             raise _HydrationError(msg) from error
         return _Walk(events=tuple(events), complete=complete)
 
-    async def _fetch_room(self, room_id: str, *, owed_through_ts: int | None = None) -> _Walk:
+    async def _fetch_room(self, room_id: str, *, owed_through_event_id: str | None = None) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
 
         A server that has run out of history answers with an empty chunk and no
@@ -606,15 +619,23 @@ class ConversationHydrator:
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
 
-        ``owed_through_ts`` adds the second job a repayment walk has to do, and
-        it is a timestamp rather than a count because a debt is a timestamp. The
-        window cannot stand in for it: the window is how much history a prompt
-        reads, and the anchor is how far back a hole starts, so a room busier
-        than the window fills it on messages newer than the anchor and stops
-        with the hole untouched. Both bounds have to be satisfied, not either --
-        a repayment installs the room conversation as well as settling the debt,
-        so stopping at coverage would leave the prompt permanently short, and
-        stopping at the window would file live history as lost.
+        ``owed_through_event_id`` adds the second job a repayment walk has to
+        do, and it is an event rather than a count because a debt is an event.
+        The window cannot stand in for it: the window is how much history a
+        prompt reads, and the anchor is how far back a hole starts, so a room
+        busier than the window fills it on messages newer than the anchor and
+        stops with the hole untouched. Both bounds have to be satisfied, not
+        either -- a repayment installs the room conversation as well as settling
+        the debt, so stopping at coverage would leave the prompt permanently
+        short, and stopping at the window would file live history as lost.
+
+        The anchor is an event rather than its timestamp because pagination
+        order and ``origin_server_ts`` order are not the same order. Stopping
+        once the oldest timestamp seen was old enough let a single federated or
+        bridge-rewritten event at the tip end the walk on its first page, with
+        every page the hole was on still unfetched and the result reported as a
+        repayment. Seeing the anchor is a statement about how deep the walk
+        went; a clock reading is not.
 
         There are three ways this returns, and only two of them mean the walk
         finished its job. The third is the event ceiling, which is logged rather
@@ -625,6 +646,7 @@ class ConversationHydrator:
         fetched = 0
         pages = 0
         reached: int | None = None
+        saw_anchor = False
         start: str | None = None
         while True:
             response = await self._client().room_messages(
@@ -640,15 +662,17 @@ class ConversationHydrator:
             pages += 1
             for event in response.chunk:
                 reached = event.server_timestamp if reached is None else min(reached, event.server_timestamp)
+                # Before projection, so a redacted anchor still counts as seen.
+                saw_anchor = saw_anchor or event.event_id == owed_through_event_id
                 projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
                 if projected is None:
                     continue
                 events.append(projected)
                 if projected.replaces_event_id is None:
                     logical += 1
-            covered = owed_through_ts is None or (reached is not None and reached <= owed_through_ts)
+            covered = owed_through_event_id is None or saw_anchor
             if logical >= self.prompt_window_messages and covered:
-                return _Walk(events=tuple(events), complete=False, reached_ts=reached)
+                return _Walk(events=tuple(events), complete=False, reached_ts=reached, saw_anchor=saw_anchor)
             # An empty page is not exhaustion. The server may filter a page down
             # to nothing and still hand back a continuation token, and the room
             # can hold visible history behind it; only the absent token means
@@ -656,7 +680,7 @@ class ConversationHydrator:
             # progress, which is the one shape that could spin forever, because
             # an empty page does not advance the event count either.
             if not response.end:
-                return _Walk(events=tuple(events), complete=True, reached_ts=reached)
+                return _Walk(events=tuple(events), complete=True, reached_ts=reached, saw_anchor=saw_anchor)
             if response.end == start:
                 # Neither server MindRoom runs signals exhaustion this way.
                 # Tuwunel derives `end` from the last event it returned and so
@@ -684,7 +708,7 @@ class ConversationHydrator:
                     logical_messages=logical,
                     prompt_window_messages=self.prompt_window_messages,
                 )
-                return _Walk(events=tuple(events), complete=False, reached_ts=reached)
+                return _Walk(events=tuple(events), complete=False, reached_ts=reached, saw_anchor=saw_anchor)
             start = response.end
 
     async def refresh(self, request: RefreshRequest) -> bool:

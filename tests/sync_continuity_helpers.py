@@ -26,12 +26,17 @@ class RecordedHistoryDebts:
     """
 
     anchor_ts: int = 1_000
+    anchor_event_id: str = "$anchor"
     rooms: list[str] = field(default_factory=list)
 
     async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
         """Record the history a skipped gap left one room owing."""
         self.rooms.append(room_id)
-        return RoomHistoryDebt(room_id=room_id, owed_through_ts=self.anchor_ts)
+        return RoomHistoryDebt(
+            room_id=room_id,
+            owed_through_ts=self.anchor_ts,
+            owed_through_event_id=self.anchor_event_id,
+        )
 
 
 def save_sync_token(

@@ -150,9 +150,17 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
         -- The newest message the projection held when sync gave up on
-        -- rebuilding a gap in this room. Everything the room received after it
-        -- may be missing, so a later history walk that reaches back to this
-        -- timestamp has covered the whole gap. NULL means nothing is owed.
+        -- rebuilding a gap in this room, and the event a walk has to reach to
+        -- prove it covered the whole gap. NULL means nothing is owed.
+        --
+        -- The event and not the timestamp is what proves it. An
+        -- `origin_server_ts` is the sending server's clock and does not have to
+        -- agree with the order this server paginates in, so one skewed event at
+        -- the tip would otherwise satisfy the debt on the first page of a walk
+        -- that never got near the hole. The timestamp is kept because it orders
+        -- two anchors when a second gap is recorded over the first, and because
+        -- it is what an operator reads to see how far back a hole starts.
+        owed_through_event_id TEXT,
         owed_through_ts BIGINT,
         -- A walk finished without reaching the timestamp it owed. The hole is
         -- real and no bounded walk will close it, so this stays set: it is the
@@ -343,6 +351,12 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # twice; the cost is one room scan for a row that is simultaneously
     # unacknowledged, attempted, and older than this column.
     ("response_outbox", "sending_device_id", "TEXT"),
+    # The anchor is what says a debt is outstanding, so a row that predates this
+    # column reads as owing nothing however its timestamp was left. That is the
+    # only direction that terminates: a debt whose anchor cannot be named can
+    # never be proven covered, so honoring it would withhold the room's marker
+    # on every read while no walk could ever settle it.
+    ("room_history_debt", "owed_through_event_id", "TEXT"),
 )
 
 
