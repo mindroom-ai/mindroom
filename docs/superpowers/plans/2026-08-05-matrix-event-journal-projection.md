@@ -2386,6 +2386,8 @@ These are facts about Matrix that no fake can establish, and the harness's own w
 
 `scripts/testing/fuzz_live_matrix.py` runs 200 concurrent operations with periodic restarts against the same stack.
 Its invariant is `_assert_no_wrong_replies`: exactly one reply per source, no strays.
+
+**Pass `--restart-interval` explicitly, or the restarts do not happen.** It defaults to 100 (`fuzz_live_matrix.py:3078`), so the obvious `--steps 200` run produces a single restart and the restart pressure this gate exists for is absent while the run still reports `PASS`. The green run behind this document is `--seed 42 --steps 200 --threads 45 --restart-interval 10`, which produced **18 restarts** across 44 batches; the generator drops the trailing restart once the step budget is spent, which is why it is 18 and not 20. `--profile restart-regression` is a separate fixed profile that ignores this flag.
 **`canonical_agent_replies` is not that check** — it is `len(oracle.expected_sources)`, a count of prompts issued, and comparing it across runs measures the scenario rather than the runtime.
 That number was twice cited in this document as the duplicate gate before anyone read its definition.
 
