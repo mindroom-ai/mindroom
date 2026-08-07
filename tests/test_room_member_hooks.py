@@ -618,20 +618,19 @@ async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
     assert dispatched == ["$dispatch"]
 
 
-@pytest.mark.asyncio
-async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
+def _restored_token_router_bot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The first sync after a restored certified token should emit missed live joins."""
-    seen: list[str] = []
+    room: MagicMock,
+    seen: list[str],
+) -> AgentBot:
+    """Return a router whose first sync restores a certified token."""
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.event_id)
 
     bot = _router_bot(tmp_path)
-    room = _room()
     bot._first_sync_done = False
     bot._room_member_join_hooks_armed = False
     bot._sync_cache_trust.state = SyncTrustState.PENDING
@@ -647,6 +646,42 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
         "cache_sync_timeline_for_certification",
         AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
     )
+    return bot
+
+
+def _record_timeline_lifecycle_dispatches(
+    bot: AgentBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, EventClass]]:
+    """Capture how the timeline walk admits each member event it dispatches."""
+    dispatched: list[tuple[str, EventClass]] = []
+
+    async def admit_and_run(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        kind: EventKind,
+        event_class: EventClass,
+    ) -> None:
+        assert kind is EventKind.ROOM_LIFECYCLE
+        dispatched.append((event.event_id, event_class))
+
+    monkeypatch.setattr(bot._journal_dispatcher, "admit_and_run", admit_and_run)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first sync after a restored certified token should emit missed live joins."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, monkeypatch, room, seen)
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$catchup-join",
+        nio.TimelineEventProvenance.RECOVERED,
+    )
 
     await bot._on_sync_response(
         _sync_response_with_state(
@@ -657,6 +692,114 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
     )
 
     assert seen == ["$catchup-join"]
+
+
+@pytest.mark.asyncio
+async def test_router_leaves_cold_history_sync_timeline_joins_unanswered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A join nio called cold history is context, however the walk reaches it."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, monkeypatch, room, seen)
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$ancient-join",
+        nio.TimelineEventProvenance.HISTORY,
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$ancient-join", prev_membership=None)],
+        ),
+    )
+
+    assert seen == []
+    # Admitted already settled, so no callback will ever claim the parsed
+    # event. Holding it would keep one object per cold-history join forever.
+    assert bot._journal_dispatcher._live_events == {}
+
+
+@pytest.mark.asyncio
+async def test_router_admits_sync_timeline_joins_with_the_class_nio_gave_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each provenance reaches admission as the class it maps to, not a fixed one."""
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, monkeypatch, room, [])
+    provenance = {
+        "$recovered-join": nio.TimelineEventProvenance.RECOVERED,
+        "$live-join": nio.TimelineEventProvenance.LIVE,
+        "$ancient-join": nio.TimelineEventProvenance.HISTORY,
+    }
+    for event_id, recorded in provenance.items():
+        bot._journal_dispatcher.timeline_member_provenance.record(event_id, recorded)
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[
+                _room_member_event(event_id=event_id, user_id=f"@user{index}:localhost", prev_membership=None)
+                for index, event_id in enumerate(provenance)
+            ],
+        ),
+    )
+
+    assert dispatched == [
+        ("$recovered-join", EventClass.ACTIONABLE),
+        ("$live-join", EventClass.ACTIONABLE),
+        ("$ancient-join", EventClass.CONTEXT_ONLY),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_skips_sync_timeline_joins_nio_admitted_on_an_earlier_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No verdict means the event is already journaled, so the walk must not guess one."""
+    seen: list[str] = []
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, monkeypatch, room, seen)
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$already-admitted", prev_membership=None)],
+        ),
+    )
+
+    assert dispatched == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_sync_timeline_member_provenance_does_not_outlive_its_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verdict nio gave one response must not answer for the next one."""
+    room = _room()
+    bot = _restored_token_router_bot(tmp_path, monkeypatch, room, [])
+    bot._journal_dispatcher.timeline_member_provenance.record(
+        "$catchup-join",
+        nio.TimelineEventProvenance.RECOVERED,
+    )
+    dispatched = _record_timeline_lifecycle_dispatches(bot, monkeypatch)
+    join_event = _room_member_event(event_id="$catchup-join", prev_membership=None)
+
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, [], timeline_events=[join_event]))
+    bot._classic_sync_rebuild_pending = True
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, [], timeline_events=[join_event]))
+
+    assert dispatched == [("$catchup-join", EventClass.ACTIONABLE)]
 
 
 @pytest.mark.asyncio

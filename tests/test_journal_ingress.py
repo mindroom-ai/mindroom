@@ -1371,3 +1371,71 @@ async def _eventually(predicate: Callable[[], bool], *, seconds: float = 5.0) ->
         await asyncio.sleep(0.01)
     msg = "The worker never reached the expected state"
     raise AssertionError(msg)
+
+
+def member_event(event_id: str, *, user_id: str = ALICE) -> nio.RoomMemberEvent:
+    """Return a parsed room-member join event."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": user_id,
+            "state_key": user_id,
+            "origin_server_ts": 7_000,
+            "type": "m.room.member",
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
+
+
+class TestTimelineMemberProvenance:
+    """A consumer that runs after the timeline still gets nio's verdict."""
+
+    @pytest.mark.parametrize(
+        ("provenance", "expected"),
+        [
+            (nio.TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
+            (nio.TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
+            (nio.TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
+        ],
+    )
+    async def test_a_declined_member_event_still_states_its_class(
+        self,
+        alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
+        expected: EventClass,
+    ) -> None:
+        """Declining to admit is exactly when a later consumer needs the verdict."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        event = member_event("$join")
+
+        await ingress._admit(room(), event, provenance)
+
+        assert ingress.admission_kind(event) is None
+        assert ingress.timeline_member_event_class(event) is expected
+
+    async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
+        """Nio skips admission for an event it accepted earlier, and silence is the answer."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        assert ingress.timeline_member_event_class(member_event("$join")) is None
+
+    async def test_only_member_events_are_recorded(self, alice: PrincipalStore) -> None:
+        """Nothing else has a consumer that runs later, so nothing else is kept."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+
+        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
+
+        assert ingress.timeline_member_provenance.get("$m") is None
+
+    async def test_clearing_forgets_the_response_that_produced_it(self, alice: PrincipalStore) -> None:
+        """The verdict is about one delivery, so it cannot answer for the next."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        event = member_event("$join")
+        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
+
+        ingress.timeline_member_provenance.clear()
+
+        assert ingress.timeline_member_event_class(event) is None
