@@ -990,27 +990,34 @@ class FakeOutbox:
         )
         return transaction_id
 
-    async def claim_delivery(
-        self,
-        *,
-        turn_id: str,
-        stage: DeliveryStage,
-        device_id: str | None = None,
-    ) -> OutboxDelivery | None:
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Freeze one delivery before any network call, returning its prior state.
 
         The pre-claim row is what comes back, exactly as the real outbox does:
         a caller has to be able to see whether *someone else* attempted this
         and from which device, and reading after the mark would report this
-        attempt back to itself.
+        attempt back to itself. The device is not written here -- claiming does
+        not mean this device is going to send.
         """
         key = (turn_id, stage.value)
         row = self.rows.get(key)
         if row is None:
             return None
         self.attempted.add(key)
-        self.rows[key] = replace(row, attempted=True, sending_device_id=device_id)
+        self.rows[key] = replace(row, attempted=True)
         return row
+
+    async def record_sending_device(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        key = (turn_id, stage.value)
+        if key in self.rows:
+            self.rows[key] = replace(self.rows[key], sending_device_id=device_id)
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Return one delivery without claiming it."""
@@ -1130,15 +1137,19 @@ class DiesAfterAcknowledgement:
         """Return whether a turn still speaks for the room's current membership."""
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def claim_delivery(
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before network I/O and return what to send."""
+        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
+
+    async def record_sending_device(
         self,
         *,
         turn_id: str,
         stage: DeliveryStage,
-        device_id: str | None = None,
-    ) -> OutboxDelivery | None:
-        """Freeze one delivery before network I/O and return what to send."""
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage, device_id=device_id)
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        await self.inner.record_sending_device(turn_id=turn_id, stage=stage, device_id=device_id)
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Return one delivery without claiming it."""

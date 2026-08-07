@@ -113,7 +113,6 @@ def claim(
     *,
     turn_id: str,
     stage: DeliveryStage,
-    device_id: str | None = None,
 ) -> OutboxDelivery | None:
     """Freeze one delivery's content and return the row as it stood.
 
@@ -129,10 +128,14 @@ def claim(
     would report this attempt back to itself and make every resend look like a
     first one.
 
-    ``device_id`` is the device about to do the sending. It is recorded now
-    rather than after a successful send, for the same reason ``attempted`` is:
-    a crash mid-send has to leave behind the fact that this device may already
-    have used the transaction ID.
+    The sending device is deliberately *not* written here. Claiming freezes the
+    payload; it does not mean this device is going to send. When the recorded
+    device differs from this process's, delivery has to read the room before it
+    can send at all, and that lookup can fail. Advancing the marker first would
+    erase the only evidence that the lookup is still owed: the next pass would
+    see its own device, skip the lookup, and post the answer a second time.
+    ``record_sending_device`` is called once the send is actually about to
+    happen.
     """
     row = transaction.fetchone(
         f"""
@@ -145,12 +148,39 @@ def claim(
         return None
     transaction.execute(
         """
-        UPDATE response_outbox SET attempted = 1, sending_device_id = ?
+        UPDATE response_outbox SET attempted = 1
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        """,
+        (principal_id, turn_id, stage.value),
+    )
+    return _delivery(row)
+
+
+def record_sending_device(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    turn_id: str,
+    stage: DeliveryStage,
+    device_id: str | None,
+) -> None:
+    """Record the device whose transaction-ID namespace is about to be used.
+
+    Committed before the network call, for the reason ``attempted`` is: a crash
+    mid-send has to leave behind the fact that this device may already hold the
+    ID, so the next attempt resends rather than reading the room.
+
+    Only ever called on the path that is about to send. A pass that could not
+    determine whether an earlier device's answer reached the room leaves the
+    marker alone, so the lookup stays owed.
+    """
+    transaction.execute(
+        """
+        UPDATE response_outbox SET sending_device_id = ?
         WHERE principal_id = ? AND turn_id = ? AND stage = ?
         """,
         (device_id, principal_id, turn_id, stage.value),
     )
-    return _delivery(row)
 
 
 def acknowledge(

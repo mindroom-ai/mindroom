@@ -188,11 +188,7 @@ class ResponseDelivery:
         asked directly, and an answer already there is adopted instead of sent
         again.
         """
-        claimed = await self.store.claim_delivery(
-            turn_id=turn_id,
-            stage=stage,
-            device_id=self.sending_device_id,
-        )
+        claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
         if claimed is None:
             logger.info("response_delivery_row_withdrawn", turn_id=turn_id, stage=stage.value)
             return None
@@ -203,6 +199,12 @@ class ResponseDelivery:
             if already_delivered is not None:
                 await self.store.acknowledge_delivery(turn_id=turn_id, stage=stage, event_id=already_delivered)
                 return already_delivered
+        # Only now, with a send actually about to happen. Writing this at claim
+        # time instead loses the fact that a lookup is still owed: a room scan
+        # that raises would leave the row unacknowledged but stamped with this
+        # device, and the next pass would see its own marker, skip the lookup
+        # and post the answer twice.
+        await self.store.record_sending_device(turn_id=turn_id, stage=stage, device_id=self.sending_device_id)
         event_id = await self.send(claimed)
         await self.store.acknowledge_delivery(
             turn_id=turn_id,
@@ -217,7 +219,12 @@ class ResponseDelivery:
         Failing to find one is not the same as there not being one, and the
         difference decides between a duplicate and a lost answer. Both are bad;
         a duplicate is the one the user can act on, so a lookup that cannot run
-        sends anyway.
+        at all sends anyway.
+
+        A lookup that runs and *raises* is different: it propagates, the row
+        stays unacknowledged, and -- because the device marker has not moved --
+        the next pass asks the room again. That costs a repeated scan while the
+        homeserver is unreachable, which is the right price for not guessing.
         """
         if self.resolve_delivered is None:
             logger.warning(

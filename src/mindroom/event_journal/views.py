@@ -283,14 +283,18 @@ class OutboxView(Protocol):
         """Return whether a turn still speaks for the room's current membership."""
         ...
 
-    async def claim_delivery(
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before network I/O and return the row as it stood."""
+        ...
+
+    async def record_sending_device(
         self,
         *,
         turn_id: str,
         stage: DeliveryStage,
-        device_id: str | None = None,
-    ) -> OutboxDelivery | None:
-        """Freeze one delivery before network I/O and return the row as it stood."""
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
         ...
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:

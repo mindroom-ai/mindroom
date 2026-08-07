@@ -1024,14 +1024,15 @@ class TestSchemaUpgrade:
                 payload=text("answer"),
             )
 
-            claimed = await alice.claim_delivery(
+            claimed = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+            assert claimed is not None
+            assert claimed.sending_device_id is None
+            assert not claimed.attempted
+            await alice.record_sending_device(
                 turn_id="turn-1",
                 stage=DeliveryStage.FINAL,
                 device_id="DEVICE1",
             )
-            assert claimed is not None
-            assert claimed.sending_device_id is None
-            assert not claimed.attempted
 
             stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
             assert stored is not None
@@ -1561,8 +1562,9 @@ class TestOutbox:
             thread_id=None,
             payload=text("sent"),
         )
-        first = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
-        second = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
+        first = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.record_sending_device(turn_id="turn-1", stage=DeliveryStage.FINAL, device_id="DEVICE1")
+        second = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert first is not None
         assert second is not None
 

@@ -473,16 +473,27 @@ class PrincipalStore:
             ),
         )
 
-    async def claim_delivery(
+    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+        """Freeze one delivery before network I/O and return the row as it stood."""
+        return await self._backend.write(
+            lambda transaction: outbox.claim(
+                transaction,
+                self._principal_id,
+                turn_id=turn_id,
+                stage=stage,
+            ),
+        )
+
+    async def record_sending_device(
         self,
         *,
         turn_id: str,
         stage: DeliveryStage,
-        device_id: str | None = None,
-    ) -> OutboxDelivery | None:
-        """Freeze one delivery before network I/O and return what to send."""
-        return await self._backend.write(
-            lambda transaction: outbox.claim(
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        await self._backend.write(
+            lambda transaction: outbox.record_sending_device(
                 transaction,
                 self._principal_id,
                 turn_id=turn_id,

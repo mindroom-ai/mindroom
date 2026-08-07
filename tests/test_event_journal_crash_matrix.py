@@ -961,12 +961,13 @@ class TestARelogInCannotDuplicateTheAnswer:
             payload={"msgtype": "m.text", "body": "answer"},
             edits_event_id="$placeholder",
         )
-        claimed = await runtime.store.claim_delivery(
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        await runtime.store.record_sending_device(
             turn_id=SOURCE,
             stage=DeliveryStage.FINAL,
             device_id="DEVICE1",
         )
-        assert claimed is not None
 
         runtime.homeserver.device_id = "DEVICE2"
         outcome = await runtime.delivery.recover()
@@ -974,16 +975,21 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert outcome.recovered == 1
         assert runtime.homeserver.room_scans == 0
 
-    async def test_the_claim_records_the_device_that_is_about_to_send(
+    async def test_the_device_is_recorded_before_the_send_but_not_at_the_claim(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """Recorded before the network call, for the reason `attempted` is.
+        """Two different moments, and the gap between them is load-bearing.
 
-        A crash during the send has to leave behind the fact that *this*
-        device may already hold the transaction ID. Writing the device only
-        after a successful send would lose exactly the case the row exists to
-        survive.
+        The marker has to be committed before the network call, for the reason
+        `attempted` is: a crash during the send must leave behind the fact that
+        this device may already hold the transaction ID.
+
+        It must not be committed at the claim. Claiming does not mean this
+        device is going to send -- when the recorded device differs, delivery
+        reads the room first, and that read can fail. Stamping the marker
+        before knowing erases the evidence that the read is still owed, and the
+        next pass then sees its own device and sends blind.
         """
         await runtime.store.enqueue_delivery(
             turn_id=SOURCE,
@@ -997,19 +1003,66 @@ class TestARelogInCannotDuplicateTheAnswer:
         assert not before.attempted
         assert before.sending_device_id is None
 
-        claimed = await runtime.store.claim_delivery(
-            turn_id=SOURCE,
-            stage=DeliveryStage.FINAL,
-            device_id="DEVICE1",
-        )
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
         assert claimed is not None
         assert not claimed.attempted, "a claim reports the state it took over, not the one it wrote"
         assert claimed.sending_device_id is None
 
-        after = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
-        assert after is not None
-        assert after.attempted
-        assert after.sending_device_id == "DEVICE1"
+        after_claim = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert after_claim is not None
+        assert after_claim.attempted, "the claim froze the payload"
+        assert after_claim.sending_device_id is None, "the claim stamped a device it had not committed to"
+
+        await runtime.store.record_sending_device(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            device_id="DEVICE1",
+        )
+        before_send = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert before_send is not None
+        assert before_send.sending_device_id == "DEVICE1"
+
+    async def test_a_room_scan_that_raises_leaves_the_lookup_still_owed(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """The marker must not move for a send that never happened.
+
+        Matrix accepted D1's answer and the acknowledgement was lost, so the
+        row looks exactly like one that never arrived. Recovery under D2 has to
+        read the room, and here the read fails -- the homeserver is briefly
+        unreachable.
+
+        If the claim had already stamped the row D2, the next pass would
+        compare D2 against D2, conclude the transaction ID still protects it,
+        and send. The user would see the answer twice. Leaving the marker where
+        it was keeps the lookup owed, and the cost is that the next pass scans
+        again.
+        """
+        await admit(runtime.store)
+        runtime.homeserver.lose_acknowledgement = True
+        await runtime.worker().drain_once()
+        assert runtime.homeserver.visible_messages == 1
+
+        scans = 0
+
+        async def unreachable(_delivery: OutboxDelivery) -> str | None:
+            nonlocal scans
+            scans += 1
+            msg = "the homeserver could not be reached"
+            raise CrashError(msg)
+
+        runtime.homeserver.device_id = "DEVICE2"
+        recovery = replace(runtime.delivery, resolve_delivered=unreachable)
+
+        assert (await recovery.recover()).failed == 1
+        stranded = await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.FINAL)
+        assert stranded is not None
+        assert stranded.sending_device_id == "DEVICE1", "a failed lookup took ownership of the row"
+
+        assert (await recovery.recover()).failed == 1
+        assert scans == 2, "the second pass skipped the lookup it still owed"
+        assert runtime.homeserver.visible_messages == 1, "the answer was posted twice"
 
     async def test_a_failing_resend_scans_the_room_once_per_relogin(
         self,
