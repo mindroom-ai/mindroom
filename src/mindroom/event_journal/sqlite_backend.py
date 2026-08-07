@@ -9,6 +9,7 @@ than of a timeout being long enough.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
+from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, Dialect, add_column_statement, added_columns, render, schema_statements
 
 if TYPE_CHECKING:
@@ -75,6 +77,7 @@ class SqliteBackend:
     _closed: bool = field(default=False, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
 
     @property
     def dialect(self) -> Dialect:
@@ -128,8 +131,9 @@ class SqliteBackend:
     def _reader(self) -> sqlite3.Connection:
         connection = getattr(self._readers, "connection", None)
         if connection is None:
-            # Used only by its owning pool thread while open; `close()` runs
-            # after reads have stopped, from whichever thread closes the store.
+            # Used only by its owning pool thread while open. `close()` drains
+            # every offloaded read before closing these, so no statement is
+            # ever executing on one when the closing thread reaches it.
             connection = sqlite3.connect(
                 self.database_path,
                 isolation_level=None,
@@ -145,19 +149,25 @@ class SqliteBackend:
         while True:
             queued = await self._queue.get()
             try:
-                result = await asyncio.to_thread(self._apply, queued.operation)
-            except asyncio.CancelledError:
-                if not queued.future.done():
-                    queued.future.cancel()
-                raise
-            except BaseException as error:
-                if not queued.future.done():
-                    queued.future.set_exception(error)
-            else:
-                if not queued.future.done():
-                    queued.future.set_result(result)
+                await self._settle(queued)
             finally:
                 self._queue.task_done()
+
+    async def _settle(self, queued: _QueuedWrite) -> None:
+        """Run one queued write and hand its caller what the statement did.
+
+        The outcome is reported from the worker's own future rather than from
+        how this await ended, because those are different questions: a
+        cancellation reaches the await and never reaches the thread.
+        """
+        work = self._offload.submit(lambda: self._apply(queued.operation))
+        try:
+            # A failed write belongs to its caller's future, not to the writer
+            # task, which has to survive it to run the write after it.
+            with contextlib.suppress(Exception):
+                await settled(work)
+        finally:
+            _report(queued.future, work)
 
     def _apply[T](self, operation: Operation[T]) -> T:
         self._writer.execute("BEGIN IMMEDIATE")
@@ -177,7 +187,10 @@ class SqliteBackend:
         queue = self._ensure_writer_task()
         future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
         await queue.put(_QueuedWrite(operation=operation, future=future))
-        return await future
+        # Cancelling this await must not report an outcome the writer has not
+        # reached yet: the statement runs on a thread regardless, so the caller
+        # learns how it ended before its cancellation propagates.
+        return await settled(future)
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
@@ -188,13 +201,24 @@ class SqliteBackend:
         def apply() -> T:
             return self._apply_read(operation)
 
-        return await asyncio.to_thread(apply)
+        return await self._offload.run(apply)
 
     def _apply_read[T](self, operation: Operation[T]) -> T:
         return operation(_SqliteTransaction(self._reader()))
 
     async def close(self) -> None:
-        """Stop the writer task and close every connection."""
+        """Stop the writer task and close every connection.
+
+        Cancelling the writer task is safe only because ``_settle`` refuses to
+        return while its worker thread is still executing: the cancellation
+        ends the task after that statement, not during it. Awaiting the task is
+        therefore also how this waits for the write in flight, and closing the
+        connection cannot land underneath a live ``BEGIN IMMEDIATE`` -- which
+        SQLite answers with a segmentation fault rather than an exception.
+
+        Reads are not the writer task's to finish, so they are drained
+        separately before the connections they run on are closed.
+        """
         if self._closed:
             return
         self._closed = True
@@ -212,12 +236,25 @@ class SqliteBackend:
             if not queued.future.done():
                 queued.future.set_exception(RuntimeError("The event-journal store is closed"))
             queue.task_done()
+        await self._offload.drain()
         await asyncio.to_thread(self._writer.close)
         with self._reader_lock:
             readers = tuple(self._open_readers)
             self._open_readers.clear()
         for reader in readers:
             await asyncio.to_thread(reader.close)
+
+
+def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:
+    """Give the waiting caller the worker's own outcome."""
+    if future.done():
+        return
+    if work.cancelled():
+        future.cancel()
+    elif (error := work.exception()) is not None:
+        future.set_exception(error)
+    else:
+        future.set_result(work.result())
 
 
 @dataclass(slots=True)

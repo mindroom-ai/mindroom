@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .offloading import ThreadOffload
 from .schema import POSTGRES_DIALECT, Dialect, add_column_statement, added_columns, render, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
@@ -78,6 +79,7 @@ class PostgresBackend:
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
 
     @property
     def dialect(self) -> Dialect:
@@ -133,7 +135,15 @@ class PostgresBackend:
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a serialized write transaction and commit it."""
+        """Run one operation in a serialized write transaction and commit it.
+
+        The lock is what makes the shared writer connection safe, so it may not
+        be released while a statement is still executing on that connection.
+        A bare ``await asyncio.to_thread`` released it on cancellation: the next
+        write then ran inside the cancelled one's still-open transaction, and
+        whichever of the two reached ``commit`` or ``rollback`` first decided
+        the fate of both.
+        """
         if self._closed:
             msg = "The event-journal store is closed"
             raise RuntimeError(msg)
@@ -142,7 +152,12 @@ class PostgresBackend:
             return self._apply_write(operation)
 
         async with self._writer_lock:
-            return await asyncio.to_thread(apply)
+            # Waiting for the lock is a suspension, so the store may have been
+            # closed since the check above and this connection may be gone.
+            if self._closed:
+                msg = "The event-journal store is closed"
+                raise RuntimeError(msg)
+            return await self._offload.run(apply)
 
     def _apply_write[T](self, operation: Operation[T]) -> T:
         try:
@@ -155,7 +170,12 @@ class PostgresBackend:
         return result
 
     async def read[T](self, operation: Operation[T]) -> T:
-        """Run one operation on a pooled reader."""
+        """Run one operation on a pooled reader.
+
+        The connection goes back to the pool only once its statement has
+        stopped. Returning it while a cancelled read's thread was still using
+        it handed a live connection to the next reader.
+        """
         if self._closed:
             msg = "The event-journal store is closed"
             raise RuntimeError(msg)
@@ -165,7 +185,12 @@ class PostgresBackend:
             return self._apply_read(connection, operation)
 
         try:
-            return await asyncio.to_thread(apply)
+            # An exhausted pool makes the line above a suspension, so the store
+            # may have been closed while this read waited for a connection.
+            if self._closed:
+                msg = "The event-journal store is closed"
+                raise RuntimeError(msg)
+            return await self._offload.run(apply)
         finally:
             self._readers_queue().put_nowait(connection)
 
@@ -181,10 +206,17 @@ class PostgresBackend:
             connection.rollback()
 
     async def close(self) -> None:
-        """Close every connection this backend owns."""
+        """Close every connection this backend owns, once nothing is using one.
+
+        Setting the closed flag first stops any further statement from
+        starting; draining then waits for the ones already on worker threads,
+        because closing a connection under a running statement is how psycopg
+        reports someone else's cancellation as this caller's broken connection.
+        """
         if self._closed:
             return
         self._closed = True
+        await self._offload.drain()
         for connection in (self._writer, *self._pool):
             await asyncio.to_thread(connection.close)
         self._pool.clear()

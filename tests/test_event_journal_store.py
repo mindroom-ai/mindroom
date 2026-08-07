@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -72,6 +72,38 @@ DEVICE = "SENDINGDEVICE"
 # round trip it covers, and only ever paid when the second claimer is blocked --
 # which is the fix working.
 _CONTENDED_CLAIM_WAIT_SECONDS = 0.5
+
+# How long an await that must not finish yet is given to finish anyway before
+# the test concludes it cannot. Paid in full only when the backend is correct,
+# which is why it is small: an implementation that releases early gets there in
+# microseconds, so no plausible machine turns a real failure into a pass.
+_MUST_NOT_FINISH_SECONDS = 0.25
+# How long a worker thread waits to be let go. Never reached unless the test is
+# already failing, so it only bounds the damage.
+_WORKER_WAIT_SECONDS = 5.0
+
+# A statement against a real table, so the connection a test's operation holds
+# is genuinely in use rather than merely borrowed.
+_INSERT_MEMBERSHIP = "INSERT INTO room_membership (principal_id, room_id, membership_epoch) VALUES (?, ?, ?)"
+
+
+async def _finished_within_grace(work: asyncio.Task[object]) -> bool:
+    """Give ``work`` every chance to finish and report whether it did.
+
+    Shielded, so waiting cannot itself cancel the thing being watched, and the
+    outcome is read off the task rather than off what the wait raised.
+    """
+    with suppress(asyncio.CancelledError, Exception):
+        await asyncio.wait_for(asyncio.shield(work), _MUST_NOT_FINISH_SECONDS)
+    return work.done()
+
+
+async def _membership_principals(store: EventJournalStore) -> list[str]:
+    """Return the membership rows a backend test wrote, straight off the backend."""
+    rows = await store.backend.read(
+        lambda transaction: transaction.fetchall("SELECT principal_id FROM room_membership"),
+    )
+    return sorted(str(row["principal_id"]) for row in rows)
 
 
 @pytest.fixture
@@ -2364,6 +2396,192 @@ class TestConcurrency:
 
         assert results.count(AdmissionResult.ADMITTED) == 1
         assert [event.event_id for event in await alice.pending()] == ["$contended"]
+
+
+class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
+    """A cancelled await cannot stop a worker thread, so it must not hand on what that thread is using.
+
+    Every backend statement runs on an ``asyncio.to_thread`` worker no
+    cancellation can reach. What each rule below pins is one thing the await
+    was holding while the thread ran -- the writer lock, a pooled connection,
+    a connection about to be closed -- and that none of them may change hands
+    until the statement has actually stopped.
+
+    Nothing here substitutes anything for ``to_thread``: the crash these guard
+    against is a real connection being taken away from a real statement, and a
+    faked worker has no connection to take away.
+    """
+
+    async def test_closing_the_store_waits_for_a_write_already_on_a_worker_thread(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Closing the store must not close the connection a write is executing on.
+
+        Closing is not only a shutdown path -- a bot closes its store on every
+        config reload -- so this is a routine edit landing while a turn is
+        being written. SQLite answers a connection closed underneath a live
+        statement with a segmentation fault rather than an exception, which
+        takes the whole process with it.
+        """
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
+            running.set()
+            while not release.is_set():
+                # Genuinely executing, not parked: a connection closed under a
+                # statement in flight is the shape that crashes.
+                transaction.fetchall("SELECT 1 AS one")
+            return "landed"
+
+        writing = asyncio.create_task(journal_store.backend.write(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(journal_store.close())
+        closed_early = await _finished_within_grace(closing)
+        release.set()
+        await closing
+
+        assert not closed_early, "close() returned while a write was still executing on the connection"
+        assert await writing == "landed"
+
+    async def test_closing_the_store_waits_for_a_read_already_on_a_worker_thread(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A close that drains only the writer leaves the same crash reachable from a read.
+
+        Reads run on their own connections, which ``close()`` closes too, so
+        the reader path owns this rule separately from the writer path.
+        """
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            running.set()
+            while not release.is_set():
+                transaction.fetchall("SELECT 1 AS one")
+            return "read"
+
+        reading = asyncio.create_task(journal_store.backend.read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(journal_store.close())
+        closed_early = await _finished_within_grace(closing)
+        release.set()
+        await closing
+
+        assert not closed_early, "close() returned while a read was still executing on the connection"
+        assert await reading == "read"
+
+    async def test_a_cancelled_write_does_not_return_while_its_statement_runs(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A cancelled write owns its transaction until the transaction ends.
+
+        Returning early is what lets the caller's next act -- releasing the
+        writer lock, or closing the connection -- happen behind a statement
+        that is still running.
+        """
+        running = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow(transaction: Transaction) -> str:
+            transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
+            running.set()
+            release.wait(_WORKER_WAIT_SECONDS)
+            finished.set()
+            return "landed"
+
+        writing = asyncio.create_task(journal_store.backend.write(slow))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        writing.cancel()
+        returned_early = await _finished_within_grace(writing)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await writing
+
+        assert not returned_early, "the cancelled write returned while its statement was still running"
+        assert finished.is_set()
+
+    async def test_a_cancelled_read_does_not_return_while_its_statement_runs(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A cancelled read owns its connection until its statement ends.
+
+        On a pooled backend the connection goes back to the pool the moment
+        this returns, so returning early hands a live connection to whoever
+        reads next.
+        """
+        running = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow(transaction: Transaction) -> str:
+            transaction.fetchall("SELECT 1 AS one")
+            running.set()
+            release.wait(_WORKER_WAIT_SECONDS)
+            finished.set()
+            return "read"
+
+        reading = asyncio.create_task(journal_store.backend.read(slow))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        reading.cancel()
+        returned_early = await _finished_within_grace(reading)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+
+        assert not returned_early, "the cancelled read returned while its statement was still running"
+        assert finished.is_set()
+
+    async def test_a_cancelled_write_keeps_the_next_write_out_of_its_transaction(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The next write must not execute inside a cancelled write's open transaction.
+
+        Two writes sharing one transaction corrupt each other in both
+        directions, and both were observed: the second write committed the
+        first one's statements along with its own, and the first write's
+        ``rollback`` threw away a second write that had already reported
+        success to its caller. On a durable turn ledger either one means a
+        message answered twice or an answer that was never recorded.
+        """
+        first_running = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+
+        def first(transaction: Transaction) -> str:
+            transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
+            first_running.set()
+            release_first.wait(_WORKER_WAIT_SECONDS)
+            msg = "the cancelled write fails"
+            raise RuntimeError(msg)
+
+        def second(transaction: Transaction) -> str:
+            second_started.set()
+            transaction.execute(_INSERT_MEMBERSHIP, ("agent@bob", OTHER_ROOM, 1))
+            return "second landed"
+
+        cancelled = asyncio.create_task(journal_store.backend.write(first))
+        await asyncio.to_thread(first_running.wait, _WORKER_WAIT_SECONDS)
+        cancelled.cancel()
+        following = asyncio.create_task(journal_store.backend.write(second))
+        await _finished_within_grace(following)
+        trespassed = second_started.is_set()
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        assert not trespassed, "the next write ran inside the cancelled write's still-open transaction"
+        assert await following == "second landed"
+        assert await _membership_principals(journal_store) == ["agent@bob"], (
+            "the failed write's rows survived, or the successful write's rows did not"
+        )
 
 
 class TestConnectionSecretsStayOutOfLogs:
