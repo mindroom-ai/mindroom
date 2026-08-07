@@ -56,7 +56,7 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
 
 
 def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics() -> None:
-    """Page-local root proof should count only non-root children of the candidate thread."""
+    """Page-local root proof counts only non-root children carrying a native thread relation."""
     thread_root_id = "$thread-root:localhost"
     explicit_child = _message_event_info(
         {
@@ -125,7 +125,11 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
         event_id="$reply:localhost",
         event_info=explicit_child,
     )
-    assert _page_event_info_counts_as_thread_child_proof(
+    # An edit naming the candidate inside its ``m.new_content`` proves nothing about it. That
+    # relation is ignored when the replacement is applied, and the edit is placed by the event it
+    # replaces - which is `$reply:localhost`, not the candidate. Counting it would let one
+    # replacement promote any relation-free message in the page into a thread root.
+    assert not _page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$reply-edit:localhost",
         event_info=edit_child,

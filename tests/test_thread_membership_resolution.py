@@ -429,6 +429,202 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id is None
 
     @pytest.mark.asyncio
+    async def test_edit_resolves_through_its_original_not_the_thread_it_names(
+        self,
+    ) -> None:
+        """The thread inside an edit's ``m.new_content`` loses to the thread of the event it edits.
+
+        Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
+        every ``m.relates_to`` written there, so that value is a claim its author chose. Answering
+        from it would let anyone who can edit a message declare which conversation the edit joins.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return "$real_thread:localhost" if event_id == original_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            if event_id != original_id:
+                return None
+            return EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "original",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$real_thread:localhost"},
+                    },
+                    "event_id": original_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            edit_event_info,
+            event_id="$edit:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == "$real_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_walking_onto_an_edit_keeps_walking_to_the_message_it_replaces(
+        self,
+    ) -> None:
+        """Reaching an edit mid-walk resolves the edited message, not the thread the edit names.
+
+        Implied membership makes this reachable from any plain reply or reaction: the walk lands on
+        a replacement, and the replacement's ``m.new_content`` is the one relation on the path that
+        Matrix throws away. The hop to the original is what the walk exists for.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_id = "$edit:localhost"
+        reply_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "a reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": edit_id}},
+                },
+                "event_id": "$reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 3,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": edit_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return "$real_thread:localhost" if event_id == original_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return edit_event_info if event_id == edit_id else None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            reply_event_info,
+            event_id="$reply:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == "$real_thread:localhost"
+
+    @pytest.mark.asyncio
+    async def test_edit_of_an_unreadable_original_is_indeterminate_not_the_thread_it_names(
+        self,
+    ) -> None:
+        """An edit whose original nobody can read is unplaced, not placed where the edit says.
+
+        This is the case the claim used to answer, and answering it is exactly what an outsider
+        wants: the original is the only authority, and it is unavailable. Fail closed on the
+        candidate so dispatch coalesces and retries rather than acting on an attacker's choice.
+        """
+        room_id = "!test:localhost"
+        original_id = "$original:localhost"
+        edit_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "* updated",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "updated",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+                "event_id": "$edit:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            edit_event_info,
+            event_id="$edit:localhost",
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.thread_id is None
+        assert resolution.candidate_thread_root_id == original_id
+
+    @pytest.mark.asyncio
     async def test_related_thread_resolution_marks_event_lookup_failure_indeterminate(
         self,
     ) -> None:

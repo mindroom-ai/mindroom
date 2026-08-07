@@ -11,11 +11,15 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 1. An event is THREADED if and only if one of the following holds:
    it carries a native ``m.thread`` relation (``EventInfo.thread_id``);
-   it is an edit whose ``m.new_content`` carries an ``m.thread`` relation (``thread_id_from_edit``);
-   a relation walk from it reaches an event satisfying either of the above;
+   a relation walk from it reaches an event carrying one;
    or the walk terminates at a relation-free event that is proven to have at least one real threaded child,
    in which case that terminal event is itself the thread root.
    Per MSC3440 only relation-free events (``can_be_thread_root``) may become roots.
+   An ``m.thread`` relation written inside an edit's ``m.new_content`` (``EventInfo
+   .thread_id_from_edit``) is never one of those things. Matrix applies ``m.new_content`` by
+   keeping the original event's relation and ignoring every ``m.relates_to`` found there, so an
+   edit is placed by the event it replaces: the walk hops to that original and resolves it, and an
+   original nobody can read is INDETERMINATE like any other unavailable relation target.
 
 2. The relation walk follows ``EventInfo.next_related_event_id``: edit original, then reaction target,
    then ``m.reference`` target, then reply target.
@@ -242,9 +246,8 @@ async def resolve_event_thread_membership(
     allow_current_root: bool = False,
 ) -> ThreadResolution:
     """Return canonical thread membership for one event."""
-    explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
-    if explicit_thread_id is not None:
-        return ThreadResolution._threaded(explicit_thread_id)
+    if event_info.thread_id is not None:
+        return ThreadResolution._threaded(event_info.thread_id)
     related_event_id = event_info.next_related_event_id("")
     if related_event_id is not None:
         return await resolve_related_event_thread_membership(
@@ -295,9 +298,8 @@ async def resolve_related_event_thread_membership(
             )
             break
 
-        thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
-        if thread_id is not None:
-            resolution = ThreadResolution._threaded(thread_id)
+        if related_event_info.thread_id is not None:
+            resolution = ThreadResolution._threaded(related_event_info.thread_id)
             break
 
         next_target = _next_related_event_target(
@@ -372,16 +374,16 @@ def _page_event_info_counts_as_thread_child_proof(
     event_id: str,
     event_info: EventInfo,
 ) -> bool:
-    """Return whether one page-local event proves a root has thread children."""
+    """Return whether one page-local event proves a root has thread children.
+
+    Only a native ``m.thread`` relation counts. An edit naming the candidate inside its
+    ``m.new_content`` is not a child of it - that relation is ignored on application, and the edit
+    is placed by the event it replaces - so believing it would let one replacement promote any
+    relation-free message in the page into a thread root.
+    """
     if event_id == thread_root_id or not event_type_supports_thread_relations(event_info.event_type):
         return False
-    return any(
-        candidate_thread_id == thread_root_id
-        for candidate_thread_id in (
-            event_info.thread_id,
-            event_info.thread_id_from_edit,
-        )
-    )
+    return event_info.thread_id == thread_root_id
 
 
 def _is_thread_root_not_found_error(error: Exception) -> bool:

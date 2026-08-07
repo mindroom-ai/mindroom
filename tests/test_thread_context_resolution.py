@@ -100,8 +100,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_uses_thread_from_new_content(self, bot: AgentBot) -> None:
-        """Edit events should resolve thread context from m.new_content thread relation."""
+    async def test_extract_context_edit_ignores_the_thread_its_new_content_names(self, bot: AgentBot) -> None:
+        """An edit is placed by the message it edits, not by the thread it names inside itself.
+
+        Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
+        every ``m.relates_to`` written there, so the thread named inside an edit is a claim its
+        author chose. Reading it would let anyone who can edit a message move the conversation it
+        belongs to - here into a thread the edited message was never part of.
+        """
         room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
@@ -112,7 +118,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     "m.new_content": {
                         "body": "updated",
                         "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed_thread:localhost"},
                     },
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_msg:localhost"},
                 },
