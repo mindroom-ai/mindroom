@@ -77,7 +77,15 @@ Implementation, traced end to end:
 
 **Steps 1-5 were built once and reverted, and the reason matters.** The production wiring applies and imports cleanly, and `tests/test_streaming_behavior.py` then fails with `assert None == '$stream_1'` and `assert None == '$response'` — the streamed delivery produces no event ID. Those tests were green immediately before the change, so it introduces the failure.
 
-**The error, read rather than inferred**, is `TypeError: ... unexpected keyword argument 'final_text_transform'`, surfacing as `FinalDeliveryOutcome(terminal_status='error', event_id=None)`. So the failure is a constructor rejecting the new field, not anything about the transform's behaviour — and the delivery reports `error` rather than raising, which is why it reads as a bare assertion on a missing event ID.
+**The change has now been built to completion once and reverted at the last step. It works.** What follows is measured, not projected.
+
+The rejecting constructor was neither `StreamingResponse` nor a test double: it is the module-level entry point in `streaming.py` (~`:1830`) that the gateway calls, which lists `terminal_edit`, `terminal_send` and `transport_is_current` explicitly and forwards them to `streaming_cls(...)`. It needs `final_text_transform` in its signature and in that call. With that added, **`tests/test_streaming_behavior.py` passes.**
+
+Removing the post-hoc edit then cascades in a way worth knowing in advance: deleting the transform block orphans the `try:` that wrapped it (drop the wrapper and dedent, the guard it protected needs no protection), which orphans `_finalize_visible_replacement_edit` — vulture catches it, and deleting it is correct, since removing the second edit is the entire point. `FinalTextTransform` also has to join `streaming.py`'s `__all__`.
+
+**Exactly three tests then fail, and they are the migration:** `test_streamed_success_allows_one_final_response_transform`, `test_streamed_success_noop_final_transform_keeps_visible_stream_text`, and `test_streamed_success_noop_final_transform_uses_matching_visible_interactive_metadata`. All three construct `StreamingDeliveryRequest` without `identity`, so the transform is `None` and the hook is never awaited — `Awaited 0 times`. They assert the old post-hoc mechanism and must be rewritten to pass `identity` and to assert the transformed text arrives in the *terminal payload* rather than in a following edit. That is the whole remaining task.
+
+**The error that led here, read rather than inferred**, is `TypeError: ... unexpected keyword argument 'final_text_transform'`, surfacing as `FinalDeliveryOutcome(terminal_status='error', event_id=None)`. So the failure is a constructor rejecting the new field, not anything about the transform's behaviour — and the delivery reports `error` rather than raising, which is why it reads as a bare assertion on a missing event ID.
 
 Note what this rules out: the field *is* declared on `StreamingResponse` (beside `terminal_edit` and `terminal_send`), and the test subclasses take `**kwargs` and pass them through, so neither is the rejecting constructor. Identify which one is before changing anything else; there is a second construction path in play that the five-step reading did not account for.
 
