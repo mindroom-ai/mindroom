@@ -314,6 +314,11 @@ class _ActiveApprovalSend:
     done_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     send_task: asyncio.Future[SentApprovalEvent | None]
+    # The row this send belongs to. The claim is durable before the send
+    # starts and the live waiter is built out of what the send returns, so for
+    # the length of the send this is the only thing that says the row is
+    # spoken for.
+    transaction_id: str
 
 
 class _ApprovalManager:
@@ -510,6 +515,26 @@ class _ApprovalManager:
         concerned and retrying would reach the same answer, so counting it as
         owed would keep the sweep asking forever.
         """
+        if self._send_is_in_flight(claimed.transaction_id):
+            # A row whose send has not come back is indistinguishable, from
+            # here, from one a dead process abandoned: claimed, no event id,
+            # and claimed by a device this process can still present from. The
+            # live waiter that would say otherwise is built out of the send's
+            # own return value, so it does not exist yet.
+            #
+            # Acting on it presents the transaction a second time -- which is
+            # a second card in the room whenever the homeserver has not yet
+            # seen the first, exactly the case a send still in flight
+            # describes -- and then expires the answer its caller is waiting
+            # for. Nothing is owed here, so this is not a failure either;
+            # counting it would have the sweep return for a card that is
+            # already in hand.
+            logger.debug(
+                "approval_startup_card_skipped_send_in_flight",
+                room_id=room_id,
+                transaction_id=claimed.transaction_id,
+            )
+            return None
         identified = await self._identified_card(room_id, claimed)
         if identified.card is None:
             return None if identified.settled else False
@@ -702,6 +727,7 @@ class _ApprovalManager:
             done_future=Future(),
             owner_loop=asyncio.get_running_loop(),
             send_task=send_task,
+            transaction_id=transaction_id,
         )
         with self._live_lock:
             self._active_approval_sends.add(active_send)
@@ -1488,6 +1514,11 @@ class _ApprovalManager:
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
         return has_waiters or has_active_sends or has_cleanup_tasks
+
+    def _send_is_in_flight(self, transaction_id: str) -> bool:
+        """Return whether a live request is between claiming this row and binding to it."""
+        with self._live_lock:
+            return any(send.transaction_id == transaction_id for send in self._active_approval_sends)
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:

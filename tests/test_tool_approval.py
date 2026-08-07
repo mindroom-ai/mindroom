@@ -3323,6 +3323,105 @@ async def test_discard_pending_on_startup_expires_card_older_than_approval_timeo
 
 
 @pytest.mark.asyncio
+async def test_a_sweep_leaves_alone_a_card_whose_send_has_not_come_back(tmp_path: Path) -> None:
+    """The row is durable before the send, and the waiter only exists after it.
+
+    In between, the row looks exactly like one a dead process abandoned:
+    claimed, no event id, claimed by a device this process can still present
+    from. Nothing else marks it as spoken for, because the live waiter that
+    would is created out of the send's own return value.
+
+    A sweep landing in that window presents the transaction again -- which
+    posts a second card whenever the homeserver has not yet seen the first --
+    and then expires it. The request that is still inside its send goes on to
+    bind a waiter to a card the room already shows as expired, and blocks
+    until its own timeout for an answer no one can now give.
+
+    This used to be a startup-only window. It stopped being one when the sweep
+    gained a retry that runs during ordinary operation.
+    """
+    cards = FakeApprovalCards()
+    editor = AsyncMock(return_value=True)
+    sending = asyncio.Event()
+    finish_send = asyncio.Event()
+    sends: list[str] = []
+
+    async def sender(
+        room_id: str,  # noqa: ARG001 - matches the transport signature
+        thread_id: str | None,  # noqa: ARG001 - matches the transport signature
+        content: dict[str, Any],  # noqa: ARG001 - matches the transport signature
+        transaction_id: str,
+    ) -> SentApprovalEvent:
+        sends.append(transaction_id)
+        if len(sends) == 1:
+            sending.set()
+            await finish_send.wait()
+        # What the homeserver does with a repeat of a transaction it has
+        # already accepted, which is the kindest case for the sweep.
+        return SentApprovalEvent("$card")
+
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    request = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    async with asyncio.timeout(5):
+        await sending.wait()
+
+    sweep = await store.discard_pending_on_startup()
+
+    # Not this sweep's row: it belongs to a request that has not finished
+    # sending it. Not a failure either -- nothing is owed, so counting it
+    # would keep the sweep coming back for a card that is doing fine.
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    assert sends == [transaction_id_for_approval(cards)]
+    editor.assert_not_awaited()
+
+    finish_send.set()
+    pending = await _wait_for_pending(store, approval_id=_only_claimed_approval_id(cards))
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await asyncio.wait_for(request, timeout=5)
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+
+
+def _only_claimed_approval_id(cards: FakeApprovalCards) -> str:
+    """Return the approval id of the single card the store is holding."""
+    (row,) = cards.rows.values()
+    return str(row.card["content"]["approval_id"])
+
+
+def transaction_id_for_approval(cards: FakeApprovalCards) -> str:
+    """Return the transaction the single claimed card was sent under."""
+    (transaction_id,) = cards.rows
+    return transaction_id
+
+
+@pytest.mark.asyncio
 async def test_a_page_of_undeliverable_cards_does_not_starve_the_ones_behind_it(tmp_path: Path) -> None:
     """A card whose edit failed keeps its row, so the scan has to advance past it.
 

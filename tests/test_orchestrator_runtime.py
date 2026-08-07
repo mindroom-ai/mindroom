@@ -1889,6 +1889,68 @@ class TestMultiAgentOrchestrator:
         assert waits[0] < waits[3]
 
     @pytest.mark.asyncio
+    async def test_shutdown_stands_down_a_retry_caught_part_way_through_a_sweep(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The retry holds the cleanup lock while it sweeps, and shutdown still has to win.
+
+        Cancelling a sleeping retry is the easy half. A retry that has woken up
+        is inside the sweep, holding the lock, with the cancellation having to
+        travel through the store call it is waiting on -- and the sweep's own
+        error handling is broad. If anything swallowed it the task would
+        outlive the runtime that is tearing down around it.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        transport = orchestrator._approval_transport
+        sweeps_started = 0
+        retry_is_sweeping = asyncio.Event()
+        never_finishes = asyncio.Event()
+
+        async def _sweep() -> ApprovalStartupSweep:
+            nonlocal sweeps_started
+            sweeps_started += 1
+            # The first sweep is the startup gate's; the second is the retry's,
+            # and it is held open so the cancellation lands inside it.
+            if sweeps_started >= 2:
+                retry_is_sweeping.set()
+                await never_finishes.wait()
+            return ApprovalStartupSweep(discarded=0, failed=1)
+
+        with (
+            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            patch(
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(side_effect=_sweep),
+            ),
+        ):
+            transport.reset_startup_cleanup_gate()
+            await transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+
+            # Wait until the retry has woken and is inside the sweep, not
+            # merely scheduled to run one later.
+            waiting = _retry_tasks()
+            assert len(waiting) == 1
+            await _await_until(retry_is_sweeping.is_set)
+            assert sweeps_started == 2
+
+            await transport.cancel_startup_cleanup_retry()
+
+        assert waiting[0].cancelled()
+        assert not _retry_tasks()
+
+    @pytest.mark.asyncio
     async def test_a_finished_sweep_stands_down_the_retry_it_no_longer_needs(
         self,
         tmp_path: Path,
