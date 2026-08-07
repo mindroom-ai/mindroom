@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from . import approvals, journal, outbox, reads
-from .approvals import StoredApprovalCard  # noqa: TC001 - part of this module's runtime return types
+from .approvals import (  # noqa: TC001 - part of this module's runtime return types
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+)
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -389,9 +392,14 @@ class PrincipalStore:
             ),
         )
 
-    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
+    async def resolve_approval_card(
+        self,
+        *,
+        card_event_id: str,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision:
         """Record the decision one card carries, before it is shown."""
-        await self._backend.write(
+        return await self._backend.write(
             lambda transaction: approvals.resolve(
                 transaction,
                 self._principal_id,

@@ -1,5 +1,5 @@
 """Tests for Matrix-backed tool approval state."""
-# ruff: noqa: D102, D103
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
-from mindroom.event_journal import StoredApprovalCard
 from mindroom.logging_config import get_logger
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -51,69 +50,18 @@ from mindroom.tool_approval import (
     tool_requires_approval_for_openai_compat,
 )
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
+from tests.approval_test_support import (
+    FakeApprovalCards,
+    UnrememberableApprovalCards,
+    UnwritableApprovalCards,
+)
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Mapping
+    from collections.abc import Awaitable, Callable, Generator
     from pathlib import Path
-
-
-class FakeApprovalCards:
-    """The cards a bot still owes work on, as the durable store keeps them.
-
-    A decision is written before it is shown and the row is dropped once the
-    room shows it, so a row carrying a resolution is an answer whose delivery
-    is in doubt. The store only ever holds cards this bot authored, which is
-    why nothing here can model a foreign edit: one cannot reach it.
-    """
-
-    def __init__(self) -> None:
-        self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
-        self.resolutions: dict[str, dict[str, Any]] = {}
-
-    async def remember_approval_card(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        card: Mapping[str, Any],
-    ) -> None:
-        self.cards.setdefault(card_event_id, (room_id, dict(card)))
-
-    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:
-        if card_event_id in self.cards:
-            self.resolutions.setdefault(card_event_id, dict(resolution))
-
-    async def forget_approval_card(self, *, card_event_id: str) -> None:
-        self.cards.pop(card_event_id, None)
-        self.resolutions.pop(card_event_id, None)
-
-    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None:
-        entry = self.cards.get(card_event_id)
-        if entry is None or entry[0] != room_id:
-            return None
-        return StoredApprovalCard(card=entry[1], resolution=self.resolutions.get(card_event_id))
-
-    async def pending_approval_cards(self, *, room_id: str, limit: int = 256) -> tuple[StoredApprovalCard, ...]:
-        return tuple(
-            StoredApprovalCard(card=card, resolution=self.resolutions.get(card["event_id"]))
-            for card_room, card in self.cards.values()
-            if card_room == room_id
-        )[:limit]
-
-    async def store_card(self, card_event_id: str, room_id: str, card: dict[str, Any]) -> None:
-        """Seed one card as if a previous process had sent it."""
-        await self.remember_approval_card(room_id=room_id, card_event_id=card_event_id, card=card)
-
-
-class UnwritableApprovalCards(FakeApprovalCards):
-    """A store that remembers cards but cannot commit a decision to one."""
-
-    async def resolve_approval_card(self, *, card_event_id: str, resolution: Mapping[str, Any]) -> None:  # noqa: ARG002 - matches the view it stands in for
-        msg = f"cannot record a decision for {card_event_id!r}"
-        raise RuntimeError(msg)
 
 
 def _recording_point_lookup(
@@ -2634,6 +2582,160 @@ async def test_a_decision_that_cannot_be_recorded_is_never_shown(tmp_path: Path)
     assert decision.reason == "Tool approval request could not be delivered to Matrix."
     assert cards.resolutions == {}
     assert set(cards.cards) == {"$approval"}
+
+
+@pytest.mark.asyncio
+async def test_a_decision_no_row_takes_is_never_shown_or_acted_on(tmp_path: Path) -> None:
+    """A guarded update that matches nothing is a failure to record, not a commit.
+
+    The row is what makes a decision accountable: it is what a later startup
+    reads to redeliver an answer the room may never have been shown. Once it
+    is gone, the write updates nothing and raises nothing, and reading that
+    silence as a commit would run the tool on a decision no durable record
+    agrees with and leave nobody able to repair it.
+    """
+    cards = FakeApprovalCards()
+    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender_mock,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender_mock)
+    assert set(cards.cards) == {"$approval"}
+
+    # The row goes away between the card being sent and the human answering.
+    await cards.forget_approval_card(card_event_id="$approval")
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    editor.assert_not_awaited()
+    assert result.resolved is False
+    assert decision.status == "expired"
+    assert cards.resolutions == {}
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_row_already_holds_is_not_replaced_or_reshown(tmp_path: Path) -> None:
+    """The first committed decision is the one the room and the tool both get.
+
+    A row takes one decision and refuses the next, silently. If the refusal
+    read as a commit, the second answer would be shown in the room and acted
+    on while the row still held the first, and the next startup would restore
+    the decision that did not happen over the one that did.
+    """
+    cards = FakeApprovalCards()
+    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender_mock,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender_mock)
+
+    # Something else committed a decision to this card first.
+    committed = await cards.resolve_approval_card(
+        card_event_id="$approval",
+        resolution={"status": "approved", "resolution_reason": "Looks fine."},
+    )
+    assert committed.recorded is True
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="denied",
+        reason="Changed my mind.",
+    )
+    decision = await task
+
+    editor.assert_not_awaited()
+    assert result.resolved is False
+    assert decision.status == "expired"
+    assert cards.resolutions["$approval"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_card_no_row_backs_is_taken_back_before_anyone_can_click_it(tmp_path: Path) -> None:
+    """A sent card that nothing recorded must not be left answerable.
+
+    Nothing can expire it, nothing can redeliver a decision made on it, and
+    nothing could ever account for one. Binding a live waiter to it anyway
+    leaves exactly one click between an unrecorded card and a running tool,
+    so the request fails closed at the point the record failed.
+    """
+    cards = UnrememberableApprovalCards()
+    sender_mock = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender_mock,
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    # Short, so a card that stayed answerable would show up as a timeout here
+    # rather than as a hang.
+    decision = await store.request_approval(
+        tool_name="read_file",
+        arguments={"path": "notes.txt"},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=0.05,
+    )
+
+    assert decision.status == "expired"
+    assert decision.reason == "Tool approval request could not be recorded durably, so it cannot be answered."
+    # The room is told the card is dead, and is never told it was approved.
+    assert editor.await_count == 1
+    assert editor.await_args.args[2]["status"] == "expired"
+
+    clicked = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert clicked.resolved is False
+    assert cards.resolutions == {}
+    assert editor.await_count == 1
 
 
 @pytest.mark.asyncio
