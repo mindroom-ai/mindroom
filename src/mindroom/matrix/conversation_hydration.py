@@ -319,13 +319,20 @@ class ConversationHydrator:
         touched. A thread's relation tree could never prove the same thing: it
         says what that thread contains, not what the room received.
 
+        The walk is told what it owes, because the prompt window is the wrong
+        bound for this job and silently produced the wrong answer with it: a
+        room busier than the window fills it on messages newer than the anchor,
+        and the walk then reports history as lost that the homeserver would have
+        handed over on the next page. What still bounds it is the event ceiling,
+        which measures cost rather than prompts and applies to every walk.
+
         A failure here propagates. The read that triggered it fails visibly, the
         debt stays outstanding, and the next read tries again -- which is the
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
         """
         epoch = await self.store.membership_epoch(debt.room_id)
-        walk = await self._fetch_room(debt.room_id)
+        walk = await self._fetch_room(debt.room_id, owed_through_ts=debt.owed_through_ts)
         outcome = await self.store.repay_room_history_debt(
             debt,
             events=walk.events,
@@ -462,8 +469,8 @@ class ConversationHydrator:
             raise _HydrationError(msg) from error
         return _Walk(events=tuple(events), complete=complete)
 
-    async def _fetch_room(self, room_id: str) -> _Walk:
-        """Walk back until the prompt window is filled, or the room runs out.
+    async def _fetch_room(self, room_id: str, *, owed_through_ts: int | None = None) -> _Walk:
+        """Walk back until this walk's job is done, or the room runs out.
 
         A server that has run out of history answers with an empty chunk and no
         ``end`` token. That is successful exhaustion, not a failure, and
@@ -475,9 +482,19 @@ class ConversationHydrator:
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
 
-        There are three ways this returns, and only two of them mean the window
-        was filled. The third is the event ceiling, which is logged rather than
-        raised: the caller gets a shorter conversation, not a failed read.
+        ``owed_through_ts`` adds the second job a repayment walk has to do, and
+        it is a timestamp rather than a count because a debt is a timestamp. The
+        window cannot stand in for it: the window is how much history a prompt
+        reads, and the anchor is how far back a hole starts, so a room busier
+        than the window fills it on messages newer than the anchor and stops
+        with the hole untouched. Both bounds have to be satisfied, not either --
+        a repayment installs the room conversation as well as settling the debt,
+        so stopping at coverage would leave the prompt permanently short, and
+        stopping at the window would file live history as lost.
+
+        There are three ways this returns, and only two of them mean the walk
+        finished its job. The third is the event ceiling, which is logged rather
+        than raised: the caller gets a shorter conversation, not a failed read.
         """
         events: list[ProjectedEvent] = []
         logical = 0
@@ -505,7 +522,8 @@ class ConversationHydrator:
                 events.append(projected)
                 if projected.replaces_event_id is None:
                     logical += 1
-            if logical >= self.prompt_window_messages:
+            covered = owed_through_ts is None or (reached is not None and reached <= owed_through_ts)
+            if logical >= self.prompt_window_messages and covered:
                 return _Walk(events=tuple(events), complete=False, reached_ts=reached)
             # An empty page is not exhaustion. The server may filter a page down
             # to nothing and still hand back a continuation token, and the room

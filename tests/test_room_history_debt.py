@@ -440,6 +440,42 @@ async def test_reach_is_measured_over_what_the_walk_saw_not_what_it_kept(
     assert settled[0]["reached_ts"] == 1_000
 
 
+async def test_a_repayment_walks_past_the_prompt_window_to_reach_its_anchor(
+    alice: PrincipalStore,
+) -> None:
+    """The prompt window bounds a prompt, and a repayment is not one.
+
+    A room with more recent history than a prompt reads is the ordinary case,
+    not a pathology: the anchor sits behind messages the window fills up on
+    first. A walk that stops the moment the window is full reaches a timestamp
+    newer than the one it owes, so it files as lost history the homeserver is
+    still holding on the very next page -- and loss is sticky, so that one short
+    walk answers every later completeness question about the room with no.
+    """
+    await admit_all(alice, [raw("$anchor", "anchor", ts=1_000)])
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(
+        pages=[
+            [
+                raw("$five", "five", ts=5_000),
+                raw("$four", "four", ts=4_000),
+                raw("$three", "three", ts=3_000),
+            ],
+            [raw("$two", "two", ts=2_000), raw("$anchor", "anchor", ts=1_000)],
+        ],
+    )
+
+    with capture_logs() as logs:
+        await hydrator(alice, client, prompt_window_messages=3).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.REPAID.value]
+    assert settled[0]["reached_ts"] == 1_000
+    # The page the window-bounded walk never asked for, and the gap's own
+    # messages that were sitting on it the whole time.
+    assert await bodies(alice) == ["anchor", "two", "three", "four", "five"]
+
+
 async def test_a_rejoin_during_the_repayment_walk_installs_nothing(alice: PrincipalStore) -> None:
     """A view of the previous membership must not be written into the new one."""
     await admit_all(alice, [raw("$one", "one", ts=1_000)])
@@ -514,22 +550,25 @@ async def test_a_rejoin_drops_a_debt_for_the_membership_that_owed_it(alice: Prin
     assert await alice.room_history_debt(ROOM) is None
 
 
-async def test_a_walk_that_never_reaches_the_debt_records_the_loss_and_stops(
+async def test_a_gap_deeper_than_the_cost_ceiling_records_the_loss_and_stops(
     alice: PrincipalStore,
 ) -> None:
-    """The one case where accepting loss is honest, and it has to say so.
+    """The one bound that does stop a repayment, and it has to say so.
 
-    A room busy enough that the newest window no longer reaches the hole can
-    never be repaired by a bounded walk. Retrying it on every read forever would
-    be worse than the freeze this replaced, so the loss is recorded once, the
-    gate lifts, and every completeness question about the room answers no.
+    The ceiling measures what a walk costs rather than what a prompt reads, so
+    unlike the window it is a bound a repayment has to answer to. A gap behind
+    it cannot be repaired by waiting either: the next walk starts from a tip
+    that has only moved forward, so the same allowance carries it less far back,
+    never further. Retrying on every read forever would be worse than the freeze
+    this replaced, so the loss is recorded once, the gate lifts, and every
+    completeness question about the room answers no.
     """
     await admit_all(alice, [raw("$old", "old", ts=1_000)])
     await alice.record_room_history_debt(ROOM)
     # A server whose history outlives any bounded walk, all of it newer than the
     # timestamp the debt owes.
     client = FakeClient(endless=True)
-    hydrate = hydrator(alice, client, prompt_window_messages=3)
+    hydrate = hydrator(alice, client, prompt_window_messages=3, max_requests=5)
 
     with capture_logs() as logs:
         await hydrate.ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -540,6 +579,10 @@ async def test_a_walk_that_never_reaches_the_debt_records_the_loss_and_stops(
     assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.LOST.value]
     assert settled[0]["log_level"] == "error"
     assert settled[0]["owed_through_ts"] == 1_000
+    # The ceiling is what stopped it and the window is not: a prompt walk would
+    # have been satisfied after three messages, and this one spent its whole
+    # allowance before admitting the history was out of reach.
+    assert walks_after_loss == 5
     assert await alice.room_history_debt(ROOM) is None
     assert client.calls == walks_after_loss
     # Lost history is not truncation in front of the page; it is a hole behind
