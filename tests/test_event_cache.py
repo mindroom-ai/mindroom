@@ -33,12 +33,11 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
@@ -56,6 +55,7 @@ from tests.conftest import (
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import entity_ids
+from tests.threading_helpers import EmptyProjection
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -101,7 +101,7 @@ def _conversation_cache_for_thread_reads(
         event_cache=event_cache,
         event_cache_write_coordinator=None,
     )
-    return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+    return MatrixConversationCache(logger=MagicMock(), runtime=runtime, store=EmptyProjection())
 
 
 def _set_dispatch_thread_read_timeout(conversation_cache: MatrixConversationCache, seconds: float) -> None:
@@ -1687,140 +1687,6 @@ async def test_thread_event_cache_strips_runtime_timing_marker(event_cache: Conv
 
 
 @pytest.mark.asyncio
-async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: ConversationEventCache) -> None:
-    """Cached room get event lookups should reconstruct nio responses without I/O."""
-    cache = event_cache
-
-    reply_event = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Cached reply",
-        server_timestamp=2000,
-        source_content={"body": "Cached reply"},
-    )
-    client = MagicMock()
-    client.room_get_event = AsyncMock()
-
-    try:
-        await cache.store_event("$reply", "!room:localhost", _cache_source(reply_event))
-        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
-    finally:
-        await cache.close()
-
-    assert isinstance(response, nio.RoomGetEventResponse)
-    assert response.event.event_id == "$reply"
-    assert response.event.body == "Cached reply"
-    client.room_get_event.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_matrix_conversation_lookup_fill_cannot_cross_leave_and_rejoin(tmp_path: Path) -> None:
-    """A point fetch begun before departure must not repopulate the rejoined cache."""
-    db_path = tmp_path / "event_cache.db"
-    principal_id = "@alice:localhost"
-    room_id = "!room:localhost"
-    event_id = "$lookup"
-    lookup_root = SqliteEventCache(db_path)
-    membership_root = SqliteEventCache(db_path)
-    await lookup_root.initialize()
-    await membership_root.initialize()
-    lookup_cache = lookup_root.for_principal(principal_id)
-    membership_cache = membership_root.for_principal(principal_id)
-    event = _make_text_event(
-        event_id=event_id,
-        sender="@agent:localhost",
-        body="Fetched",
-        server_timestamp=1,
-        source_content={"body": "Fetched"},
-    )
-    fetch_started = asyncio.Event()
-    release_fetch = asyncio.Event()
-
-    async def room_get_event(_room_id: str, _event_id: str) -> MagicMock:
-        fetch_started.set()
-        await release_fetch.wait()
-        return _make_room_get_event_response(event)
-
-    client = MagicMock()
-    client.room_get_event = AsyncMock(side_effect=room_get_event)
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, lookup_cache, client=client)
-    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=conversation_cache.runtime,
-    )
-    lookup_task = asyncio.create_task(conversation_cache.get_event(room_id, event_id))
-    try:
-        await fetch_started.wait()
-        departure_epoch = membership_cache.mark_room_departed(room_id)
-        await membership_cache.purge_room(room_id)
-        await membership_cache.mark_room_joined(
-            room_id,
-            expected_departure_epoch=departure_epoch,
-        )
-        release_fetch.set()
-
-        response = await lookup_task
-        assert isinstance(response, nio.RoomGetEventResponse)
-        assert await lookup_cache.get_event(room_id, event_id) is None
-    finally:
-        release_fetch.set()
-        if not lookup_task.done():
-            await lookup_task
-        await membership_root.close()
-        await lookup_root.close()
-
-
-@pytest.mark.asyncio
-async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Point-event cache hits should surface the latest edited content for originals."""
-    cache = event_cache
-
-    original_event = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Original reply",
-        server_timestamp=2000,
-        source_content={
-            "body": "Original reply",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-        },
-    )
-    edit_event = _make_text_event(
-        event_id="$reply_edit",
-        sender="@agent:localhost",
-        body="* Final reply",
-        server_timestamp=3000,
-        source_content={
-            "body": "* Final reply",
-            "m.new_content": {"body": "Final reply", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-        },
-    )
-    client = MagicMock()
-    client.room_get_event = AsyncMock()
-
-    try:
-        await cache.store_events_batch(
-            [
-                ("$reply", "!room:localhost", _cache_source(original_event)),
-                ("$reply_edit", "!room:localhost", _cache_source(edit_event)),
-            ],
-        )
-        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
-    finally:
-        await cache.close()
-
-    assert isinstance(response, nio.RoomGetEventResponse)
-    assert response.event.event_id == "$reply"
-    assert response.event.body == "Final reply"
-    assert response.event.server_timestamp == 3000
-    assert EventInfo.from_event(response.event.source).thread_id == "$thread_root"
-    client.room_get_event.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -1953,105 +1819,6 @@ async def test_latest_edit_can_be_scoped_to_sender_when_newer_edit_is_untrusted(
 
 
 @pytest.mark.asyncio
-async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Network fetches should still project originals through cached latest edits."""
-    cache = event_cache
-
-    original_event = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Original reply",
-        server_timestamp=2000,
-        source_content={"body": "Original reply"},
-    )
-    edit_event = _make_text_event(
-        event_id="$reply_edit",
-        sender="@agent:localhost",
-        body="* Final reply",
-        server_timestamp=3000,
-        source_content={
-            "body": "* Final reply",
-            "m.new_content": {"body": "Final reply", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-        },
-    )
-    client = MagicMock()
-    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
-
-    try:
-        await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
-        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
-    finally:
-        await cache.close()
-
-    assert isinstance(response, nio.RoomGetEventResponse)
-    assert response.event.event_id == "$reply"
-    assert response.event.body == "Final reply"
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply")
-
-
-@pytest.mark.asyncio
-async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(event_cache: ConversationEventCache) -> None:
-    """Removing the newest edit should expose the previous cached visible state."""
-    cache = event_cache
-
-    original_event = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Original reply",
-        server_timestamp=1000,
-        source_content={"body": "Original reply"},
-    )
-    older_edit = _make_text_event(
-        event_id="$reply_edit_1",
-        sender="@agent:localhost",
-        body="* Intermediate reply",
-        server_timestamp=2000,
-        source_content={
-            "body": "* Intermediate reply",
-            "m.new_content": {"body": "Intermediate reply", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-        },
-    )
-    newer_edit = _make_text_event(
-        event_id="$reply_edit_2",
-        sender="@agent:localhost",
-        body="* Final reply",
-        server_timestamp=3000,
-        source_content={
-            "body": "* Final reply",
-            "m.new_content": {"body": "Final reply", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-        },
-    )
-    client = MagicMock()
-    client.room_get_event = AsyncMock()
-
-    try:
-        await cache.store_events_batch(
-            [
-                ("$reply", "!room:localhost", _cache_source(original_event)),
-                ("$reply_edit_1", "!room:localhost", _cache_source(older_edit)),
-                ("$reply_edit_2", "!room:localhost", _cache_source(newer_edit)),
-            ],
-        )
-        latest_response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
-        redacted = await cache.redact_event("!room:localhost", "$reply_edit_2")
-        fallback_response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
-    finally:
-        await cache.close()
-
-    assert redacted is True
-    assert isinstance(latest_response, nio.RoomGetEventResponse)
-    assert latest_response.event.body == "Final reply"
-    assert isinstance(fallback_response, nio.RoomGetEventResponse)
-    assert fallback_response.event.body == "Intermediate reply"
-    client.room_get_event.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_redaction_removes_individual_event_cache_entry(event_cache: ConversationEventCache) -> None:
     """Redactions should also remove individually cached events."""
     cache = event_cache
@@ -2125,9 +1892,6 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     )
-    client = MagicMock()
-    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
-
     try:
         await _seed_thread_cache(
             cache,
@@ -2139,15 +1903,11 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(
         await cache.invalidate_thread("!room:localhost", "$thread_root")
 
         latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
-        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$reply_edit"
-    assert isinstance(response, nio.RoomGetEventResponse)
-    assert response.event.body == "Final reply"
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply")
 
 
 @pytest.mark.asyncio

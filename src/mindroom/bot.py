@@ -503,6 +503,7 @@ class AgentBot:
         self._conversation_cache = MatrixConversationCache(
             logger=self.logger,
             runtime=self._runtime_view,
+            store=self._journal_store.principal(self._journal_principal_id),
         )
         self._conversation_state_writer = ConversationStateWriter(
             ConversationStateWriterDeps(

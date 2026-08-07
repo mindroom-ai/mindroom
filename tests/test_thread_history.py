@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,19 +11,16 @@ import pytest
 from nio.responses import RoomThreadsError, RoomThreadsResponse
 
 import mindroom.matrix.client_thread_history as matrix_client_module
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_thread_history import (
     _fetch_thread_history_via_room_messages_with_events,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.client_visible_messages import ThreadEditCandidates
-from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.room_history_reads import _event_source_for_cache, _group_scanned_sources_by_thread
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
@@ -69,62 +65,6 @@ def test_thread_agent_detection_uses_actual_persisted_ids(tmp_path: Path) -> Non
 
 class TestThreadHistory:
     """Test thread history fetching functionality."""
-
-    @pytest.mark.asyncio
-    async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:
-        """Hydrate a long sidecar thread without one durable transaction per message."""
-        sidecar_count = 128
-        event_sources = [
-            {
-                "event_id": f"$event-{index}",
-                "origin_server_ts": index,
-                "type": "m.room.message",
-                "sender": "@agent:localhost",
-                "content": {
-                    "msgtype": "m.file",
-                    "body": f"Preview {index}",
-                    "io.mindroom.long_text": {
-                        "version": 2,
-                        "encoding": "matrix_event_content_json",
-                    },
-                    "url": f"mxc://server/sidecar-{index}",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$event-0",
-                    },
-                },
-            }
-            for index in range(sidecar_count)
-        ]
-        event_cache = _event_cache()
-        cached_payload = json.dumps(
-            {
-                "msgtype": "m.text",
-                "body": "Hydrated",
-            },
-        )
-        event_cache.get_mxc_texts.return_value = {
-            (f"$event-{index}", f"mxc://server/sidecar-{index}"): cached_payload for index in range(sidecar_count)
-        }
-        client = AsyncMock()
-
-        resolution = await _resolve_thread_history_from_event_sources_timed(
-            client,
-            room_id="!room:localhost",
-            thread_id="$event-0",
-            event_sources=event_sources,
-            event_cache=event_cache,
-            expected_membership_epoch=0,
-        )
-        history = resolution.messages
-
-        assert len(history) == sidecar_count
-        event_cache.get_mxc_texts.assert_awaited_once()
-        event_cache.room_membership_epoch.assert_not_awaited()
-        event_cache.get_event.assert_not_awaited()
-        event_cache.get_mxc_text.assert_not_awaited()
-        event_cache.store_events_batch.assert_not_awaited()
-        client.download.assert_not_awaited()
 
     @staticmethod
     def _make_text_event(
@@ -301,8 +241,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -361,8 +299,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
         ).history
         serialized = [message.to_dict() for message in history]
@@ -418,8 +354,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
         ).history
 
@@ -615,8 +549,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
         ).history
 
@@ -630,7 +562,6 @@ class TestThreadHistory:
 
         resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
-            room_id="!room:localhost",
             thread_id="$root",
             event_sources=[
                 {
@@ -664,7 +595,6 @@ class TestThreadHistory:
                 },
             ],
             hydrate_sidecars=True,
-            event_cache=_event_cache(),
         )
         history = resolution.messages
 
@@ -701,10 +631,8 @@ class TestThreadHistory:
 
         resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
-            room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
-            event_cache=_event_cache(),
         )
         history = resolution.messages
 
@@ -745,10 +673,8 @@ class TestThreadHistory:
         ) as mock_extract_edit_body:
             resolution = await _resolve_thread_history_from_event_sources_timed(
                 client,
-                room_id="!room:localhost",
                 thread_id="$thread_root",
                 event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(unrelated_edit)],
-                event_cache=_event_cache(),
             )
         history = resolution.messages
 
@@ -790,10 +716,8 @@ class TestThreadHistory:
 
         resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
-            room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
-            event_cache=_event_cache(),
         )
         history = resolution.messages
 
@@ -812,8 +736,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
 
     @pytest.mark.asyncio
@@ -841,8 +763,6 @@ class TestThreadHistory:
                 "!room:localhost",
                 "$thread_root",
                 hydrate_sidecars=True,
-                event_cache=_event_cache(),
-                expected_membership_epoch=0,
             )
 
 
@@ -1052,33 +972,6 @@ class TestThreadHistoryCache:
         events: list[dict[str, object]],
     ) -> None:
         await _replace_thread(cache, room_id, thread_id, events)
-
-    @staticmethod
-    def _conversation_cache_for_runtime(
-        *,
-        tmp_path: Path,
-        client: nio.AsyncClient,
-        event_cache: SqliteEventCache,
-        runtime_started_at: float,
-    ) -> tuple[MatrixConversationCache, EventCacheWriteCoordinator]:
-        runtime_paths = test_runtime_paths(tmp_path)
-        config = bind_runtime_paths(
-            Config(agents={"general": AgentConfig(display_name="General Agent")}),
-            runtime_paths,
-        )
-        persist_entity_accounts(config, runtime_paths)
-        coordinator = EventCacheWriteCoordinator(logger=MagicMock(), background_task_owner=object())
-        runtime = BotRuntimeState(
-            client=client,
-            config=config,
-            runtime_paths=runtime_paths,
-            enable_streaming=True,
-            orchestrator=None,
-            event_cache=event_cache,
-            event_cache_write_coordinator=coordinator,
-        )
-        runtime.runtime_started_at = runtime_started_at
-        return MatrixConversationCache(logger=MagicMock(), runtime=runtime), coordinator
 
     @staticmethod
     def _make_redaction_event(
@@ -1322,7 +1215,7 @@ class TestThreadHistoryCache:
         with patch(
             "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
             new=AsyncMock(return_value=fetch_result),
-        ) as fetch:
+        ):
             history = await matrix_client_module.refresh_thread_history_from_source(
                 AsyncMock(),
                 "!room:localhost",
@@ -1332,5 +1225,6 @@ class TestThreadHistoryCache:
             )
 
         assert [message.event_id for message in history] == ["$thread_root"]
-        assert fetch.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH
+        # The fetch no longer carries an epoch -- it writes nothing durable --
+        # so the uncertified generation has to reach the one write that remains.
         assert event_cache.replace_thread.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH

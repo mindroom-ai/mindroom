@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -112,6 +112,53 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         plain_reply_id = "$plain_reply:localhost"
         second_plain_reply_id = "$second_plain_reply:localhost"
 
+        # The chain's earlier hops are resolved from the homeserver rather than
+        # from a durable index of raw events: a point lookup answers from the
+        # visible projection and falls through to Matrix for anything it does
+        # not hold, and neither hop was ever admitted here.
+        chain_sources = {
+            thread_reply_id: {
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": thread_root_id,
+                    },
+                },
+                "event_id": thread_reply_id,
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567894,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+            plain_reply_id: {
+                "content": {
+                    "body": "first bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                },
+                "event_id": plain_reply_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567895,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        }
+
+        async def room_get_event(
+            _room_id: str,
+            event_id: str,
+        ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+            source = chain_sources.get(event_id)
+            if source is None:
+                return nio.RoomGetEventError("M_NOT_FOUND")
+            response = nio.RoomGetEventResponse()
+            response.event = nio.Event.parse_event(source)
+            return response
+
+        bot.client.room_get_event = AsyncMock(side_effect=room_get_event)
+
         real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-second-hop-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
@@ -120,42 +167,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             background_task_owner=bot._runtime_view,
         )
         try:
-            await real_event_cache.store_event(
-                thread_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                    "event_id": thread_reply_id,
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567894,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-            await real_event_cache.store_event(
-                plain_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "first bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                    "event_id": plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-
             second_plain_reply_event = nio.RoomMessageText.from_dict(
                 {
                     "content": {

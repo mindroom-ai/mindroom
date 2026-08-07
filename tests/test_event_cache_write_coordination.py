@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -18,6 +18,7 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from tests.threading_helpers import (
+    EmptyProjection,
     ThreadingBehaviorTestBase,
     _conversation_runtime,
     _make_client_mock,
@@ -35,49 +36,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
-    async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
-        """Point-event cache fills should use the same room-ordered coordinator as other durable writes."""
-        event_cache = _runtime_event_cache()
-        event_cache.get_event = AsyncMock(return_value=None)
-        event_cache.store_event = AsyncMock()
-        coordinator = _runtime_write_coordinator()
-        client = _make_client_mock()
-        client.room_get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": {"body": "hello", "msgtype": "m.text"},
-                    "event_id": "$event:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "room_id": "!test:localhost",
-                    "type": "m.room.message",
-                },
-            ),
-        )
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-
-        with patch.object(coordinator, "queue_room_update", wraps=coordinator.queue_room_update) as mock_queue:
-            await access.get_event("!test:localhost", "  $event:localhost  ")
-
-        event_cache.store_event.assert_awaited_once()
-        stored_event_id, stored_room_id, stored_event_source = event_cache.store_event.await_args.args
-        assert stored_event_id == "$event:localhost"
-        assert stored_room_id == "!test:localhost"
-        assert stored_event_source["event_id"] == "$event:localhost"
-        mock_queue.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_same_turn_point_cache_hit_skips_room_write_barrier(self) -> None:
-        """A memoized point read should not wait behind unrelated room writes."""
-        event_cache = _runtime_event_cache()
-        coordinator = _runtime_write_coordinator()
+    async def test_same_turn_point_read_is_resolved_once(self) -> None:
+        """A point read repeated inside one turn must resolve once, not once per caller."""
         response = nio.RoomGetEventResponse.from_dict(
             {
                 "content": {"body": "hello", "msgtype": "m.text"},
@@ -88,37 +48,24 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "type": "m.room.message",
             },
         )
+        client = _make_client_mock()
+        client.room_get_event = AsyncMock(return_value=response)
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(
-                client=_make_client_mock(),
-                event_cache=event_cache,
-                coordinator=coordinator,
+                client=client,
+                event_cache=_runtime_event_cache(),
+                coordinator=_runtime_write_coordinator(),
             ),
+            store=EmptyProjection(),
         )
 
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache._cached_room_get_event",
-                new=AsyncMock(return_value=(response, None)),
-            ) as get_event,
-            patch.object(
-                coordinator,
-                "wait_for_prior_room_updates",
-                new=AsyncMock(),
-            ) as wait_for_prior_room_updates,
-        ):
-            async with access.turn_scope():
-                first = await access.get_event("!test:localhost", "$event:localhost")
-                second = await access.get_event("!test:localhost", "$event:localhost")
+        async with access.turn_scope():
+            first = await access.get_event("!test:localhost", "$event:localhost")
+            second = await access.get_event("!test:localhost", "$event:localhost")
 
-        assert first is response
-        assert second is response
-        get_event.assert_awaited_once()
-        wait_for_prior_room_updates.assert_awaited_once_with(
-            "!test:localhost",
-            coordination_scope=event_cache.principal_id,
-        )
+        assert first is second
+        client.room_get_event.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_queue_room_cache_update_forwards_false_emit_timing(self) -> None:
@@ -398,6 +345,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
             return_value=MutationThreadImpact.threaded("$thread:localhost"),
@@ -451,6 +399,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
+            store=EmptyProjection(),
         )
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
             return_value=MutationThreadImpact.threaded("$thread:localhost"),
@@ -578,6 +527,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(coordinator=coordinator),
+            store=EmptyProjection(),
         )
 
         async def failing_update() -> None:
@@ -625,10 +575,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         first_access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(coordinator=coordinator),
+            store=EmptyProjection(),
         )
         second_access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(coordinator=coordinator),
+            store=EmptyProjection(),
         )
 
         async def first_update() -> None:
@@ -885,128 +837,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
 
     @pytest.mark.asyncio
-    async def test_point_read_barrier_does_not_wait_for_later_room_update(self) -> None:
-        """A point read must wait for predecessors without being extended by later writes."""
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
-        second_started = asyncio.Event()
-        release_second = asyncio.Event()
-        coordinator = _runtime_write_coordinator()
-
-        async def first_update() -> None:
-            first_started.set()
-            await release_first.wait()
-
-        async def second_update() -> None:
-            second_started.set()
-            await release_second.wait()
-
-        first_task = coordinator.queue_room_update(
-            "!test:localhost",
-            first_update,
-            name="first_room_update",
-            coordination_scope="test-principal",
-        )
-        await first_started.wait()
-        read_barrier = asyncio.create_task(
-            coordinator.wait_for_prior_room_updates(
-                "!test:localhost",
-                coordination_scope="test-principal",
-            ),
-        )
-        await asyncio.sleep(0)
-        second_task = coordinator.queue_room_update(
-            "!test:localhost",
-            second_update,
-            name="later_room_update",
-            coordination_scope="test-principal",
-        )
-
-        try:
-            release_first.set()
-            await second_started.wait()
-            await asyncio.wait_for(read_barrier, timeout=1.0)
-            assert second_task.done() is False
-        finally:
-            release_first.set()
-            release_second.set()
-            await asyncio.gather(first_task, second_task, return_exceptions=True)
-            await coordinator.close()
-
-    @pytest.mark.asyncio
-    async def test_point_read_barrier_waits_for_queued_predecessor(self) -> None:
-        """The point-read fence includes prior thread writes but excludes later room writes."""
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
-        queued_predecessor_started = asyncio.Event()
-        release_queued_predecessor = asyncio.Event()
-        later_started = asyncio.Event()
-        release_later = asyncio.Event()
-        coordinator = _runtime_write_coordinator()
-
-        async def first_update() -> None:
-            first_started.set()
-            await release_first.wait()
-
-        async def queued_predecessor() -> None:
-            queued_predecessor_started.set()
-            await release_queued_predecessor.wait()
-
-        async def later_update() -> None:
-            later_started.set()
-            await release_later.wait()
-
-        first_task = coordinator.queue_room_update(
-            "!test:localhost",
-            first_update,
-            name="first_room_update",
-            coordination_scope="test-principal",
-        )
-        await first_started.wait()
-        queued_predecessor_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$thread:localhost",
-            queued_predecessor,
-            name="queued_predecessor",
-            coordination_scope="test-principal",
-        )
-        read_barrier = asyncio.create_task(
-            coordinator.wait_for_prior_room_updates(
-                "!test:localhost",
-                coordination_scope="test-principal",
-            ),
-        )
-        await asyncio.sleep(0)
-        later_task = coordinator.queue_room_update(
-            "!test:localhost",
-            later_update,
-            name="later_room_update",
-            coordination_scope="test-principal",
-        )
-
-        try:
-            release_first.set()
-            await queued_predecessor_started.wait()
-            await asyncio.sleep(0)
-            assert read_barrier.done() is False
-
-            release_queued_predecessor.set()
-            await later_started.wait()
-            await asyncio.wait_for(read_barrier, timeout=1.0)
-            assert later_task.done() is False
-        finally:
-            release_first.set()
-            release_queued_predecessor.set()
-            release_later.set()
-            await asyncio.gather(
-                first_task,
-                queued_predecessor_task,
-                later_task,
-                return_exceptions=True,
-            )
-            await coordinator.close()
-
-    @pytest.mark.asyncio
     async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
         """Thread reads should ignore cancelled room fences that only preserve write ordering."""
         first_thread_started = asyncio.Event()
@@ -1094,6 +924,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(coordinator=coordinator),
+            store=EmptyProjection(),
         )
 
         async def blocking_update() -> None:
@@ -1139,6 +970,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(coordinator=coordinator),
+            store=EmptyProjection(),
         )
 
         async def first_update() -> None:

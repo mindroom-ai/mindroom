@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         SettlementOutcome,
+        VisibleMessage,
     )
     from .projection import ProjectedEvent
 
@@ -222,6 +223,17 @@ class PrincipalStore:
                 thread_id=thread_id,
                 limit=limit,
                 before=before,
+            ),
+        )
+
+    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
+        """Return the current visible revision of one logical message."""
+        return await self._backend.read(
+            lambda transaction: reads.visible_message(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                logical_event_id=logical_event_id,
             ),
         )
 

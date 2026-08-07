@@ -565,24 +565,6 @@ class EventCacheWriteCoordinator:
                 self._discard_waiter(room_key, waiter)
                 raise
 
-    async def wait_for_prior_room_updates(
-        self,
-        room_id: str,
-        *,
-        coordination_scope: str,
-    ) -> None:
-        """Wait for all writes in this room that were already queued when this read began."""
-        room_key = _coordination_room_key(room_id, coordination_scope)
-        self._reevaluate_room(room_key)
-        state = self._room_states.get(room_key)
-        pending_tasks = () if state is None else self._pending_entry_tasks(state.entries)
-        for pending_task in pending_tasks:
-            await self._await_idle_task(
-                pending_task,
-                room_id=room_id,
-                log_message="Room cache update failed before the point read barrier",
-            )
-
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator.
 
