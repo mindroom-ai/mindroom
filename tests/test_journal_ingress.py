@@ -21,7 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind, SemanticConsumer, SettlementOutcome, VisibleMessage
-from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.journal_dispatch import _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
@@ -167,6 +167,10 @@ def reaction_event(event_id: str, *, target: str = "$target", key: str = "OK") -
 def room() -> nio.MatrixRoom:
     """Return a minimal joined room."""
     return nio.MatrixRoom(ROOM, ALICE)
+
+
+async def _noop_callback(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+    """Accept one event and do nothing with it."""
 
 
 PLACEHOLDER_ID = "$placeholder"
@@ -1151,6 +1155,41 @@ class TestDurableAdmission:
 
         assert [journal.event_id for journal in await alice.pending()] == ["$m"]
 
+    async def test_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Held parsed events are released by the run that uses them, and nothing else.
+
+        An event whose work is already settled is never handed to the worker
+        again, so nothing releases a parsed object kept for it. A checkpoint
+        replayed from further back redelivers a whole window of them, and every
+        distinct one stays held for the life of the process.
+        """
+        event = text_event("$m")
+        await alice.admit(
+            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+        await alice.settle(event.event_id, SettlementOutcome.SUCCEEDED)
+        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
+
+        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
+
+        assert dispatcher._live_events == {}
+
+    async def test_a_live_event_is_kept_for_the_run_it_still_owes(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Replaying from the payload instead would discard nio's decryption state."""
+        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
+        event = text_event("$m")
+
+        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+
+        assert set(dispatcher._live_events) == {"$m"}
+
     async def test_an_unowned_event_is_neither_admitted_nor_rejected(
         self,
         alice: PrincipalStore,
@@ -1804,6 +1843,52 @@ class TestDeferralOwnership:
         message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
 
         assert dispatcher._deferral_is_live(message) is False
+
+
+class TestUnsettledLifecycleIdentities:
+    """The set a join-hook suppressor trusts has to be all of them."""
+
+    @staticmethod
+    def _dispatcher(store: PrincipalStore) -> JournalDispatcher:
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", noop),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    async def test_every_unsettled_identity_is_returned_past_one_page(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One page short is one join hook that never runs.
+
+        The caller records every join this set does not cover as already seen,
+        so an identity missing because the read filled up is not merely late:
+        nothing asks about it again.
+        """
+        count = _LIFECYCLE_PAGE_SIZE + 1
+        for index in range(count):
+            member = member_event(f"$join{index:04d}", user_id=f"@user{index:04d}:example.org")
+            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
+
+        members = await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
+
+        assert len(members) == count
+        assert (ROOM, f"@user{count - 1:04d}:example.org") in members
 
 
 class TestABoundedScanIsFair:

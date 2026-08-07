@@ -26,7 +26,13 @@ import nio
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import TURN_BACKED_KINDS, EventKind, SemanticConsumer, SettlementOutcome
+from mindroom.event_journal import (
+    TURN_BACKED_KINDS,
+    AdmissionResult,
+    EventKind,
+    SemanticConsumer,
+    SettlementOutcome,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -52,6 +58,10 @@ logger = get_logger(__name__)
 # it to claim a consumer or read their receipt order without every one of them
 # having to thread the event through its own signature.
 _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
+
+# How many unsettled lifecycle events one read of the identity walk covers. The
+# walk continues past it; this only bounds how much is held at once.
+_LIFECYCLE_PAGE_SIZE = 256
 
 type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
@@ -201,7 +211,7 @@ class JournalDispatcher:
         rather than delivering something that just happened.
         """
         try:
-            await self.store.admit(
+            admission = await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),
                 projected_event(room.room_id, event, kind, self_sender=self.self_sender),
             )
@@ -209,7 +219,9 @@ class JournalDispatcher:
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
-        if live:
+        if live and admission is AdmissionResult.ADMITTED:
+            # Only an event this admission created can still owe the run that
+            # takes the parsed object back out again.
             self._remember_live_event(room, event)
         self._worker.wake()
 
@@ -411,15 +423,30 @@ class JournalDispatcher:
         return await self.store.unsettled_event_ids()
 
     async def unsettled_room_lifecycle_member_ids(self) -> frozenset[tuple[str, str]]:
-        """Return room and member identities still owned by lifecycle events."""
+        """Return room and member identities still owned by lifecycle events.
+
+        Every one of them, walked to the end rather than read as one page. The
+        caller records the joins this set does not cover as already seen, so an
+        identity left out because a page filled up is a join hook that never
+        runs and nothing ever asks about again.
+        """
         members: set[tuple[str, str]] = set()
-        for event in await self.store.pending_of_kind(EventKind.ROOM_LIFECYCLE):
-            parsed = parse_journal_event(event)
-            if not isinstance(parsed, nio.RoomMemberEvent):
-                msg = f"Room lifecycle event {event.event_id!r} is not a member event"
-                raise JournalCorruptionError(msg)
-            members.add((event.room_id, parsed.state_key))
-        return frozenset(members)
+        cursor: int | None = None
+        while True:
+            page = await self.store.pending_of_kind(
+                EventKind.ROOM_LIFECYCLE,
+                limit=_LIFECYCLE_PAGE_SIZE,
+                after_receipt_order=cursor,
+            )
+            for event in page:
+                parsed = parse_journal_event(event)
+                if not isinstance(parsed, nio.RoomMemberEvent):
+                    msg = f"Room lifecycle event {event.event_id!r} is not a member event"
+                    raise JournalCorruptionError(msg)
+                members.add((event.room_id, parsed.state_key))
+            if len(page) < _LIFECYCLE_PAGE_SIZE:
+                return frozenset(members)
+            cursor = page[-1].receipt_order
 
 
 @dataclass(frozen=True, slots=True)

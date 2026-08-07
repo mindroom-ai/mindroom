@@ -127,10 +127,17 @@ class PrincipalStore:
         kind: EventKind,
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
+        after_receipt_order: int | None = None,
     ) -> tuple[JournalEvent, ...]:
         """Return pending events of one kind, in receipt order."""
         return await self._backend.read(
-            lambda transaction: journal.pending_of_kind(transaction, self._principal_id, kind, limit=limit),
+            lambda transaction: journal.pending_of_kind(
+                transaction,
+                self._principal_id,
+                kind,
+                limit=limit,
+                after_receipt_order=after_receipt_order,
+            ),
         )
 
     async def pending_thread_events_after(

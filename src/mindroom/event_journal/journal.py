@@ -483,10 +483,28 @@ def pending(
     end of the backlog and nothing else, and the last event returned is a
     resume point with no unread rows before it.
     """
+    return _pending_page(transaction, principal_id, limit=limit, after_receipt_order=after_receipt_order)
+
+
+def _pending_page(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    limit: int,
+    after_receipt_order: int | None,
+    kind: EventKind | None = None,
+) -> tuple[JournalEvent, ...]:
+    """Return up to ``limit`` readable pending events, filled from raw rows."""
     events: list[JournalEvent] = []
     cursor = after_receipt_order
     while len(events) < limit:
-        rows = _pending_rows(transaction, principal_id, limit=limit - len(events), after_receipt_order=cursor)
+        rows = _pending_rows(
+            transaction,
+            principal_id,
+            limit=limit - len(events),
+            after_receipt_order=cursor,
+            kind=kind,
+        )
         if not rows:
             break
         cursor = int(rows[-1]["receipt_order"])
@@ -500,18 +518,21 @@ def _pending_rows(
     *,
     limit: int,
     after_receipt_order: int | None,
+    kind: EventKind | None = None,
 ) -> tuple[Row, ...]:
     """Return one raw page of pending rows, in receipt order."""
     cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
+    kind_clause = "" if kind is None else " AND kind = ?"
+    kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
     return transaction.fetchall(
         f"""
         SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND state = 'pending'{cursor_clause}
+        WHERE principal_id = ? AND state = 'pending'{kind_clause}{cursor_clause}
         ORDER BY receipt_order
         LIMIT ?
-        """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-        (principal_id, *cursor_params, limit),
+        """,  # noqa: S608 - a fixed column list and fixed clauses, not input
+        (principal_id, *kind_params, *cursor_params, limit),
     )
 
 
@@ -659,18 +680,20 @@ def pending_of_kind(
     kind: EventKind,
     *,
     limit: int,
+    after_receipt_order: int | None = None,
 ) -> tuple[JournalEvent, ...]:
-    """Return pending events of one kind, in receipt order."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND state = 'pending' AND kind = ?
-        ORDER BY receipt_order
-        LIMIT ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, kind.value, limit),
+    """Return pending events of one kind, in receipt order.
+
+    Pages the same way ``pending`` does, so a caller that needs every one of
+    them can walk to the end and know when it got there.
+    """
+    return _pending_page(
+        transaction,
+        principal_id,
+        limit=limit,
+        after_receipt_order=after_receipt_order,
+        kind=kind,
     )
-    return _decode_rows(rows)
 
 
 def claim_semantic_consumer(

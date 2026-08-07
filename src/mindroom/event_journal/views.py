@@ -90,7 +90,13 @@ class DispatchView(ReplayView, AdmissionView, Protocol):
         """Return one admitted event."""
         ...
 
-    async def pending_of_kind(self, kind: EventKind, *, limit: int = ...) -> tuple[JournalEvent, ...]:
+    async def pending_of_kind(
+        self,
+        kind: EventKind,
+        *,
+        limit: int = ...,
+        after_receipt_order: int | None = None,
+    ) -> tuple[JournalEvent, ...]:
         """Return pending events of one kind, in receipt order."""
         ...
 

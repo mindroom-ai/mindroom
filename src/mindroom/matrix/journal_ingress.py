@@ -17,6 +17,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.event_journal import (
+    AdmissionResult,
     EventClass,
     EventKind,
     InboundEvent,
@@ -362,7 +363,7 @@ class JournalIngress:
             return
         event_class = _event_class_for(provenance, event)
         try:
-            await self.store.admit(
+            admission = await self.store.admit(
                 inbound_event(room.room_id, event, kind, event_class),
                 projected_event(room.room_id, event, kind, self_sender=self.self_sender),
             )
@@ -371,6 +372,13 @@ class JournalIngress:
             # redelivery and does not advance the checkpoint past it.
             self.on_persist_failure()
             raise nio.CallbackNotAcceptedError(str(error)) from error
-        if event_class is EventClass.ACTIONABLE:
+        if event_class is not EventClass.ACTIONABLE:
+            return
+        if admission is AdmissionResult.ADMITTED:
+            # Only an event this admission created can still owe a run, and a
+            # run is the only thing that gives the parsed object back. Keeping
+            # one for an event the journal already settled means keeping it for
+            # a run that cannot come, once per distinct event redelivered from
+            # an older checkpoint.
             self.on_event_admitted(room, event)
-            self.on_admitted()
+        self.on_admitted()
