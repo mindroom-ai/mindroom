@@ -1046,6 +1046,7 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        self.attempted: set[tuple[str, str]] = set()
 
     async def enqueue_delivery(
         self,
@@ -1057,10 +1058,26 @@ class FakeOutbox:
         payload: Mapping[str, object],
         edits_event_id: str | None = None,
     ) -> str:
-        """Record intent, leaving an already-attempted row's payload alone."""
+        """Record intent, leaving an already-attempted row's payload alone.
+
+        An unattempted row is rewritten, exactly as the real `ON CONFLICT DO
+        UPDATE ... WHERE attempted = 0` does. Refusing that too would make this
+        double stricter than production and hide a same-turn re-enqueue -- a
+        continuation replacing the answer it has not sent yet -- behind a stale
+        payload no real deployment would serve.
+        """
         key = (turn_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
+            if key in self.attempted:
+                return existing.transaction_id
+            self.rows[key] = replace(
+                existing,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=dict(payload),
+                edits_event_id=edits_event_id,
+            )
             return existing.transaction_id
         transaction_id = f"tx-{turn_id}-{stage.value}"
         self.rows[key] = OutboxDelivery(
@@ -1078,7 +1095,11 @@ class FakeOutbox:
 
     async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Freeze one delivery before any network call."""
-        return self.rows.get((turn_id, stage.value))
+        key = (turn_id, stage.value)
+        row = self.rows.get(key)
+        if row is not None:
+            self.attempted.add(key)
+        return row
 
     async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
         """Return one delivery without claiming it."""
