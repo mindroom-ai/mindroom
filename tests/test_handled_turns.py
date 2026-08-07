@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom import constants
+from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     HandledTurnLedger,
     SourceEventMetadata,
@@ -23,6 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
@@ -843,6 +845,63 @@ async def test_record_is_durable_when_the_call_returns(journal_store: EventJourn
 
     persisted = await _read_persisted_records(journal_store, "test_durable_on_return")
     assert persisted["$event"]["response_event_id"] == "$response"
+
+
+@dataclass(frozen=True, slots=True)
+class _FailingWriteStore(TurnRecordStore):
+    """A record store whose write stays open until the test makes it fail."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def upsert(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> None:
+        """Hold the write open, then fail it, leaving the database untouched."""
+        _ = (index_event_ids, anchor_event_id, record_json)
+        self.started.set()
+        await self.released.wait()
+        msg = "the journal refused the record"
+        raise RuntimeError(msg)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_failed_write_stops_claiming_the_turn_was_handled(
+    journal_store: EventJournalStore,
+) -> None:
+    """A write that failed after its caller was cancelled must take its publication back.
+
+    The record is published to memory before the write so no reader sees "not
+    handled" while the write is in flight. A cancelled caller that never learns
+    the write failed leaves that publication standing over a database with no
+    such record: this process refuses to answer the message, and the restart
+    that reads the database answers it a second time.
+    """
+    records = _FailingWriteStore(_backend=journal_store.backend, _agent_name="test_cancelled_failed_write")
+    ledger = HandledTurnLedger("test_cancelled_failed_write", records=records)
+    await ledger.load()
+
+    recording = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$event"], response_event_id="$response")),
+    )
+    await records.started.wait()
+    recording.cancel()
+    # One turn of the loop, so the cancellation lands while the write is still
+    # open rather than after it has already reported its failure.
+    await asyncio.sleep(0)
+    assert ledger.has_responded("$event"), "nothing was published, so the rollback would prove nothing"
+    records.released.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await recording
+
+    assert not ledger.has_responded("$event")
+    assert ledger.get_turn_record("$event") is None
+    assert await _read_persisted_records(journal_store, "test_cancelled_failed_write") == {}
 
 
 @pytest.mark.asyncio

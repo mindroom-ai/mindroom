@@ -517,25 +517,37 @@ class HandledTurnLedger:
             # live process answering a message it has already answered, and a
             # restart disagreeing with it. Shielding lets the write settle and
             # report, after which the cancellation propagates as it should.
-            write = asyncio.shield(
-                asyncio.ensure_future(
-                    self.records.upsert(
-                        index_event_ids=persisted_record.indexed_event_ids,
-                        anchor_event_id=persisted_record.anchor_event_id,
-                        record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
-                    ),
+            #
+            # The task, not the shield, is what is kept. A shield reports its
+            # own cancellation and nothing after it, so asking the shield how
+            # the write ended answers "cancelled" for a write that is still
+            # running -- and asking a cancelled future for its exception raises
+            # instead of answering, which skipped the rollback below entirely.
+            write = asyncio.ensure_future(
+                self.records.upsert(
+                    index_event_ids=persisted_record.indexed_event_ids,
+                    anchor_event_id=persisted_record.anchor_event_id,
+                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
                 ),
             )
             try:
-                await write
+                await asyncio.shield(write)
             except BaseException:
                 # A cancelled caller has not learned the write's fate yet: the
-                # shield kept it running, so wait for it before deciding
-                # whether memory is wrong. Only a genuinely failed write
-                # justifies undoing the publication.
-                with contextlib.suppress(BaseException):
-                    await asyncio.shield(write)
-                if write.done() and write.exception() is None:
+                # shield only detached the wait, so the write is still running
+                # and has to be waited for before memory can be judged wrong.
+                # Every further cancellation re-attaches rather than escaping,
+                # because a caller cancelled twice would otherwise decide the
+                # record's fate while the transaction is still open.
+                while not write.done():
+                    with contextlib.suppress(BaseException):
+                        await asyncio.shield(write)
+                # Only a write that reported failure did definitely not land. A
+                # cancelled write did not report anything: the backend hands the
+                # statement to a writer that outlives the await, so unpublishing
+                # it risks re-answering a message the database already records as
+                # answered -- the very outcome publishing early exists to prevent.
+                if write.cancelled() or write.exception() is None:
                     raise
                 self._restore_superseded(persisted_record, superseded)
                 raise
