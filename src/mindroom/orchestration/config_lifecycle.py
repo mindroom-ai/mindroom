@@ -145,7 +145,12 @@ class ConfigReloadLifecycle:
             # Refused rather than applied, because there is no correct way to
             # apply it here; see mindroom.event_journal_change, which is the one
             # authority the API's config publisher consults for the same verdict.
-            if refuses_event_journal_change(current_config, new_config, refused_by="orchestrator_config_reload"):
+            if refuses_event_journal_change(
+                current_config,
+                new_config,
+                runtime_paths=self.runtime_paths,
+                refused_by="orchestrator_config_reload",
+            ):
                 return False
 
             agent_bots = self.agent_bots()

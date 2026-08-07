@@ -480,7 +480,12 @@ def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> 
     silently ignoring the journal field would save a file the runtime disagrees
     with and report success for a change that never happened.
     """
-    if not refuses_event_journal_change(current.runtime_config, candidate, refused_by="api_config_write"):
+    if not refuses_event_journal_change(
+        current.runtime_config,
+        candidate,
+        runtime_paths=current.runtime_paths,
+        refused_by="api_config_write",
+    ):
         return
     raise HTTPException(
         status_code=409,
@@ -794,6 +799,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         if runtime_config is not None and refuses_event_journal_change(
             current.runtime_config,
             runtime_config,
+            runtime_paths=runtime_paths,
             refused_by="api_config_publish",
         ):
             # Publishing it would advance the generation for a change the

@@ -459,6 +459,93 @@ class TestEventJournalChangeRefusal:
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
 
+    def test_a_sqlite_database_url_edit_opens_the_same_file_and_is_adopted(self, loaded_app: FastAPI) -> None:
+        """Only a change of opened database is a move; nothing else in the field is one.
+
+        ``open_event_journal_store`` derives the SQLite path from the runtime
+        storage root and reads no ``event_journal`` field to do it, so this edit
+        opens exactly the same file. Refusing it would stop an adoption for a
+        store that did not move -- and because a refusal never advances the
+        adopted config, every later unrelated reload would be refused too.
+        """
+        before = _snapshot(loaded_app)
+        same_store = copy.deepcopy(VALID_CONFIG)
+        same_store["event_journal"] = {
+            "backend": "sqlite",
+            "database_url": "postgresql://localhost/never-opened-under-sqlite",
+            "database_url_env": "OTHER_DATABASE_URL",
+        }
+        _write_config(before.runtime_paths.config_path, same_store)
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        adopted = _snapshot(loaded_app)
+        assert adopted.generation == before.generation + 1
+        assert adopted.config_data["event_journal"]["database_url_env"] == "OTHER_DATABASE_URL"
+
+        later = copy.deepcopy(same_store)
+        later["agents"]["probe"] = {"display_name": "Probe", "role": "Added after the journal edit"}
+        _write_config(before.runtime_paths.config_path, later)
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        assert "probe" in _snapshot(loaded_app).config_data["agents"]
+
+    def test_a_sqlite_database_url_write_is_saved_rather_than_rejected(self, loaded_app: FastAPI) -> None:
+        """The write paths read the same rule, so they must agree that this is not a move."""
+        before = _snapshot(loaded_app)
+        same_store = copy.deepcopy(VALID_CONFIG)
+        same_store["event_journal"] = {"backend": "sqlite", "database_url_env": "OTHER_DATABASE_URL"}
+
+        config_lifecycle.replace_committed_config(
+            _request_for(loaded_app),
+            same_store,
+            error_prefix="test replace",
+        )
+
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert on_disk["event_journal"]["database_url_env"] == "OTHER_DATABASE_URL"
+
+    def test_a_postgres_dsn_reached_by_another_route_is_the_same_database(self, tmp_path: Path) -> None:
+        """For PostgreSQL it is the resolved DSN that picks the database, not how it was written."""
+        dsn = "postgresql://localhost/journal"
+        config_path = tmp_path / "config.yaml"
+        by_env = copy.deepcopy(VALID_CONFIG)
+        by_env["event_journal"] = {"backend": "postgres"}
+        _write_config(config_path, by_env)
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env={"MINDROOM_EVENT_CACHE_DATABASE_URL": dsn},
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+
+        by_url = copy.deepcopy(VALID_CONFIG)
+        by_url["event_journal"] = {"backend": "postgres", "database_url": dsn}
+        _write_config(config_path, by_url)
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        assert _snapshot(api_app).config_data["event_journal"]["database_url"] == dsn
+
+    def test_a_postgres_dsn_change_is_still_refused(self, tmp_path: Path) -> None:
+        """Loosening the comparison must not loosen it past the database actually opened."""
+        config_path = tmp_path / "config.yaml"
+        opened = copy.deepcopy(VALID_CONFIG)
+        opened["event_journal"] = {"backend": "postgres", "database_url": "postgresql://localhost/journal"}
+        _write_config(config_path, opened)
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env={},
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://localhost/elsewhere"}
+        _write_config(config_path, moved)
+
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is False
+
 
 class TestConcurrencySmoke:
     """Interleaved writers racing on the same committed snapshot."""

@@ -3240,10 +3240,13 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         current_config = MagicMock()
         current_config.authorization.global_users = []
-        current_config.event_journal = MagicMock()
+        current_config.event_journal = EventJournalConfig()
         new_config = MagicMock()
         new_config.authorization.global_users = []
-        new_config.event_journal = MagicMock()
+        new_config.event_journal = EventJournalConfig(
+            backend="postgres",
+            database_url="postgresql://journal.invalid/moved",
+        )
         orchestrator.config = current_config
 
         with (
@@ -3255,6 +3258,52 @@ class TestMultiAgentOrchestrator:
         assert updated is False, "a journal change must not report a successful reload"
         mock_plan.assert_not_called()
         assert orchestrator.config is current_config, "the refused config was adopted anyway"
+
+    @pytest.mark.asyncio
+    async def test_update_config_adopts_a_journal_edit_that_opens_the_same_database(self, tmp_path: Path) -> None:
+        """Only a change of opened database is a move, and nothing else in the field is one.
+
+        ``open_event_journal_store`` derives the SQLite path from the runtime
+        storage root and reads no ``event_journal`` field to do it, so a
+        ``database_url`` written under ``backend: sqlite`` opens exactly the
+        same file. Refusing it would stop the reload for a store that did not
+        move -- and because a refusal never advances the adopted config, every
+        later unrelated reload would be refused too, until the field was put
+        back or the process restarted.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        current_config = MagicMock()
+        current_config.authorization.global_users = []
+        current_config.event_journal = EventJournalConfig()
+        new_config = MagicMock()
+        new_config.authorization.global_users = []
+        new_config.event_journal = EventJournalConfig(database_url="postgresql://journal.invalid/unused")
+        orchestrator.config = current_config
+        plan = SimpleNamespace(
+            mindroom_user_changed=False,
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            added_entities=set(),
+            removed_entities=set(),
+            only_support_service_changes=True,
+        )
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                return_value=plan,
+            ) as mock_plan,
+            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        ):
+            await orchestrator.config_reload._update_config()
+
+        mock_plan.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_config_does_not_swap_hook_runtime_on_failed_reload(self, tmp_path: Path) -> None:
