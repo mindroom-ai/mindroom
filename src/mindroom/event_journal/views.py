@@ -328,6 +328,16 @@ class ApprovalView(Protocol):
         """Record one sent approval card as awaiting a decision."""
         ...
 
+    async def room_messages_from_sender(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        limit: int = ...,
+    ) -> tuple[VisibleMessage, ...]:
+        """Return one sender's visible messages across a room, newest first."""
+        ...
+
     async def resolve_approval_card(
         self,
         *,

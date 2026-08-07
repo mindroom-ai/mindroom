@@ -20,6 +20,7 @@ from mindroom.approval_events import (
     PendingApprovalStatus,
     parse_approval_datetime,
 )
+from mindroom.event_journal import StoredApprovalCard
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalView, StoredApprovalCard
+    from mindroom.event_journal import ApprovalView
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -38,6 +39,9 @@ ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 
 _STARTUP_DISCARD_SCAN_LIMIT = 10_000
+# The msgtype every approval card carries. Startup uses it to tell this bot's
+# own cards apart from everything else it has said in an approval room.
+_APPROVAL_CARD_MSGTYPE = "io.mindroom.tool_approval"
 _POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
@@ -1139,6 +1143,20 @@ class _ApprovalManager:
             )
 
     async def _recoverable_room_cards(self, room_id: str) -> tuple[StoredApprovalCard, ...]:
+        """Return every card this room may still owe a decision, row or not.
+
+        The rows are the first source and the authoritative one: they carry any
+        decision already recorded. They are not the only source, because a card
+        reaches the room before its row is written. A crash in that window used
+        to leave a clickable card nobody could resolve -- the previous design
+        caught it by scanning a general event cache, and deleting that cache
+        removed the safety net without replacing it.
+
+        The projection is where that room now lives, so the second source is
+        this bot's own messages in it. A card found there with no row behind it
+        is exactly the orphan: visible, unanswerable, and invisible to the row
+        scan that would otherwise retire it.
+        """
         if self._cards is None:
             return ()
         cards = await self._cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_DISCARD_SCAN_LIMIT)
@@ -1148,7 +1166,78 @@ class _ApprovalManager:
                 room_id=room_id,
                 scan_limit=_STARTUP_DISCARD_SCAN_LIMIT,
             )
-        return cards
+        return (*cards, *await self._unrecorded_room_cards(room_id, recorded=cards))
+
+    async def _unrecorded_room_cards(
+        self,
+        room_id: str,
+        *,
+        recorded: tuple[StoredApprovalCard, ...],
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return cards visible in the room that no durable row accounts for.
+
+        Carries no resolution by construction: a decision is only ever recorded
+        against a row, so a card without one has never been answered. That is
+        the right shape for the caller, which expires exactly those.
+        """
+        cards = self._cards
+        transport_sender = self._transport_sender_id()
+        if cards is None or transport_sender is None:
+            return ()
+        # An efficiency guard, not a correctness one, and worth saying so: the
+        # store's insert is `ON CONFLICT DO NOTHING` and cleanup is claimed once
+        # per card event, so a card that slipped through here would be
+        # deduplicated twice over downstream. What it saves is a store round
+        # trip for every already-recorded card in the room, on every startup.
+        recorded_event_ids = {event_id for card in recorded if isinstance(event_id := card.card.get("event_id"), str)}
+        try:
+            projected = await cards.room_messages_from_sender(
+                room_id=room_id,
+                sender=transport_sender,
+                limit=_STARTUP_DISCARD_SCAN_LIMIT,
+            )
+        except Exception:
+            logger.warning("approval_startup_projection_scan_failed", room_id=room_id, exc_info=True)
+            return ()
+        orphans: list[StoredApprovalCard] = []
+        for message in projected:
+            if message.revision_event_id in recorded_event_ids:
+                continue
+            if message.content.get("msgtype") != _APPROVAL_CARD_MSGTYPE:
+                continue
+            orphans.append(
+                StoredApprovalCard(
+                    # The same shape `_card_event_from_content` stores, rebuilt
+                    # from the projection: the parser needs the event type and
+                    # sender, and a projected message carries neither as such.
+                    card={
+                        "event_id": message.revision_event_id,
+                        "sender": message.sender,
+                        "type": _APPROVAL_CARD_MSGTYPE,
+                        "origin_server_ts": message.created_ts,
+                        "content": dict(message.content),
+                    },
+                    resolution=None,
+                ),
+            )
+        if not orphans:
+            return ()
+        # Write the row the crashed process never got to. Everything downstream
+        # resolves a card by recording its decision against that row first, so
+        # an orphan handed on without one is refused and stays in the room --
+        # finding it is only half of retiring it.
+        for orphan in orphans:
+            await cards.remember_approval_card(
+                room_id=room_id,
+                card_event_id=str(orphan.card["event_id"]),
+                card=orphan.card,
+            )
+        logger.info(
+            "approval_startup_recovered_unrecorded_cards",
+            room_id=room_id,
+            cards=len(orphans),
+        )
+        return tuple(orphans)
 
     async def shutdown(self, *, reason: str) -> None:
         """Expire pending approvals and drain approval cleanup tasks."""

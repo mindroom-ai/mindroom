@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2205,6 +2206,122 @@ async def test_a_restart_can_answer_a_card_the_previous_process_sent(tmp_path: P
 
     assert await restarted.discard_pending_on_startup() == 1
     assert editor.await_args.args[:2] == ("!room:localhost", pending.card_event_id)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_retires_a_card_whose_row_was_never_written(tmp_path: Path) -> None:
+    """The window between sending a card and recording it, and who closes it.
+
+    A card reaches the room before its row exists. A process that dies in
+    between leaves something clickable that no row accounts for, so the row
+    scan at startup cannot see it and nobody can ever resolve it.
+
+    The previous design caught this by scanning a general event cache of the
+    room. Deleting that cache removed the safety net, so startup now also reads
+    the projection -- which is where this bot's own messages live now -- and
+    treats a card there with no row behind it as the orphan it is.
+    """
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    # Exactly the crash shape: the card is in the room, no row was written.
+    cards.projected.append(
+        SimpleNamespace(
+            room_id="!room:localhost",
+            sender="@mindroom_router:localhost",
+            revision_event_id="$orphan",
+            created_ts=1_000,
+            content={
+                "msgtype": "io.mindroom.tool_approval",
+                "tool_name": "read_file",
+                "approval_id": "orphan-approval",
+                "tool_call_id": "orphan-approval",
+                "status": "pending",
+                "approver_user_id": "@user:localhost",
+                "arguments": {"path": "notes.txt"},
+            },
+        ),
+    )
+    # Ordinary chatter from the same sender shares the room and the projection.
+    cards.projected.append(
+        SimpleNamespace(
+            room_id="!room:localhost",
+            sender="@mindroom_router:localhost",
+            revision_event_id="$chatter",
+            created_ts=900,
+            content={"msgtype": "m.notice", "body": "working on it"},
+        ),
+    )
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await restarted.discard_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$orphan")
+    # The repair writes the row the crash skipped, and only that one: a message
+    # that is not a card must not become one. The row is then dropped again,
+    # because the room now shows the decision, so the write is what to observe.
+    assert cards.remembered == ["$orphan"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_does_not_retire_the_same_card_twice(tmp_path: Path) -> None:
+    """A card with a row must not also arrive as an orphan.
+
+    The row scan and the projection scan see the same room, so anything with a
+    row appears in both. Retiring it once is correct; retiring it twice would
+    edit an already-expired card and double every startup's work.
+    """
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    card_content = {
+        "msgtype": "io.mindroom.tool_approval",
+        "tool_name": "read_file",
+        "approval_id": "recorded-approval",
+        "tool_call_id": "recorded-approval",
+        "status": "pending",
+        "approver_user_id": "@user:localhost",
+        "arguments": {"path": "notes.txt"},
+    }
+    await cards.remember_approval_card(
+        room_id="!room:localhost",
+        card_event_id="$recorded",
+        card={
+            "event_id": "$recorded",
+            "sender": "@mindroom_router:localhost",
+            "type": "io.mindroom.tool_approval",
+            "origin_server_ts": 1_000,
+            "content": dict(card_content),
+        },
+    )
+    cards.projected.append(
+        SimpleNamespace(
+            room_id="!room:localhost",
+            sender="@mindroom_router:localhost",
+            revision_event_id="$recorded",
+            created_ts=1_000,
+            content=dict(card_content),
+        ),
+    )
+    cards.remembered.clear()  # Ignore this test's own seeding of the row.
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await restarted.discard_pending_on_startup() == 1
+    assert editor.await_count == 1
+    assert cards.remembered == [], "a card that already had a row was written again"
 
 
 @pytest.mark.asyncio

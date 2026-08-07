@@ -159,6 +159,43 @@ def visible_message(
     return _visible_message(row)
 
 
+def room_messages_from_sender(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    sender: str,
+    limit: int,
+) -> tuple[VisibleMessage, ...]:
+    """Return one sender's visible messages across a whole room, newest first.
+
+    The only read here that is not scoped to a conversation, and it exists for
+    one caller: approval recovery, which has to find cards this bot left in a
+    room without knowing which thread each landed in.
+
+    Deliberately not a general room read. It is filtered to a single sender --
+    in practice this bot's own -- because the thing being recovered is
+    something this process sent and then lost track of. A caller wanting
+    "everything in this room" would be reaching for the arbitrary cached lookup
+    the projection replaced, and would not be able to express it through this.
+
+    Newest first and bounded, because the caller wants the cards a recent
+    process left behind rather than the room's history, and an unbounded scan
+    of a busy room at startup is not a recovery pass anyone would want to wait
+    for.
+    """
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_PAGE_COLUMNS} FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND sender = ?
+        ORDER BY created_ts DESC, logical_event_id/*bytes*/ DESC
+        LIMIT ?
+        """,  # noqa: S608 - a fixed column list, not interpolated input
+        (principal_id, room_id, sender, limit),
+    )
+    return tuple(_visible_message(row) for row in rows if row["content_json"] is not None)
+
+
 def latest_visible_event_id(
     transaction: Transaction,
     principal_id: str,

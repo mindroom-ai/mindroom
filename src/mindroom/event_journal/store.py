@@ -563,6 +563,24 @@ class PrincipalStore:
             ),
         )
 
+    async def room_messages_from_sender(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        limit: int = _DEFAULT_ROOM_CARD_LIMIT,
+    ) -> tuple[VisibleMessage, ...]:
+        """Return one sender's visible messages across a room, newest first."""
+        return await self._backend.read(
+            lambda transaction: reads.room_messages_from_sender(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                sender=sender,
+                limit=limit,
+            ),
+        )
+
     async def remember_approval_card(
         self,
         *,

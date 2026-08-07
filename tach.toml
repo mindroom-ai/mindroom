@@ -125,6 +125,7 @@ visibility = [
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
     "mindroom.thread_export.projected_history",
+    "mindroom.approval_manager",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
     "mindroom.orchestrator",
@@ -541,6 +542,7 @@ path = "mindroom.approval_manager"
 depends_on = [
     "mindroom.approval_events",
     "mindroom.constants",
+    "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.tool_system.tool_calls",
 ]

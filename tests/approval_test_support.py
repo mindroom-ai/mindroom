@@ -31,6 +31,26 @@ class FakeApprovalCards:
         self.cards: dict[str, tuple[str, dict[str, Any]]] = {}
         self.resolutions: dict[str, dict[str, Any]] = {}
         self.lookups: list[tuple[str, str]] = []
+        # What the room shows, which is not the same thing as what has a row.
+        self.projected: list[Any] = []
+        # Cards this instance wrote a row for, so a test can see redundant writes.
+        self.remembered: list[str] = []
+
+    async def room_messages_from_sender(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        limit: int = 256,
+    ) -> tuple[Any, ...]:
+        """Return this bot's visible messages in a room, as the projection holds them.
+
+        Populated by sync echo rather than by the card bookkeeping, so a card
+        can appear here while its row is missing. That divergence is the whole
+        thing under test.
+        """
+        del limit
+        return tuple(m for m in self.projected if m.room_id == room_id and m.sender == sender)
 
     async def remember_approval_card(
         self,
@@ -40,6 +60,8 @@ class FakeApprovalCards:
         card: Mapping[str, Any],
     ) -> None:
         """Record one sent card as pending, keeping the first body seen."""
+        if card_event_id not in self.cards:
+            self.remembered.append(card_event_id)
         self.cards.setdefault(card_event_id, (room_id, dict(card)))
 
     async def resolve_approval_card(
