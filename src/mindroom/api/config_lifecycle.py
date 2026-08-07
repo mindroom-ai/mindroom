@@ -27,7 +27,7 @@ from mindroom.config.yaml_includes import (
     partial_source_files,
     source_files_fingerprint,
 )
-from mindroom.event_journal_change import refuses_event_journal_change
+from mindroom.event_journal_change import EVENT_JOURNAL_CHANGE_MESSAGE, refuses_event_journal_change
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -326,10 +326,21 @@ def persist_runtime_validated_config(
     runtime_config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    """Persist one already-validated config and immediately publish matching committed API snapshots."""
+    """Persist one already-validated config and immediately publish matching committed API snapshots.
+
+    The chat ``!config`` command and the config tools write through here rather
+    than through the HTTP commit paths, so the event-journal rule has to be
+    applied here too. Without it this function would save the moved journal and
+    publish it at generation+1 while the orchestrator kept refusing to adopt it,
+    which is precisely the split the rule exists to prevent -- and it would move
+    published state onto the new journal, so the disk loader's comparison would
+    then agree with it and never refuse again.
+    """
     validated_payload = runtime_config.authored_model_dump()
     matching_states = [state for state in _registered_api_states() if state.snapshot.runtime_paths == runtime_paths]
     if not matching_states:
+        # No published snapshot means no runtime in this process to disagree
+        # with: nothing has adopted a journal here, so there is none to move.
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths, committed_source_files=None)
         return
 
@@ -341,6 +352,9 @@ def persist_runtime_validated_config(
             if snapshot.runtime_paths != runtime_paths:
                 continue
             locked_snapshots.append((state, snapshot))
+
+        for _state, snapshot in locked_snapshots:
+            _raise_if_event_journal_changed(snapshot, runtime_config)
 
         committed_source_files = next(
             (snapshot.source_files for _, snapshot in locked_snapshots if snapshot.source_files is not None),
@@ -473,12 +487,32 @@ def _published_snapshot(
     )
 
 
+class _EventJournalChangeRefusedError(ConfigRuntimeValidationError):
+    """Config write rejected because it moves the event journal this process opened."""
+
+
+def _event_journal_refused_http_error(exc: _EventJournalChangeRefusedError) -> HTTPException:
+    """Return the journal-refusal 409 for the HTTP write paths.
+
+    A permanent rejection like the includes one, not the retryable stale-write
+    409: retrying changes nothing until the process restarts or the field is
+    put back.
+    """
+    return HTTPException(status_code=409, detail=str(exc))
+
+
 def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> None:
     """Reject a write that moves the journal this process already opened.
 
     Told rather than dropped: the write also persists the config file, so
     silently ignoring the journal field would save a file the runtime disagrees
     with and report success for a change that never happened.
+
+    Raised as a config-validation error rather than an ``HTTPException`` because
+    the writers are not all HTTP. The chat ``!config`` command and the config
+    tools reach the same rule through ``persist_runtime_validated_config``, and
+    they already render this exception type as a rejected-change reply; the HTTP
+    paths translate it to 409 at their boundary.
     """
     if not refuses_event_journal_change(
         current.runtime_config,
@@ -487,13 +521,7 @@ def _raise_if_event_journal_changed(current: ApiSnapshot, candidate: Config) -> 
         refused_by="api_config_write",
     ):
         return
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            "event_journal cannot change while MindRoom is running. "
-            "Stop the process, change event_journal, then start it again."
-        ),
-    )
+    raise _EventJournalChangeRefusedError(EVENT_JOURNAL_CHANGE_MESSAGE)
 
 
 def _stale_snapshot_error() -> HTTPException:
@@ -695,6 +723,8 @@ def _build_and_commit_mutation[T](
         raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+    except _EventJournalChangeRefusedError as e:
+        raise _event_journal_refused_http_error(e) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
@@ -733,6 +763,8 @@ def _build_and_commit_replacement(
         raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+    except _EventJournalChangeRefusedError as e:
+        raise _event_journal_refused_http_error(e) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except ConfigRuntimeValidationError as e:
@@ -775,6 +807,8 @@ def _build_and_commit_raw_replacement(
         )
     except HTTPException:
         raise
+    except _EventJournalChangeRefusedError as exc:
+        raise _event_journal_refused_http_error(exc) from exc
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
     except Exception as exc:

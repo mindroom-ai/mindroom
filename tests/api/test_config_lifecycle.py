@@ -17,7 +17,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -456,6 +456,28 @@ class TestEventJournalChangeRefusal:
 
         assert exc_info.value.status_code == 409
         assert _snapshot(loaded_app) is before
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
+
+    def test_external_persist_that_moves_the_journal_is_refused(self, loaded_app: FastAPI) -> None:
+        """The writer behind the chat command and the config tools carries the rule too.
+
+        This path writes the file and republishes every registered snapshot at
+        generation+1 without going through the HTTP commit paths. Left
+        unguarded, a `!config set event_journal.database_url ...` reports
+        success and moves published state onto a journal the orchestrator goes
+        on refusing -- and, because published state then names the new journal,
+        the disk loader's comparison agrees with it and never refuses again.
+        """
+        before = _snapshot(loaded_app)
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = dict(self.JOURNAL_MOVE)
+
+        with pytest.raises(ConfigRuntimeValidationError):
+            config_lifecycle.validate_and_persist_config_payload(moved, before.runtime_paths)
+
+        after = _snapshot(loaded_app)
+        assert after is before, "a refused write advanced the published snapshot"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert "event_journal" not in on_disk, "the refused journal move was written to the config file"
 
