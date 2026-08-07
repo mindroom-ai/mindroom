@@ -91,7 +91,7 @@ from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
-from .event_journal_open import bind_event_journal, open_event_journal_store
+from .event_journal_open import bind_event_journal, close_event_journal_store, open_event_journal_store
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
@@ -1957,7 +1957,7 @@ class _MultiAgentOrchestrator:
         # store out from under a bot still draining its outbox.
         if self._journal_store is not None:
             store, self._journal_store = self._journal_store, None
-            await store.close()
+            await close_event_journal_store(store, storage_path=self.storage_path)
         logger.info("All agent bots stopped")
 
 

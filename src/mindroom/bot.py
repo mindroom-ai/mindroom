@@ -111,7 +111,7 @@ from .event_journal import (
     PrincipalStore,
     SemanticConsumer,
 )
-from .event_journal_open import bind_event_journal, open_event_journal_store
+from .event_journal_open import bind_event_journal, close_event_journal_store, open_event_journal_store
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -1970,7 +1970,11 @@ class AgentBot:
         failures: list[Exception] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
         if self._borrowed_journal_store is None:
-            await self._release("journal store", self._journal_store.close(), failures)
+            await self._release(
+                "journal store",
+                close_event_journal_store(self._journal_store, storage_path=self.storage_path),
+                failures,
+            )
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)

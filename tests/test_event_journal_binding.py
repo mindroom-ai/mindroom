@@ -14,6 +14,7 @@ import asyncio
 import sqlite3
 import threading
 from typing import TYPE_CHECKING
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -27,8 +28,10 @@ from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal_open import (
     EventJournalBinding,
     EventJournalBindingError,
+    adopt_event_journal,
     bind_event_journal,
-    clear_event_journal_binding,
+    close_event_journal_store,
+    current_binding_description,
     describe_event_journal,
     event_journal_binding_path,
     event_journal_sqlite_path,
@@ -81,6 +84,19 @@ def _postgres_runtime_paths(tmp_path: Path, database_url: str) -> RuntimePaths:
     )
 
 
+def _adopt_argv(runtime_paths: RuntimePaths) -> list[str]:
+    """Return the non-interactive `journal adopt` invocation for one install."""
+    return [
+        "journal",
+        "adopt",
+        "--config",
+        str(runtime_paths.config_path),
+        "--storage-path",
+        str(runtime_paths.storage_root),
+        "--yes",
+    ]
+
+
 async def _open_and_bind(runtime_paths: RuntimePaths) -> str:
     """Open the configured journal and bind this install to it, as startup does."""
     config = load_config(runtime_paths)
@@ -97,7 +113,7 @@ async def _open_and_bind(runtime_paths: RuntimePaths) -> str:
             storage_path=runtime_paths.storage_root,
         )
     finally:
-        await store.close()
+        await close_event_journal_store(store, storage_path=runtime_paths.storage_root)
 
 
 class TestBindingRefusal:
@@ -404,19 +420,7 @@ class TestAdoptCommand:
             await _open_and_bind(runtime_paths)
 
         # The command owns its own event loop, so it runs off this one.
-        result = await asyncio.to_thread(
-            runner.invoke,
-            app,
-            [
-                "journal",
-                "adopt",
-                "--config",
-                str(runtime_paths.config_path),
-                "--storage-path",
-                str(runtime_paths.storage_root),
-                "--yes",
-            ],
-        )
+        result = await asyncio.to_thread(runner.invoke, app, _adopt_argv(runtime_paths))
 
         assert result.exit_code == 0, result.output
         assert "Bound" in result.output
@@ -426,17 +430,134 @@ class TestAdoptCommand:
         assert binding is not None
         assert binding.generation == adopted
 
-    async def test_clearing_the_binding_lets_the_next_start_adopt(self, tmp_path: Path) -> None:
-        """The reset primitive under the command, on its own."""
+    async def test_a_failed_adoption_leaves_the_install_exactly_as_usable(self, tmp_path: Path) -> None:
+        """This is the repair tool. It may not be the thing that breaks the install.
+
+        Adoption used to delete the known-good binding before it had so much as
+        tried to open the candidate, so anything that went wrong next -- an
+        unreachable server, a bad DSN, a full disk -- left the install bound to
+        nothing at all, which is worse than the state it was run to fix.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+        before = event_journal_binding_path(runtime_paths.storage_root).read_bytes()
+
+        with (
+            mock.patch(
+                "mindroom.event_journal_open._open_store",
+                side_effect=RuntimeError("the database refused the connection"),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await adopt_event_journal(
+                load_config(runtime_paths).event_journal,
+                runtime_paths=runtime_paths,
+                storage_path=runtime_paths.storage_root,
+            )
+
+        assert event_journal_binding_path(runtime_paths.storage_root).read_bytes() == before
+        # Still usable: the install starts against the journal it was bound to.
+        await _open_and_bind(runtime_paths)
+
+    async def test_adopting_is_refused_while_another_process_holds_the_store(self, tmp_path: Path) -> None:
+        """A running MindRoom keeps writing to the journal it started on.
+
+        Rebinding under it does not move the running install; it splits the
+        install's history between two databases, one of which nothing will ever
+        read again.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+        live = open_event_journal_store(
+            load_config(runtime_paths).event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
+        try:
+            result = await asyncio.to_thread(runner.invoke, app, _adopt_argv(runtime_paths))
+        finally:
+            await close_event_journal_store(live, storage_path=runtime_paths.storage_root)
+
+        assert result.exit_code == 1, result.output
+        assert "still has this install's event journal open" in result.output
+
+    async def test_force_adopts_anyway_for_an_operator_who_knows_better(self, tmp_path: Path) -> None:
+        """The claim is advisory, so the operator has to be able to overrule it."""
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+        live = open_event_journal_store(
+            load_config(runtime_paths).event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
+        try:
+            result = await asyncio.to_thread(runner.invoke, app, [*_adopt_argv(runtime_paths), "--force"])
+        finally:
+            await close_event_journal_store(live, storage_path=runtime_paths.storage_root)
+
+        assert result.exit_code == 0, result.output
+        assert "Bound" in result.output
+
+    async def test_a_closed_store_stops_standing_in_the_way(self, tmp_path: Path) -> None:
+        """A claim that outlived its store would make the repair command refuse forever."""
         runtime_paths = _runtime_paths(tmp_path)
         await _open_and_bind(runtime_paths)
 
-        assert clear_event_journal_binding(runtime_paths.storage_root) is True
-        assert clear_event_journal_binding(runtime_paths.storage_root) is False
-        assert read_event_journal_binding(runtime_paths.storage_root) is None
+        result = await asyncio.to_thread(runner.invoke, app, _adopt_argv(runtime_paths))
 
-        (runtime_paths.storage_root / "tracking" / "event_journal.db").unlink()
+        assert result.exit_code == 0, result.output
+
+
+class TestAnUnreadableBindingIsStillABinding:
+    """A binding whose content is lost is a repair job, never an absence."""
+
+    pytestmark = pytest.mark.asyncio
+
+    @pytest.mark.parametrize(
+        ("corruption", "written"),
+        [("invalid utf-8", b"\xff\xfe{"), ("malformed json", b"{not json"), ("truncated", b"")],
+    )
+    async def test_every_kind_of_corruption_is_refused_the_same_way(
+        self,
+        tmp_path: Path,
+        corruption: str,
+        written: bytes,
+    ) -> None:
+        """A half-finished write leaves bytes that are not UTF-8, not only bad JSON.
+
+        Letting that one escape as a ``UnicodeDecodeError`` turns a repairable
+        binding into an unexplained crash, with none of the instructions the
+        other corruptions get.
+        """
+        del corruption
+        runtime_paths = _runtime_paths(tmp_path)
         await _open_and_bind(runtime_paths)
+        event_journal_binding_path(runtime_paths.storage_root).write_bytes(written)
+
+        with pytest.raises(EventJournalBindingError) as exc_info:
+            await _open_and_bind(runtime_paths)
+
+        assert "mindroom journal adopt" in str(exc_info.value)
+
+    async def test_a_corrupt_binding_does_not_buy_a_gentler_confirmation(self, tmp_path: Path) -> None:
+        """Adopt asks harder when something is already bound, so "nothing" is the wrong answer.
+
+        Reading a corrupt binding as "there was nothing here" dropped the
+        prompt that warns about giving up deduplication, delivery, and recovery
+        history -- so a corrupted file was adopted over with less ceremony than
+        an intact one.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+        event_journal_binding_path(runtime_paths.storage_root).write_bytes(b"\xff\xfe{")
+
+        assert current_binding_description(runtime_paths.storage_root) is not None
+
+        interactive = [argument for argument in _adopt_argv(runtime_paths) if argument != "--yes"]
+        result = await asyncio.to_thread(runner.invoke, app, interactive, input="n\n")
+
+        assert result.exit_code == 1, result.output
+        assert "gives up the deduplication" in result.output
 
 
 class TestNonSecretDescription:

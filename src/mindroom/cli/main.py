@@ -375,50 +375,49 @@ def _threads_export_command(
     )
 
 
-async def _journal_adopt(*, config_path: Path | None, storage_path: Path | None, yes: bool) -> None:
+async def _journal_adopt(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    yes: bool,
+    force: bool,
+) -> None:
     """Bind this install to whatever event-journal database is configured right now."""
     from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
         EventJournalBindingError,
-        bind_event_journal,
-        clear_event_journal_binding,
+        adopt_event_journal,
+        current_binding_description,
         describe_event_journal,
-        open_event_journal_store,
-        read_event_journal_binding,
     )
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
     description = describe_event_journal(config.event_journal, runtime_paths)
-    try:
-        previous = read_event_journal_binding(runtime_paths.storage_root)
-    except EventJournalBindingError:
-        # Adopting is the repair for an unreadable binding, so it must not be
-        # the one command that cannot run while one is present.
-        previous = None
+    # Read for the prompt only. What is actually replaced is decided again
+    # under the binding lock, where nothing else can be publishing.
+    previous = current_binding_description(runtime_paths.storage_root)
     if previous is not None and not yes:
-        console.print(f"This install is bound to [bold]{previous.database}[/bold].")
+        console.print(f"This install is bound to [bold]{previous}[/bold].")
         console.print(
             f"Adopting [bold]{description}[/bold] gives up the deduplication, delivery, and recovery "
             "history held in the bound journal.",
         )
+        console.print("Stop MindRoom first: a runtime that is still up keeps writing to the journal it started on.")
         if not typer.confirm("Adopt the configured event journal?"):
             raise typer.Exit(1)
 
-    clear_event_journal_binding(runtime_paths.storage_root)
-    store = open_event_journal_store(
-        config.event_journal,
-        runtime_paths=runtime_paths,
-        storage_path=runtime_paths.storage_root,
-    )
     try:
-        generation = await bind_event_journal(
-            store,
-            journal_config=config.event_journal,
+        generation = await adopt_event_journal(
+            config.event_journal,
             runtime_paths=runtime_paths,
             storage_path=runtime_paths.storage_root,
+            force=force,
         )
-    finally:
-        await store.close()
+    except EventJournalBindingError as exc:
+        # The previous binding is still in place, which is the point: a failed
+        # adoption must leave the install exactly as usable as it was.
+        console.print(f"[red]Not adopted:[/red] {exc}")
+        raise typer.Exit(1) from exc
     console.print(f"[green]Bound[/green] this install to {description} (generation {generation}).")
 
 
@@ -442,6 +441,11 @@ def _journal_adopt_command(
         "-y",
         help="Adopt without confirming, even when another journal is already bound.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Adopt even though another process still has this install's journal open.",
+    ),
 ) -> None:
     """Bind this install to the configured event-journal database.
 
@@ -450,7 +454,7 @@ def _journal_adopt_command(
     recovery ownership without any error. This is how you say the change was
     deliberate.
     """
-    asyncio.run(_journal_adopt(config_path=config_path, storage_path=storage_path, yes=yes))
+    asyncio.run(_journal_adopt(config_path=config_path, storage_path=storage_path, yes=yes, force=force))
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:

@@ -39,11 +39,17 @@ from typing import TYPE_CHECKING
 from mindroom.durable_write import write_json_file_durable
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.probe import probe_postgres_generation, probe_sqlite_generation
-from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.file_locks import (
+    acquire_shared_file_lock,
+    async_exclusive_file_lock,
+    file_lock_is_held,
+    release_file_lock,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import TextIO
 
     from mindroom.config.main import Config
     from mindroom.config.matrix import EventJournalConfig
@@ -53,6 +59,7 @@ logger = get_logger(__name__)
 
 BINDING_FILENAME = "event_journal_binding.json"
 BINDING_LOCK_FILENAME = "event_journal_binding.lock"
+IN_USE_LOCK_FILENAME = "event_journal_store.lock"
 
 # Keyed by config path rather than by the whole runtime context: the runtime
 # context carries the resolution environment, which is not part of which
@@ -61,10 +68,56 @@ BINDING_LOCK_FILENAME = "event_journal_binding.lock"
 _OPENED_DATABASES: dict[Path, tuple[str, str | None]] = {}
 _OPENED_DATABASES_LOCK = threading.Lock()
 
+# One shared lock per storage root, held for as long as this process has a
+# store open on it, so another process can find out that rebinding now would
+# strand a live writer. Refcounted because a bot that was built outside the
+# orchestrator opens its own store beside the shared one.
+_IN_USE_CLAIMS: dict[Path, _InUseClaim] = {}
+_IN_USE_CLAIMS_LOCK = threading.Lock()
+
 # The only connection parameters that go into a description. An allowlist that
 # is missing a field costs an operator some detail; a denylist that is missing
 # one publishes a password.
 _DESCRIBED_CONNECTION_FIELDS = ("host", "port", "dbname")
+
+
+@dataclass
+class _InUseClaim:
+    """This process's declaration that it has a journal open on one storage root."""
+
+    handle: TextIO
+    holders: int
+
+
+def event_journal_in_use_lock_path(storage_path: Path) -> Path:
+    """Return the lock a process holds while it has this install's journal open."""
+    return storage_path / "tracking" / IN_USE_LOCK_FILENAME
+
+
+def _claim_journal_in_use(storage_path: Path) -> None:
+    """Declare that this process has a store open on ``storage_path``."""
+    with _IN_USE_CLAIMS_LOCK:
+        claim = _IN_USE_CLAIMS.get(storage_path)
+        if claim is not None:
+            claim.holders += 1
+            return
+        _IN_USE_CLAIMS[storage_path] = _InUseClaim(
+            handle=acquire_shared_file_lock(event_journal_in_use_lock_path(storage_path)),
+            holders=1,
+        )
+
+
+def _drop_journal_in_use_claim(storage_path: Path) -> None:
+    """Withdraw one open-store claim, releasing the lock when the last one goes."""
+    with _IN_USE_CLAIMS_LOCK:
+        claim = _IN_USE_CLAIMS.get(storage_path)
+        if claim is None:
+            return
+        claim.holders -= 1
+        if claim.holders > 0:
+            return
+        del _IN_USE_CLAIMS[storage_path]
+    release_file_lock(claim.handle)
 
 
 def _opened_database(
@@ -197,14 +250,17 @@ def read_event_journal_binding(storage_path: Path) -> EventJournalBinding | None
 
     An unreadable or malformed binding is refused rather than treated as
     absent: silently re-binding would adopt whatever database happened to be
-    configured, which is the outcome the binding exists to prevent.
+    configured, which is the outcome the binding exists to prevent. Bytes that
+    are not UTF-8 are one of those cases and not a crash -- a truncated write
+    can leave a partial multi-byte sequence, which is exactly the corruption
+    this is here to catch.
     """
     path = event_journal_binding_path(storage_path)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         msg = (
             f"The event-journal binding at {path} could not be read ({exc}). "
             "Repair or remove it, then run `mindroom journal adopt` to bind the configured database."
@@ -219,6 +275,22 @@ def read_event_journal_binding(storage_path: Path) -> EventJournalBinding | None
         )
         raise EventJournalBindingError(msg)
     return EventJournalBinding(generation=generation, database=database)
+
+
+def current_binding_description(storage_path: Path) -> str | None:
+    """Return what this install is bound to now, or ``None`` when nothing is recorded.
+
+    An unreadable binding is not nothing. It is a binding whose content has
+    been lost, which is a repair job -- but reporting it as absent would drop
+    every "are you sure" that depends on there having been one, and the wording
+    that warns about giving up history is exactly the one that depends on it.
+    A corrupted file would then buy a gentler prompt than an intact one.
+    """
+    try:
+        binding = read_event_journal_binding(storage_path)
+    except EventJournalBindingError:
+        return f"a binding this install can no longer read ({event_journal_binding_path(storage_path)})"
+    return None if binding is None else binding.database
 
 
 def write_event_journal_binding(storage_path: Path, binding: EventJournalBinding) -> None:
@@ -245,15 +317,6 @@ def write_event_journal_binding(storage_path: Path, binding: EventJournalBinding
         indent=2,
         trailing_newline=True,
     )
-
-
-def clear_event_journal_binding(storage_path: Path) -> bool:
-    """Forget which journal this install is bound to; return whether one was recorded."""
-    try:
-        event_journal_binding_path(storage_path).unlink()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def event_journal_sqlite_path(storage_path: Path) -> Path:
@@ -344,9 +407,11 @@ def open_event_journal_store(
     writing.
 
     Opening is also what fixes the journal for the rest of the process, so this
-    records the identity :func:`pending_event_journal_restart` compares against.
-    Recorded after the open succeeds: a store that failed to open is not one
-    anybody is writing to.
+    records the identity :func:`pending_event_journal_restart` compares against,
+    and claims the storage root as in use so that `mindroom journal adopt`
+    running elsewhere can see there is a live writer. Both happen after the
+    open succeeds: a store that failed to open is not one anybody is writing
+    to. Pair this with :func:`close_event_journal_store`, which ends the claim.
     """
     binding = read_event_journal_binding(storage_path)
     if binding is not None:
@@ -355,7 +420,24 @@ def open_event_journal_store(
             binding=binding,
             description=describe_event_journal(journal_config, runtime_paths),
         )
-    return _open_store(journal_config, runtime_paths=runtime_paths, storage_path=storage_path)
+    store = _open_store(journal_config, runtime_paths=runtime_paths, storage_path=storage_path)
+    _claim_journal_in_use(storage_path)
+    return store
+
+
+async def close_event_journal_store(store: EventJournalStore, *, storage_path: Path) -> None:
+    """Close a store this process opened, and withdraw its claim on the journal.
+
+    The claim is only true while the store is open, and it is what stops
+    `mindroom journal adopt` from rebinding out from under a running MindRoom.
+    Leaving it behind would make the repair command refuse forever; the
+    operating system withdraws it if this process dies, so a crash needs no
+    cleanup.
+    """
+    try:
+        await store.close()
+    finally:
+        _drop_journal_in_use_claim(storage_path)
 
 
 async def bind_event_journal(
@@ -390,16 +472,66 @@ async def bind_event_journal(
         )
 
 
+async def adopt_event_journal(
+    journal_config: EventJournalConfig,
+    *,
+    runtime_paths: RuntimePaths,
+    storage_path: Path,
+    force: bool = False,
+) -> str:
+    """Bind this install to the configured database, whatever it was bound to before.
+
+    The deliberate override of the startup refusal, and the only repair for an
+    install whose binding has been lost. So it has to leave the install in a
+    usable state no matter how it fails: the previous binding is replaced by
+    its successor rather than cleared first and rebuilt. Clearing first turned
+    every failure in between -- an unreachable server, a bad DSN, a full disk
+    -- into an unbound install, which is worse than the state the operator ran
+    this command to leave.
+
+    Refuses while another process has the journal open, because that process
+    keeps writing to the store it started on: adopting under it does not move
+    the running install, it splits the install's history in two. ``force``
+    exists because the claim is advisory and an operator can know better --
+    a container that was killed uncleanly leaves no claim, but a shared storage
+    root on a network filesystem may not carry one across hosts.
+    """
+    description = describe_event_journal(journal_config, runtime_paths)
+    async with async_exclusive_file_lock(event_journal_binding_lock_path(storage_path)):
+        if not force and file_lock_is_held(event_journal_in_use_lock_path(storage_path)):
+            msg = (
+                "Another process still has this install's event journal open, and it will go on writing "
+                "to the database it started with. Adopting now would split this install's history in two. "
+                "Stop MindRoom and run this again, or pass --force if you are certain nothing is running."
+            )
+            raise EventJournalBindingError(msg)
+        store = _open_store(journal_config, runtime_paths=runtime_paths, storage_path=storage_path)
+        try:
+            generation = await store.generation(new_generation=uuid.uuid4().hex)
+        finally:
+            await store.close()
+        write_event_journal_binding(
+            storage_path,
+            EventJournalBinding(generation=generation, database=description),
+        )
+    logger.info("event_journal_adopted", database=description)
+    return generation
+
+
 __all__ = [
     "BINDING_FILENAME",
     "BINDING_LOCK_FILENAME",
+    "IN_USE_LOCK_FILENAME",
     "EventJournalBinding",
     "EventJournalBindingError",
+    "adopt_event_journal",
     "bind_event_journal",
-    "clear_event_journal_binding",
+    "close_event_journal_store",
+    "current_binding_description",
     "describe_event_journal",
     "event_journal_binding_lock_path",
     "event_journal_binding_path",
+    "event_journal_in_use_lock_path",
     "event_journal_sqlite_path",
     "open_event_journal_store",
     "pending_event_journal_restart",
