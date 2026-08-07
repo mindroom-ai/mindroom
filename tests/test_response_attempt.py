@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,7 +11,6 @@ import pytest
 from mindroom import response_attempt as response_attempt_module
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 
@@ -49,71 +47,52 @@ class _StopManager:
         self.cleared_messages.append((message_id, remove_button))
 
 
-class _DeliveryGateway:
-    def __init__(self, event_id: str | None = "$thinking") -> None:
-        self.event_id = event_id
-        self.sent_requests: list[Any] = []
-
-    async def send_text(self, request: object) -> str | None:
-        self.sent_requests.append(request)
-        return self.event_id
-
-
 def _runner(
     *,
-    delivery_gateway: _DeliveryGateway | None = None,
     stop_manager: _StopManager | None = None,
     show_stop_button: bool = False,
-) -> tuple[ResponseAttemptRunner, _DeliveryGateway, _StopManager]:
-    resolved_delivery_gateway = delivery_gateway or _DeliveryGateway()
+) -> tuple[ResponseAttemptRunner, _StopManager]:
     resolved_stop_manager = stop_manager or _StopManager()
     return (
         ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=MagicMock(user_id="@mindroom_agent:localhost"),
-                delivery_gateway=resolved_delivery_gateway,
                 stop_manager=resolved_stop_manager,
                 logger=MagicMock(),
                 show_stop_button=lambda: show_stop_button,
                 config=Config(),
             ),
         ),
-        resolved_delivery_gateway,
         resolved_stop_manager,
     )
 
 
 @pytest.mark.asyncio
-async def test_response_attempt_sends_pending_placeholder_and_tracks_visible_task() -> None:
-    """Thinking messages should be sent as tracked pending placeholders."""
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, delivery_gateway, stop_manager = _runner()
-    seen_message_ids: list[str | None] = []
-    order: list[str] = []
+async def test_response_attempt_tracks_the_adopted_placeholder_as_the_visible_task() -> None:
+    """The attempt runs against the placeholder the turn already put in the room.
 
-    async def on_visible_response(message_id: str) -> None:
-        order.append(f"visible:{message_id}")
+    It has no delivery gateway at all, which is the point: the durable outbox
+    row is the only thing allowed to make a placeholder visible, so this runner
+    cannot add a second one even by mistake.
+    """
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, stop_manager = _runner()
+    seen_message_ids: list[str | None] = []
 
     async def response_function(message_id: str | None) -> None:
-        order.append("response")
         seen_message_ids.append(message_id)
 
     message_id = await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
-            thinking_message="Thinking...",
+            existing_event_id="$thinking",
             run_id="run-1",
-            on_visible_response=on_visible_response,
         ),
     )
 
     assert message_id == "$thinking"
     assert seen_message_ids == ["$thinking"]
-    assert order == ["visible:$thinking", "response"]
-    assert delivery_gateway.sent_requests[0].target == target
-    assert delivery_gateway.sent_requests[0].response_text == "Thinking..."
-    assert delivery_gateway.sent_requests[0].extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
     assert stop_manager.set_current_calls[0][0] == "$thinking"
     assert stop_manager.set_current_calls[0][1] == target
     assert stop_manager.set_current_calls[0][3] == "run-1"
@@ -124,7 +103,7 @@ async def test_response_attempt_sends_pending_placeholder_and_tracks_visible_tas
 async def test_response_attempt_uses_pending_tracking_key_without_visible_message() -> None:
     """Responses without a visible message should still be tracked until cleanup."""
     target = MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True)
-    runner, delivery_gateway, stop_manager = _runner(delivery_gateway=_DeliveryGateway(event_id=None))
+    runner, stop_manager = _runner()
     seen_message_ids: list[str | None] = []
 
     async def response_function(message_id: str | None) -> None:
@@ -139,7 +118,6 @@ async def test_response_attempt_uses_pending_tracking_key_without_visible_messag
 
     assert message_id is None
     assert seen_message_ids == [None]
-    assert delivery_gateway.sent_requests == []
     tracked_id = stop_manager.set_current_calls[0][0]
     assert tracked_id.startswith("__pending_response__:")
     assert stop_manager.cleared_messages == [(tracked_id, False)]
@@ -151,7 +129,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
 ) -> None:
     """Online users get a stop reaction that is removed during cleanup."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, _delivery_gateway, stop_manager = _runner(show_stop_button=True)
+    runner, stop_manager = _runner(show_stop_button=True)
     is_user_online = AsyncMock(return_value=True)
     monkeypatch.setattr(response_attempt_module, "is_user_online", is_user_online)
 
@@ -162,7 +140,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
-            thinking_message="Thinking...",
+            existing_event_id="$thinking",
             user_id="@user:localhost",
         ),
     )
@@ -188,7 +166,7 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
 async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
     """Cancelling the awaiting chain must cancel the attempt task with the same provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, _delivery_gateway, _stop_manager = _runner()
+    runner, _stop_manager = _runner()
     inner_started = asyncio.Event()
     inner_cancel_args: list[tuple[object, ...]] = []
     cancellation_reasons: list[str] = []
@@ -222,7 +200,7 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
 @pytest.mark.asyncio
 async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> None:
     """An attempt task that errors while unwinding the forced cancel must be reported."""
-    runner, _delivery_gateway, _stop_manager = _runner()
+    runner, _stop_manager = _runner()
     inner_started = asyncio.Event()
 
     async def misbehaving_attempt() -> None:
@@ -249,7 +227,7 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
 ) -> None:
     """A straggler outliving the forwarded-cancel wait must still report its eventual failure."""
     monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
-    runner, _delivery_gateway, _stop_manager = _runner()
+    runner, _stop_manager = _runner()
     inner_started = asyncio.Event()
     release = asyncio.Event()
 
@@ -298,7 +276,7 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
 ) -> None:
     """Cancelled attempts should classify provenance and always clear tracking."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
-    runner, delivery_gateway, stop_manager = _runner()
+    runner, stop_manager = _runner()
     cancellation_reasons: list[str] = []
 
     async def response_function(_message_id: str | None) -> None:
@@ -314,7 +292,6 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     )
 
     assert message_id == "$existing"
-    assert delivery_gateway.sent_requests == []
     assert cancellation_reasons == [expected_reason]
     assert stop_manager.cleared_messages == [("$existing", False)]
     getattr(runner.deps.logger, log_method).assert_called_once()

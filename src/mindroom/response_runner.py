@@ -1382,7 +1382,6 @@ class ResponseRunner:
         request: ResponseRequest,
         identity: ResponseIdentity,
         progress: _DeliveryProgress,
-        run_message_id: str | None,
         terminal_status: TerminalFailureStatus,
         failure_reason: str,
     ) -> FinalDeliveryOutcome:
@@ -1392,14 +1391,10 @@ class ResponseRunner:
         non-placeholder existing event (for example a prior answer being
         regenerated) must never be treated as a redactable placeholder.
         """
-        # Pre-delivery, a tracked event without an existing event can only be
-        # the attempt runner's freshly sent thinking placeholder (the local
-        # run_message_id is unassigned when the attempt raised), so classify
-        # it as the run message for placeholder cleanup instead of leaving
-        # "Thinking..." dangling.
-        placeholder_run_message_id = (
-            (run_message_id or progress.tracked_event_id) if request.existing_event_id is None else None
-        )
+        # Pre-delivery, a tracked event with no adopted existing event is a
+        # message this turn created on its own, so classify it as the run
+        # message for placeholder cleanup instead of leaving it dangling.
+        placeholder_run_message_id = progress.tracked_event_id if request.existing_event_id is None else None
         pending = PendingVisibleResponse(
             tracked_event_id=progress.tracked_event_id,
             run_message_id=placeholder_run_message_id,
@@ -1437,7 +1432,6 @@ class ResponseRunner:
         request: ResponseRequest,
         identity: ResponseIdentity,
         progress: _DeliveryProgress,
-        run_message_id: str | None,
         terminal_status: TerminalFailureStatus,
         failure_reason: str,
     ) -> None:
@@ -1456,7 +1450,6 @@ class ResponseRunner:
                 request=request,
                 identity=identity,
                 progress=progress,
-                run_message_id=run_message_id,
                 terminal_status=terminal_status,
                 failure_reason=failure_reason,
             )
@@ -1503,7 +1496,6 @@ class ResponseRunner:
         lifecycle: ResponseLifecycle,
         progress: _DeliveryProgress,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        thinking_message: str | None,
         user_id: str | None,
         run_id: str,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
@@ -1515,22 +1507,18 @@ class ResponseRunner:
         | None = None,
     ) -> str | None:
         """Run generation and settle its terminal lifecycle exactly once."""
-        run_message_id: str | None = None
         deferred_error: BaseException | None = None
         try:
-            run_message_id = await self._run_cancellable_response(
+            # The attempt runs against the event the turn already adopted, which
+            # `progress` was seeded with, so it has no new event to report back.
+            await self._run_cancellable_response(
                 target=target,
                 response_function=response_function,
-                thinking_message=thinking_message,
                 existing_event_id=request.existing_event_id,
                 user_id=user_id,
                 run_id=run_id,
-                pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
-                on_visible_response=request.on_visible_response,
             )
-            if progress.tracked_event_id is None:
-                progress.track_event(run_message_id)
         except asyncio.CancelledError as error:
             progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
             await self._settle_missing_delivery_outcome(
@@ -1538,7 +1526,6 @@ class ResponseRunner:
                 request=request,
                 identity=lifecycle.identity,
                 progress=progress,
-                run_message_id=run_message_id,
                 terminal_status="cancelled",
                 failure_reason=progress.failure_reason or "interrupted",
             )
@@ -1560,7 +1547,6 @@ class ResponseRunner:
                         request=request,
                         identity=lifecycle.identity,
                         progress=progress,
-                        run_message_id=run_message_id,
                         terminal_status="error",
                         failure_reason=progress.failure_reason,
                     ),
@@ -1573,7 +1559,6 @@ class ResponseRunner:
                 request=request,
                 identity=lifecycle.identity,
                 progress=progress,
-                run_message_id=run_message_id,
                 terminal_status="cancelled" if progress.cancelled else "error",
                 failure_reason=progress.failure_reason or "interrupted",
             )
@@ -1777,7 +1762,6 @@ class ResponseRunner:
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=deliver_resolution_reason,
-                thinking_message=None,
                 user_id=request.user_id,
                 run_id=str(uuid4()),
                 build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
@@ -2222,14 +2206,6 @@ class ResponseRunner:
                 ),
             )
 
-        thinking_msg = None
-        if not request.existing_event_id and not self._has_queued_forced_compaction(
-            session_id=session_id,
-            scope=session_scope,
-            execution_identity=tool_dispatch.execution_identity,
-        ):
-            thinking_msg = "🤝 Team Response: Thinking..."
-
         def build_team_post_response_outcome(_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
                 response_run_id=team_turn_recorder.run_id or response_run_id,
@@ -2259,7 +2235,6 @@ class ResponseRunner:
             lifecycle=lifecycle,
             progress=progress,
             response_function=generate_team_response,
-            thinking_message=thinking_msg,
             user_id=requester_user_id,
             run_id=response_run_id,
             build_post_response_outcome=build_team_post_response_outcome,
@@ -2276,19 +2251,15 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        thinking_message: str | None = None,
         existing_event_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
-        pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
-        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self._client(),
-                delivery_gateway=self.deps.delivery_gateway,
                 stop_manager=self.deps.stop_manager,
                 logger=self.deps.logger,
                 show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
@@ -2298,13 +2269,10 @@ class ResponseRunner:
             ResponseAttemptRequest(
                 target=target,
                 response_function=response_function,
-                thinking_message=thinking_message,
                 existing_event_id=existing_event_id,
                 user_id=user_id,
                 run_id=run_id,
-                pipeline_timing=pipeline_timing,
                 on_cancelled=on_cancelled,
-                on_visible_response=on_visible_response,
             ),
         )
 
@@ -3031,14 +2999,6 @@ class ResponseRunner:
                 )
             progress.settle(generation.delivery)
 
-        thinking_msg = None
-        if not request.existing_event_id and not self._has_queued_forced_compaction(
-            session_id=session_id,
-            scope=self.deps.state_writer.history_scope(),
-            execution_identity=execution_identity,
-        ):
-            thinking_msg = "Thinking..."
-
         def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
                 # The live collector list also covers raising exit paths, where the
@@ -3074,7 +3034,6 @@ class ResponseRunner:
             lifecycle=lifecycle,
             progress=progress,
             response_function=generate,
-            thinking_message=thinking_msg,
             user_id=request.user_id,
             run_id=response_run_id,
             build_post_response_outcome=build_post_response_outcome,

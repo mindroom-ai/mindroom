@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
 from tests.ai_user_id_helpers import (
@@ -29,6 +31,120 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.response_runner import ResponseRequest
+
+
+class _FakeHomeserver:
+    """A room that dedups on transaction ID and can lose one confirmation.
+
+    Both halves matter. Deduplication is what lets a resend under the same
+    transaction ID collapse onto an event the server already has, and losing a
+    confirmation is the only way to produce the state this test is about: a
+    send whose outcome the client cannot know.
+    """
+
+    def __init__(self, *, accepts_first: bool) -> None:
+        self.events: list[tuple[str, str | None]] = []
+        self.placeholder_sends: list[tuple[str | None, object]] = []
+        self._event_id_by_transaction: dict[str, str] = {}
+        self._accepts_first = accepts_first
+        self._seen_first = False
+
+    async def send(
+        self,
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        operation: str = "send_message",
+        retry_sync_recovery: bool = False,
+        transaction_id: str | None = None,
+    ) -> DeliveredMatrixEvent | None:
+        """Accept one send, deduplicating on transaction ID like a homeserver."""
+        del operation, retry_sync_recovery
+        if content.get("body") == "Thinking...":
+            self.placeholder_sends.append((transaction_id, content.get(STREAM_STATUS_KEY)))
+        if transaction_id is not None and transaction_id in self._event_id_by_transaction:
+            return DeliveredMatrixEvent(
+                event_id=self._event_id_by_transaction[transaction_id],
+                content_sent=dict(content),
+            )
+        first = not self._seen_first
+        self._seen_first = True
+        if first and not self._accepts_first:
+            return None
+        event_id = f"$event-{len(self.events)}"
+        self.events.append((event_id, str(content.get("body", ""))))
+        if transaction_id is not None:
+            self._event_id_by_transaction[transaction_id] = event_id
+        # The first send's confirmation never comes back, whether or not the
+        # server kept the event.
+        return None if first else DeliveredMatrixEvent(event_id=event_id, content_sent=dict(content))
+
+    def placeholders(self) -> list[str]:
+        """Return every visible placeholder event this room ever accepted."""
+        return [event_id for event_id, body in self.events if body == "Thinking..."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_kept_the_placeholder", [True, False])
+async def test_one_turn_never_shows_two_placeholders(
+    tmp_path: Path,
+    *,
+    server_kept_the_placeholder: bool,
+) -> None:
+    """An unconfirmed placeholder send must not be answered with a second one.
+
+    The turn's placeholder goes out through a durable ``INITIAL`` outbox row so
+    that exactly one thing owns it. When that send cannot be confirmed the row
+    is deliberately left unacknowledged, because it is the only record that
+    something may already be in the room under its transaction ID -- and
+    recovery will resend it under that same ID, collapsing onto the event if
+    the server kept it and creating it if it did not.
+
+    Sending a fallback placeholder outside the outbox breaks that in both
+    directions. If the server kept the first one, the fallback is a second
+    visible "Thinking..." immediately, and only the fallback is ever edited
+    into the answer. If it did not, the fallback is in the room and recovery
+    still owes the row, so the next start adds the duplicate instead.
+
+    The count is the assertion. A turn produces at most one placeholder, no
+    matter which way the unconfirmed send actually went.
+    """
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    homeserver = _FakeHomeserver(accepts_first=server_kept_the_placeholder)
+
+    async def die_before_answering(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
+        msg = "process died before the answer"
+        raise RuntimeError(msg)
+
+    with (
+        patch("mindroom.delivery_gateway.send_message_result", new=homeserver.send),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=die_before_answering)),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="process died before the answer"):
+            await coordinator.generate_response(_plain_request(_target()))
+        assert len(homeserver.placeholders()) <= 1, "the turn itself put two placeholders in the room"
+
+        # The turn died before enqueueing FINAL, so nothing supersedes the
+        # placeholder row and the next start resends it.
+        await bot._delivery_gateway.recover_deliveries()
+
+    assert homeserver.placeholders() == ["$event-0"], (
+        "one turn produced more than one visible placeholder across failure and recovery"
+    )
+    # Every attempt carried one owned transaction ID -- which is what makes the
+    # resend collapse rather than add a message -- and the pending marker that
+    # makes clients render it as a placeholder.
+    transaction_ids = {transaction_id for transaction_id, _ in homeserver.placeholder_sends}
+    assert len(transaction_ids) == 1, "the placeholder was attempted under more than one transaction"
+    assert None not in transaction_ids, "a placeholder went out on the unowned direct path"
+    assert {status for _, status in homeserver.placeholder_sends} == {STREAM_STATUS_PENDING}
 
 
 def test_delivery_progress_transitions() -> None:
