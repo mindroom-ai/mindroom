@@ -579,6 +579,12 @@ async def test_prepare_edit_message() -> None:
 
     # Body should have preview
     assert len(result["body"]) < len("* " + text)
+    # The rewrap rebuilds the fallback from the truncated preview rather than
+    # carrying the original body forward. Length alone would pass on a fallback
+    # truncated to the wrong text; only the preview it marks is right, and a
+    # fallback still holding the full 30 KB would push the event over the limit
+    # the truncation exists to stay under.
+    assert result["body"] == f"* {result['m.new_content']['body']}"
     assert "[Message continues in attached file]" in result["m.new_content"]["body"]
     assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
     assert client.uploaded_data is not None
@@ -637,6 +643,12 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
     assert len(result["m.new_content"]["body"]) < len(text)
     assert "[Streaming preview truncated]" in result["m.new_content"]["body"]
     assert "[Message continues in attached file]" not in result["m.new_content"]["body"]
+    # The fallback layer is rebuilt from the same truncated preview. It is what
+    # a client that ignores m.replace renders, and it is counted in the size
+    # this whole path exists to keep under the hard limit -- so an untruncated
+    # one is both the wrong text on screen and an event the server refuses.
+    assert result["body"] == f"* {result['m.new_content']['body']}"
+    assert result["formatted_body"] == result["m.new_content"]["formatted_body"]
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload == edit_content

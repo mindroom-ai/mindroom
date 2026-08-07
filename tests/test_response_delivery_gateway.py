@@ -324,6 +324,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         stored = outbox.rows["$cause", "final"].payload
         assert stored["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$placeholder"}
         assert stored["m.new_content"]["body"] == "the answer"
+        # Both layers are frozen, and the outer one is the only text a client
+        # that does not understand m.replace ever renders. Recovery resends
+        # this row byte for byte, so an outer body still reading "Thinking..."
+        # would be permanent for those clients, not a one-attempt glitch.
+        assert stored["body"] == "* the answer"
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
@@ -355,6 +360,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         frozen = outbox.rows["$cause", "final"].payload
         assert frozen["m.new_content"]["body"] == "first answer"
+        assert frozen["body"] == "* first answer"
 
         delivered = SimpleNamespace(event_id="$placeholder", content_sent=dict(frozen))
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)) as resend:
@@ -366,8 +372,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert sent["m.new_content"]["body"] == "first answer", (
             "the rerun sent its own text under the frozen transaction"
         )
+        # The fallback layer is frozen with the rest. A client that ignores
+        # m.replace reads only this, so leaving it rebuildable would let the
+        # rerun's text reach exactly the readers who cannot see it corrected.
+        assert sent["body"] == "* first answer", "the rerun rebuilt the fallback body from its own text"
         assert resend.await_args.kwargs["transaction_id"] == "tx-$cause-final"
         assert outbox.rows["$cause", "final"].payload["m.new_content"]["body"] == "first answer"
+        assert outbox.rows["$cause", "final"].payload["body"] == "* first answer"
 
     async def test_a_rerun_turn_does_not_edit_the_answer_in_twice(
         self,
@@ -463,6 +474,46 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert list(outbox.rows) == [("$cause", "final")]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$streamed"
+
+    async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The row a stream freezes has to be renderable by a client that ignores edits.
+
+        A streamed answer's last revision is an ``m.replace`` of the message the
+        stream has been editing all along, and the outer ``body`` is the only
+        text a client without edit support shows for it. Recovery resends this
+        row verbatim rather than rebuilding it, so whatever is stored here is
+        final for those clients.
+
+        The stream hands the terminal edit its formatted content and its display
+        text as two separate arguments, and they are not the same string
+        whenever the answer mentions someone. Distinct values here so the
+        assertions say which of the two each layer is built from.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        edited = SimpleNamespace(event_id="$streamed", content_sent={"msgtype": "m.text", "body": "done"})
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=edited)):
+            await terminal(
+                AsyncMock(),
+                _ROOM_ID,
+                "$streamed",
+                {"msgtype": "m.text", "body": "done, @mindroom_code:localhost"},
+                "done, @code",
+            )
+
+        stored = outbox.rows["$cause", "final"].payload
+        assert stored["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$streamed"}
+        assert stored["m.new_content"]["body"] == "done, @mindroom_code:localhost"
+        assert stored["body"] == "* done, @code"
 
     async def test_a_streamed_answer_with_no_placeholder_to_edit_is_still_durable(
         self,
