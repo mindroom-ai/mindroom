@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -150,6 +153,73 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
         "id": SENTENCE_TRANSFORMERS_DEFAULT,
         "dimensions": 384,
     }
+
+
+class _ConcurrencyProbe:
+    """Record the highest number of callers inside the embedder at once."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def observe(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        # Long enough that unserialized callers overlap on any machine.
+        time.sleep(0.02)
+        with self._lock:
+            self.active -= 1
+
+
+def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyProbe) -> object:
+    class DummyEmbedder:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def get_embedding(self, text: str) -> list[float]:
+            probe.observe()
+            return [float(len(text))]
+
+        def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, int]]:
+            probe.observe()
+            return [float(len(text))], {"tokens": len(text)}
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+    return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+
+
+def test_sentence_transformers_embedder_serializes_concurrent_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads must never be inside the local torch embedder at the same time."""
+    probe = _ConcurrencyProbe()
+    embedder = _probed_local_embedder(monkeypatch, probe)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(embedder.get_embedding, [f"chunk {index}" for index in range(8)]))
+
+    assert probe.max_active == 1
+    assert results == [[float(len(f"chunk {index}"))] for index in range(8)]
+
+
+def test_sentence_transformers_embedder_serializes_concurrent_usage_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The usage-reporting entry point shares the same serialization."""
+    probe = _ConcurrencyProbe()
+    embedder = _probed_local_embedder(monkeypatch, probe)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(embedder.get_embedding_and_usage, ["chunk"] * 8))
+
+    assert probe.max_active == 1
+    assert results == [([5.0], {"tokens": 5})] * 8
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:

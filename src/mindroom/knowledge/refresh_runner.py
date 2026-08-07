@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
+from mindroom.constants import (
+    DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
+    KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
+    RuntimePaths,
+    resolve_runtime_paths,
+    runtime_env_values,
+)
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
@@ -90,6 +96,22 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
     start_new_session: bool
 
 
+def _refresh_subprocess_timeout_seconds() -> float:
+    """Return how long one refresh child may run before it is killed."""
+    raw_value = os.getenv(KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV)
+    if raw_value is None:
+        return DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be a number, got {raw_value!r}"
+        raise ValueError(msg) from exc
+    if value <= 0:
+        msg = f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV} must be greater than 0, got {value}"
+        raise ValueError(msg)
+    return value
+
+
 _REFRESH_SUBPROCESS_THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -133,6 +155,9 @@ async def refresh_knowledge_binding_in_subprocess(
     env = dict(runtime_env_values(runtime_paths))
     env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+    # Resolved before the spawn so a malformed window rejects the refresh
+    # instead of leaving a child nobody is waiting on.
+    timeout = _refresh_subprocess_timeout_seconds()
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -144,7 +169,16 @@ async def refresh_knowledge_binding_in_subprocess(
     try:
         with suppress(BrokenPipeError, ConnectionResetError):
             await _send_subprocess_refresh_request(process, request_payload)
-        return_code = await process.wait()
+        return_code = await asyncio.wait_for(process.wait(), timeout=timeout)
+    except TimeoutError:
+        # A refresh child can wedge below Python: torch's Metal shader-library
+        # caches are unlocked, and a corrupted lookup spins forever. The child
+        # gets its own session, so nothing else would ever reap it.
+        await _terminate_refresh_subprocess(process)
+        msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
+        logger.warning(msg, base_id=base_id)
+        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
+        raise RuntimeError(msg) from None
     except asyncio.CancelledError:
         cleanup_task = asyncio.create_task(
             _cleanup_cancelled_refresh_subprocess(
