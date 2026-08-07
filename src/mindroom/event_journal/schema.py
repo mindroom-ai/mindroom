@@ -186,7 +186,17 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS approval_cards (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
-        card_event_id TEXT NOT NULL,
+        -- The card's identity, chosen by this bot before the card is sent and
+        -- reused as the Matrix transaction ID. The homeserver assigns the event
+        -- ID, so keying on that would mean no row could exist until after the
+        -- send -- which is the one ordering that can leave a clickable card
+        -- nothing accounts for.
+        transaction_id TEXT NOT NULL,
+        -- NULL until the send returns an event ID. Such a row is a card that
+        -- may or may not be in the room; presenting the frozen transaction
+        -- again is what settles which, because the homeserver collapses a
+        -- repeat onto the event it already accepted.
+        card_event_id TEXT,
         card_json TEXT NOT NULL,
         -- The decision this bot committed to before it tried to show it. A
         -- card is answered the moment this is set, whether or not the edit
@@ -194,7 +204,7 @@ _TABLES = (
         resolution_json TEXT,
         membership_epoch BIGINT NOT NULL,
         created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, card_event_id)
+        PRIMARY KEY (principal_id, transaction_id)
     )
     """,
     """
@@ -273,8 +283,18 @@ _INDEXES = (
     WHERE acknowledged_event_id IS NULL
     """,
     """
-    CREATE INDEX IF NOT EXISTS approval_cards_room_scan
-    ON approval_cards (principal_id, room_id, created_at_ns, card_event_id/*bytes*/)
+    -- Tied on `transaction_id` rather than the event ID, which is nullable now:
+    -- the two backends disagree about where NULLs sort, so an order broken on
+    -- that column would page one room's cards differently on each.
+    CREATE INDEX IF NOT EXISTS approval_cards_room_transaction_scan
+    ON approval_cards (principal_id, room_id, created_at_ns, transaction_id/*bytes*/)
+    """,
+    """
+    -- One card per accepted event. The partial predicate is what lets many rows
+    -- sit unacknowledged at once, since only a recorded event ID is claimed.
+    CREATE UNIQUE INDEX IF NOT EXISTS approval_cards_event
+    ON approval_cards (principal_id, card_event_id)
+    WHERE card_event_id IS NOT NULL
     """,
     """
     -- The startup repair's scan: delivered answers, oldest first. Its predicate
@@ -293,6 +313,7 @@ _INDEXES = (
 _DROPPED_INDEXES = (
     "DROP INDEX IF EXISTS response_outbox_unacknowledged",
     "DROP INDEX IF EXISTS approval_cards_room",
+    "DROP INDEX IF EXISTS approval_cards_room_scan",
 )
 
 
@@ -302,7 +323,6 @@ _DROPPED_INDEXES = (
 # names it, and then fails at runtime rather than at startup. Every column added
 # to an existing table has to be listed here as well as in the table above.
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("approval_cards", "resolution_json", "TEXT"),
     ("room_membership", "departure_fenced", "INTEGER NOT NULL DEFAULT 0"),
     ("room_membership", "owed_departure_reports", "BIGINT NOT NULL DEFAULT 0"),
     # A row that predates this column was written by a walk that stopped at the

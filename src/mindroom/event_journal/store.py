@@ -607,37 +607,53 @@ class PrincipalStore:
             ),
         )
 
-    async def room_messages_from_sender(
+    async def acknowledged_final_deliveries(
         self,
         *,
-        room_id: str,
-        sender: str,
-        limit: int = _DEFAULT_ROOM_CARD_LIMIT,
-    ) -> tuple[VisibleMessage, ...]:
-        """Return one sender's visible messages across a room, newest first."""
+        limit: int = _DEFAULT_UNACKNOWLEDGED_LIMIT,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[tuple[int, str, str], ...]:
+        """Return ``(created_at_ns, turn_id, acknowledged_event_id)`` for accepted answers."""
         return await self._backend.read(
-            lambda transaction: reads.room_messages_from_sender(
+            lambda transaction: outbox.acknowledged_finals(
                 transaction,
                 self._principal_id,
-                room_id=room_id,
-                sender=sender,
                 limit=limit,
+                after=after,
             ),
         )
 
-    async def remember_approval_card(
+    async def claim_approval_card(
         self,
         *,
         room_id: str,
-        card_event_id: str,
+        transaction_id: str,
         card: Mapping[str, Any],
     ) -> None:
-        """Record one sent approval card as awaiting a decision."""
+        """Record one approval card as awaiting a decision, before it is sent."""
         await self._backend.write(
-            lambda transaction: approvals.remember(
+            lambda transaction: approvals.claim(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
+                transaction_id=transaction_id,
+                card=card,
+            ),
+        )
+
+    async def acknowledge_approval_card(
+        self,
+        *,
+        transaction_id: str,
+        card_event_id: str,
+        card: Mapping[str, Any],
+    ) -> None:
+        """Record the Matrix event one claimed approval card became."""
+        await self._backend.write(
+            lambda transaction: approvals.acknowledge(
+                transaction,
+                self._principal_id,
+                transaction_id=transaction_id,
                 card_event_id=card_event_id,
                 card=card,
             ),
@@ -659,13 +675,13 @@ class PrincipalStore:
             ),
         )
 
-    async def forget_approval_card(self, *, card_event_id: str) -> None:
+    async def forget_approval_card(self, *, transaction_id: str) -> None:
         """Drop one approval card that has reached a terminal state."""
         await self._backend.write(
             lambda transaction: approvals.forget(
                 transaction,
                 self._principal_id,
-                card_event_id=card_event_id,
+                transaction_id=transaction_id,
             ),
         )
 

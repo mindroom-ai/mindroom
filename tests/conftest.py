@@ -674,13 +674,6 @@ def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "Event
 
 _LEGACY_TABLE_DDL = (
     """
-    CREATE TABLE approval_cards (
-        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, card_event_id TEXT NOT NULL,
-        card_json TEXT NOT NULL, membership_epoch BIGINT NOT NULL, created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, card_event_id)
-    )
-    """,
-    """
     CREATE TABLE room_membership (
         principal_id TEXT NOT NULL, room_id TEXT NOT NULL, membership_epoch BIGINT NOT NULL,
         PRIMARY KEY (principal_id, room_id)

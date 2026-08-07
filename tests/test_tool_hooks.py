@@ -1487,6 +1487,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         content: dict[str, object],
         *,
         ignore_unverified_devices: bool = False,
+        tx_id: str | None = None,
     ) -> nio.RoomSendResponse:
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
@@ -1496,6 +1497,9 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         assert message_type == "io.mindroom.tool_approval"
         assert ignore_unverified_devices is True
         assert content["status"] == "pending"
+        # The card is claimed under this transaction before it is sent, so a
+        # repeat after a crash collapses onto whatever this call produced.
+        assert tx_id is not None
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
     client, _ = _initialize_router_approval_store(runtime_paths, room_send=AsyncMock(side_effect=mock_room_send))

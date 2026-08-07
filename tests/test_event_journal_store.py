@@ -973,7 +973,10 @@ class TestSchemaUpgrade:
             "CREATE INDEX response_outbox_unacknowledged ON response_outbox (principal_id, created_at_ns) "
             "WHERE acknowledged_event_id IS NULL",
         )
-        database.execute("CREATE INDEX approval_cards_room ON approval_cards (principal_id, room_id, created_at_ns)")
+        database.execute(
+            "CREATE INDEX approval_cards_room_scan "
+            "ON approval_cards (principal_id, room_id, created_at_ns, card_event_id)",
+        )
 
         for statement in schema_statements(SQLITE_DIALECT):
             database.execute(statement)
@@ -984,8 +987,8 @@ class TestSchemaUpgrade:
                 "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'",
             )
         }
-        assert not indexes & {"response_outbox_unacknowledged", "approval_cards_room"}
-        assert {"response_outbox_unacknowledged_scan", "approval_cards_room_scan"} <= indexes
+        assert not indexes & {"response_outbox_unacknowledged", "approval_cards_room_scan"}
+        assert {"response_outbox_unacknowledged_scan", "approval_cards_room_transaction_scan"} <= indexes
         # And the upgraded database really uses the replacement for its ordering.
         plan = " | ".join(
             row[-1]
@@ -1029,42 +1032,6 @@ class TestSchemaUpgrade:
 
             page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=5)
             assert [m.content["body"] for m in page.messages] == ["hello"]
-        finally:
-            await store.close()
-
-    async def test_a_card_table_predating_its_resolution_column_still_works(
-        self,
-        legacy_journal_store: EventJournalStore,
-    ) -> None:
-        """Approval cards shipped before decisions were recorded on them.
-
-        Every statement naming ``resolution_json`` runs after store opening, so
-        the upgrade has to have happened by then -- on both backends, since one
-        guards the add itself and the other inspects the existing columns.
-        """
-        store = legacy_journal_store
-        try:
-            principal = store.principal("agent@alice")
-            await principal.remember_approval_card(room_id=ROOM, card_event_id="$card", card={"body": "run it?"})
-
-            stored = await principal.pending_approval_card(room_id=ROOM, card_event_id="$card")
-            assert stored is not None
-            assert stored.resolution is None
-
-            recorded = await principal.resolve_approval_card(
-                card_event_id="$card",
-                resolution={"status": "approved"},
-            )
-            assert recorded.recorded is True
-            resolved = await principal.pending_approval_card(room_id=ROOM, card_event_id="$card")
-            assert resolved is not None
-            assert resolved.resolution == {"status": "approved"}
-            assert [c.resolution for c in await principal.pending_approval_cards(room_id=ROOM)] == [
-                {"status": "approved"},
-            ]
-
-            await principal.forget_approval_card(card_event_id="$card")
-            assert await principal.pending_approval_cards(room_id=ROOM) == ()
         finally:
             await store.close()
 
@@ -2041,14 +2008,109 @@ class TestApprovalCards:
             "content": {"approval_id": event_id.lstrip("$"), "status": "pending"},
         }
 
+    @classmethod
+    def transaction(cls, event_id: str) -> str:
+        """Return the transaction a card with this event id was sent under."""
+        return f"txn{event_id}"
+
+    @classmethod
+    async def remember(cls, store: PrincipalStore, event_id: str, *, sender: str = ALICE) -> None:
+        """Leave one card in the state a completed send leaves it: claimed and acknowledged."""
+        card = cls.card(event_id, sender=sender)
+        await store.claim_approval_card(room_id=ROOM, transaction_id=cls.transaction(event_id), card=card)
+        await store.acknowledge_approval_card(
+            transaction_id=cls.transaction(event_id),
+            card_event_id=event_id,
+            card=card,
+        )
+
     async def test_a_remembered_card_reads_back_whole(self, alice: PrincipalStore) -> None:
         """A remembered card reads back whole, and unanswered."""
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
         assert stored is not None
         assert stored.card == self.card("$card")
         assert stored.resolution is None
+        assert stored.card_event_id == "$card"
+
+    async def test_a_claim_is_recoverable_before_anything_knows_its_event(self, alice: PrincipalStore) -> None:
+        """The window a crash lands in holds a row, not a stranded card.
+
+        Nothing can look this card up by event id yet, because no event id
+        exists -- but the room scan startup drives sees it, which is the whole
+        point of writing the row before the send.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [(entry.transaction_id, entry.card_event_id) for entry in scanned] == [("txn", None)]
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
+
+    async def test_a_claim_cannot_carry_a_decision_before_its_send_returns(self, alice: PrincipalStore) -> None:
+        """A decision is recorded against an event, so there is nothing to record against yet.
+
+        Letting one land would mean answering a card whose place in the room is
+        still unknown, and the answer would have no event to be shown on.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+
+        refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
+
+        assert refused.recorded is False
+        assert refused.resolution is None
+
+    async def test_acknowledging_twice_keeps_the_first_event(self, alice: PrincipalStore) -> None:
+        """Two event ids for one transaction means the repeat was not collapsed.
+
+        The homeserver only guarantees that within a device, so a repeat after
+        a re-login can produce a second card. The first is the one the user has
+        been looking at, and moving the row onto the second would abandon it.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=self.card("$card"))
+        await alice.acknowledge_approval_card(
+            transaction_id="txn",
+            card_event_id="$second",
+            card=self.card("$second"),
+        )
+
+        assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$second") is None
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.card == self.card("$card")
+
+    async def test_acknowledging_records_what_the_room_actually_shows(self, alice: PrincipalStore) -> None:
+        """The body is corrected once no repeat can present it again.
+
+        Up to the acknowledgement it had to stay frozen; after it, the send may
+        have diverged from what was claimed -- oversized arguments become a
+        sidecar reference -- and every later read compares the row to the room.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        sent = {**self.card("$card"), "content": {"approval_id": "card", "status": "pending", "approvable": False}}
+        await alice.acknowledge_approval_card(transaction_id="txn", card_event_id="$card", card=sent)
+
+        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
+        assert stored is not None
+        assert stored.card == sent
+
+    async def test_a_card_is_droppable_whether_or_not_it_was_ever_sent(self, alice: PrincipalStore) -> None:
+        """A claim whose send failed has no event id and still has to be removable.
+
+        Keying the delete on the event id would silently match nothing here,
+        and the row would come back on every startup as a card to resend.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn-unsent", card=self.card("$unsent"))
+        await self.remember(alice, "$sent")
+
+        await alice.forget_approval_card(transaction_id="txn-unsent")
+
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [entry.card_event_id for entry in scanned] == ["$sent"]
+
+        await alice.forget_approval_card(transaction_id=self.transaction("$sent"))
+        assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
     async def test_a_recorded_decision_reads_back_with_the_card(self, alice: PrincipalStore) -> None:
         """A card keeps its decision until the room is known to show it.
@@ -2057,7 +2119,7 @@ class TestApprovalCards:
         what a crash between the two leaves behind, and it is what tells the
         next startup to redeliver rather than expire.
         """
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
         await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
         stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
@@ -2073,7 +2135,7 @@ class TestApprovalCards:
         Whether the tool runs turns on this answer, and the write is a guarded
         update that can decline silently.
         """
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         recorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
@@ -2089,7 +2151,7 @@ class TestApprovalCards:
         because a caller told only that no exception occurred would go on to
         show and act on the decision the row rejected.
         """
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
         await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
         refused = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "denied"})
@@ -2119,8 +2181,8 @@ class TestApprovalCards:
         The two zero-row causes stay distinguishable: this one has nothing to
         report back, where a card that already decided reports what it decided.
         """
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
-        await alice.forget_approval_card(card_event_id="$card")
+        await self.remember(alice, "$card")
+        await alice.forget_approval_card(transaction_id=self.transaction("$card"))
 
         unrecorded = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
@@ -2134,7 +2196,7 @@ class TestApprovalCards:
         """Another bot's card is not a row this one may answer, or claim to have."""
         alice = journal_store.principal("agent@alice")
         bob = journal_store.principal("agent@bob")
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         unrecorded = await bob.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
 
@@ -2146,41 +2208,43 @@ class TestApprovalCards:
 
     async def test_a_forgotten_card_is_gone(self, alice: PrincipalStore) -> None:
         """Resolving a card is what removes it, so presence means pending."""
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
         await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
-        await alice.forget_approval_card(card_event_id="$card")
+        await alice.forget_approval_card(transaction_id=self.transaction("$card"))
 
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
 
     async def test_a_card_is_not_readable_from_another_room(self, alice: PrincipalStore) -> None:
         """A card belongs to the room it was sent in."""
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         assert await alice.pending_approval_card(room_id=OTHER_ROOM, card_event_id="$card") is None
         assert await alice.pending_approval_cards(room_id=OTHER_ROOM) == ()
 
-    async def test_remembering_twice_keeps_the_first_card(self, alice: PrincipalStore) -> None:
-        """A repeated send acknowledgement must not rewrite the card body."""
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
-        await alice.remember_approval_card(
+    async def test_claiming_twice_keeps_the_first_card(self, alice: PrincipalStore) -> None:
+        """A repeated claim must not rewrite a body the homeserver may hold.
+
+        The claim is what a repeat send would present again, so replacing it
+        would let a retry post different content under a transaction the
+        homeserver has already accepted.
+        """
+        await alice.claim_approval_card(room_id=ROOM, transaction_id="txn", card=self.card("$card"))
+        await alice.claim_approval_card(
             room_id=ROOM,
-            card_event_id="$card",
+            transaction_id="txn",
             card={**self.card("$card"), "sender": BOB},
         )
 
-        stored = await alice.pending_approval_card(room_id=ROOM, card_event_id="$card")
-        assert stored is not None
-        assert stored.card["sender"] == ALICE
+        # Read while it is still frozen. Acknowledging first would rewrite the
+        # body with whatever was sent and hide a claim that had been replaced.
+        scanned = await alice.pending_approval_cards(room_id=ROOM)
+        assert [entry.card["sender"] for entry in scanned] == [ALICE]
 
     async def test_a_rooms_cards_come_back_oldest_first(self, alice: PrincipalStore) -> None:
         """Startup expiry walks the room's cards in the order they were sent."""
         for index in range(3):
-            await alice.remember_approval_card(
-                room_id=ROOM,
-                card_event_id=f"$card-{index}",
-                card=self.card(f"$card-{index}"),
-            )
+            await self.remember(alice, f"$card-{index}")
 
         stored = await alice.pending_approval_cards(room_id=ROOM)
         assert [entry.card["event_id"] for entry in stored] == ["$card-0", "$card-1", "$card-2"]
@@ -2188,11 +2252,7 @@ class TestApprovalCards:
     async def test_the_scan_honors_its_limit(self, alice: PrincipalStore) -> None:
         """A bounded scan is what tells the caller its own view was truncated."""
         for index in range(5):
-            await alice.remember_approval_card(
-                room_id=ROOM,
-                card_event_id=f"$card-{index}",
-                card=self.card(f"$card-{index}"),
-            )
+            await self.remember(alice, f"$card-{index}")
 
         assert len(await alice.pending_approval_cards(room_id=ROOM, limit=2)) == 2
 
@@ -2205,7 +2265,7 @@ class TestApprovalCards:
         Expiring it would edit a message in a room the bot has since rejoined,
         answering a question nobody in the current membership asked.
         """
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         await alice.advance_membership_epoch(ROOM)
 
@@ -2219,7 +2279,7 @@ class TestApprovalCards:
         """Two bots in one database do not answer each other's approvals."""
         alice = journal_store.principal("agent@alice")
         bob = journal_store.principal("agent@bob")
-        await alice.remember_approval_card(room_id=ROOM, card_event_id="$card", card=self.card("$card"))
+        await self.remember(alice, "$card")
 
         assert await bob.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await bob.pending_approval_cards(room_id=ROOM) == ()
@@ -2312,8 +2372,9 @@ class TestHotQueriesAreIndexCovered:
         ),
         "approval card scan": (
             "SELECT * FROM approval_cards WHERE principal_id=? AND room_id=? "
-            "ORDER BY created_at_ns, card_event_id LIMIT 50"
+            "ORDER BY created_at_ns, transaction_id LIMIT 50"
         ),
+        "approval card point lookup": ("SELECT * FROM approval_cards WHERE principal_id=? AND card_event_id=?"),
         "delivered-answer repair scan": (
             "SELECT turn_id, acknowledged_event_id, created_at_ns FROM response_outbox "
             "WHERE principal_id=? AND stage='final' AND acknowledged_event_id IS NOT NULL "
