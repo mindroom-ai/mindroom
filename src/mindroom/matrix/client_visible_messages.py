@@ -35,6 +35,15 @@ class ResolvedVisibleMessage:
     latest_event_id: str
     stream_status: str | None = None
     edited_timestamp: int | None = None
+    thread_id_known: bool = True
+    """Whether ``thread_id`` is a fact about this message rather than an absence of one.
+
+    A message reconstructed from an edit alone has never been read: its thread lives on the
+    original event's ``m.relates_to``, which the replacement inherits rather than restates, so no
+    client sends it and no window that lacks the original contains it. ``False`` says the placement
+    is unknown, which is not the statement ``thread_id=None`` makes - the canonical thread rules
+    call an unavailable original indeterminate, never room level.
+    """
 
     @classmethod
     def from_message_data(
@@ -125,13 +134,16 @@ class ResolvedVisibleMessage:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the resolved message back to the public dictionary shape."""
-        message_data = {
+        message_data: dict[str, Any] = {
             "sender": self.sender,
             "body": self.body,
             "timestamp": self.timestamp,
             "event_id": self.event_id,
             "content": self.content,
-            "thread_id": self.thread_id,
+            # An unplaced message reports that its thread is unknown instead of reporting no
+            # thread. A reader told a threaded reply sits at room level answers it in the room,
+            # outside the thread it belongs to.
+            **({"thread_id": self.thread_id} if self.thread_id_known else {"thread_id_unknown": True}),
             "latest_event_id": self.latest_event_id,
         }
         # Position and edit time are separate facts now that an edit no longer moves the message.
@@ -483,6 +495,14 @@ async def apply_latest_edits_to_messages(
             )
             continue
 
+        # Everything this message is made of came from the replacement, because the message it
+        # replaces is outside the window. Matrix keeps an edited message's thread on the original
+        # alone - a replacement inherits the relation rather than restating it - so an edit is
+        # usually silent about the thread, and the silence is ignorance rather than room level.
+        #
+        # The revision's time stands in for a creation time nothing here can see, and is reported
+        # as the edit time as well, so a reader can tell that this message's position is a
+        # revision's rather than the original's.
         synthesized_message = ResolvedVisibleMessage(
             sender=edit_event.sender,
             body=edited_body,
@@ -491,6 +511,8 @@ async def apply_latest_edits_to_messages(
             content=edited_content if edited_content is not None else {},
             thread_id=edit_thread_id,
             latest_event_id=edit_event.event_id,
+            edited_timestamp=edit_event.server_timestamp,
+            thread_id_known=edit_thread_id is not None,
         )
         synthesized_message.refresh_stream_status()
         messages_by_event_id[original_event_id] = synthesized_message

@@ -7,6 +7,9 @@ decide the winner.
 Invariant: a Matrix replacement is applied only when it preserves one immutable event identity,
 comes from the sender of the event it replaces, and - among equally-timestamped candidates from
 that sender - is the one with the lexicographically greatest event ID.
+
+Invariant: a message reconstructed from a replacement alone claims only what the replacement
+proves. Its thread is not one of those things, so it is reported as unknown rather than as absent.
 """
 
 from __future__ import annotations
@@ -144,6 +147,90 @@ class TestReplacementSenderRule:
 
         assert messages[_ORIGINAL_ID].sender == _IMPOSTOR
         assert messages[_ORIGINAL_ID].body == "orphaned"
+
+
+class TestSynthesizedMessagePlacement:
+    """Where a message reconstructed from a replacement alone is said to live."""
+
+    @pytest.mark.asyncio
+    async def test_silent_edit_leaves_the_synthesized_placement_unknown(self) -> None:
+        """An edit that says nothing about a thread must not place the message in the room.
+
+        A replacement inherits the original's ``m.relates_to`` instead of restating it, so a
+        threaded reply's edit carries no thread and neither does the window once the original has
+        scrolled out of it. Reporting ``thread_id=None`` there tells a reader the reply was posted
+        at room level, and the reader answers it in the room rather than in its thread.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages: dict[str, ResolvedVisibleMessage] = {}
+
+        await _apply(candidates, messages)
+
+        synthesized = messages[_ORIGINAL_ID]
+        assert "thread_id" not in synthesized.to_dict()
+        assert synthesized.to_dict()["thread_id_unknown"] is True
+        assert synthesized.thread_id_known is False
+        assert synthesized.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_edit_that_carries_its_thread_places_the_synthesized_message(self) -> None:
+        """An edit that does name its thread places the message it reconstructs."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+                new_thread_id="$root",
+            ),
+        )
+        messages: dict[str, ResolvedVisibleMessage] = {}
+
+        await _apply(candidates, messages)
+
+        synthesized = messages[_ORIGINAL_ID]
+        assert synthesized.to_dict()["thread_id"] == "$root"
+        assert synthesized.thread_id_known is True
+
+    @pytest.mark.asyncio
+    async def test_message_read_with_its_edit_keeps_its_own_thread_and_position(self) -> None:
+        """A message that was read is placed by itself, whatever its edit does or does not say."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit",
+                body="* final answer",
+                new_body="final answer",
+                sender=_AUTHOR,
+                server_timestamp=2_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        original = _original_message()
+        original.thread_id = "$root"
+        messages = {_ORIGINAL_ID: original}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] == "$root"
+        assert messages[_ORIGINAL_ID].timestamp == 1_000
+        assert messages[_ORIGINAL_ID].edited_timestamp == 2_000
 
 
 class TestReplacementWinnerSelection:

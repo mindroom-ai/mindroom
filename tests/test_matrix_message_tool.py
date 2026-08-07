@@ -29,6 +29,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
@@ -2633,6 +2634,52 @@ async def test_matrix_message_read_room_collapses_edits_into_one_message() -> No
     assert [message["event_id"] for message in payload["messages"]] == ["$original"]
     assert payload["messages"][0]["body"] == "revision 3"
     assert payload["messages"][0]["latest_event_id"] == "$edit-3"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_does_not_place_an_off_window_message_in_the_room() -> None:
+    """A revision whose message scrolled out of the window must not be reported as room-level.
+
+    A streaming answer is one message and many revisions, so a window of raw events easily holds
+    the revisions without the reply they revise. The reply's thread lives on that reply alone --
+    Matrix has the replacement inherit ``m.relates_to`` rather than restate it, so no client puts
+    it on an edit -- which leaves the fold with a message it cannot place. Reporting no thread
+    reads as room level, and an agent following up on its own answer then posts outside the thread
+    the answer belongs to.
+    """
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    edit_content = build_edit_event_content(
+        event_id="$agent-reply",
+        new_content={"msgtype": "m.notice", "body": "final answer"},
+        new_text="final answer",
+    )
+    response = nio.RoomMessagesResponse.from_dict(
+        {
+            "chunk": [
+                {
+                    "type": "m.room.message",
+                    "event_id": "$edit",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 20,
+                    "content": edit_content,
+                },
+            ],
+            "start": "s",
+            "end": "e",
+        },
+        ctx.room_id,
+    )
+    ctx.client.room_messages.return_value = response
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", limit=5))
+
+    assert payload["status"] == "ok"
+    message = payload["messages"][0]
+    assert (message["event_id"], message["body"]) == ("$agent-reply", "final answer")
+    assert "thread_id" not in message
+    assert message["thread_id_unknown"] is True
 
 
 @pytest.mark.asyncio
