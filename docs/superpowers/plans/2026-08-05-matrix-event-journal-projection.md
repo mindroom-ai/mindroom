@@ -89,10 +89,17 @@ The desired production flow is:
 nio recovery and provenance
   -> durable journal admission and projection update
   -> pending event worker
-  -> durable model result
   -> claimed deterministic outbox delivery
   -> Matrix
 ```
+
+A model result becomes durable *by* being enqueued; there is no separate durable
+record of it beforehand. A crash between the model returning and the enqueue
+leaves the sources pending and reruns the model, which is deliberate: persisting
+a result that was never claimed would let a restart send content the outbox
+never froze, and re-running is the cheaper of the two wrong answers. Only after
+the enqueue is the answer owed to a room, and from that point the transaction ID
+makes redelivery collapse onto one event.
 
 Intermediate AI edits remain transient transport updates and are not durable product data.
 
@@ -1469,7 +1476,7 @@ Approval cards additionally need the durable projection described above, because
 
 ### 3. Delivery ownership cutover
 
-Add the claimed deterministic outbox and durable model-result handoff.
+Add the claimed deterministic outbox, which is the point at which a model result becomes durable.
 
 Keep only the latest unsent streaming content in memory.
 
