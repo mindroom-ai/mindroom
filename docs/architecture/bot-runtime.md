@@ -191,8 +191,12 @@ Interactive reactions and numeric text selections now share the same controller-
 That path sends the acknowledgment, runs response generation, and records the handled turn once.
 
 `ResponseAttemptRunner` now owns visible response attempts.
-It sends thinking placeholders, registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
+It registers stop tracking, runs the cancellable response task, logs cancellation provenance, and clears stop tracking.
 `ResponseRunner` keeps the existing attempt entry point, but delegates attempt mechanics through this deeper module.
+
+It deliberately does not send the turn's placeholder.
+The durable `INITIAL` outbox row that `ResponseRunner` writes when it takes the lifecycle lock is the only thing allowed to put a placeholder in the room, so a send whose outcome Matrix never confirmed is resolved by resending that row under its own transaction ID rather than by a second, unowned send.
+When the durable placeholder cannot be delivered, the turn runs without one and the `FINAL` row becomes its first visible message.
 
 The ingress-to-execution seam is now one-way.
 Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `ResponsePayloadPreparation` value and hands it to the runner inside `ResponseRequest`.

@@ -213,20 +213,16 @@ class RecordingStopManager(StopManager):
         self.tracked_messages.pop(message_id, None)
 
 
-def _attempt_runner(tmp_path: Path, stop_manager: StopManager) -> tuple[ResponseAttemptRunner, MagicMock]:
-    gateway = MagicMock(spec=DeliveryGateway)
-    gateway.send_text = AsyncMock(return_value="$placeholder")
-    runner = ResponseAttemptRunner(
+def _attempt_runner(tmp_path: Path, stop_manager: StopManager) -> ResponseAttemptRunner:
+    return ResponseAttemptRunner(
         ResponseAttemptDeps(
             client=make_matrix_client_mock(),
-            delivery_gateway=gateway,
             stop_manager=stop_manager,
             logger=get_logger("tests.response_attempt"),
             show_stop_button=lambda: False,
             config=_config(tmp_path),
         ),
     )
-    return runner, gateway
 
 
 # ---------------------------------------------------------------------------
@@ -772,75 +768,28 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
 
 
 @pytest.mark.asyncio
-async def test_placeholder_sent_before_generation_and_passed_to_response_function(tmp_path: Path) -> None:
-    """The thinking placeholder lands before generation starts and its event id feeds the attempt."""
+async def test_adopted_placeholder_is_passed_to_the_response_function(tmp_path: Path) -> None:
+    """The event the turn already made visible is what the attempt generates against."""
     stop_manager = RecordingStopManager()
-    runner, gateway = _attempt_runner(tmp_path, stop_manager)
-    order: list[object] = []
-
-    async def send_text(request: object) -> str:
-        order.append(("placeholder", request.response_text, request.extra_content))  # type: ignore[attr-defined]
-        return "$placeholder"
-
-    gateway.send_text = AsyncMock(side_effect=send_text)
-
-    async def respond(message_id: str | None) -> None:
-        order.append(("generate", message_id))
-
-    result = await runner.run(
-        ResponseAttemptRequest(target=_target(), response_function=respond, thinking_message="Thinking..."),
-    )
-
-    assert result == "$placeholder"
-    assert order == [
-        ("placeholder", "Thinking...", {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}),
-        ("generate", "$placeholder"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_existing_event_id_skips_placeholder(tmp_path: Path) -> None:
-    """An adopted existing event suppresses the placeholder send entirely."""
-    stop_manager = RecordingStopManager()
-    runner, gateway = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path, stop_manager)
     seen: list[str | None] = []
 
     async def respond(message_id: str | None) -> None:
         seen.append(message_id)
 
     result = await runner.run(
-        ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$existing"),
+        ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
     )
 
-    assert result == "$existing"
-    assert seen == ["$existing"]
-    gateway.send_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_thinking_message_and_existing_event_are_mutually_exclusive(tmp_path: Path) -> None:
-    """Passing both a thinking message and an existing event id is a caller bug."""
-    runner, _gateway = _attempt_runner(tmp_path, RecordingStopManager())
-
-    async def respond(_message_id: str | None) -> None:
-        pytest.fail("response_function must not run")
-
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        await runner.run(
-            ResponseAttemptRequest(
-                target=_target(),
-                response_function=respond,
-                thinking_message="Thinking...",
-                existing_event_id="$existing",
-            ),
-        )
+    assert result == "$placeholder"
+    assert seen == ["$placeholder"]
 
 
 @pytest.mark.asyncio
 async def test_stop_tracking_registered_during_run_and_cleared_on_success(tmp_path: Path) -> None:
     """The attempt is stop-trackable while generating and tracking clears after success."""
     stop_manager = RecordingStopManager()
-    runner, _gateway = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path, stop_manager)
     target = _target()
     observed: list[tuple[MessageTarget, str | None, bool]] = []
 
@@ -853,7 +802,7 @@ async def test_stop_tracking_registered_during_run_and_cleared_on_success(tmp_pa
         ResponseAttemptRequest(
             target=target,
             response_function=respond,
-            thinking_message="Thinking...",
+            existing_event_id="$placeholder",
             run_id="run-1",
         ),
     )
@@ -868,7 +817,7 @@ async def test_stop_tracking_registered_during_run_and_cleared_on_success(tmp_pa
 async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
     """Generation failures re-raise but never leave dangling stop tracking."""
     stop_manager = RecordingStopManager()
-    runner, _gateway = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path, stop_manager)
 
     async def respond(_message_id: str | None) -> None:
         msg = "generation exploded"
@@ -876,7 +825,7 @@ async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="generation exploded"):
         await runner.run(
-            ResponseAttemptRequest(target=_target(), response_function=respond, thinking_message="Thinking..."),
+            ResponseAttemptRequest(target=_target(), response_function=respond, existing_event_id="$placeholder"),
         )
 
     assert stop_manager.cleared == ["$placeholder"]
@@ -887,7 +836,7 @@ async def test_stop_tracking_cleared_on_failure(tmp_path: Path) -> None:
 async def test_attempt_without_visible_message_tracks_synthetic_key(tmp_path: Path) -> None:
     """No placeholder and no existing event still produces stop-trackable state."""
     stop_manager = RecordingStopManager()
-    runner, gateway = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path, stop_manager)
     tracked_keys: list[str] = []
 
     async def respond(message_id: str | None) -> None:
@@ -897,7 +846,6 @@ async def test_attempt_without_visible_message_tracks_synthetic_key(tmp_path: Pa
     result = await runner.run(ResponseAttemptRequest(target=_target(), response_function=respond))
 
     assert result is None
-    gateway.send_text.assert_not_awaited()
     assert len(tracked_keys) == 1
     assert tracked_keys[0].startswith("__pending_response__:")
     assert stop_manager.cleared == tracked_keys
@@ -913,7 +861,7 @@ async def test_attempt_without_visible_message_tracks_synthetic_key(tmp_path: Pa
 async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_path: Path) -> None:
     """A stop reaction mid-generation cancels the attempt, records the outcome, and clears tracking."""
     stop_manager = RecordingStopManager()
-    runner, _gateway = _attempt_runner(tmp_path, stop_manager)
+    runner = _attempt_runner(tmp_path, stop_manager)
     started = asyncio.Event()
     cancel_reasons: list[str] = []
 
@@ -926,7 +874,7 @@ async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_pat
             ResponseAttemptRequest(
                 target=_target(),
                 response_function=respond,
-                thinking_message="Thinking...",
+                existing_event_id="$placeholder",
                 on_cancelled=cancel_reasons.append,
             ),
         ),
@@ -1545,7 +1493,6 @@ async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
             lifecycle=lifecycle,
             progress=progress,
             response_function=generate,
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=build_post_outcome,
@@ -1604,7 +1551,6 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1659,7 +1605,6 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1708,7 +1653,6 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1787,7 +1731,6 @@ async def test_terminal_send_cancellation_preserves_source_replay(
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1852,7 +1795,6 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1919,7 +1861,6 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -1984,7 +1925,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
@@ -2028,7 +1968,6 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            thinking_message=None,
             user_id=request.user_id,
             run_id="run-1",
             build_post_response_outcome=build_post_outcome,
