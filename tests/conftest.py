@@ -1036,7 +1036,7 @@ class FakeOutbox:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> None:
+    ) -> str | None:
         """Record the Matrix event one claimed delivery produced, and the turn it completes.
 
         The terminal record is kept rather than discarded so a test can assert
@@ -1044,8 +1044,14 @@ class FakeOutbox:
         two drift apart again without anything noticing.
         """
         key = (turn_id, stage.value)
+        already = self.rows[key].acknowledged_event_id
+        if already is not None:
+            # First-writer-wins, like the real store: a loser is told the event
+            # the row already names rather than its own.
+            return already
         self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
         self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
+        return event_id
 
     async def unacknowledged_deliveries(
         self,
@@ -1181,7 +1187,7 @@ class DiesAfterAcknowledgement:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> None:
+    ) -> str | None:
         """Record the Matrix outcome, then die before anything else can run."""
         await self.inner.acknowledge_delivery(
             turn_id=turn_id,

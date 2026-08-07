@@ -226,8 +226,7 @@ class ResponseDelivery:
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
-                await self._acknowledge(turn_id, stage, already_delivered)
-                return already_delivered
+                return await self._acknowledge(turn_id, stage, already_delivered)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan
         # that raises would leave the row unacknowledged but stamped with this
@@ -235,10 +234,9 @@ class ResponseDelivery:
         # and post the answer twice.
         await self.store.record_sending_device(turn_id=turn_id, stage=stage, device_id=self.sending_device_id)
         event_id = await self.send(claimed)
-        await self._acknowledge(turn_id, stage, event_id)
-        return event_id
+        return await self._acknowledge(turn_id, stage, event_id)
 
-    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> None:
+    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> str:
         """Bind the row and let an in-memory view of the record catch up.
 
         The record commits inside the acknowledgement, so nothing else writes
@@ -250,15 +248,25 @@ class ResponseDelivery:
 
         Only on a bound acknowledgement. A loser committed nothing, so it has
         nothing to publish and must not overwrite the winner's record.
+
+        Returns the event the row actually names, which is not always the one
+        just sent. A caller that lost the race must report the winner's event
+        upward, because everything downstream records what delivery returns --
+        and a loser reporting its own send is how the outbox and the terminal
+        record end up naming different events even though the acknowledgement
+        itself was guarded.
         """
-        bound = await self.store.acknowledge_delivery(
+        settled = await self.store.acknowledge_delivery(
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,
             terminal_turn=self._terminal_turn(turn_id, stage, event_id),
         )
-        if bound and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
+        if settled is None:
+            return event_id
+        if settled == event_id and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
             self.terminal_turn_committed(turn_id, event_id)
+        return settled
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.

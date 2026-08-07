@@ -144,9 +144,9 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> None:
+    ) -> str | None:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
-        await self.inner.acknowledge_delivery(
+        return await self.inner.acknowledge_delivery(
             turn_id=turn_id,
             stage=stage,
             event_id=event_id,

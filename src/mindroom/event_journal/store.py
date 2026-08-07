@@ -521,12 +521,14 @@ class PrincipalStore:
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> bool:
+    ) -> str | None:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
 
-        Returns whether this call bound the row. Callers need that to know
-        whether anything they cached alongside the record is now true: a loser
-        wrote nothing here and must publish nothing anywhere else either.
+        Returns the event the row now names -- this call's if it bound the row,
+        and the winner's if it did not. A loser must not go on reporting its own
+        send: everything downstream records what delivery returns, so that is
+        exactly how the outbox and the terminal record come to name different
+        events.
 
         ``terminal_turn`` is the turn record this acknowledgement completes,
         written in the same transaction. The acknowledgement is the durable
@@ -542,7 +544,7 @@ class PrincipalStore:
         database. That is the whole reason turn records were moved here.
         """
 
-        def acknowledge(transaction: Transaction) -> bool:
+        def acknowledge(transaction: Transaction) -> str | None:
             bound = outbox.acknowledge(
                 transaction,
                 self._principal_id,
@@ -562,7 +564,21 @@ class PrincipalStore:
                     anchor_event_id=terminal_turn.anchor_event_id,
                     record_json=terminal_turn.record_json,
                 )
-            return bound
+            if bound:
+                return event_id
+            # Lost the row. Whatever is on it now is the answer this delivery
+            # resolves to, and the caller has to be told that rather than its
+            # own event id -- everything downstream records what `flush`
+            # returns, so a loser reporting its own send is how the outbox and
+            # the turn record end up naming different events.
+            settled = transaction.fetchone(
+                """
+                SELECT acknowledged_event_id FROM response_outbox
+                WHERE principal_id = ? AND turn_id = ? AND stage = ?
+                """,
+                (self._principal_id, turn_id, stage.value),
+            )
+            return None if settled is None else str(settled["acknowledged_event_id"])
 
         return await self._backend.write(acknowledge)
 

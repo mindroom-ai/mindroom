@@ -309,8 +309,8 @@ class OutboxView(Protocol):
         stage: DeliveryStage,
         event_id: str,
         terminal_turn: TerminalTurnWrite | None = None,
-    ) -> bool:
-        """Record the delivery's Matrix event and the turn it completes; say if this call bound it."""
+    ) -> str | None:
+        """Record the delivery's event and the turn it completes; return the event the row names."""
         ...
 
     async def unacknowledged_deliveries(
