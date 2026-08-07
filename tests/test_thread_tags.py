@@ -2731,29 +2731,48 @@ async def test_resolve_thread_root_event_id_for_client_uses_the_journal_when_the
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_original_event() -> None:
-    """Thread edits should normalize directly from explicit thread metadata."""
+async def test_resolve_thread_root_event_id_for_client_ignores_the_thread_an_edit_names() -> None:
+    """Thread edits normalize through the message they edit, not the thread they name.
+
+    Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring every
+    ``m.relates_to`` written there, so a thread named inside an edit is whatever its author typed.
+    Normalizing from it would let an edit retag a message into a thread of the editor's choosing,
+    so the extra point lookup for the original is the price of getting the right answer.
+    """
     client = AsyncMock()
     client.room_get_event = AsyncMock(
-        return_value=_message_event_response(
-            "$edit:localhost",
-            content={
-                "body": "* edited",
-                "msgtype": "m.text",
-                "m.new_content": {
-                    "body": "edited",
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                content={
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "edited",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$claimed-root:localhost",
+                        },
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-reply:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
                     "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread-root:localhost",
                     },
                 },
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$thread-reply:localhost",
-                },
-            },
-        ),
+            ),
+        ],
     )
 
     normalized = await resolve_thread_root_event_id_for_client(
@@ -2764,7 +2783,8 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_
     )
 
     assert normalized == "$thread-root:localhost"
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
 
 
 @pytest.mark.asyncio
