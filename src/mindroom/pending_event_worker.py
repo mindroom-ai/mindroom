@@ -100,6 +100,9 @@ class PendingEventWorker:
     # the store for the whole time its handler runs, so a scan that could not
     # see these would collect one and put a second handler inside it.
     _running_off_lane: set[str] = field(default_factory=set, init=False, repr=False)
+    # Where the next bounded scan resumes, so a prefix of events this worker
+    # cannot act on cannot spend the whole page budget on every pass.
+    _scan_cursor: int | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
         """Begin draining, including anything a previous process left behind."""
@@ -309,15 +312,20 @@ class PendingEventWorker:
         backlog. Events whose turn is still running are skipped rather than
         stopping the scan, so a room full of in-flight turns cannot hide the
         events queued behind it.
+
+        A pass that runs out of page budget leaves its position behind for the
+        next one, and a pass that reaches the end of the backlog starts again
+        from the front. Restarting at receipt order zero every time is what
+        made the budget a ceiling rather than a bound: enough events the worker
+        cannot act on -- a busy bot's in-flight turns, a room whose lane keeps
+        failing -- and every pass spends the whole budget on the same prefix
+        while the dispatchable events behind it are never reached at all.
         """
         by_room: dict[str, list[JournalEvent]] = {}
-        cursor: int | None = None
+        cursor = self._scan_cursor
+        wrapped = cursor is None
         for _ in range(_MAX_SCAN_PAGES):
             page = await self.store.pending(limit=_BATCH_SIZE, after_receipt_order=cursor)
-            if not page:
-                return by_room, False
-            cursor = page[-1].receipt_order
-            truncated = False
             for event in page:
                 if event.event_id in self._running_off_lane:
                     # Its caller is inside the handler right now, and releases
@@ -325,15 +333,18 @@ class PendingEventWorker:
                     continue
                 if event.event_id in self._deferred and not self._reclaim_lost_deferral(event):
                     continue
-                lane = by_room.setdefault(event.room_id, [])
-                if len(lane) >= _BATCH_SIZE:
-                    truncated = True
-                    continue
-                lane.append(event)
-            if truncated:
-                return by_room, True
-            if len(page) < _BATCH_SIZE:
+                by_room.setdefault(event.room_id, []).append(event)
+            if len(page) == _BATCH_SIZE:
+                cursor = page[-1].receipt_order
+                continue
+            if wrapped:
+                self._scan_cursor = None
                 return by_room, False
+            # The end of the backlog, reached from part way through it. What
+            # came before the resume point has not been looked at, so the rest
+            # of the budget goes on it rather than on another pass.
+            cursor, wrapped = None, True
+        self._scan_cursor = cursor
         return by_room, True
 
     def _reclaim_lost_deferral(self, event: JournalEvent) -> bool:

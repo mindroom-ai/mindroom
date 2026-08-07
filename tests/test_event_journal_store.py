@@ -673,6 +673,64 @@ class TestRedaction:
         assert page.refresh_pending == ()
 
 
+class TestUnreadableRowsDoNotEndTheBacklog:
+    """A short page of pending work has to mean one thing, or paging is a lie."""
+
+    @staticmethod
+    async def _corrupt(store: PrincipalStore, *event_ids: str) -> None:
+        """Make some admitted rows' replay payloads undecodable."""
+        for event_id in event_ids:
+            await store._backend.write(
+                lambda transaction, event_id=event_id: transaction.execute(
+                    "UPDATE journal_events SET source_json = ? WHERE event_id = ?",
+                    ("{", event_id),
+                ),
+            )
+
+    async def test_a_corrupt_row_does_not_shorten_the_page_it_sits_in(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A caller paging on the result length would stop here and never resume.
+
+        Dropping the row is right -- nothing ran, so nothing may claim it did --
+        but a page that comes back short for that reason is indistinguishable
+        from the end of the backlog. Everything behind the corrupt row is then
+        durable work no scan ever looks at again.
+        """
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index)
+        await self._corrupt(alice, "$m1")
+
+        page = await alice.pending(limit=4)
+
+        assert [event.event_id for event in page] == ["$m0", "$m2", "$m3", "$m4"]
+
+    async def test_a_page_of_nothing_but_corrupt_rows_is_scanned_through(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Otherwise the scan stalls: no events back, and no cursor to move past."""
+        for index in range(3):
+            await admit(alice, f"$m{index}", ts=1_000 + index)
+        await self._corrupt(alice, "$m0", "$m1")
+
+        page = await alice.pending(limit=2)
+
+        assert [event.event_id for event in page] == ["$m2"]
+
+    async def test_a_short_page_still_means_the_end_of_the_backlog(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The signal the caller paginates on has to keep working."""
+        for index in range(3):
+            await admit(alice, f"$m{index}", ts=1_000 + index)
+
+        assert len(await alice.pending(limit=10)) == 3
+        assert await alice.pending(limit=10, after_receipt_order=1_000) == ()
+
+
 class TestBoundedReads:
     """Reads are paged; there is no call that returns a whole room."""
 

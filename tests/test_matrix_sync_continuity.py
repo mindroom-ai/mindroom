@@ -2671,7 +2671,12 @@ async def test_unreadable_journal_row_does_not_hide_the_events_behind_it(
     )
 
     with capture_logs() as logs:
-        pending = await bot._journal_dispatcher.store.pending()
+        # One row to a page, so the unreadable row fills the page it sits in.
+        # Asserted at a default limit, this held only because the two rows
+        # shared a page: a read that returned whatever decoded from one query
+        # gave back an empty page here, which the worker's scan reads as the
+        # end of the backlog.
+        pending = await bot._journal_dispatcher.store.pending(limit=1)
 
     # The unreadable row is skipped rather than settled — nothing ran, so
     # nothing may claim it did — and it does not hide the events behind it.

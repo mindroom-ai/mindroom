@@ -1806,6 +1806,97 @@ class TestDeferralOwnership:
         assert dispatcher._deferral_is_live(message) is False
 
 
+class TestABoundedScanIsFair:
+    """A page budget bounds how much one pass looks at, not what it can reach."""
+
+    @staticmethod
+    async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
+        await store.admit(
+            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+        )
+
+    async def test_a_full_budget_of_owned_events_does_not_hide_what_is_behind_them(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Restarting at receipt order zero turns the page budget into a ceiling.
+
+        Every pass then spends the whole budget on the same prefix of events it
+        cannot act on -- a busy bot's in-flight turns, a room whose lane keeps
+        failing -- and the dispatchable events behind that prefix are never
+        reached at all, however long the process stays up.
+
+        The budget is cut to one page so the boundary is a page rather than
+        two thousand admissions; the arithmetic being proven is the same.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+            handled.append(event.event_id)
+            return None if event.event_id.startswith("$busy") else SettlementOutcome.SUCCEEDED
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_scan_seconds=0.01)
+        worker.start()
+        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        handled.clear()
+
+        await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
+        worker.wake()
+
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=10)
+        finally:
+            await worker.stop()
+
+    async def test_a_scan_that_ran_off_the_end_goes_back_to_the_front(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cursor that only ever moves forward starves what is behind it.
+
+        Receipt order is not the order events become actionable in. An event
+        the scan has already passed can need dispatching later -- the owner it
+        was handed to died -- and a resume point that never returns to the
+        front of the backlog would leave it there permanently.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+        lost: set[str] = set()
+
+        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+            handled.append(event.event_id)
+            # A source taken back from a dead owner is answered rather than
+            # deferred again, so the count below stays a count of one.
+            return SettlementOutcome.SUCCEEDED if event.event_id in lost else None
+
+        for index in range(_BATCH_SIZE):
+            await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda event: event.event_id not in lost,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        await _eventually(lambda: len(handled) == _BATCH_SIZE)
+        handled.clear()
+
+        # The very first event of the backlog, which the resume point is now
+        # well past, loses its owner.
+        lost.add("$busy0000")
+
+        try:
+            await _eventually(lambda: handled == ["$busy0000"], seconds=10)
+        finally:
+            await worker.stop()
+
+
 @dataclass
 class _FlakyReplayView:
     """One principal's replay view whose store I/O can be made to fail once."""
@@ -1870,11 +1961,11 @@ class TestStoreFailuresBelongToTheLane:
         worker.start()
 
         try:
-            await _eventually(lambda: attempts == ["$m"], seconds=10)
+            await _eventually_async(lambda: alice.pending(), seconds=10)
         finally:
             await worker.stop()
 
-        assert await alice.unsettled_event_ids() == frozenset()
+        assert attempts == ["$m"]
 
     async def test_a_settlement_that_fails_is_retried_rather_than_abandoned(
         self,

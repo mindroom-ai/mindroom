@@ -473,10 +473,38 @@ def pending(
     ``after_receipt_order`` resumes the scan past events a caller has already
     seen. Without it, a caller whose first page is entirely events it cannot
     act on yet — turns still running — could never reach the ones behind them.
+
+    A page is filled from as many rows as it takes, because an unreadable row
+    is dropped from the result but not from the backlog. Reading one query's
+    worth of rows and returning what decoded would make a short page mean two
+    different things — "the backlog ended" and "something in it could not be
+    read" — and the caller that paginates on that would stop at the first
+    corrupt row and strand everything behind it. Here a short page means the
+    end of the backlog and nothing else, and the last event returned is a
+    resume point with no unread rows before it.
     """
+    events: list[JournalEvent] = []
+    cursor = after_receipt_order
+    while len(events) < limit:
+        rows = _pending_rows(transaction, principal_id, limit=limit - len(events), after_receipt_order=cursor)
+        if not rows:
+            break
+        cursor = int(rows[-1]["receipt_order"])
+        events.extend(_decode_rows(rows))
+    return tuple(events)
+
+
+def _pending_rows(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    limit: int,
+    after_receipt_order: int | None,
+) -> tuple[Row, ...]:
+    """Return one raw page of pending rows, in receipt order."""
     cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
-    rows = transaction.fetchall(
+    return transaction.fetchall(
         f"""
         SELECT {_JOURNAL_COLUMNS} FROM journal_events
         WHERE principal_id = ? AND state = 'pending'{cursor_clause}
@@ -485,7 +513,6 @@ def pending(
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
         (principal_id, *cursor_params, limit),
     )
-    return _decode_rows(rows)
 
 
 def pending_thread_events_after(
