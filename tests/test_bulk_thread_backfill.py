@@ -11,9 +11,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.matrix.room_history_reads import (
+    _MAX_APPROVAL_CARD_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
+    find_approval_card_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
@@ -455,3 +457,218 @@ async def test_thread_messages_from_source_raises_rather_than_returning_a_partia
 
     with pytest.raises(ThreadRoomScanRootNotFoundError):
         await fetch_thread_messages_from_source(client, _ROOM_ID, "$missing-root:localhost")
+
+
+def _approval_card_event(
+    event_id: str,
+    *,
+    approval_id: str,
+    timestamp: int,
+    sender: str = "@router:localhost",
+    replaces_event_id: str | None = None,
+) -> nio.Event:
+    """Return one approval card, or the terminal edit that replaces one."""
+    content: dict[str, Any] = {
+        "msgtype": "io.mindroom.tool_approval",
+        "approval_id": approval_id,
+        "status": "pending",
+    }
+    if replaces_event_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replaces_event_id}
+    return raw_nio_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": timestamp,
+            "room_id": _ROOM_ID,
+            "type": "io.mindroom.tool_approval",
+            "content": content,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_finds_the_card_by_its_approval_id() -> None:
+    """The card is located by the id frozen into its body, never by a transaction.
+
+    A transaction ID is scoped to the device that used it, which is the exact
+    reason this lookup is being made at all.
+    """
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [_approval_card_event("$other:localhost", approval_id="other", timestamp=3000)],
+                end="page-2",
+            ),
+            _messages_response(
+                [_approval_card_event("$card:localhost", approval_id="wanted", timestamp=2000)],
+                end="page-3",
+            ),
+        ],
+    )
+
+    found = await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    assert found == "$card:localhost"
+    # Stops the moment it has the answer rather than walking the whole room.
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_reports_absence_only_after_seeing_all_history() -> None:
+    """No card and no history left is the one answer that retires a row."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [_approval_card_event("$other:localhost", approval_id="other", timestamp=2000)],
+            end=None,
+        ),
+    )
+
+    found = await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_ignores_a_card_another_sender_wrote() -> None:
+    """Only this bot's own cards are its to expire."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _approval_card_event(
+                    "$impostor:localhost",
+                    approval_id="wanted",
+                    timestamp=2000,
+                    sender="@someone-else:localhost",
+                ),
+            ],
+            end=None,
+        ),
+    )
+
+    found = await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> None:
+    """A terminal edit carries the same approval id as the card it replaces.
+
+    Adopting the edit would bind every later write to an event the room renders
+    as part of another, so the original is the only match.
+    """
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _approval_card_event(
+                    "$edit:localhost",
+                    approval_id="wanted",
+                    timestamp=3000,
+                    replaces_event_id="$card:localhost",
+                ),
+                _approval_card_event("$card:localhost", approval_id="wanted", timestamp=2000),
+            ],
+            end=None,
+        ),
+    )
+
+    found = await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    assert found == "$card:localhost"
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() -> None:
+    """Running out of pages establishes nothing, and must not read as "no card".
+
+    An unproven absence retires the row, and the card it belongs to then stays
+    clickable with nothing behind it forever. So the bound raises, the row is
+    kept, and the sweep comes back.
+    """
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [_approval_card_event(f"$other-{page}:localhost", approval_id="other", timestamp=page)],
+                end=f"page-{page}",
+            )
+            for page in range(1, 40)
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="absence is unproven"):
+        await find_approval_card_event_id_via_room_messages(
+            client,
+            _ROOM_ID,
+            card_sender="@router:localhost",
+            approval_id="wanted",
+        )
+
+    assert client.room_messages.await_count == _MAX_APPROVAL_CARD_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_rejects_a_repeated_pagination_token() -> None:
+    """A stuck cursor is a failed lookup, not an absence."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [_approval_card_event("$other:localhost", approval_id="other", timestamp=2000)],
+            end="stuck-token",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="repeated pagination token"):
+        await find_approval_card_event_id_via_room_messages(
+            client,
+            _ROOM_ID,
+            card_sender="@router:localhost",
+            approval_id="wanted",
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_asks_for_the_encrypted_wrapper_too() -> None:
+    """In an encrypted room the card is `m.room.encrypted` on the wire.
+
+    nio decrypts the chunk in place and the plaintext type reappears on the
+    event source, but a server-side filter naming only the plaintext type would
+    have excluded the event before that could happen.
+    """
+    client = AsyncMock()
+    client.room_messages = AsyncMock(return_value=_messages_response([], end=None))
+
+    await find_approval_card_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        card_sender="@router:localhost",
+        approval_id="wanted",
+    )
+
+    message_filter = client.room_messages.await_args.kwargs["message_filter"]
+    assert set(message_filter["types"]) == {"io.mindroom.tool_approval", "m.room.encrypted"}

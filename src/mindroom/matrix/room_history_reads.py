@@ -57,6 +57,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
+_APPROVAL_CARD_EVENT_TYPE = "io.mindroom.tool_approval"
+# An approval card is `io.mindroom.tool_approval` in a plain room and arrives
+# wrapped as `m.room.encrypted` in an encrypted one, where nio decrypts the
+# chunk in place and the plaintext type reappears on the event source.
+_APPROVAL_CARD_HISTORY_TYPES = (_APPROVAL_CARD_EVENT_TYPE, "m.room.encrypted")
+_MAX_APPROVAL_CARD_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 
@@ -248,6 +254,85 @@ async def find_response_event_ids_via_room_messages(
         from_token = response.end
 
     return frozenset(response_event_ids)
+
+
+def _is_approval_card_for(event_source: Mapping[str, Any], *, card_sender: str, approval_id: str) -> bool:
+    """Return whether one scanned event is the original card for this approval."""
+    if event_source.get("type") != _APPROVAL_CARD_EVENT_TYPE or event_source.get("sender") != card_sender:
+        return False
+    if EventInfo.from_event(dict(event_source)).is_edit:
+        # A terminal edit carries the same approval id as the card it replaces.
+        # Adopting the edit would bind every later write to an event the room
+        # renders as part of another, so only the original counts.
+        return False
+    content = event_source.get("content")
+    return isinstance(content, Mapping) and content.get("approval_id") == approval_id
+
+
+async def find_approval_card_event_id_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    card_sender: str,
+    approval_id: str,
+) -> str | None:
+    """Find the Matrix event one approval card became, in recent room history.
+
+    Asked when a card's row survived a crash unacknowledged and the frozen
+    transaction ID has stopped being proof, which is a re-login between the
+    send and the recovery. Presenting the transaction again from the new device
+    would put a second prompt in the room rather than converge on the first, so
+    the room itself is the only witness left.
+
+    Located by ``approval_id`` rather than by the transaction: the transaction
+    is device-scoped, which is the whole reason this lookup is being made. The
+    approval id is a per-request ``uuid4`` frozen into the card body before it
+    was sent, so at most one original card in the room carries it.
+
+    Bounded, and the bound is a real limit rather than a guess dressed up as
+    one. A card reachable from here was sent by a process that died moments
+    afterwards, so it sits near the tip of the room; running out of pages
+    before the end of history therefore means the answer was not established,
+    and that is raised rather than reported as absence. Returning None only
+    ever means the walk saw all the history there was and the card was not in
+    it.
+    """
+    from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
+
+    for _page in range(_MAX_APPROVAL_CARD_SCAN_PAGES):
+        response = await client.room_messages(
+            room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": list(_APPROVAL_CARD_HISTORY_TYPES)},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"approval card room scan failed for {room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        for event in response.chunk:
+            if not isinstance(event, nio.Event):
+                continue
+            event_source = event.source if isinstance(event.source, dict) else {}
+            if _is_approval_card_for(event_source, card_sender=card_sender, approval_id=approval_id):
+                return event.event_id
+        if not response.chunk or not response.end:
+            return None
+        if response.end in seen_pagination_tokens:
+            msg = f"approval card room scan repeated pagination token for {room_id}"
+            raise RuntimeError(msg)
+        seen_pagination_tokens.add(response.end)
+        from_token = response.end
+
+    # Raised rather than answered, and the same way every other failure here
+    # is: the caller separates "the room says no" from "the room did not say",
+    # and only the first retires anything.
+    msg = (
+        f"approval card room scan for {approval_id!r} in {room_id} reached its "
+        f"{_MAX_APPROVAL_CARD_SCAN_PAGES}-page bound with history left, so the card's absence is unproven"
+    )
+    raise RuntimeError(msg)
 
 
 @dataclass(frozen=True)
