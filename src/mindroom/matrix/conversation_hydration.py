@@ -97,6 +97,12 @@ _MAX_FETCHED_EVENTS = 20_000
 # code to count. See `_fetch_relations`.
 _MAX_MESSAGES_REQUESTS = 400
 
+# Membership can move while a walk is in flight, refusing its install. Retrying
+# under the fresh epoch is almost always enough; a room whose membership keeps
+# moving is one the bot cannot get a stable view of, and a strict caller is
+# better served by an error than by a page it cannot vouch for.
+_HYDRATION_EPOCH_ATTEMPTS = 3
+
 
 class _HydrationError(RuntimeError):
     """A conversation could not be built from the server."""
@@ -248,30 +254,55 @@ class ConversationHydrator:
         return client
 
     async def ensure_hydrated(self, *, room_id: str, thread_id: str | None) -> None:
-        """Hydrate a conversation once, sharing one task among concurrent readers."""
+        """Hydrate a conversation once, sharing one task among concurrent readers.
+
+        Returning means a hydration marker exists for the *current* membership,
+        and that is checked rather than assumed. A walk installs nothing when
+        membership moved while it was in flight, and the shared task is keyed by
+        conversation alone, so a reader that arrives in the new epoch joins the
+        old epoch's walk and is handed its result. Both then believed a
+        conversation was hydrated when the install had been refused.
+
+        Silently, too: a missing hydration row is not a truncation, so the
+        prompt path reads it as a whole conversation and a model answers from a
+        page with history missing from behind it. Membership churn is exactly
+        when that history matters.
+
+        So each attempt re-checks the durable marker, and a walk refused by the
+        epoch it was launched under is retried under the current one. Bounded,
+        because membership that keeps moving is a room the bot cannot get a
+        stable view of, and failing closed there is the safe direction -- a
+        strict caller gets an error instead of a page it cannot vouch for.
+        """
+        for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
+            if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
+                return
+            debt = await self.store.room_history_debt(room_id)
+            if debt is not None:
+                # Shared per room, so two readers in two threads of an indebted
+                # room walk it once between them rather than once each.
+                await self._shared(
+                    self._repayments,
+                    room_id,
+                    lambda: self._repay(debt),  # noqa: B023 - awaited before the next iteration rebinds it
+                    name=f"repay_room_history_{room_id}",
+                )
+                if thread_id is None:
+                    # The repayment walked the room conversation and installed
+                    # it. Walking it again here would fetch the same pages a
+                    # second time to reach the same rows. The loop still
+                    # verifies the marker landed.
+                    continue
+            await self._shared(
+                self._in_flight,
+                (room_id, thread_id),
+                lambda: self._hydrate(room_id=room_id, thread_id=thread_id),
+                name=f"hydrate_conversation_{room_id}",
+            )
         if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
             return
-        debt = await self.store.room_history_debt(room_id)
-        if debt is not None:
-            # Shared per room, so two readers in two threads of an indebted room
-            # walk it once between them rather than once each.
-            await self._shared(
-                self._repayments,
-                room_id,
-                lambda: self._repay(debt),
-                name=f"repay_room_history_{room_id}",
-            )
-            if thread_id is None:
-                # The repayment walked the room conversation and installed it.
-                # Walking it again here would fetch the same pages a second time
-                # to reach the same rows.
-                return
-        await self._shared(
-            self._in_flight,
-            (room_id, thread_id),
-            lambda: self._hydrate(room_id=room_id, thread_id=thread_id),
-            name=f"hydrate_conversation_{room_id}",
-        )
+        msg = f"Conversation hydration kept losing its membership epoch for {room_id} thread {thread_id}"
+        raise _HydrationError(msg)
 
     async def _shared[Key](
         self,

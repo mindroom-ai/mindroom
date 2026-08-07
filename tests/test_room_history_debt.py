@@ -477,7 +477,12 @@ async def test_a_rejoin_during_the_repayment_walk_installs_nothing(alice: Princi
 
     client = _RejoiningClient(pages=[[raw("$two", "two", ts=2_000)]])
 
-    with capture_logs() as logs:
+    # This server rejoins on every request, so no attempt can ever install. A
+    # real rejoin happens once and the retry succeeds; a room that never settles
+    # is one the bot cannot get a stable view of, and the read fails visibly
+    # rather than handing back a page with nothing in it. Returning quietly here
+    # is what let a strict prompt treat an unhydrated conversation as whole.
+    with capture_logs() as logs, pytest.raises(_HydrationError, match="membership epoch"):
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     # The walk reached past the timestamp it owed, so it would have settled --
@@ -753,3 +758,46 @@ async def test_a_walk_carrying_a_settled_debt_changes_nothing(alice: PrincipalSt
     assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
     assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
     assert await bodies(alice) == ["gap", "old"]
+
+
+async def test_a_single_rejoin_during_hydration_retries_under_the_new_epoch(
+    alice: PrincipalStore,
+) -> None:
+    """One membership change mid-walk must not leave the conversation unhydrated.
+
+    The shared task is keyed by conversation, not by epoch, so a reader that
+    arrives in the new membership joins the old membership's walk and is handed
+    its result -- a result whose install was refused. Reporting success there is
+    what let a strict prompt read an empty page and call it whole, because a
+    missing hydration row is not a truncation.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+
+    @dataclass
+    class _RejoinsOnce(FakeClient):
+        """A homeserver that rejoins under the first walk and settles after.
+
+        Every call is one complete walk, because a real server still holds this
+        history when the retry asks for it.
+        """
+
+        rejoined: bool = False
+
+        async def room_messages(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - matches the fake it overrides
+            """Advance membership under the first request only."""
+            del args, kwargs
+            self.calls += 1
+            if not self.rejoined:
+                self.rejoined = True
+                await alice.advance_membership_epoch(ROOM)
+            chunk = [parse(raw("$two", "two", ts=2_000))]
+            return nio.RoomMessagesResponse(ROOM, chunk, "start", None)
+
+    client = _RejoinsOnce()
+
+    await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    # The retry ran under the settled epoch and installed, so the caller's
+    # promise holds: returning means a marker exists for the current membership.
+    assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    assert await bodies(alice) == ["two"]
