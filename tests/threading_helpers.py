@@ -180,6 +180,7 @@ async def seed_thread_history(
         room_id=room_id,
         thread_id=thread_id,
         events=(),
+        complete=True,
         expected_membership_epoch=await store.membership_epoch(room_id),
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -41,7 +42,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Iterable, Iterator
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
 
@@ -106,6 +107,11 @@ class FakeClient:
     history: list[dict[str, Any]] = field(default_factory=list)
     reported_depth: int | None = 3
     relation_calls: int = 0
+    relation_events: int = 0
+    # A relation tree that outlives any one walk, which is what a long thread of
+    # streamed answers is: one original and a run of edits per answer, forever.
+    endless_relations: bool = False
+    endless_relation_edits: int = 0
     history_pages: int = 0
     history_end_token: str | None = None
     # A room whose history outlives any startup walk, which is what a
@@ -153,23 +159,68 @@ class FakeClient:
         *,
         room_id: str,
         event_id: str,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield stored relations, enforcing depth the way nio does."""
+        """Yield stored relations in server order, enforcing depth the way nio does."""
         del room_id, recurse
         self.relation_calls += 1
-        sources = self.relations.get(event_id, [])
+        sources = self._ordered_relations(event_id, direction)
+        first = next(sources, None)
         # Mirrors nio: an empty page has no depth to report and nothing that
         # could have been truncated, so it is never rejected.
-        if (
-            minimum_recursion_depth is not None
-            and sources
-            and (self.reported_depth is None or self.reported_depth < minimum_recursion_depth)
+        if first is None:
+            return
+        if minimum_recursion_depth is not None and (
+            self.reported_depth is None or self.reported_depth < minimum_recursion_depth
         ):
             raise nio.InsufficientRecursionDepthError(minimum_recursion_depth, self.reported_depth)
-        for source in sources:
+        for source in itertools.chain([first], sources):
+            self.relation_events += 1
             yield parse(source)
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return stored relations in the order a homeserver would send them.
+
+        MSC3981: relations come back in the same topological order ``/messages``
+        would give for the same direction, which for these fixtures is their
+        timestamp order. A walk that stops early depends on that, so the fake
+        has to honor it rather than replay insertion order.
+        """
+        if self.endless_relations:
+            return self._endless_relations()
+        return iter(
+            sorted(
+                self.relations.get(event_id, []),
+                key=lambda source: (source["origin_server_ts"], source["event_id"]),
+                reverse=direction is not nio.MessageDirection.front,
+            ),
+        )
+
+    def _endless_relations(self) -> Iterator[dict[str, Any]]:
+        """Yield an inexhaustible relation tree, newest first.
+
+        Each answer arrives as its edits and then the answer itself, because
+        every edit is newer than the message it revises. Backwards is the only
+        direction this one can express, which is the only direction hydration
+        asks for.
+        """
+        for index in itertools.count():
+            ts = 1_000_000 - index * 100
+            original = f"$answer{index}"
+            for edit in reversed(range(self.endless_relation_edits)):
+                yield raw(
+                    f"{original}-edit{edit}",
+                    f"answer {index} v{edit}",
+                    ts=ts + 1 + edit,
+                    replaces=original,
+                )
+            yield raw(original, f"answer {index}", ts=ts, thread_id="$root")
 
     async def room_messages(
         self,
@@ -514,6 +565,150 @@ class TestThreadHydration:
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await bodies(alice, "$root") == ["root"]
+
+
+class TestThreadHydrationBounds:
+    """A thread's relation tree is walked as far as a prompt needs, and no further.
+
+    The room walk's ceilings do not carry over mechanically, because a thread
+    has no backwards pagination of its own. What carries over is the unit: the
+    window counts logical messages, and the event ceiling counts raw relation
+    events, which in this product differ by an order of magnitude because a
+    streamed answer is one message and a long run of ``m.replace`` edits.
+    """
+
+    @staticmethod
+    def _edited_thread(answers: int, edits: int) -> FakeClient:
+        """Return a thread of streamed answers, each ending at its newest edit."""
+        relations: list[dict[str, Any]] = []
+        for index in range(answers):
+            ts = 1_000 + index * 100
+            original = f"$answer{index}"
+            relations.append(raw(original, f"answer {index}", ts=ts, thread_id="$root"))
+            relations.extend(
+                raw(f"{original}-edit{edit}", f"answer {index} v{edit}", ts=ts + 1 + edit, replaces=original)
+                for edit in range(edits)
+            )
+        return FakeClient(events={"$root": raw("$root", "root", ts=500)}, relations={"$root": relations})
+
+    async def test_the_window_counts_messages_a_prompt_can_read_not_events(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Edits revise a message; they do not fill the window with new ones.
+
+        The room walk learned this the hard way and the thread walk never got
+        the same treatment. A thread of streamed answers has far more relations
+        than messages, so a bound counted in events would call a handful of
+        answers a full prompt window and hydrate almost nothing.
+        """
+        client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
+
+        await hydrator(
+            alice,
+            client,
+            prompt_window_messages=5,
+            max_fetched_events=2_000,
+        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=100)
+        # The root over and above the window: a thread that starts at its first
+        # reply is missing the message the whole thread is about.
+        assert len(page.messages) == 6
+
+    async def test_a_message_inside_the_window_keeps_its_whole_edit_tail(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The one thing truncation must never do is split a message from its edits.
+
+        A message installed without its newest edit is shown at a stale
+        revision, which is wrong text rather than less history, and no reader
+        can tell. The walk may therefore only stop where the relation stream has
+        just finished delivering a message -- which, newest first, is the moment
+        an original arrives, because every edit of it is newer and already read.
+        """
+        client = self._edited_thread(answers=4, edits=3)
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        # The two newest answers, each at its newest revision, and the root.
+        assert await bodies(alice, "$root") == ["root", "answer 2 v2", "answer 3 v2"]
+        assert await revisions(alice, "$root") == ["$root", "$answer2-edit2", "$answer3-edit2"]
+
+    async def test_the_event_ceiling_stops_a_thread_the_window_never_would(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One pathological thread must not walk its whole relation tree.
+
+        This is the bound the thread walk was missing entirely: every relation
+        was accumulated into one list and written in one projection
+        transaction, so a first strict read paid for the whole tree before it
+        returned anything.
+        """
+        client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
+
+        await hydrator(
+            alice,
+            client,
+            prompt_window_messages=50,
+            max_fetched_events=200,
+        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_events == 200
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=100)
+        assert len(page.messages) < 50
+
+    async def test_reaching_the_ceiling_still_marks_the_thread_hydrated(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The marker records that the one-time walk ran, not that it filled.
+
+        Withholding it would re-run the whole truncated walk on every read of
+        that thread, which is far worse than a prompt with less history than
+        its maximum. This is the room walk's recorded trade and it transfers.
+        """
+        client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
+
+        await hydrator(
+            alice,
+            client,
+            prompt_window_messages=50,
+            max_fetched_events=200,
+        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+
+    async def test_a_bounded_thread_is_hydrated_but_not_complete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Being hydrated and being whole are different facts, and both are recorded.
+
+        A reader whose correctness is completeness rather than recency -- an
+        export, not a prompt -- cannot tell a windowed thread from a short one
+        by looking at the projection, so the walk records why it stopped
+        instead of leaving it to be inferred.
+        """
+        client = self._edited_thread(answers=4, edits=1)
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_thread_the_walk_read_to_the_end_is_complete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Running out of relations is completeness, and it is recorded as such."""
+        client = self._edited_thread(answers=4, edits=1)
+
+        await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
 
 class TestRoomHydration:
@@ -888,6 +1083,7 @@ class TestSidecarResolution:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await store.membership_epoch(ROOM),
         )
         return ConversationReader(store=store, hydrator=hydrator(store, client))
@@ -1240,6 +1436,7 @@ class TestReadModes:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
@@ -1259,6 +1456,7 @@ class TestReadModes:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
@@ -1288,6 +1486,7 @@ class TestWindowTruncation:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
@@ -1314,6 +1513,7 @@ class TestWindowTruncation:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
@@ -1361,6 +1561,7 @@ class TestRefreshStarvation:
             room_id=ROOM,
             thread_id=None,
             events=(),
+            complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 

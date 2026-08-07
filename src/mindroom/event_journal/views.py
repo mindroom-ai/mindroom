@@ -155,6 +155,7 @@ class HydrationView(Protocol):
         room_id: str,
         thread_id: str | None,
         events: tuple[ProjectedEvent, ...],
+        complete: bool,
         expected_membership_epoch: int,
     ) -> bool:
         """Install a completed hydration atomically, or install nothing."""

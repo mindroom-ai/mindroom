@@ -14,6 +14,7 @@ now".
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,11 @@ _MAX_FETCHED_EVENTS = 20_000
 # A separate bound, because it measures a different thing. Deriving it from the
 # event ceiling made a room that returns one event per page stop after two
 # pages while reporting that it had read twenty thousand events.
+#
+# This one is the room walk's alone. A thread is a single
+# `room_get_event_relations` call whose pagination happens inside nio, which
+# yields events rather than pages, so there is no request for this side of the
+# code to count. See `_fetch_relations`.
 _MAX_MESSAGES_REQUESTS = 400
 
 
@@ -124,6 +130,22 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     if is_transport_progress_revision(projected, self_sender=self_sender):
         return None
     return projected
+
+
+@dataclass(frozen=True, slots=True)
+class _Walk:
+    """What one hydration walk collected, and whether it reached the end.
+
+    ``complete`` says the walk ran out of conversation rather than out of
+    allowance. It is not the same statement as the hydration marker, which only
+    records that the one-time walk ran: a bounded walk that stopped at the
+    prompt window is hydrated and is not complete, and a reader whose
+    correctness is completeness rather than recency has to be able to tell those
+    apart instead of reading a warm marker as a whole conversation.
+    """
+
+    events: tuple[ProjectedEvent, ...]
+    complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,13 +245,14 @@ class ConversationHydrator:
 
     async def _hydrate(self, *, room_id: str, thread_id: str | None) -> None:
         epoch = await self.store.membership_epoch(room_id)
-        events = (
+        walk = (
             await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
         )
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,
             thread_id=thread_id,
-            events=events,
+            events=walk.events,
+            complete=walk.complete,
             expected_membership_epoch=epoch,
         )
         if not installed:
@@ -237,7 +260,28 @@ class ConversationHydrator:
             # a room the bot is no longer in the same relationship with.
             logger.info("conversation_hydration_superseded", room_id=room_id, thread_id=thread_id)
 
-    async def _fetch_thread(self, room_id: str, thread_id: str) -> tuple[ProjectedEvent, ...]:
+    async def _fetch_thread(self, room_id: str, thread_id: str) -> _Walk:
+        """Build one thread from its root and a bounded walk of its relations.
+
+        The room walk's ceilings apply here, but they do not carry over
+        mechanically, because a thread has no "paginate backwards until the
+        window fills" shape of its own.
+
+        The window still counts logical messages, and the relation walk is what
+        it bounds. The root is kept over and above it: a thread that starts at
+        its first reply is missing the message the whole thread is about, so it
+        is not a message the window is allowed to spend itself on.
+
+        The event ceiling still counts raw relation events, and it is the one
+        that matters most here. MindRoom streams by editing, so the relation
+        tree of a thread of streamed answers is an order of magnitude larger
+        than its logical message count, and all of it used to be accumulated in
+        one list and written in one projection transaction.
+
+        The request ceiling has no counterpart. This is a single
+        ``room_get_event_relations`` call; nio paginates inside it and yields
+        events, not pages, so there is nothing here to count.
+        """
         root = await self._client().room_get_event(room_id, thread_id)
         if not isinstance(root, nio.RoomGetEventResponse):
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
@@ -246,26 +290,86 @@ class ConversationHydrator:
         root_projected = _projected_from_event(room_id, root.event, self_sender=self.self_sender)
         if root_projected is not None:
             events.append(root_projected)
-        events.extend(await self._fetch_relations(room_id, thread_id))
-        return tuple(events)
+        relations = await self._fetch_relations(
+            room_id,
+            thread_id,
+            window_messages=self.prompt_window_messages,
+        )
+        return _Walk(events=(*events, *relations.events), complete=relations.complete)
 
-    async def _fetch_relations(self, room_id: str, event_id: str) -> tuple[ProjectedEvent, ...]:
-        """Walk the whole relation tree, without filtering by relation type.
+    async def _fetch_relations(
+        self,
+        room_id: str,
+        event_id: str,
+        *,
+        window_messages: int | None,
+    ) -> _Walk:
+        """Walk the relation tree newest first, without filtering by relation type.
 
         Filtering by ``m.thread`` would miss the edits and replies hanging off
         thread members, which is exactly the content a conversation is made of.
+
+        Newest first is what makes stopping early safe, and it is asked for
+        explicitly rather than inherited from nio's default because the whole
+        truncation rests on it. MSC3981 has the server return relations in the
+        same topological order ``/messages`` would give for the same direction,
+        and an edit is sent after the message it revises, so every edit of a
+        message arrives before that message does. The room walk's backwards
+        pagination already rests on exactly this and for exactly this reason.
+
+        So the unit the window is applied to is the logical message, and the
+        only place the walk may stop for it is the moment one has just been
+        admitted: at that point its whole edit tail is already collected, and a
+        message can never be installed at a stale revision. The event ceiling
+        can stop mid-message, and under this order that direction is the harmless
+        one -- it drops an original and keeps edits nothing will claim, rather
+        than keeping a message and dropping the edits that supersede it.
+
+        ``window_messages`` is ``None`` for a point refetch, which is one logical
+        message and has no window: a threaded reply among its relations must not
+        end the walk before the edit it came for arrives.
         """
         events: list[ProjectedEvent] = []
+        admitted = 0
+        fetched = 0
+        complete = True
+        relations = self._client().room_get_event_relations(
+            room_id=room_id,
+            event_id=event_id,
+            direction=nio.MessageDirection.back,
+            recurse=True,
+            minimum_recursion_depth=self.required_recursion_depth,
+        )
         try:
-            async for event in self._client().room_get_event_relations(
-                room_id=room_id,
-                event_id=event_id,
-                recurse=True,
-                minimum_recursion_depth=self.required_recursion_depth,
-            ):
-                projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
-                if projected is not None:
-                    events.append(projected)
+            # Closed explicitly, because every exit below but exhaustion leaves
+            # the server mid-tree and nio's generator holding a page it will
+            # never be asked for.
+            async with contextlib.aclosing(relations):
+                async for event in relations:
+                    fetched += 1
+                    projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
+                    if projected is not None:
+                        events.append(projected)
+                        if projected.replaces_event_id is None:
+                            admitted += 1
+                            if window_messages is not None and admitted >= window_messages:
+                                complete = False
+                                break
+                    if fetched >= self.max_fetched_events:
+                        complete = False
+                        # Said out loud for the same reason the room walk says
+                        # it: this is not the window being met, it is a
+                        # conversation whose remaining relations cost more than
+                        # they are worth to a prompt.
+                        logger.warning(
+                            "conversation_hydration_ceiling_reached",
+                            room_id=room_id,
+                            event_id=event_id,
+                            fetched_events=fetched,
+                            logical_messages=admitted,
+                            prompt_window_messages=window_messages,
+                        )
+                        break
         except nio.InsufficientRecursionDepthError as error:
             msg = (
                 f"Homeserver returned related events without reporting a recursion depth "
@@ -273,9 +377,9 @@ class ConversationHydrator:
                 f"conversation would be missing indirectly related events"
             )
             raise _HydrationError(msg) from error
-        return tuple(events)
+        return _Walk(events=tuple(events), complete=complete)
 
-    async def _fetch_room(self, room_id: str) -> tuple[ProjectedEvent, ...]:
+    async def _fetch_room(self, room_id: str) -> _Walk:
         """Walk back until the prompt window is filled, or the room runs out.
 
         A server that has run out of history answers with an empty chunk and no
@@ -317,7 +421,7 @@ class ConversationHydrator:
                 if projected.replaces_event_id is None:
                     logical += 1
             if logical >= self.prompt_window_messages:
-                return tuple(events)
+                return _Walk(events=tuple(events), complete=False)
             # An empty page is not exhaustion. The server may filter a page down
             # to nothing and still hand back a continuation token, and the room
             # can hold visible history behind it; only the absent token means
@@ -325,7 +429,7 @@ class ConversationHydrator:
             # progress, which is the one shape that could spin forever, because
             # an empty page does not advance the event count either.
             if not response.end:
-                return tuple(events)
+                return _Walk(events=tuple(events), complete=True)
             if response.end == start:
                 # Neither server MindRoom runs signals exhaustion this way.
                 # Tuwunel derives `end` from the last event it returned and so
@@ -353,7 +457,7 @@ class ConversationHydrator:
                     logical_messages=logical,
                     prompt_window_messages=self.prompt_window_messages,
                 )
-                return tuple(events)
+                return _Walk(events=tuple(events), complete=False)
             start = response.end
 
     async def refresh(self, request: RefreshRequest) -> bool:
@@ -374,8 +478,8 @@ class ConversationHydrator:
         projected = _projected_from_event(request.room_id, original.event, self_sender=self.self_sender)
         if projected is None:
             return await self.store.drop_refetched_message(request)
-        relations = await self._fetch_relations(request.room_id, request.logical_event_id)
-        revision = _reduce_current_revision(projected, relations)
+        relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
+        revision = _reduce_current_revision(projected, relations.events)
         content = await self._resolved_content(revision.event_id, revision.content)
         if content is None:
             return False

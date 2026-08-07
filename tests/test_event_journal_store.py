@@ -897,6 +897,7 @@ class TestMembershipEpoch:
             room_id=ROOM,
             thread_id=None,
             events=(message("$hydrated")[1],),
+            complete=True,
             expected_membership_epoch=epoch,
         )
 
@@ -911,6 +912,7 @@ class TestMembershipEpoch:
             room_id=ROOM,
             thread_id=None,
             events=(message("$hydrated")[1],),
+            complete=True,
             expected_membership_epoch=epoch,
         )
 
@@ -1031,6 +1033,7 @@ class TestMembershipEpoch:
             room_id=ROOM,
             thread_id=None,
             events=(message("$before")[1],),
+            complete=True,
             expected_membership_epoch=epoch,
         )
         assert await bodies(alice) == ["$before"]
@@ -1062,6 +1065,7 @@ class TestMembershipEpoch:
             room_id=ROOM,
             thread_id=None,
             events=(message("$hydrated")[1],),
+            complete=True,
             expected_membership_epoch=stale_epoch,
         )
 

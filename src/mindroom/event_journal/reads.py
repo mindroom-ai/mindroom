@@ -211,17 +211,18 @@ def pending_refreshes(
     return tuple(_refresh_request(row) for row in rows)
 
 
-def conversation_is_hydrated(
+def _current_hydration(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     thread_id: str | None,
-) -> bool:
-    """Return whether this conversation was hydrated under the current membership."""
+) -> Row | None:
+    """Return this conversation's hydration row, if it survived the membership."""
     row = transaction.fetchone(
         """
         SELECT hydration.membership_epoch AS hydrated_epoch,
+               hydration.complete AS complete,
                COALESCE(membership.membership_epoch, 0) AS current_epoch
         FROM conversation_hydration AS hydration
         LEFT JOIN room_membership AS membership
@@ -231,7 +232,40 @@ def conversation_is_hydrated(
         """,
         (principal_id, room_id, encode_thread_id(thread_id)),
     )
-    return row is not None and int(row["hydrated_epoch"]) == int(row["current_epoch"])
+    if row is None or int(row["hydrated_epoch"]) != int(row["current_epoch"]):
+        return None
+    return row
+
+
+def conversation_is_hydrated(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> bool:
+    """Return whether this conversation was hydrated under the current membership."""
+    return _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id) is not None
+
+
+def conversation_is_complete(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+) -> bool:
+    """Return whether the walk that hydrated this conversation reached its end.
+
+    Strictly stronger than being hydrated, and the two must not be confused. The
+    hydration marker records that the one-time walk ran; this records that it
+    ran out of conversation rather than out of allowance. A caller whose
+    correctness is completeness rather than recency -- an export, not a prompt --
+    asks this one, because a bounded walk leaves a warm marker over a partial
+    conversation and nothing else distinguishes the two.
+    """
+    row = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    return row is not None and bool(row["complete"])
 
 
 def mark_conversation_hydrated(
@@ -240,6 +274,7 @@ def mark_conversation_hydrated(
     *,
     room_id: str,
     thread_id: str | None,
+    complete: bool,
     expected_membership_epoch: int,
 ) -> bool:
     """Record a completed hydration, unless membership moved under it.
@@ -259,12 +294,13 @@ def mark_conversation_hydrated(
         return False
     transaction.execute(
         """
-        INSERT INTO conversation_hydration (principal_id, room_id, thread_id, membership_epoch)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO conversation_hydration (principal_id, room_id, thread_id, membership_epoch, complete)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
-            membership_epoch = excluded.membership_epoch
+            membership_epoch = excluded.membership_epoch,
+            complete = excluded.complete
         """,
-        (principal_id, room_id, encode_thread_id(thread_id), current_epoch),
+        (principal_id, room_id, encode_thread_id(thread_id), current_epoch, int(complete)),
     )
     return True
 

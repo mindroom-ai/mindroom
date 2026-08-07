@@ -127,6 +127,12 @@ _TABLES = (
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
+        -- Whether the walk that filled this conversation ran out of
+        -- conversation rather than out of allowance. Being hydrated and being
+        -- complete are different facts: a walk that stopped at the prompt
+        -- window is hydrated, and a reader whose correctness is completeness
+        -- has to be able to tell that from a whole conversation.
+        complete INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, thread_id)
     )
     """,
@@ -200,7 +206,14 @@ _INDEXES = (
 # these columns existed keeps working right up until the first statement that
 # names it, and then fails at runtime rather than at startup. Every column added
 # to an existing table has to be listed here as well as in the table above.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("approval_cards", "resolution_json", "TEXT"),)
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("approval_cards", "resolution_json", "TEXT"),
+    # A row that predates this column was written by a walk that stopped at the
+    # prompt window as often as not, so the default has to be the conservative
+    # answer. Claiming completeness for a conversation nobody measured is the
+    # one direction that silently serves a truncated read.
+    ("conversation_hydration", "complete", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 def added_columns() -> tuple[tuple[str, str, str], ...]:
