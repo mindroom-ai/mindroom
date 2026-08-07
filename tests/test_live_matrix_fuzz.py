@@ -19,26 +19,38 @@ import httpx
 import pytest
 import yaml
 
-from mindroom.event_journal import EventClass, EventJournalStore, EventKind, InboundEvent
+from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
 from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from mindroom.matrix.sync_certification import SyncCheckpoint
 from mindroom.matrix.sync_continuity import SyncContinuityStore
+from scripts.testing import fuzz_live_matrix
 from scripts.testing.fuzz_live_matrix import (
+    DEFAULT_ROOT_FANOUT,
     ORDERLY_SHUTDOWN_MARKER,
     PROJECT_ROOT,
     RESTART_SHUTDOWN_FAILURE_MARKER,
     ExactReplyOracle,
+    ExactReplyTimeoutError,
+    HostLoadReport,
+    JournalRow,
     LiveFuzzRunner,
     LiveFuzzScenario,
     LiveMatrixClient,
     LiveOperation,
     LiveOperationKind,
     ManagedTuwunelStack,
+    MissingReplyStage,
+    OutboxRow,
     RestartRegressionObservation,
+    SlowWaitNotice,
+    TurnLatencyMonitor,
+    WaitBudget,
     _log_count,
     _ModelHandler,
     _restart_prompt_observation,
     _semantic_ingress_markers,
+    classify_missing_reply,
+    collect_host_load_report,
     evaluate_restart_regression,
     live_scenario_from_seed,
     restart_regression_scenario,
@@ -1659,3 +1671,529 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
         oracle._assert_no_wrong_replies()
     finally:
         await client.close()
+
+
+class _FakeClock:
+    """A monotonic clock the harness tests advance on purpose."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the current fake time."""
+        return self.now
+
+
+class _ScriptedSyncClient:
+    """A Matrix client whose sync drives a fake clock and scripted replies."""
+
+    room_id = "!room:example"
+
+    def __init__(
+        self,
+        clock: _FakeClock,
+        *,
+        tick: float,
+        deliveries: tuple[tuple[float, str], ...] = (),
+    ) -> None:
+        self.clock = clock
+        self.tick = tick
+        self._deliveries = sorted(deliveries)
+        self._delivered = 0
+
+    async def sync(self, since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        """Advance the clock one poll and hand back whatever is due."""
+        del since, timeout_ms
+        await asyncio.sleep(0)
+        self.clock.now += self.tick
+        events: list[dict[str, Any]] = []
+        while self._delivered < len(self._deliveries) and self._deliveries[self._delivered][0] <= self.clock.now:
+            _due_at, source_event_id = self._deliveries[self._delivered]
+            self._delivered += 1
+            events.append(
+                {
+                    "event_id": f"{source_event_id}-reply",
+                    "sender": "@agent:example",
+                    "type": "m.room.message",
+                    "content": {
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root",
+                            "m.in_reply_to": {"event_id": source_event_id},
+                        },
+                    },
+                },
+            )
+        return {
+            "next_batch": f"s{self.clock.now}",
+            "rooms": {"join": {self.room_id: {"timeline": {"limited": False, "events": events}}}},
+        }
+
+
+def _scripted_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tick: float,
+    sources: tuple[str, ...],
+    deliveries: tuple[tuple[float, str], ...] = (),
+) -> tuple[ExactReplyOracle, _FakeClock]:
+    """Build an oracle whose only clock and traffic come from the test."""
+    clock = _FakeClock()
+    monkeypatch.setattr(fuzz_live_matrix, "time", clock)
+    client = _ScriptedSyncClient(clock, tick=tick, deliveries=deliveries)
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", client), "@agent:example")
+    for index, source_event_id in enumerate(sources):
+        oracle.expect(f"op:{index}", source_event_id)
+    return oracle, clock
+
+
+def test_wait_budget_scales_with_the_work_and_keeps_the_single_turn_floor() -> None:
+    """A wait for many sequential turns must not share a one-turn deadline."""
+    single = WaitBudget(turns=1, per_turn_seconds=2.0, settle_seconds=0.75, floor_seconds=60.0)
+    many = WaitBudget(turns=45, per_turn_seconds=2.0, settle_seconds=0.75, floor_seconds=60.0)
+
+    assert single.seconds == pytest.approx(60.75)
+    assert many.seconds == pytest.approx(45 * 2.0 * 3.0 + 0.75)
+    assert many.seconds > single.seconds
+    # An unmeasured machine falls back to exactly the operator's deadline.
+    assert WaitBudget(turns=45, per_turn_seconds=0.0, settle_seconds=0.75, floor_seconds=60.0).seconds == pytest.approx(
+        60.75,
+    )
+
+
+def test_wait_budget_derives_the_stall_window_from_measured_latency() -> None:
+    """Silence long enough to cover several turns is a wedge, not slowness."""
+    fast = WaitBudget(turns=45, per_turn_seconds=2.0, settle_seconds=0.0, floor_seconds=1.0)
+    slow = WaitBudget(turns=45, per_turn_seconds=30.0, settle_seconds=0.0, floor_seconds=1.0)
+
+    assert fast.stall_seconds == pytest.approx(8.0)
+    assert slow.stall_seconds == pytest.approx(120.0)
+    # The wedge detector always fires long before the whole-batch deadline.
+    assert fast.stall_seconds < fast.seconds
+    assert slow.stall_seconds < slow.seconds
+
+
+def test_turn_latency_monitor_keeps_the_slowest_observed_turn() -> None:
+    """Budgets must follow the machine's worst turn, not its luckiest."""
+    monitor = TurnLatencyMonitor()
+
+    assert monitor.per_turn_seconds == 0.0
+
+    monitor.observe(turns=8, elapsed_seconds=8.0)
+    assert monitor.per_turn_seconds == pytest.approx(1.0)
+
+    monitor.observe(turns=4, elapsed_seconds=12.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+    monitor.observe(turns=10, elapsed_seconds=1.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+    # Waits that drove no turn and impossible durations teach nothing.
+    monitor.observe(turns=0, elapsed_seconds=99.0)
+    monitor.observe(turns=5, elapsed_seconds=-1.0)
+    assert monitor.per_turn_seconds == pytest.approx(3.0)
+
+
+class _ChatteringSyncClient:
+    """A client whose bots keep answering each other after the work is done."""
+
+    room_id = "!room:example"
+
+    def __init__(self, clock: _FakeClock, *, tick: float) -> None:
+        self.clock = clock
+        self.tick = tick
+        self._round = 0
+
+    async def sync(self, since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        """Emit one fresh router prompt and one fresh agent answer per poll."""
+        del since, timeout_ms
+        await asyncio.sleep(0)
+        self.clock.now += self.tick
+        self._round += 1
+        relay = f"$relay{self._round}"
+        events: list[dict[str, Any]] = [
+            {"event_id": relay, "sender": "@router:example", "type": "m.room.message", "content": {"body": "again"}},
+            {
+                "event_id": f"{relay}-answer",
+                "sender": "@agent:example",
+                "type": "m.room.message",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": relay},
+                    },
+                },
+            },
+        ]
+        if self._round == 1:
+            events.append(
+                {
+                    "event_id": "$a-reply",
+                    "sender": "@agent:example",
+                    "type": "m.room.message",
+                    "content": {
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$root",
+                            "m.in_reply_to": {"event_id": "$a"},
+                        },
+                    },
+                },
+            )
+        return {
+            "next_batch": f"s{self.clock.now}",
+            "rooms": {"join": {self.room_id: {"timeline": {"limited": False, "events": events}}}},
+        }
+
+
+@pytest.mark.asyncio
+async def test_wait_fails_when_the_room_never_goes_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bots looping at each other must fail the wait, not extend it forever."""
+    clock = _FakeClock()
+    monkeypatch.setattr(fuzz_live_matrix, "time", clock)
+    client = _ChatteringSyncClient(clock, tick=0.1)
+    oracle = ExactReplyOracle(
+        cast("LiveMatrixClient", client),
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    oracle.expect("op:0", "$a")
+    budget = WaitBudget(turns=1, per_turn_seconds=0.0, settle_seconds=0.5, floor_seconds=2.0)
+
+    with pytest.raises(AssertionError, match="never went quiet"):
+        await oracle.wait_until_exact(budget)
+
+    assert clock.now == pytest.approx(budget.stall_seconds, abs=0.2)
+
+
+@pytest.mark.asyncio
+async def test_wait_reports_a_silent_runtime_as_wedged_long_before_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot that answers nothing must fail fast, not run out its whole budget."""
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.05, sources=("$a", "$b", "$c"))
+    budget = WaitBudget(turns=3, per_turn_seconds=10.0, settle_seconds=0.0, floor_seconds=1.0)
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget)
+
+    assert failure.value.wedged is True
+    assert failure.value.waited_seconds == pytest.approx(budget.stall_seconds, abs=0.1)
+    assert failure.value.waited_seconds < budget.seconds
+    assert set(failure.value.missing) == {"$a", "$b", "$c"}
+    assert "wedged rather than slow" in str(failure.value)
+    assert clock.now == pytest.approx(failure.value.waited_seconds, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_wait_extends_its_deadline_while_replies_are_still_arriving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow machine that keeps finishing turns must be allowed to finish."""
+    sources = tuple(f"$s{index}" for index in range(6))
+    deliveries = tuple((1.5 * (index + 1), source) for index, source in enumerate(sources))
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.1, sources=sources, deliveries=deliveries)
+    budget = WaitBudget(turns=6, per_turn_seconds=0.3, settle_seconds=0.0, floor_seconds=2.0)
+    notices: list[SlowWaitNotice] = []
+
+    elapsed = await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert budget.seconds == pytest.approx(5.4)
+    assert elapsed > budget.seconds
+    assert clock.now == pytest.approx(9.0, abs=0.2)
+    assert [notice.extension for notice in notices] == [1]
+    assert "slow machine" in notices[0].render()
+    assert not oracle.outstanding()
+
+
+@pytest.mark.asyncio
+async def test_wait_stops_extending_for_a_reply_stream_that_never_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A livelock that dribbles one reply at a time must still fail."""
+    sources = tuple(f"$s{index}" for index in range(200))
+    deliveries = tuple((1.5 * (index + 1), source) for index, source in enumerate(sources))
+    oracle, _clock = _scripted_oracle(monkeypatch, tick=0.1, sources=sources, deliveries=deliveries)
+    budget = WaitBudget(turns=200, per_turn_seconds=0.009, settle_seconds=0.0, floor_seconds=2.0)
+    notices: list[SlowWaitNotice] = []
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert [notice.extension for notice in notices] == [1, 2, 3]
+    assert failure.value.wedged is False
+    assert "deadline extensions were exhausted" in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_wait_never_extends_a_window_that_produced_no_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget shorter than its own stall window must not buy a wedge more time."""
+    oracle, _clock = _scripted_oracle(monkeypatch, tick=0.1, sources=("$a",))
+    # A one-turn budget that expires before the silence detector would.
+    budget = WaitBudget(turns=1, per_turn_seconds=1.0, settle_seconds=0.0, floor_seconds=3.0)
+    notices: list[SlowWaitNotice] = []
+
+    with pytest.raises(ExactReplyTimeoutError) as failure:
+        await oracle.wait_until_exact(budget, on_slow=notices.append)
+
+    assert budget.seconds == pytest.approx(3.0)
+    assert budget.stall_seconds == pytest.approx(4.0)
+    assert notices == []
+    assert failure.value.wedged is True
+    assert failure.value.waited_seconds == pytest.approx(3.0, abs=0.15)
+
+
+@pytest.mark.asyncio
+async def test_wait_fails_immediately_when_the_managed_runtime_has_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead MindRoom process must never be waited out as a slow one."""
+    oracle, clock = _scripted_oracle(monkeypatch, tick=0.05, sources=("$a",))
+    budget = WaitBudget(turns=1, per_turn_seconds=100.0, settle_seconds=0.0, floor_seconds=100.0)
+
+    def died() -> None:
+        msg = "MindRoom exited with code 1 while the harness was waiting for replies"
+        raise AssertionError(msg)
+
+    with pytest.raises(AssertionError, match="MindRoom exited with code 1"):
+        await oracle.wait_until_exact(budget, liveness=died)
+
+    assert clock.now == pytest.approx(0.05)
+
+
+class _ExitedProcess:
+    """A managed child that has already exited."""
+
+    returncode = 3
+
+    def poll(self) -> int:
+        """Report the recorded exit status."""
+        return self.returncode
+
+
+def test_require_runtime_alive_reports_an_exited_child() -> None:
+    """The liveness probe must read the managed child's real exit status."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.require_runtime_alive()
+
+        stack._mindroom_process = cast("subprocess.Popen[str]", _ExitedProcess())
+        with pytest.raises(AssertionError, match="MindRoom exited with code 3"):
+            stack.require_runtime_alive()
+    finally:
+        stack.close()
+
+
+def _journal_row(*, state: str, outcome: str | None) -> JournalRow:
+    """Build one durable journal row for the classifier."""
+    return JournalRow(
+        principal_id="general@@agent:example",
+        kind="message",
+        event_class="actionable",
+        state=state,
+        outcome=outcome,
+        semantic_consumer=None,
+        receipt_order=12,
+    )
+
+
+def _outbox_row(*, acknowledged_event_id: str | None) -> OutboxRow:
+    """Build one staged response row for the classifier."""
+    return OutboxRow(
+        principal_id="general@@agent:example",
+        stage="initial",
+        attempted=1,
+        acknowledged_event_id=acknowledged_event_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("journal_rows", "outbox_rows", "expected_stage"),
+    [
+        ((), (), MissingReplyStage.NOT_ADMITTED),
+        (
+            (_journal_row(state="pending", outcome=None),),
+            (),
+            MissingReplyStage.ADMITTED_NEVER_DISPATCHED,
+        ),
+        (
+            (_journal_row(state="settled", outcome="intentionally_ignored"),),
+            (),
+            MissingReplyStage.SETTLED_WITHOUT_REPLY,
+        ),
+        (
+            (_journal_row(state="pending", outcome=None),),
+            (_outbox_row(acknowledged_event_id=None),),
+            MissingReplyStage.DISPATCHED_NEVER_SENT,
+        ),
+        (
+            (_journal_row(state="settled", outcome="succeeded"),),
+            (_outbox_row(acknowledged_event_id="$reply"),),
+            MissingReplyStage.SENT_BUT_UNOBSERVED,
+        ),
+    ],
+    ids=[
+        "never-admitted",
+        "admitted-never-dispatched",
+        "settled-without-reply",
+        "dispatched-never-sent",
+        "sent-but-unobserved",
+    ],
+)
+def test_classify_missing_reply_names_the_durable_position(
+    journal_rows: tuple[JournalRow, ...],
+    outbox_rows: tuple[OutboxRow, ...],
+    expected_stage: MissingReplyStage,
+) -> None:
+    """Each durable position is a different failure with a different owner."""
+    stage, detail = classify_missing_reply(journal_rows, outbox_rows)
+
+    assert stage is expected_stage
+    assert detail
+
+
+def test_missing_reply_diagnosis_reads_the_production_journal_schema() -> None:
+    """The failure report must query the schema MindRoom actually writes."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id = "@agent:example"
+        principal_id = f"general@{stack.agent_id}"
+        store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
+
+        async def seed() -> None:
+            principal = store.principal(principal_id)
+            for event_id in ("$stuck", "$staged"):
+                await principal.admit(
+                    InboundEvent(
+                        event_id=event_id,
+                        room_id="!room:example",
+                        thread_id=None,
+                        kind=EventKind.MESSAGE,
+                        event_class=EventClass.ACTIONABLE,
+                        sender="@user:example",
+                        origin_server_ts=1,
+                        source={"event_id": event_id},
+                    ),
+                )
+            await principal.enqueue_delivery(
+                turn_id="$staged",
+                stage=DeliveryStage.INITIAL,
+                room_id="!room:example",
+                thread_id=None,
+                payload={"body": "hello"},
+            )
+
+        asyncio.run(seed())
+
+        report = stack.diagnose_missing_replies({"$stuck": "op:1", "$staged": "op:2", "$never": "op:3"})
+
+        assert "journal: pending per room !room:example=2" in report
+        assert "oldest pending receipt_order=1 event_id=$stuck" in report
+        assert f"op:1 ($stuck): {MissingReplyStage.ADMITTED_NEVER_DISPATCHED.value}" in report
+        assert f"op:2 ($staged): {MissingReplyStage.DISPATCHED_NEVER_SENT.value}" in report
+        assert f"op:3 ($never): {MissingReplyStage.NOT_ADMITTED.value}" in report
+        assert principal_id in report
+    finally:
+        stack.close()
+
+
+def test_missing_reply_diagnosis_survives_a_run_with_no_journal_yet() -> None:
+    """A failure before the runtime writes anything must still report cleanly."""
+    stack = ManagedTuwunelStack()
+    try:
+        report = stack.diagnose_missing_replies({"$one": "op:1"})
+
+        assert "journal: no pending events" in report
+        assert MissingReplyStage.NOT_ADMITTED.value in report
+        assert not (stack.storage_path / "tracking" / "event_journal.db").exists()
+    finally:
+        stack.close()
+
+
+def test_host_load_report_warns_only_about_a_contended_machine() -> None:
+    """A run competing with other work must say so before it starts."""
+    quiet = HostLoadReport(
+        cpu_count=16,
+        load_average=(1.0, 1.0, 1.0),
+        docker_cpus=4,
+        docker_memory_bytes=8 * 1024**3,
+        competing_test_processes=0,
+    )
+    busy = replace(quiet, load_average=(24.0, 30.0, 40.0), competing_test_processes=4)
+
+    assert quiet.contended is False
+    assert "WARNING" not in quiet.render()
+    assert "docker 4 cpus / 8 GiB" in quiet.render()
+    assert busy.contended is True
+    assert busy.load_per_cpu == pytest.approx(1.5)
+    assert "WARNING" in busy.render()
+    assert "4 competing test processes" in busy.render()
+    assert busy.as_dict()["host_load_per_cpu"] == pytest.approx(1.5)
+    # A machine with spare cores is still contended while tests share it.
+    assert replace(quiet, competing_test_processes=1).contended is True
+
+
+def test_collect_host_load_report_measures_the_real_machine() -> None:
+    """The preflight report must read this host rather than guess."""
+    report = collect_host_load_report()
+
+    assert report.cpu_count >= 1
+    assert len(report.load_average) == 3
+    assert report.competing_test_processes >= 0
+    assert report.as_dict()["host_cpu_count"] == report.cpu_count
+
+
+class _WaveRecordingRunner(LiveFuzzRunner):
+    """Record how many roots each wave leaves outstanding, then satisfy them."""
+
+    waves: list[int]
+
+    async def _await_replies(self) -> None:
+        outstanding = self.oracle.outstanding()
+        self.waves.append(len(outstanding))
+        for event_id in outstanding:
+            self.oracle.response_ids[event_id].add(f"{event_id}-reply")
+
+
+def _wave_runner(*, root_fanout: int) -> _WaveRecordingRunner:
+    """Build a root-fan-out runner with no live dependencies."""
+    stack = ManagedTuwunelStack()
+    stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+    runner = _WaveRecordingRunner(
+        stack,
+        (cast("LiveMatrixClient", _RecordingDormantClient()),),
+        live_scenario_from_seed(1, steps=1, thread_count=25, max_batch_size=1, restart_interval=0),
+        reply_timeout=1,
+        settle_seconds=0,
+        root_fanout=root_fanout,
+    )
+    runner.waves = []
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_send_roots_releases_waves_sized_to_the_single_room_lane() -> None:
+    """Roots are setup, so no wait should have to explain the whole fan-out."""
+    runner = _wave_runner(root_fanout=DEFAULT_ROOT_FANOUT)
+    try:
+        await runner._send_roots(range(25))
+
+        assert runner.waves == [8, 8, 8, 1]
+        assert len(runner.event_ids) == 25
+    finally:
+        runner.stack.close()
+
+
+@pytest.mark.asyncio
+async def test_send_roots_keeps_the_simultaneous_fan_out_reachable() -> None:
+    """The old all-at-once behaviour stays available behind an explicit flag."""
+    runner = _wave_runner(root_fanout=0)
+    try:
+        await runner._send_roots(range(25))
+
+        assert runner.waves == [25]
+    finally:
+        runner.stack.close()

@@ -62,6 +62,30 @@ RESTART_SHUTDOWN_FAILURE_MARKER = "runtime_drain_incomplete_with_durable_dispatc
 ORDERLY_SHUTDOWN_MARKER = "All agent bots stopped"
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
+# Every event in one room is handled by a single sequential lane, so a wait for
+# N outstanding replies is a wait for N agent turns end to end. The budget is
+# therefore N times the turn latency this machine is actually showing us, times
+# a factor that absorbs the ordinary spread between a median turn and a slow
+# one. The factor is the only guess here; the latency it multiplies is measured.
+_BUDGET_SAFETY_FACTOR = 3.0
+
+# Silence is what separates a slow machine from a wedged one. A lane that is
+# merely slow still finishes turns; a lane that is stuck finishes none. Tolerate
+# a few consecutive turn latencies of quiet before calling it stuck, so one
+# pathological turn cannot be mistaken for a wedge.
+_STALL_TURN_MULTIPLE = 4.0
+
+# Extending a deadline is only defensible while replies keep arriving. Cap the
+# extensions anyway so a livelock that dribbles one reply per minute eventually
+# fails instead of running forever.
+_MAX_BUDGET_EXTENSIONS = 3
+
+# Thread roots are setup, not the concurrency under test, and the room's single
+# lane serialises them regardless of how many are in flight. Sending them in
+# waves keeps genuine transport-level concurrency while bounding how much work
+# any one deadline has to cover and how much a failure report has to explain.
+DEFAULT_ROOT_FANOUT = 8
+
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
     field = value.get(key)
@@ -921,6 +945,316 @@ def _run_command(*command: str) -> str:
     return result.stdout
 
 
+def _command_output(*command: str) -> str:
+    """Return one advisory command's output, or empty when it is unavailable."""
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+@dataclass(frozen=True, slots=True)
+class HostLoadReport:
+    """What else the machine is doing while this proof runs.
+
+    A live run competes for the same cores as everything else on the host, and
+    a contended host is the single most common reason a passing proof turns
+    red. Reporting the contention up front means a slow run can be recognised
+    as a slow run instead of being investigated as a defect.
+    """
+
+    cpu_count: int
+    load_average: tuple[float, float, float]
+    docker_cpus: int | None
+    docker_memory_bytes: int | None
+    competing_test_processes: int
+
+    @property
+    def load_per_cpu(self) -> float:
+        """Return the one-minute load carried by each host core."""
+        return self.load_average[0] / self.cpu_count if self.cpu_count else 0.0
+
+    @property
+    def contended(self) -> bool:
+        """Return whether the host already has a runnable process per core."""
+        return self.load_per_cpu >= 1.0 or self.competing_test_processes > 0
+
+    def as_dict(self) -> dict[str, float | int | None]:
+        """Return the report in the run's machine-readable result shape."""
+        return {
+            "host_cpu_count": self.cpu_count,
+            "host_load_1m": round(self.load_average[0], 2),
+            "host_load_per_cpu": round(self.load_per_cpu, 2),
+            "docker_cpus": self.docker_cpus,
+            "docker_memory_bytes": self.docker_memory_bytes,
+            "competing_test_processes": self.competing_test_processes,
+        }
+
+    def render(self) -> str:
+        """Return one human-readable preflight line."""
+        one, five, fifteen = self.load_average
+        docker = (
+            f"docker {self.docker_cpus} cpus / {self.docker_memory_bytes // (1024**3)} GiB"
+            if self.docker_cpus is not None and self.docker_memory_bytes is not None
+            else "docker limits unavailable"
+        )
+        headline = (
+            f"host {self.cpu_count} cpus, load {one:.2f}/{five:.2f}/{fifteen:.2f} "
+            f"({self.load_per_cpu:.2f} per cpu), {docker}, "
+            f"{self.competing_test_processes} competing test processes"
+        )
+        if not self.contended:
+            return headline
+        return f"{headline}\nWARNING: this machine is already busy; agent turns will be slower than a quiet host"
+
+
+def collect_host_load_report() -> HostLoadReport:
+    """Measure the contention this run starts under."""
+    docker_info = _command_output("docker", "info", "--format", "{{.NCPU}} {{.MemTotal}}").split()
+    docker_cpus, docker_memory_bytes = (
+        (int(docker_info[0]), int(docker_info[1]))
+        if len(docker_info) == 2 and docker_info[0].isdigit()
+        else (None, None)
+    )
+    own_pid = str(os.getpid())
+    competing = [
+        line
+        for line in _command_output("pgrep", "-f", "pytest").splitlines()
+        if line.strip() and line.strip() != own_pid
+    ]
+    return HostLoadReport(
+        cpu_count=os.cpu_count() or 1,
+        load_average=cast("tuple[float, float, float]", os.getloadavg()),
+        docker_cpus=docker_cpus,
+        docker_memory_bytes=docker_memory_bytes,
+        competing_test_processes=len(competing),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WaitBudget:
+    """How long a wait for `turns` sequential agent turns may take.
+
+    The deadline is the work multiplied by the measured cost of that work,
+    never a flat constant: a batch that demands forty-five turns of a
+    single-threaded lane cannot be held to the same clock as a batch that
+    demands one. ``floor_seconds`` is the operator's single-turn deadline and
+    keeps small waits exactly as strict as they were before measurement.
+    """
+
+    turns: int
+    per_turn_seconds: float
+    settle_seconds: float
+    floor_seconds: float
+
+    @property
+    def seconds(self) -> float:
+        """Return the deadline for completing every outstanding turn."""
+        return max(self.floor_seconds, self.turns * self.per_turn_seconds * _BUDGET_SAFETY_FACTOR) + self.settle_seconds
+
+    @property
+    def stall_seconds(self) -> float:
+        """Return how long total silence means wedged rather than slow."""
+        return max(self.floor_seconds, self.per_turn_seconds * _STALL_TURN_MULTIPLE)
+
+    def describe(self) -> str:
+        """Describe the budget in the terms that produced it."""
+        measured = f"{self.per_turn_seconds:.2f}s/turn measured" if self.per_turn_seconds else "no turn measured yet"
+        return (
+            f"{self.seconds:.1f}s for {self.turns} sequential turns ({measured}, stall after {self.stall_seconds:.1f}s)"
+        )
+
+
+class TurnLatencyMonitor:
+    """The cost of one sequential agent turn, as observed on this machine.
+
+    Every completed wait is a measurement: it produced a known number of
+    sequential replies in a known time. The slowest such observation is kept,
+    because a budget derived from the fastest turn a machine ever managed is
+    the same mistake as a flat constant.
+    """
+
+    def __init__(self) -> None:
+        self._per_turn_seconds = 0.0
+
+    def observe(self, *, turns: int, elapsed_seconds: float) -> None:
+        """Record one wait that drove `turns` replies to completion."""
+        if turns < 1 or elapsed_seconds <= 0:
+            return
+        self._per_turn_seconds = max(self._per_turn_seconds, elapsed_seconds / turns)
+
+    @property
+    def per_turn_seconds(self) -> float:
+        """Return the slowest per-turn cost seen so far, or 0 before any."""
+        return self._per_turn_seconds
+
+
+@dataclass(frozen=True, slots=True)
+class SlowWaitNotice:
+    """One deadline extension granted because replies were still arriving."""
+
+    turns_outstanding: int
+    waited_seconds: float
+    extension: int
+
+    def render(self) -> str:
+        """Describe the extension in a single operator-facing line."""
+        return (
+            f"slow machine: {self.turns_outstanding} replies still outstanding after "
+            f"{self.waited_seconds:.1f}s but progress is ongoing; extending "
+            f"(extension {self.extension} of {_MAX_BUDGET_EXTENSIONS})"
+        )
+
+
+class ExactReplyTimeoutError(AssertionError):
+    """Some expected agent reply never arrived inside its measured budget."""
+
+    def __init__(
+        self,
+        missing: Mapping[str, str],
+        *,
+        budget: WaitBudget,
+        waited_seconds: float,
+        silent_seconds: float,
+        wedged: bool,
+    ) -> None:
+        self.missing = dict(missing)
+        self.budget = budget
+        self.waited_seconds = waited_seconds
+        self.silent_seconds = silent_seconds
+        self.wedged = wedged
+        cause = (
+            f"no reply arrived for {silent_seconds:.1f}s, so the runtime is wedged rather than slow"
+            if wedged
+            else f"replies kept arriving but {_MAX_BUDGET_EXTENSIONS} deadline extensions were exhausted"
+        )
+        listed = ", ".join(f"{logical_ref} ({event_id})" for event_id, logical_ref in sorted(missing.items()))
+        super().__init__(
+            f"timed out waiting for exact agent replies: {cause}; "
+            f"waited {waited_seconds:.1f}s against a budget of {budget.describe()}; "
+            f"{len(missing)} missing: {listed}",
+        )
+
+
+class MissingReplyStage(StrEnum):
+    """How far a source event travelled before its reply stopped existing."""
+
+    NOT_ADMITTED = "not_admitted"
+    ADMITTED_NEVER_DISPATCHED = "admitted_never_dispatched"
+    DISPATCHED_NEVER_SENT = "dispatched_never_sent"
+    SENT_BUT_UNOBSERVED = "sent_but_unobserved"
+    SETTLED_WITHOUT_REPLY = "settled_without_reply"
+
+
+@dataclass(frozen=True, slots=True)
+class JournalRow:
+    """One principal's durable record of one inbound event."""
+
+    principal_id: str
+    kind: str
+    event_class: str
+    state: str
+    outcome: str | None
+    semantic_consumer: str | None
+    receipt_order: int
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxRow:
+    """One principal's durable record of a response it owes a turn."""
+
+    principal_id: str
+    stage: str
+    attempted: int
+    acknowledged_event_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MissingReplyDiagnosis:
+    """Where one missing reply's source event actually stopped."""
+
+    logical_ref: str
+    event_id: str
+    stage: MissingReplyStage
+    detail: str
+
+    def render(self) -> str:
+        """Return one indented diagnosis line."""
+        return f"  {self.logical_ref} ({self.event_id}): {self.stage.value} - {self.detail}"
+
+
+def classify_missing_reply(
+    journal_rows: Collection[JournalRow],
+    outbox_rows: Collection[OutboxRow],
+) -> tuple[MissingReplyStage, str]:
+    """Say where a source event stopped, from its own durable records.
+
+    The four durable positions are distinct failures with distinct owners: the
+    transport never delivered the event, the lane never picked it up, the turn
+    ran but never reached Matrix, or Matrix accepted a reply the harness never
+    saw. Reporting the position is the difference between a bug report and a
+    re-investigation.
+    """
+    if not journal_rows:
+        return (
+            MissingReplyStage.NOT_ADMITTED,
+            "no principal admitted the event: Matrix sync never delivered it, or ingress dropped it before the journal",
+        )
+    states = ", ".join(
+        f"{row.principal_id}={row.state}"
+        + (f"/{row.outcome}" if row.outcome else "")
+        + (f" consumer={row.semantic_consumer}" if row.semantic_consumer else "")
+        + f" receipt_order={row.receipt_order}"
+        for row in sorted(journal_rows, key=lambda row: row.principal_id)
+    )
+    if not outbox_rows:
+        if any(row.state == "pending" for row in journal_rows):
+            return (
+                MissingReplyStage.ADMITTED_NEVER_DISPATCHED,
+                f"admitted but still pending, and no response was ever staged: {states}",
+            )
+        return (
+            MissingReplyStage.SETTLED_WITHOUT_REPLY,
+            f"the turn settled without staging any response, so the bot decided not to answer: {states}",
+        )
+    unacknowledged = [row for row in outbox_rows if row.acknowledged_event_id is None]
+    deliveries = ", ".join(
+        f"{row.principal_id}/{row.stage} attempted={row.attempted} acknowledged={row.acknowledged_event_id or 'no'}"
+        for row in sorted(outbox_rows, key=lambda row: (row.principal_id, row.stage))
+    )
+    if unacknowledged:
+        return (
+            MissingReplyStage.DISPATCHED_NEVER_SENT,
+            f"a response was staged but never acknowledged by Matrix: {deliveries}; journal {states}",
+        )
+    return (
+        MissingReplyStage.SENT_BUT_UNOBSERVED,
+        f"Matrix acknowledged the reply, so the harness never observed a delivered event: {deliveries}; journal {states}",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingLaneReport:
+    """The depth of every room lane still holding unfinished work."""
+
+    depths: tuple[tuple[str, int], ...]
+    head_event_id: str | None
+    head_receipt_order: int | None
+
+    def render(self) -> str:
+        """Summarise the backlog blocking the rooms under test."""
+        if not self.depths:
+            return "journal: no pending events"
+        lanes = ", ".join(f"{room_id}={depth}" for room_id, depth in self.depths)
+        head = (
+            f"; oldest pending receipt_order={self.head_receipt_order} event_id={self.head_event_id}"
+            if self.head_event_id is not None
+            else ""
+        )
+        return f"journal: pending per room {lanes}{head}"
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
@@ -1173,6 +1507,96 @@ class ManagedTuwunelStack:
             return None
         state, outcome = row
         return str(outcome) if state == "settled" and outcome else str(state)
+
+    def _journal_query(self, query: str, parameters: tuple[object, ...]) -> list[tuple[object, ...]]:
+        """Read the durable journal without creating it when it is absent."""
+        database_path = self.storage_path / "tracking" / "event_journal.db"
+        if not database_path.is_file():
+            return []
+        with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as database:
+            return cast("list[tuple[object, ...]]", database.execute(query, parameters).fetchall())
+
+    def journal_rows(self, event_id: str) -> tuple[JournalRow, ...]:
+        """Return every principal's durable record of one inbound event."""
+        return tuple(
+            JournalRow(
+                principal_id=str(row[0]),
+                kind=str(row[1]),
+                event_class=str(row[2]),
+                state=str(row[3]),
+                outcome=None if row[4] is None else str(row[4]),
+                semantic_consumer=None if row[5] is None else str(row[5]),
+                receipt_order=int(cast("int", row[6])),
+            )
+            for row in self._journal_query(
+                """
+                SELECT principal_id, kind, event_class, state, outcome, semantic_consumer, receipt_order
+                FROM journal_events
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            )
+        )
+
+    def outbox_rows(self, turn_id: str) -> tuple[OutboxRow, ...]:
+        """Return the responses staged for one turn.
+
+        A turn is identified by the event that started it, so the source event
+        ID is the outbox key as well as the journal key.
+        """
+        return tuple(
+            OutboxRow(
+                principal_id=str(row[0]),
+                stage=str(row[1]),
+                attempted=int(cast("int", row[2])),
+                acknowledged_event_id=None if row[3] is None else str(row[3]),
+            )
+            for row in self._journal_query(
+                "SELECT principal_id, stage, attempted, acknowledged_event_id FROM response_outbox WHERE turn_id = ?",
+                (turn_id,),
+            )
+        )
+
+    def pending_lane_report(self) -> PendingLaneReport:
+        """Report the per-room backlog and the event at the head of it."""
+        depths = tuple(
+            (str(row[0]), int(cast("int", row[1])))
+            for row in self._journal_query(
+                "SELECT room_id, COUNT(*) FROM journal_events WHERE state = 'pending' GROUP BY room_id ORDER BY room_id",
+                (),
+            )
+        )
+        head = self._journal_query(
+            "SELECT event_id, receipt_order FROM journal_events WHERE state = 'pending' ORDER BY receipt_order LIMIT 1",
+            (),
+        )
+        return PendingLaneReport(
+            depths=depths,
+            head_event_id=str(head[0][0]) if head else None,
+            head_receipt_order=int(cast("int", head[0][1])) if head else None,
+        )
+
+    def diagnose_missing_replies(self, missing: Mapping[str, str]) -> str:
+        """Explain, per missing reply, how far its source event actually got."""
+        diagnoses = tuple(
+            MissingReplyDiagnosis(
+                logical_ref=logical_ref,
+                event_id=event_id,
+                stage=stage,
+                detail=detail,
+            )
+            for event_id, logical_ref in sorted(missing.items())
+            for stage, detail in (classify_missing_reply(self.journal_rows(event_id), self.outbox_rows(event_id)),)
+        )
+        lines = [self.pending_lane_report().render(), *(diagnosis.render() for diagnosis in diagnoses)]
+        return "\n".join(lines)
+
+    def require_runtime_alive(self) -> None:
+        """Fail immediately when the managed MindRoom process has exited."""
+        process = self._mindroom_process
+        if process is not None and process.poll() is not None:
+            msg = f"MindRoom exited with code {process.returncode} while the harness was waiting for replies"
+            raise AssertionError(msg)
 
     def wait_for_restart_journal_event_state(
         self,
@@ -1545,6 +1969,7 @@ class ExactReplyOracle:
         self.response_event_by_ref: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
         self._last_response_at = time.monotonic()
+        self._last_progress_at = time.monotonic()
 
     async def initialize(self) -> None:
         """Establish a sync token before the fuzz traffic starts."""
@@ -1554,29 +1979,91 @@ class ExactReplyOracle:
         """Require exactly one canonical agent reply to a source event."""
         self.expected_sources[event_id] = logical_ref
 
-    async def wait_until_exact(
-        self,
-        *,
-        deadline_seconds: float,
-        settle_seconds: float,
-    ) -> None:
-        """Wait until all sources have one reply and the room stays quiet."""
-        deadline = time.monotonic() + deadline_seconds
-        settled_after = time.monotonic() + settle_seconds
-        while time.monotonic() < deadline:
-            await self._sync_once(timeout_ms=250)
-            self._assert_no_wrong_replies()
-            if all(len(self.response_ids[source]) == 1 for source in self.expected_sources):
-                settled_after = max(settled_after, self._last_response_at + settle_seconds)
-                if time.monotonic() >= settled_after:
-                    return
-        missing = {
-            f"{logical_ref} ({event_id})": len(self.response_ids[event_id])
+    def outstanding(self) -> dict[str, str]:
+        """Return the expected sources that still owe exactly one reply."""
+        return {
+            event_id: logical_ref
             for event_id, logical_ref in self.expected_sources.items()
             if len(self.response_ids[event_id]) != 1
         }
-        msg = f"timed out waiting for exact agent replies: {missing}"
-        raise AssertionError(msg)
+
+    async def wait_until_exact(
+        self,
+        budget: WaitBudget,
+        *,
+        on_slow: Callable[[SlowWaitNotice], None] | None = None,
+        liveness: Callable[[], None] | None = None,
+    ) -> float:
+        """Wait until all sources have one reply and the room stays quiet.
+
+        Returns the seconds spent waiting so the caller can turn a completed
+        wait into a latency measurement. The wait ends early and loudly when
+        the runtime stops making progress, and is extended when the deadline
+        arrives while replies are still landing: a machine that is merely slow
+        must not be reported as a broken product.
+        """
+        started = time.monotonic()
+        window_started = started
+        deadline = started + budget.seconds
+        self._last_progress_at = started
+        extensions = 0
+        complete_since: float | None = None
+        while True:
+            await self._sync_once(timeout_ms=250)
+            self._assert_no_wrong_replies()
+            if liveness is not None:
+                liveness()
+            now = time.monotonic()
+            outstanding = self.outstanding()
+            if not outstanding:
+                # Every expected reply is in, so the only open question is
+                # whether a duplicate follows it. That window closes on quiet.
+                if now - self._last_response_at >= budget.settle_seconds:
+                    return now - started
+                complete_since = now if complete_since is None else complete_since
+                if now - complete_since < budget.stall_seconds:
+                    continue
+                msg = (
+                    f"every expected reply arrived but the room never went quiet for {budget.settle_seconds:.2f}s "
+                    f"within {budget.stall_seconds:.1f}s: the agent is still emitting traffic nobody asked for"
+                )
+                raise AssertionError(msg)
+            complete_since = None
+            silent_seconds = now - self._last_progress_at
+            if silent_seconds >= budget.stall_seconds:
+                raise ExactReplyTimeoutError(
+                    outstanding,
+                    budget=budget,
+                    waited_seconds=now - started,
+                    silent_seconds=silent_seconds,
+                    wedged=True,
+                )
+            if now < deadline:
+                continue
+            # An extension is only defensible while the lane is still draining.
+            # A window that produced no reply at all is a wedge whatever the
+            # arithmetic says, so it must never buy itself more time.
+            drained_this_window = self._last_progress_at > window_started
+            if drained_this_window and extensions < _MAX_BUDGET_EXTENSIONS:
+                extensions += 1
+                window_started = now
+                deadline = now + budget.seconds
+                if on_slow is not None:
+                    on_slow(
+                        SlowWaitNotice(
+                            turns_outstanding=len(outstanding),
+                            waited_seconds=now - started,
+                            extension=extensions,
+                        ),
+                    )
+                continue
+            raise ExactReplyTimeoutError(
+                outstanding,
+                budget=budget,
+                waited_seconds=now - started,
+                silent_seconds=silent_seconds,
+                wedged=not drained_this_window,
+            )
 
     def resolve_response_ref(self, response_ref: str) -> str:
         """Resolve a logical agent-response reference to its real event ID."""
@@ -1626,11 +2113,17 @@ class ExactReplyOracle:
         source_event_id = reply.get("event_id") if isinstance(reply, dict) else None
         if not isinstance(source_event_id, str):
             return
+        first_reply_to_source = not self.response_ids[source_event_id]
         self.response_ids[source_event_id].add(event_id)
         logical_ref = self.expected_sources.get(source_event_id)
         if logical_ref is not None:
             self.response_event_by_ref[f"response:{logical_ref}"] = event_id
         self._last_response_at = time.monotonic()
+        if first_reply_to_source and logical_ref is not None:
+            # Progress is the outstanding set shrinking, not merely traffic.
+            # A duplicate or a stray reply must never look like a lane that is
+            # still working through its queue.
+            self._last_progress_at = self._last_response_at
 
     def _assert_no_wrong_replies(self) -> None:
         duplicates = {
@@ -1659,6 +2152,7 @@ class LiveFuzzRunner:
         *,
         reply_timeout: float,
         settle_seconds: float,
+        root_fanout: int = DEFAULT_ROOT_FANOUT,
     ) -> None:
         self.stack = stack
         self.clients = clients
@@ -1666,6 +2160,8 @@ class LiveFuzzRunner:
         self.scenario = scenario
         self.reply_timeout = reply_timeout
         self.settle_seconds = settle_seconds
+        self.root_fanout = root_fanout
+        self.latency = TurnLatencyMonitor()
         self.oracle = ExactReplyOracle(
             self.client,
             stack.agent_id,
@@ -1676,6 +2172,7 @@ class LiveFuzzRunner:
         self.operation_count = 0
         self.restart_count = 0
         self.executed_batches = 0
+        self.slow_wait_extensions = 0
 
     async def run(self) -> dict[str, int | str]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -2256,12 +2753,9 @@ class LiveFuzzRunner:
                         assert event_id is not None
                         self.oracle.expect(operation.event_ref, event_id)
             try:
-                await self.oracle.wait_until_exact(
-                    deadline_seconds=self.reply_timeout,
-                    settle_seconds=self.settle_seconds,
-                )
+                await self._await_replies()
             except AssertionError as exc:
-                msg = f"{exc} after live batch {batch_index}"
+                msg = f"{exc}\nfailure occurred after live batch {batch_index}"
                 raise AssertionError(msg) from exc
             self.executed_batches += 1
 
@@ -2271,6 +2765,8 @@ class LiveFuzzRunner:
             "operations": self.operation_count,
             "restarts": self.restart_count,
             "roots": self.scenario.thread_count,
+            "measured_turn_seconds": round(self.latency.per_turn_seconds, 3),
+            "slow_wait_extensions": self.slow_wait_extensions,
             "status": "PASS",
         }
 
@@ -2292,6 +2788,35 @@ class LiveFuzzRunner:
         client_index = max(thread - 1, 0)
         return self.clients[client_index]
 
+    def _report_slow_wait(self, notice: SlowWaitNotice) -> None:
+        """Say out loud that the machine, not the product, is the bottleneck."""
+        self.slow_wait_extensions += 1
+        print(notice.render(), file=sys.stderr, flush=True)
+
+    async def _await_replies(self) -> None:
+        """Wait out every outstanding reply under a work-derived budget.
+
+        A failure here is reported with the durable position of each missing
+        reply, because "one of forty-five is missing" is a count and the next
+        reader needs a cause.
+        """
+        budget = WaitBudget(
+            turns=len(self.oracle.outstanding()),
+            per_turn_seconds=self.latency.per_turn_seconds,
+            settle_seconds=self.settle_seconds,
+            floor_seconds=self.reply_timeout,
+        )
+        try:
+            elapsed = await self.oracle.wait_until_exact(
+                budget,
+                on_slow=self._report_slow_wait,
+                liveness=self.stack.require_runtime_alive,
+            )
+        except ExactReplyTimeoutError as exc:
+            msg = f"{exc}\n{self.stack.diagnose_missing_replies(exc.missing)}"
+            raise AssertionError(msg) from exc
+        self.latency.observe(turns=budget.turns, elapsed_seconds=elapsed - self.settle_seconds)
+
     async def _await_first_baseline_response(self) -> None:
         """Send one message and wait for its reply before the scenario starts.
 
@@ -2309,12 +2834,26 @@ class LiveFuzzRunner:
         content = self._message_content("Live fuzz warm up")
         event_id = await self.client.send_event("m.room.message", "live-fuzz-warm-up", content)
         self.oracle.expect("warm-up", event_id)
-        await self.oracle.wait_until_exact(
-            deadline_seconds=self.reply_timeout,
-            settle_seconds=self.settle_seconds,
-        )
+        await self._await_replies()
 
     async def _send_roots(self, threads: Collection[int]) -> None:
+        """Create every thread root, in waves sized to the room's one lane.
+
+        A room's events are handled by a single sequential lane, so releasing
+        all forty-five roots at once buys no parallelism inside MindRoom. It
+        only puts the entire fan-out behind one deadline and turns a failure
+        report into "forty-four replies are missing" instead of naming the turn
+        that stopped. Each wave is still sent simultaneously, so the transport
+        concurrency the proof cares about is unchanged.
+        """
+        ordered = sorted(threads)
+        wave_size = self.root_fanout or len(ordered) or 1
+        for start in range(0, len(ordered), wave_size):
+            await self._send_root_wave(ordered[start : start + wave_size])
+
+    async def _send_root_wave(self, threads: Collection[int]) -> None:
+        """Send one simultaneous wave of roots and wait out its replies."""
+
         async def send_root(thread: int) -> tuple[int, str, _SentPayload]:
             logical_ref = f"root:{thread}"
             content = self._message_content(f"Live fuzz root {thread}")
@@ -2332,10 +2871,7 @@ class LiveFuzzRunner:
             self.event_ids[logical_ref] = event_id
             self.sent_payloads[logical_ref] = payload
             self.oracle.expect(logical_ref, event_id)
-        await self.oracle.wait_until_exact(
-            deadline_seconds=self.reply_timeout,
-            settle_seconds=self.settle_seconds,
-        )
+        await self._await_replies()
 
     async def _apply(
         self,
@@ -2452,9 +2988,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
     parser.add_argument(
+        "--root-fanout",
+        type=_non_negative_int,
+        default=DEFAULT_ROOT_FANOUT,
+        help="thread roots released simultaneously per wave (0 releases every root at once)",
+    )
+    parser.add_argument(
         "--reply-timeout",
         type=float,
-        help="per-reply deadline (default: 60s fuzz and restart-regression, 180s saturation)",
+        help=(
+            "deadline for a single agent turn, and the floor under every multi-turn deadline "
+            "(default: 60s fuzz and restart-regression, 180s saturation). Waits for N outstanding "
+            "turns scale this from measured per-turn latency instead of using it flat."
+        ),
     )
     parser.add_argument("--settle-seconds", type=float, default=0.75)
     parser.add_argument("--trace", type=Path)
@@ -2469,6 +3015,7 @@ async def _run_live(
     *,
     reply_timeout: float,
     settle_seconds: float,
+    root_fanout: int,
 ) -> dict[str, int | str]:
     client_count = scenario.thread_count - 1 if scenario.profile == "saturation" else 1
     clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id) for _ in range(client_count))
@@ -2479,6 +3026,7 @@ async def _run_live(
             scenario,
             reply_timeout=reply_timeout,
             settle_seconds=settle_seconds,
+            root_fanout=root_fanout,
         ).run()
     finally:
         await asyncio.gather(*(client.close() for client in clients))
@@ -2510,6 +3058,8 @@ def main() -> None:
     reply_timeout = args.reply_timeout
     if reply_timeout is None:
         reply_timeout = 180 if scenario.profile == "saturation" else 60
+    host_load = collect_host_load_report()
+    print(host_load.render(), file=sys.stderr, flush=True)
 
     stack = ManagedTuwunelStack(
         stream_segments=96 if scenario.profile == "saturation" else 4,
@@ -2525,15 +3075,18 @@ def main() -> None:
                 scenario,
                 reply_timeout=reply_timeout,
                 settle_seconds=args.settle_seconds,
+                root_fanout=args.root_fanout,
             ),
         )
         if scenario.profile != "restart-regression":
             result["seed"] = args.seed if args.trace is None else "trace"
-        result.update(stack.diagnostic_counts())
-        print(json.dumps(result, sort_keys=True))
+        payload: dict[str, object] = {**result, **stack.diagnostic_counts(), **host_load.as_dict()}
+        print(json.dumps(payload, sort_keys=True))
     except Exception:
         print("Live Matrix fuzz trace:", file=sys.stderr)
         print(args.trace or scenario.to_json(), file=sys.stderr)
+        print(f"host load at start: {host_load.render()}", file=sys.stderr)
+        print(f"host load at failure: {collect_host_load_report().render()}", file=sys.stderr)
         print(json.dumps(stack.diagnostic_counts(), sort_keys=True), file=sys.stderr)
         if args.failure_log is not None and stack.log_path.exists():
             args.failure_log.write_text(
