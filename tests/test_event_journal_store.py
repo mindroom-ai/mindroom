@@ -2003,6 +2003,33 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         assert await records.load(event_id="$a") == '{"v": 2}'
         assert await records.load(event_id="$b") is None
 
+    async def test_a_re_anchored_record_leaves_no_row_under_its_old_anchor(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Dropping the anchor itself is the case a naive delete misses.
+
+        Redaction and conflict projection re-anchor a record when the anchor is
+        one of the sources being dropped -- `handled_turns` picks the last
+        retained source instead. The rows to clean up are then filed under the
+        *old* anchor, so a delete scoped to the anchor being written walks past
+        them and the dropped source keeps reporting "already handled". Nothing
+        would ever answer it.
+        """
+        records = journal_store.turn_records("agent")
+        await records.upsert(
+            index_event_ids=("$a", "$b"),
+            anchor_event_id="$a",
+            record_json='{"v": 1}',
+        )
+
+        # `$a` is redacted away, so the record re-anchors onto `$b`.
+        await records.upsert(index_event_ids=("$b",), anchor_event_id="$b", record_json='{"v": 2}')
+
+        assert await records.load(event_id="$a") is None, "the old anchor's row survived re-anchoring"
+        assert await records.load(event_id="$b") == '{"v": 2}'
+        assert [index for index, _anchor, _json in await records.load_all()] == ["$b"]
+
     async def test_records_are_scoped_to_the_agent_not_the_matrix_identity(
         self,
         journal_store: EventJournalStore,

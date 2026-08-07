@@ -54,16 +54,34 @@ def upsert(
     and a stale row left behind would answer "already handled" for a source
     this turn no longer accounts for -- which is the one direction that
     silently drops a user's message.
+
+    Finding those rows cannot start from the anchor being written. Redaction
+    and conflict projection re-anchor a record when the anchor itself is one of
+    the dropped sources (``handled_turns.py`` picks the last retained source
+    instead), so the rows to clean up are filed under the *old* anchor and a
+    delete scoped to the new one never sees them. The old anchors are recovered
+    from the rows the surviving indexes still point at.
     """
     if not index_event_ids:
         return
     placeholders = ", ".join("?" for _ in index_event_ids)
+    previous = transaction.fetchall(
+        f"""
+        SELECT DISTINCT anchor_event_id FROM turn_records
+        WHERE agent_name = ? AND index_event_id IN ({placeholders})
+        """,  # noqa: S608 - placeholders are generated, values are still bound
+        (agent_name, *index_event_ids),
+    )
+    anchors = {anchor_event_id, *(str(row["anchor_event_id"]) for row in previous)}
+    anchor_placeholders = ", ".join("?" for _ in anchors)
     transaction.execute(
         f"""
         DELETE FROM turn_records
-        WHERE agent_name = ? AND anchor_event_id = ? AND index_event_id NOT IN ({placeholders})
+        WHERE agent_name = ?
+          AND anchor_event_id IN ({anchor_placeholders})
+          AND index_event_id NOT IN ({placeholders})
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (agent_name, anchor_event_id, *index_event_ids),
+        (agent_name, *sorted(anchors), *index_event_ids),
     )
     updated_at_ns = time.time_ns()
     for index_event_id in index_event_ids:
