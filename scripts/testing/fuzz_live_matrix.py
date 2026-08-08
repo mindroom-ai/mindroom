@@ -32,6 +32,7 @@ import time
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -105,6 +106,11 @@ _MAX_BUDGET_EXTENSIONS = 3
 # waves keeps genuine transport-level concurrency while bounding how much work
 # any one deadline has to cover and how much a failure report has to explain.
 DEFAULT_ROOT_FANOUT = 8
+
+# The fixed synthetic profile emits at least 4,000 characters at 80 characters
+# per second. Allow setup and chunk boundaries five seconds of slack while
+# still rejecting a fast or accidentally non-streaming responder.
+RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS = 45.0
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -354,6 +360,270 @@ def recovery_cliff_scenario() -> LiveFuzzScenario:
     scenario = LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
     scenario.validate()
     return scenario
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCliffTerminalAudit:
+    """Pure canonical-response and effective-terminal evidence."""
+
+    expected_sources: tuple[str, ...]
+    canonical_responses: tuple[tuple[str, str], ...]
+    canonical_response_count: int
+    missing_sources: tuple[str, ...]
+    duplicate_sources: tuple[tuple[str, tuple[str, ...]], ...]
+    unexpected_sources: tuple[str, ...]
+    invalid_relations: tuple[tuple[str, str | None, str | None], ...]
+    noncompleted_sources: tuple[tuple[str, str | None], ...]
+    min_active_stream_seconds: float
+    max_active_stream_seconds: float
+    peak_active_streams: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCliffDrainCounts:
+    """Actionable durable work remaining after recovery-cliff responses."""
+
+    pending_journal_rows: int
+    unacknowledged_outbox_rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCliffHealthSample:
+    """One parsed runtime and Matrix-sync health observation."""
+
+    healthy: bool
+    last_sync_time: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCliffObservation:
+    """Frozen evidence evaluated before a recovery-cliff PASS."""
+
+    root_count: int
+    terminal_audit: RecoveryCliffTerminalAudit
+    recovery_incomplete_markers: int
+    delivery_retry_markers: int
+    drain: RecoveryCliffDrainCounts
+    health_samples: tuple[RecoveryCliffHealthSample, ...]
+    watchdog_stalls: int
+    reaction_settled: bool
+    pre_fence_last_sync: datetime | None
+    post_fence_last_sync: datetime | None
+    clean_shutdown: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCliffEventIndex:
+    """Responder originals, edits, and malformed canonical relations."""
+
+    originals: Mapping[str, tuple[Mapping[str, Any], ...]]
+    edits: Mapping[str, tuple[Mapping[str, Any], ...]]
+    invalid_relations: tuple[tuple[str, str | None, str | None], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCliffSourceFold:
+    """One exact source's effective response state and active interval."""
+
+    source_event_id: str
+    response_event_id: str
+    effective_status: str | None
+    started_at_ms: int
+    finished_at_ms: int
+
+
+def _recovery_stream_status(event: Mapping[str, Any]) -> str | None:
+    """Read the effective stream status from one original or replacement."""
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+    new_content = content.get("m.new_content")
+    effective = new_content if isinstance(new_content, dict) else content
+    status = effective.get("io.mindroom.stream_status")
+    return status if isinstance(status, str) else None
+
+
+def _recovery_event_order(event: Mapping[str, Any]) -> tuple[int, str]:
+    """Return the stable Matrix order used to fold response edits."""
+    timestamp = event.get("origin_server_ts")
+    event_id = event.get("event_id")
+    return (
+        timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0,
+        event_id if isinstance(event_id, str) else "",
+    )
+
+
+def _index_recovery_cliff_events(
+    events: Collection[Mapping[str, Any]],
+    *,
+    responder_id: str,
+) -> _RecoveryCliffEventIndex:
+    """Index canonical candidates and same-responder replacements."""
+    originals: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    edits: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    invalid_relations: list[tuple[str, str | None, str | None]] = []
+    for event in events:
+        if event.get("type") != "m.room.message" or event.get("sender") != responder_id:
+            continue
+        event_id = event.get("event_id")
+        content = event.get("content")
+        if not isinstance(event_id, str) or not isinstance(content, dict):
+            continue
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict):
+            continue
+        if relation.get("rel_type") == "m.replace":
+            target_event_id = relation.get("event_id")
+            if isinstance(target_event_id, str):
+                edits[target_event_id].append(event)
+            continue
+        if relation.get("rel_type") != "m.thread":
+            continue
+        thread_event_id = relation.get("event_id")
+        reply = relation.get("m.in_reply_to")
+        reply_event_id = reply.get("event_id") if isinstance(reply, dict) else None
+        resolved_thread_id = thread_event_id if isinstance(thread_event_id, str) else None
+        resolved_reply_id = reply_event_id if isinstance(reply_event_id, str) else None
+        if resolved_thread_id is None or resolved_reply_id is None or resolved_thread_id != resolved_reply_id:
+            invalid_relations.append((event_id, resolved_thread_id, resolved_reply_id))
+            continue
+        originals[resolved_reply_id].append(event)
+    return _RecoveryCliffEventIndex(
+        originals={source: tuple(source_events) for source, source_events in originals.items()},
+        edits={response: tuple(response_edits) for response, response_edits in edits.items()},
+        invalid_relations=tuple(sorted(invalid_relations)),
+    )
+
+
+def _fold_recovery_cliff_source(
+    source_event_id: str,
+    *,
+    index: _RecoveryCliffEventIndex,
+) -> _RecoveryCliffSourceFold | None:
+    """Fold one uniquely canonical original with its same-responder edits."""
+    originals = index.originals.get(source_event_id, ())
+    if len(originals) != 1:
+        return None
+    original = originals[0]
+    response_event_id = cast("str", original["event_id"])
+    latest = max((original, *index.edits.get(response_event_id, ())), key=_recovery_event_order)
+    return _RecoveryCliffSourceFold(
+        source_event_id=source_event_id,
+        response_event_id=response_event_id,
+        effective_status=_recovery_stream_status(latest),
+        started_at_ms=_recovery_event_order(original)[0],
+        finished_at_ms=_recovery_event_order(latest)[0],
+    )
+
+
+def _peak_recovery_cliff_streams(folds: Collection[_RecoveryCliffSourceFold]) -> int:
+    """Return peak overlap for half-open original-to-terminal intervals."""
+    boundaries = sorted(
+        boundary
+        for fold in folds
+        if fold.finished_at_ms > fold.started_at_ms
+        for boundary in ((fold.started_at_ms, 1), (fold.finished_at_ms, -1))
+    )
+    active_streams = 0
+    peak_active_streams = 0
+    for _timestamp, delta in boundaries:
+        active_streams += delta
+        peak_active_streams = max(peak_active_streams, active_streams)
+    return peak_active_streams
+
+
+def audit_recovery_cliff_events(
+    events: Collection[Mapping[str, Any]],
+    *,
+    responder_id: str,
+    expected_source_ids: Collection[str],
+) -> RecoveryCliffTerminalAudit:
+    """Fold raw Matrix originals and same-responder edits into terminal evidence."""
+    expected_sources = tuple(sorted(expected_source_ids))
+    expected = frozenset(expected_sources)
+    index = _index_recovery_cliff_events(events, responder_id=responder_id)
+    folds = tuple(
+        fold for source in expected_sources if (fold := _fold_recovery_cliff_source(source, index=index)) is not None
+    )
+    missing_sources = tuple(source for source in expected_sources if not index.originals.get(source))
+    duplicate_sources = tuple(
+        (
+            source,
+            tuple(
+                sorted(cast("str", event["event_id"]) for event in index.originals.get(source, ())),
+            ),
+        )
+        for source in expected_sources
+        if len(index.originals.get(source, ())) > 1
+    )
+    unexpected_sources = tuple(sorted(source for source in index.originals if source not in expected))
+    durations = tuple(max(0.0, (fold.finished_at_ms - fold.started_at_ms) / 1000) for fold in folds)
+
+    return RecoveryCliffTerminalAudit(
+        expected_sources=expected_sources,
+        canonical_responses=tuple((fold.source_event_id, fold.response_event_id) for fold in folds),
+        canonical_response_count=sum(len(index.originals.get(source, ())) for source in expected_sources),
+        missing_sources=missing_sources,
+        duplicate_sources=duplicate_sources,
+        unexpected_sources=unexpected_sources,
+        invalid_relations=index.invalid_relations,
+        noncompleted_sources=tuple(
+            (fold.source_event_id, fold.effective_status) for fold in folds if fold.effective_status != "completed"
+        ),
+        min_active_stream_seconds=min(durations, default=0.0),
+        max_active_stream_seconds=max(durations, default=0.0),
+        peak_active_streams=_peak_recovery_cliff_streams(folds),
+    )
+
+
+def evaluate_recovery_cliff(observation: RecoveryCliffObservation) -> tuple[str, ...]:
+    """Return every acceptance failure in one settled recovery-cliff observation."""
+    audit = observation.terminal_audit
+    before, after = observation.pre_fence_last_sync, observation.post_fence_last_sync
+    failures = (
+        f"root_count expected={len(audit.expected_sources)} observed={observation.root_count}"
+        if observation.root_count != len(audit.expected_sources)
+        else "",
+        f"missing_sources={audit.missing_sources}" if audit.missing_sources else "",
+        f"duplicate_sources={audit.duplicate_sources}" if audit.duplicate_sources else "",
+        f"unknown_sources={audit.unexpected_sources}" if audit.unexpected_sources else "",
+        f"invalid_relations={audit.invalid_relations}" if audit.invalid_relations else "",
+        f"noncompleted_sources={audit.noncompleted_sources}" if audit.noncompleted_sources else "",
+        (
+            f"active_stream_duration_too_short={audit.min_active_stream_seconds:.3f} "
+            f"minimum={RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS:.3f}"
+            if audit.min_active_stream_seconds < RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS
+            else ""
+        ),
+        (
+            f"peak_active_streams={audit.peak_active_streams} expected={observation.root_count}"
+            if audit.peak_active_streams < observation.root_count
+            else ""
+        ),
+        "recovery_incomplete_markers=0" if observation.recovery_incomplete_markers < 1 else "",
+        "delivery_retry_markers=0" if observation.delivery_retry_markers < 1 else "",
+        (
+            f"pending_journal_rows={observation.drain.pending_journal_rows}"
+            if observation.drain.pending_journal_rows
+            else ""
+        ),
+        (
+            f"unacknowledged_outbox_rows={observation.drain.unacknowledged_outbox_rows}"
+            if observation.drain.unacknowledged_outbox_rows
+            else ""
+        ),
+        (
+            "health_samples_unhealthy"
+            if not observation.health_samples
+            or any(not sample.healthy or sample.last_sync_time is None for sample in observation.health_samples)
+            else ""
+        ),
+        f"watchdog_stalls={observation.watchdog_stalls}" if observation.watchdog_stalls else "",
+        "reaction_not_settled" if not observation.reaction_settled else "",
+        "sync_progress_absent_after_fence" if before is None or after is None or after <= before else "",
+        "shutdown_not_clean" if not observation.clean_shutdown else "",
+    )
+    return tuple(failure for failure in failures if failure)
 
 
 def _restart_failure(
@@ -1589,6 +1859,64 @@ class ManagedTuwunelStack:
             return None
         return access_token, device_id
 
+    def recovery_health_sample(self) -> RecoveryCliffHealthSample:
+        """Read and parse one recovery-cliff API health sample."""
+        response = httpx.get(f"http://127.0.0.1:{self.api_port}/api/health", timeout=2)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            msg = "MindRoom health endpoint returned non-object JSON"
+            raise TypeError(msg)
+        raw_last_sync_time = payload.get("last_sync_time")
+        if raw_last_sync_time is None:
+            last_sync_time = None
+        elif isinstance(raw_last_sync_time, str):
+            last_sync_time = datetime.fromisoformat(raw_last_sync_time)
+            if last_sync_time.tzinfo is None:
+                msg = "MindRoom health last_sync_time must include a timezone"
+                raise ValueError(msg)
+        else:
+            msg = "MindRoom health last_sync_time must be an ISO datetime or null"
+            raise TypeError(msg)
+        return RecoveryCliffHealthSample(
+            healthy=response.is_success and payload.get("status") == "healthy",
+            last_sync_time=last_sync_time,
+        )
+
+    def recovery_drain_counts(self) -> RecoveryCliffDrainCounts:
+        """Count only actionable pending journal and unacknowledged outbox rows."""
+        database_path = self.storage_path / "tracking" / "event_journal.db"
+        if not database_path.is_file():
+            msg = f"recovery-cliff event journal database is missing: {database_path}"
+            raise FileNotFoundError(msg)
+        with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as database:
+            pending_journal_rows = cast(
+                "int",
+                database.execute(
+                    "SELECT COUNT(*) FROM journal_events WHERE state = 'pending'",
+                ).fetchone()[0],
+            )
+            unacknowledged_outbox_rows = cast(
+                "int",
+                database.execute(
+                    "SELECT COUNT(*) FROM response_outbox WHERE acknowledged_event_id IS NULL",
+                ).fetchone()[0],
+            )
+        return RecoveryCliffDrainCounts(
+            pending_journal_rows=pending_journal_rows,
+            unacknowledged_outbox_rows=unacknowledged_outbox_rows,
+        )
+
+    def recovery_reaction_state(self, event_id: str) -> str | None:
+        """Return the responder's exact durable state for one reaction fence."""
+        rows = self._journal_query(
+            """
+            SELECT state FROM journal_events
+            WHERE principal_id = ? AND event_id = ? AND kind = 'reaction'
+            """,
+            (self._journal_principal_id(self.agent_id), event_id),
+        )
+        return str(rows[0][0]) if rows else None
+
     def _restart_event_projected_for_agent(self, room_id: str, event_id: str) -> bool:
         """Return whether the managed agent durably projected one exact event."""
         rows = self._journal_query(
@@ -2344,11 +2672,10 @@ class LiveFuzzRunner:
         self.executed_batches = 0
         self.slow_wait_extensions = 0
 
-    async def run(self) -> dict[str, int | str]:
+    async def run(self) -> dict[str, float | int | str]:
         """Execute every batch and enforce the reply invariant after each."""
         if self.scenario.profile == "recovery-cliff":
-            msg = "recovery-cliff runner is not yet implemented; Task 3 owns its live acceptance workload"
-            raise NotImplementedError(msg)
+            return await self._run_recovery_cliff()
         await asyncio.gather(*(client.register() for client in self.clients))
         await asyncio.gather(*(client.join_room() for client in self.clients))
         if self.scenario.profile == "restart-regression":
@@ -2365,6 +2692,323 @@ class LiveFuzzRunner:
         return await self._run_batches(
             self.scenario.batches,
         )
+
+    async def _authenticate_recovery_cliff_sender(self) -> None:
+        """Select the already-managed load sender without registering a user."""
+        credentials = self.stack.agent_matrix_credentials("load_sender")
+        if credentials is None:
+            msg = "recovery-cliff managed load_sender credentials are missing"
+            raise RuntimeError(msg)
+        access_token, _device_id = credentials
+        self.client.access_token = access_token
+        await self.client.join_room()
+
+    async def _release_recovery_cliff_roots(
+        self,
+        *,
+        run_id: str,
+        deadline: float,
+    ) -> tuple[str, ...]:
+        """Release 100 mentioned roots plus one inert boundary in one gather."""
+
+        async def send_root(thread: int) -> tuple[int, str]:
+            content = {
+                "msgtype": "m.text",
+                "body": f"Recovery cliff run={run_id} thread={thread} {self.stack.agent_id}",
+                "m.mentions": {"user_ids": [self.stack.agent_id]},
+            }
+            event_id = await self.client.send_event(
+                "m.room.message",
+                f"recovery-cliff-root-{run_id}-{thread}",
+                content,
+            )
+            return thread, event_id
+
+        async def send_boundary() -> tuple[None, str]:
+            event_id = await self.client.send_event(
+                "m.room.message",
+                f"recovery-cliff-boundary-{run_id}",
+                {
+                    "msgtype": "m.notice",
+                    "body": f"Recovery cliff load boundary run={run_id}",
+                    "m.mentions": {"user_ids": []},
+                },
+            )
+            return None, event_id
+
+        async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
+            released = await asyncio.gather(
+                *(send_root(thread) for thread in range(self.scenario.thread_count)),
+                send_boundary(),
+            )
+        roots = sorted((cast("int", thread), event_id) for thread, event_id in released if thread is not None)
+        return tuple(event_id for _thread, event_id in roots)
+
+    def _recovery_cliff_audit(
+        self,
+        *,
+        baseline_event_ids: frozenset[str],
+        expected_source_ids: Collection[str],
+    ) -> RecoveryCliffTerminalAudit:
+        """Audit the single observer cursor against exact workload sources."""
+        return audit_recovery_cliff_events(
+            tuple(event for event_id, event in self.client.seen_events.items() if event_id not in baseline_event_ids),
+            responder_id=self.stack.agent_id,
+            expected_source_ids=expected_source_ids,
+        )
+
+    @staticmethod
+    def _recovery_cliff_terminal_ready(audit: RecoveryCliffTerminalAudit) -> bool:
+        """Return whether every source has one completed canonical response."""
+        return (
+            audit.canonical_response_count == len(audit.expected_sources)
+            and not audit.missing_sources
+            and not audit.duplicate_sources
+            and not audit.unexpected_sources
+            and not audit.invalid_relations
+            and not audit.noncompleted_sources
+        )
+
+    @staticmethod
+    def _recovery_cliff_assert_no_terminal_corruption(audit: RecoveryCliffTerminalAudit) -> None:
+        """Fail immediately on evidence that cannot become valid with more sync."""
+        failures = []
+        if audit.duplicate_sources:
+            failures.append(f"duplicate_sources={audit.duplicate_sources}")
+        if audit.unexpected_sources:
+            failures.append(f"unknown_sources={audit.unexpected_sources}")
+        if audit.invalid_relations:
+            failures.append(f"invalid_relations={audit.invalid_relations}")
+        if failures:
+            raise AssertionError("recovery-cliff terminal corruption: " + "; ".join(failures))
+
+    @staticmethod
+    def _recovery_cliff_remaining(deadline: float) -> float:
+        """Return the remaining fixed SLA without extending it."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            msg = "recovery-cliff fixed service-level deadline expired"
+            raise TimeoutError(msg)
+        return remaining
+
+    async def _recovery_cliff_observer_step(
+        self,
+        *,
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> RecoveryCliffHealthSample:
+        """Sample runtime health and advance the one strict raw-event cursor."""
+        remaining = self._recovery_cliff_remaining(deadline)
+        async with asyncio.timeout(remaining):
+            self.stack.require_runtime_alive()
+            sample = await asyncio.to_thread(self.stack.recovery_health_sample)
+            health_samples.append(sample)
+            await self.client.sync_incremental(
+                timeout_ms=min(max(round(remaining * 1000), 0), 250),
+            )
+            self.stack.require_runtime_alive()
+        return sample
+
+    async def _wait_for_recovery_cliff_terminals(
+        self,
+        *,
+        baseline_event_ids: frozenset[str],
+        expected_source_ids: Collection[str],
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> RecoveryCliffTerminalAudit:
+        """Wait under one absolute deadline for exact completed responses."""
+        while True:
+            audit = self._recovery_cliff_audit(
+                baseline_event_ids=baseline_event_ids,
+                expected_source_ids=expected_source_ids,
+            )
+            self._recovery_cliff_assert_no_terminal_corruption(audit)
+            if self._recovery_cliff_terminal_ready(audit):
+                return audit
+            await self._recovery_cliff_observer_step(
+                deadline=deadline,
+                health_samples=health_samples,
+            )
+
+    async def _wait_for_recovery_cliff_drain(
+        self,
+        *,
+        baseline_event_ids: frozenset[str],
+        expected_source_ids: Collection[str],
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> RecoveryCliffDrainCounts:
+        """Wait for exact durable drain while continuing strict observation."""
+        while True:
+            async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
+                counts = await asyncio.to_thread(self.stack.recovery_drain_counts)
+            audit = self._recovery_cliff_audit(
+                baseline_event_ids=baseline_event_ids,
+                expected_source_ids=expected_source_ids,
+            )
+            self._recovery_cliff_assert_no_terminal_corruption(audit)
+            if counts == RecoveryCliffDrainCounts(0, 0):
+                return counts
+            await self._recovery_cliff_observer_step(
+                deadline=deadline,
+                health_samples=health_samples,
+            )
+
+    async def _wait_for_recovery_cliff_fence(
+        self,
+        *,
+        target_event_id: str,
+        run_id: str,
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> tuple[bool, datetime, datetime]:
+        """Require one exact settled reaction and later aggregated sync time."""
+        pre_fence_sample = await self._recovery_cliff_observer_step(
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        if pre_fence_sample.last_sync_time is None:
+            msg = "recovery-cliff pre-fence health omitted last_sync_time"
+            raise AssertionError(msg)
+        async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
+            reaction_event_id = await self.client.send_event(
+                "m.reaction",
+                f"recovery-cliff-fence-{run_id}",
+                {
+                    "m.relates_to": {
+                        "rel_type": "m.annotation",
+                        "event_id": target_event_id,
+                        "key": "recovery-cliff-fence",
+                    },
+                },
+            )
+        while True:
+            async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
+                reaction_settled = (
+                    await asyncio.to_thread(
+                        self.stack.recovery_reaction_state,
+                        reaction_event_id,
+                    )
+                    == "settled"
+                )
+            sample = await self._recovery_cliff_observer_step(
+                deadline=deadline,
+                health_samples=health_samples,
+            )
+            sync_advanced = (
+                sample.last_sync_time is not None and sample.last_sync_time > pre_fence_sample.last_sync_time
+            )
+            if reaction_settled and sync_advanced:
+                return True, pre_fence_sample.last_sync_time, sample.last_sync_time
+
+    async def _run_recovery_cliff(self) -> dict[str, float | int | str]:
+        """Exercise and evaluate the fixed 100-stream delivery recovery cliff."""
+        await self._authenticate_recovery_cliff_sender()
+        await self.client.sync_incremental(timeout_ms=0, allow_limited=True)
+
+        run_id = secrets.token_hex(6)
+        warm_baseline = frozenset(self.client.seen_events)
+        warm_event_id = await self.client.send_event(
+            "m.room.message",
+            f"recovery-cliff-warm-up-{run_id}",
+            self._message_content(f"Recovery cliff warm up run={run_id}"),
+        )
+        await self._wait_for_recovery_cliff_terminals(
+            baseline_event_ids=warm_baseline,
+            expected_source_ids=(warm_event_id,),
+            deadline=time.monotonic() + self.reply_timeout,
+            health_samples=[],
+        )
+
+        post_warm_event_ids = frozenset(self.client.seen_events)
+        incomplete_markers = (
+            "matrix_sync_recovery_incomplete",
+            f"agent={AGENT_NAME}",
+            "transport=sliding",
+        )
+        delivery_retry_markers = (
+            "Waiting to retry Matrix delivery after sync recovery",
+            f"room_id={self.client.room_id}",
+        )
+        incomplete_before = self.stack.log_count(*incomplete_markers)
+        delivery_retry_before = self.stack.log_count(*delivery_retry_markers)
+
+        deadline = time.monotonic() + self.reply_timeout
+        source_event_ids = await self._release_recovery_cliff_roots(
+            run_id=run_id,
+            deadline=deadline,
+        )
+        expected_source_ids = frozenset(source_event_ids)
+        health_samples: list[RecoveryCliffHealthSample] = []
+        terminal_audit = await self._wait_for_recovery_cliff_terminals(
+            baseline_event_ids=post_warm_event_ids,
+            expected_source_ids=expected_source_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        drain = await self._wait_for_recovery_cliff_drain(
+            baseline_event_ids=post_warm_event_ids,
+            expected_source_ids=expected_source_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+
+        reaction_settled, pre_fence_last_sync, post_fence_last_sync = await self._wait_for_recovery_cliff_fence(
+            target_event_id=terminal_audit.canonical_responses[0][1],
+            run_id=run_id,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        drain = await self._wait_for_recovery_cliff_drain(
+            baseline_event_ids=post_warm_event_ids,
+            expected_source_ids=expected_source_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        terminal_audit = self._recovery_cliff_audit(
+            baseline_event_ids=post_warm_event_ids,
+            expected_source_ids=expected_source_ids,
+        )
+
+        clean_shutdown = await asyncio.to_thread(self.stack.stop_mindroom)
+        observation = RecoveryCliffObservation(
+            root_count=self.scenario.thread_count,
+            terminal_audit=terminal_audit,
+            recovery_incomplete_markers=(self.stack.log_count(*incomplete_markers) - incomplete_before),
+            delivery_retry_markers=(self.stack.log_count(*delivery_retry_markers) - delivery_retry_before),
+            drain=drain,
+            health_samples=tuple(health_samples),
+            watchdog_stalls=self.stack.log_count("matrix_sync_watchdog_stalled"),
+            reaction_settled=reaction_settled,
+            pre_fence_last_sync=pre_fence_last_sync,
+            post_fence_last_sync=post_fence_last_sync,
+            clean_shutdown=clean_shutdown,
+        )
+        failures = evaluate_recovery_cliff(observation)
+        if failures:
+            raise AssertionError("recovery-cliff acceptance failures:\n" + "\n".join(failures))
+        return {
+            "profile": self.scenario.profile,
+            "status": "PASS",
+            "roots": observation.root_count,
+            "burst_events": observation.root_count + 1,
+            "canonical_agent_replies": terminal_audit.canonical_response_count,
+            "recovery_incomplete_markers": observation.recovery_incomplete_markers,
+            "delivery_retry_markers": observation.delivery_retry_markers,
+            "max_active_stream_seconds": round(terminal_audit.max_active_stream_seconds, 3),
+            "peak_active_streams": terminal_audit.peak_active_streams,
+            "pending_journal_rows": drain.pending_journal_rows,
+            "unacknowledged_outbox_rows": drain.unacknowledged_outbox_rows,
+            "health_checks": len(observation.health_samples),
+            "watchdog_stalls": observation.watchdog_stalls,
+            "post_load_sync_advanced": (
+                observation.pre_fence_last_sync is not None
+                and observation.post_fence_last_sync is not None
+                and observation.post_fence_last_sync > observation.pre_fence_last_sync
+            ),
+            "clean_shutdown": observation.clean_shutdown,
+        }
 
     async def _run_restart_regression(self) -> dict[str, int | str]:
         """Exercise real replacement recovery while observing only Matrix output."""
@@ -3294,7 +3938,7 @@ async def _run_live(
     reply_timeout: float,
     settle_seconds: float,
     root_fanout: int,
-) -> dict[str, int | str]:
+) -> dict[str, float | int | str]:
     client_count = scenario.thread_count - 1 if scenario.profile == "short-stream-correctness" else 1
     clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id) for _ in range(client_count))
     try:

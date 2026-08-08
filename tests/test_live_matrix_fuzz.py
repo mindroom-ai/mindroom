@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import closing
 from dataclasses import replace
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -30,6 +31,7 @@ from scripts.testing.fuzz_live_matrix import (
     DIAGNOSTIC_MARKERS,
     ORDERLY_SHUTDOWN_MARKER,
     PROJECT_ROOT,
+    RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS,
     RESTART_SHUTDOWN_FAILURE_MARKER,
     ExactReplyOracle,
     ExactReplyTimeoutError,
@@ -43,6 +45,9 @@ from scripts.testing.fuzz_live_matrix import (
     ManagedTuwunelStack,
     MissingReplyStage,
     OutboxRow,
+    RecoveryCliffDrainCounts,
+    RecoveryCliffHealthSample,
+    RecoveryCliffObservation,
     RestartRegressionObservation,
     SlowWaitNotice,
     TurnLatencyMonitor,
@@ -51,8 +56,10 @@ from scripts.testing.fuzz_live_matrix import (
     _ModelHandler,
     _restart_prompt_observation,
     _semantic_ingress_markers,
+    audit_recovery_cliff_events,
     classify_missing_reply,
     collect_host_load_report,
+    evaluate_recovery_cliff,
     evaluate_restart_regression,
     live_scenario_from_seed,
     recovery_cliff_scenario,
@@ -83,15 +90,15 @@ class _RecordingDormantClient:
 
 
 class _RecoveryCliffBoundaryClient:
-    """Fail immediately if Task 2 starts the unimplemented recovery workload."""
+    """Fail if recovery-cliff falls through to disposable registration."""
 
     room_id = "!recovery:example"
-    _REGISTER_MESSAGE = "recovery-cliff must refuse before client registration"
-    _JOIN_MESSAGE = "recovery-cliff must refuse before room join"
-    _SEND_MESSAGE = "recovery-cliff must refuse before sending roots"
+    _REGISTER_MESSAGE = "recovery-cliff must use persisted managed credentials"
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.seen_events: dict[str, dict[str, Any]] = {}
+        self.sync_calls = 0
 
     async def register(self) -> None:
         self.calls.append("register")
@@ -99,12 +106,37 @@ class _RecoveryCliffBoundaryClient:
 
     async def join_room(self) -> None:
         self.calls.append("join_room")
-        raise AssertionError(self._JOIN_MESSAGE)
 
     async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
         del event_type, txn_id, content
         self.calls.append("send_event")
-        raise AssertionError(self._SEND_MESSAGE)
+        return "$sent"
+
+    async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+        del timeout_ms, allow_limited
+        self.sync_calls += 1
+
+
+class _RecoveryCliffLaunchBarrierClient:
+    """Release sends only after the complete cliff burst has entered."""
+
+    room_id = "!recovery:example"
+
+    def __init__(self, expected_sends: int, *, finish: bool = True) -> None:
+        self.expected_sends = expected_sends
+        self.finish = finish
+        self.all_entered = asyncio.Event()
+        self.never = asyncio.Event()
+        self.sent_payloads: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        self.sent_payloads.append((event_type, txn_id, content))
+        if len(self.sent_payloads) == self.expected_sends:
+            self.all_entered.set()
+        await self.all_entered.wait()
+        if not self.finish:
+            await self.never.wait()
+        return f"${txn_id}"
 
 
 class _StaticObservationClient:
@@ -488,8 +520,8 @@ def test_recovery_cliff_scenario_rejects_an_altered_trace_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_cliff_refuses_before_registering_or_sending_until_task_three() -> None:
-    """Task 2 must not let the generic fuzz runner report a recovery-cliff pass."""
+async def test_recovery_cliff_authenticates_the_managed_sender_without_registering() -> None:
+    """Recovery load must use the persisted sender instead of creating an account."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
     client = _RecoveryCliffBoundaryClient()
     runner = LiveFuzzRunner(
@@ -500,11 +532,503 @@ async def test_recovery_cliff_refuses_before_registering_or_sending_until_task_t
         settle_seconds=0,
     )
     try:
-        with pytest.raises(NotImplementedError, match=r"recovery-cliff.*not yet implemented"):
-            await runner.run()
-        assert client.calls == []
+        stack.storage_path.mkdir()
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "accounts": {
+                        "agent_load_sender": {
+                            "access_token": "managed-sender-token",
+                            "device_id": "MANAGED-SENDER-DEVICE",
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        await runner._authenticate_recovery_cliff_sender()
+
+        assert client.access_token == "managed-sender-token"  # noqa: S105 - fake live-test token
+        assert client.calls == ["join_room"]
     finally:
         stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_releases_one_hundred_roots_and_boundary_in_one_gather() -> None:
+    """A sequential root sender deadlocks before the 101-event burst is entered."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=101)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    try:
+        released = await asyncio.wait_for(
+            runner._release_recovery_cliff_roots(
+                run_id="unit-run",
+                deadline=time.monotonic() + 1,
+            ),
+            timeout=1,
+        )
+
+        assert len(client.sent_payloads) == 101
+        assert len(released) == 100
+        root_payloads = {
+            txn_id: content
+            for event_type, txn_id, content in client.sent_payloads
+            if event_type == "m.room.message" and content["msgtype"] == "m.text"
+        }
+        assert len(root_payloads) == 100
+        for thread in range(100):
+            content = root_payloads[f"recovery-cliff-root-unit-run-{thread}"]
+            assert f"run=unit-run thread={thread}" in content["body"]
+            assert content["m.mentions"] == {"user_ids": [stack.agent_id]}
+        boundary = next(
+            content
+            for _event_type, txn_id, content in client.sent_payloads
+            if txn_id == "recovery-cliff-boundary-unit-run"
+        )
+        assert boundary == {
+            "msgtype": "m.notice",
+            "body": "Recovery cliff load boundary run=unit-run",
+            "m.mentions": {"user_ids": []},
+        }
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_root_gather_is_bounded_by_the_fixed_sla() -> None:
+    """Entered but unfinished homeserver sends cannot outlive the one SLA."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=101, finish=False)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            await runner._release_recovery_cliff_roots(
+                run_id="unit-run",
+                deadline=time.monotonic() + 0.01,
+            )
+        assert len(client.sent_payloads) == 101
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_health_and_sync_poll_cannot_overrun_the_fixed_sla(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow health request is governed by the load SLA, not its own timeout."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    health_release = threading.Event()
+
+    def blocked_health() -> RecoveryCliffHealthSample:
+        health_release.wait(timeout=1)
+        return RecoveryCliffHealthSample(
+            healthy=True,
+            last_sync_time=datetime(2026, 8, 7, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(stack, "recovery_health_sample", blocked_health)
+    asyncio.get_running_loop().call_later(0.1, health_release.set)
+    try:
+        with pytest.raises(TimeoutError):
+            await runner._recovery_cliff_observer_step(
+                deadline=time.monotonic() + 0.01,
+                health_samples=[],
+            )
+        assert client.sync_calls == 0
+    finally:
+        health_release.set()
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_samples_post_fence_health_after_exact_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The advancing health timestamp must be observed after fence settlement."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    order: list[str] = []
+    before = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    after = datetime(2026, 8, 7, 12, 1, tzinfo=UTC)
+    health_times = iter((before, after))
+
+    def sample_health() -> RecoveryCliffHealthSample:
+        order.append("health")
+        return RecoveryCliffHealthSample(healthy=True, last_sync_time=next(health_times))
+
+    def reaction_state(event_id: str) -> str:
+        assert event_id == "$reaction"
+        order.append("settled-query")
+        return "settled"
+
+    async def send_reaction(event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        del event_type, txn_id, content
+        order.append("send-reaction")
+        return "$reaction"
+
+    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
+    monkeypatch.setattr(stack, "recovery_health_sample", sample_health)
+    monkeypatch.setattr(stack, "recovery_reaction_state", reaction_state)
+    monkeypatch.setattr(client, "send_event", send_reaction)
+    try:
+        settled, pre_fence, post_fence = await runner._wait_for_recovery_cliff_fence(
+            target_event_id="$response",
+            run_id="unit-run",
+            deadline=time.monotonic() + 1,
+            health_samples=[],
+        )
+
+        assert settled is True
+        assert (pre_fence, post_fence) == (before, after)
+        assert order == ["health", "send-reaction", "settled-query", "health"]
+    finally:
+        stack.close()
+
+
+def _recovery_original(event_id: str, source_id: str, timestamp: int, status: str) -> dict[str, Any]:
+    """Build one literal canonical Matrix response original."""
+    return {
+        "event_id": event_id,
+        "origin_server_ts": timestamp,
+        "sender": "@mindroom_general:example",
+        "type": "m.room.message",
+        "content": {
+            "body": status,
+            "io.mindroom.stream_status": status,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": source_id,
+                "m.in_reply_to": {"event_id": source_id},
+            },
+        },
+    }
+
+
+def _recovery_edit(
+    event_id: str,
+    response_id: str,
+    timestamp: int,
+    status: str,
+    *,
+    sender: str = "@mindroom_general:example",
+    outer_status: str | None = None,
+) -> dict[str, Any]:
+    """Build one literal Matrix replacement with optional new-content precedence."""
+    content: dict[str, Any] = {
+        "body": status,
+        "io.mindroom.stream_status": outer_status or status,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": response_id},
+    }
+    if outer_status is not None:
+        content["m.new_content"] = {
+            "body": status,
+            "io.mindroom.stream_status": status,
+        }
+    return {
+        "event_id": event_id,
+        "origin_server_ts": timestamp,
+        "sender": sender,
+        "type": "m.room.message",
+        "content": content,
+    }
+
+
+def _completed_recovery_cliff_events() -> tuple[dict[str, Any], ...]:
+    """Return two overlapping production-shaped completed source streams."""
+    return (
+        _recovery_original("$response-0", "$source-0", 1_000, "pending"),
+        _recovery_edit("$edit-0", "$response-0", 48_000, "completed", outer_status="streaming"),
+        _recovery_original("$response-1", "$source-1", 2_000, "streaming"),
+        _recovery_edit("$edit-1", "$response-1", 49_000, "completed"),
+    )
+
+
+def _valid_recovery_cliff_observation() -> RecoveryCliffObservation:
+    """Build a settled observation whose expected values are hand-checked."""
+    before = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    after = datetime(2026, 8, 7, 12, 1, tzinfo=UTC)
+    audit = audit_recovery_cliff_events(
+        _completed_recovery_cliff_events(),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=frozenset({"$source-0", "$source-1"}),
+    )
+    return RecoveryCliffObservation(
+        root_count=2,
+        terminal_audit=audit,
+        recovery_incomplete_markers=1,
+        delivery_retry_markers=1,
+        drain=RecoveryCliffDrainCounts(
+            pending_journal_rows=0,
+            unacknowledged_outbox_rows=0,
+        ),
+        health_samples=(
+            RecoveryCliffHealthSample(healthy=True, last_sync_time=before),
+            RecoveryCliffHealthSample(healthy=True, last_sync_time=after),
+        ),
+        watchdog_stalls=0,
+        reaction_settled=True,
+        pre_fence_last_sync=before,
+        post_fence_last_sync=after,
+        clean_shutdown=True,
+    )
+
+
+def test_recovery_cliff_event_audit_accepts_exact_completed_streams() -> None:
+    """One exact original with an effective completed status satisfies each source."""
+    observation = _valid_recovery_cliff_observation()
+
+    assert observation.terminal_audit.canonical_responses == (
+        ("$source-0", "$response-0"),
+        ("$source-1", "$response-1"),
+    )
+    assert observation.terminal_audit.canonical_response_count == 2
+    assert observation.terminal_audit.max_active_stream_seconds == pytest.approx(47.0)
+    assert observation.terminal_audit.peak_active_streams == 2
+    assert evaluate_recovery_cliff(observation) == ()
+
+
+def test_recovery_cliff_event_audit_folds_only_same_responder_edits_in_total_order() -> None:
+    """A same-timestamp later edit wins, while another sender cannot finish it."""
+    events = (
+        _completed_recovery_cliff_events()[0],
+        _recovery_edit("$edit-a", "$response-0", 2_000, "completed"),
+        _recovery_edit("$edit-z", "$response-0", 2_000, "streaming"),
+        _recovery_edit(
+            "$foreign-edit",
+            "$response-0",
+            9_000,
+            "completed",
+            sender="@other:example",
+        ),
+    )
+
+    audit = audit_recovery_cliff_events(
+        events,
+        responder_id="@mindroom_general:example",
+        expected_source_ids=frozenset({"$source-0"}),
+    )
+
+    assert audit.noncompleted_sources == (("$source-0", "streaming"),)
+
+
+def test_recovery_cliff_event_audit_requires_matching_thread_and_reply_relations() -> None:
+    """An expected reply target cannot compensate for the wrong thread root."""
+    original = _completed_recovery_cliff_events()[0]
+    wrong_thread = {
+        **original,
+        "content": {
+            **original["content"],
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$different-thread",
+                "m.in_reply_to": {"event_id": "$source-0"},
+            },
+        },
+    }
+
+    audit = audit_recovery_cliff_events(
+        (wrong_thread,),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=frozenset({"$source-0"}),
+    )
+    failures = evaluate_recovery_cliff(
+        replace(
+            _valid_recovery_cliff_observation(),
+            root_count=1,
+            terminal_audit=audit,
+        ),
+    )
+
+    assert audit.canonical_response_count == 0
+    assert audit.missing_sources == ("$source-0",)
+    assert audit.invalid_relations == (("$response-0", "$different-thread", "$source-0"),)
+    assert any("invalid_relation" in failure for failure in failures)
+
+
+def test_recovery_cliff_evaluator_rejects_bad_terminal_directions() -> None:
+    """Missing, duplicate, nonterminal, and unknown originals each fail closed."""
+    valid = _completed_recovery_cliff_events()
+    expected = frozenset({"$source-0", "$source-1"})
+
+    missing = audit_recovery_cliff_events(
+        valid[:2],
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    duplicate = audit_recovery_cliff_events(
+        (
+            *valid,
+            _recovery_original(
+                "$response-1-duplicate",
+                "$source-1",
+                2_000,
+                "streaming",
+            ),
+        ),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    nonterminal_event = _recovery_edit(
+        "$edit-0",
+        "$response-0",
+        48_000,
+        "streaming",
+        outer_status="completed",
+    )
+    nonterminal = audit_recovery_cliff_events(
+        (valid[0], nonterminal_event, valid[2], valid[3]),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    unknown = audit_recovery_cliff_events(
+        (
+            *valid,
+            _recovery_original(
+                "$unknown-response",
+                "$boundary-source",
+                4_000,
+                "completed",
+            ),
+        ),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+
+    for audit, marker in (
+        (missing, "missing"),
+        (duplicate, "duplicate"),
+        (nonterminal, "noncompleted"),
+        (unknown, "unknown"),
+    ):
+        observation = replace(_valid_recovery_cliff_observation(), terminal_audit=audit)
+        assert any(marker in failure for failure in evaluate_recovery_cliff(observation)), marker
+
+
+def test_recovery_cliff_evaluator_rejects_unexercised_or_unsettled_completion() -> None:
+    """Recovery, drain, health, fence, watchdog, and shutdown are all PASS gates."""
+    valid = _valid_recovery_cliff_observation()
+    before = valid.pre_fence_last_sync
+    assert before is not None
+    bad_observations = (
+        (replace(valid, recovery_incomplete_markers=0), "recovery_incomplete"),
+        (replace(valid, delivery_retry_markers=0), "delivery_retry"),
+        (
+            replace(valid, drain=replace(valid.drain, pending_journal_rows=1)),
+            "pending_journal_rows",
+        ),
+        (
+            replace(valid, drain=replace(valid.drain, unacknowledged_outbox_rows=1)),
+            "unacknowledged_outbox_rows",
+        ),
+        (
+            replace(
+                valid,
+                health_samples=(RecoveryCliffHealthSample(healthy=False, last_sync_time=before),),
+            ),
+            "health",
+        ),
+        (replace(valid, watchdog_stalls=1), "watchdog"),
+        (replace(valid, reaction_settled=False), "reaction"),
+        (replace(valid, post_fence_last_sync=before), "sync_progress"),
+        (replace(valid, clean_shutdown=False), "shutdown"),
+    )
+
+    for observation, marker in bad_observations:
+        assert any(marker in failure for failure in evaluate_recovery_cliff(observation)), marker
+
+
+def test_recovery_cliff_evaluator_requires_sustained_overlapping_streams() -> None:
+    """Fast or serialized replies cannot masquerade as the configured cliff."""
+    valid_events = _completed_recovery_cliff_events()
+    expected = frozenset({"$source-0", "$source-1"})
+    short_events = (
+        valid_events[0],
+        {**valid_events[1], "origin_server_ts": 2_000},
+        valid_events[2],
+        {**valid_events[3], "origin_server_ts": 3_000},
+    )
+    serialized_events = (
+        valid_events[0],
+        valid_events[1],
+        {**valid_events[2], "origin_server_ts": 50_000},
+        {**valid_events[3], "origin_server_ts": 97_000},
+    )
+    asymmetric_events = (
+        valid_events[0],
+        valid_events[1],
+        valid_events[2],
+        {**valid_events[3], "origin_server_ts": 3_000},
+    )
+    short_audit = audit_recovery_cliff_events(
+        short_events,
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    serialized_audit = audit_recovery_cliff_events(
+        serialized_events,
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    asymmetric_audit = audit_recovery_cliff_events(
+        asymmetric_events,
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+
+    assert RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS == 45.0
+    assert any(
+        "active_stream_duration" in failure
+        for failure in evaluate_recovery_cliff(
+            replace(_valid_recovery_cliff_observation(), terminal_audit=short_audit),
+        )
+    )
+    assert serialized_audit.max_active_stream_seconds == pytest.approx(47.0)
+    assert serialized_audit.peak_active_streams == 1
+    assert any(
+        "peak_active_streams" in failure
+        for failure in evaluate_recovery_cliff(
+            replace(_valid_recovery_cliff_observation(), terminal_audit=serialized_audit),
+        )
+    )
+    assert asymmetric_audit.max_active_stream_seconds == pytest.approx(47.0)
+    assert asymmetric_audit.peak_active_streams == 2
+    assert any(
+        "active_stream_duration" in failure
+        for failure in evaluate_recovery_cliff(
+            replace(_valid_recovery_cliff_observation(), terminal_audit=asymmetric_audit),
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -1297,6 +1821,70 @@ def test_managed_agent_credentials_selects_the_requested_account(
         "sender-token",
         "sender-device",
     )
+
+
+def test_recovery_cliff_drain_counts_only_live_journal_and_outbox_rows() -> None:
+    """Terminal journal and acknowledged outbox rows do not keep the drain open."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    try:
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute("CREATE TABLE journal_events(state TEXT NOT NULL)")
+            database.execute("CREATE TABLE response_outbox(acknowledged_event_id TEXT)")
+            database.executemany(
+                "INSERT INTO journal_events(state) VALUES (?)",
+                (("pending",), ("settled",)),
+            )
+            database.executemany(
+                "INSERT INTO response_outbox(acknowledged_event_id) VALUES (?)",
+                ((None,), ("$response",)),
+            )
+            database.commit()
+
+        assert stack.recovery_drain_counts() == RecoveryCliffDrainCounts(
+            pending_journal_rows=1,
+            unacknowledged_outbox_rows=1,
+        )
+    finally:
+        stack.close()
+
+
+def test_recovery_cliff_drain_fails_when_the_journal_database_is_missing() -> None:
+    """Absent durable state must not be reported as a zero-row drain."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    try:
+        with pytest.raises(FileNotFoundError, match="event journal database"):
+            stack.recovery_drain_counts()
+    finally:
+        stack.close()
+
+
+def test_recovery_cliff_reaction_state_filters_exact_principal_event_and_kind() -> None:
+    """A distractor principal cannot prove that the responder settled the fence."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    try:
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "CREATE TABLE journal_events(principal_id TEXT, event_id TEXT, kind TEXT, state TEXT)",
+            )
+            database.execute(
+                "INSERT INTO journal_events VALUES (?, '$reaction', 'reaction', 'pending')",
+                ("router@@mindroom_router:example",),
+            )
+            database.commit()
+            assert stack.recovery_reaction_state("$reaction") is None
+            database.execute(
+                "INSERT INTO journal_events VALUES (?, '$reaction', 'reaction', 'settled')",
+                (f"general@{stack.agent_id}",),
+            )
+            database.commit()
+        assert stack.recovery_reaction_state("$reaction") == "settled"
+    finally:
+        stack.close()
 
 
 def test_restart_recovery_hard_kills_and_boots_new_model_generation(
