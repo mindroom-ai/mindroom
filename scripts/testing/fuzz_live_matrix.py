@@ -448,9 +448,12 @@ class RecoveryCliffTerminalAudit:
     duplicate_sources: tuple[tuple[str, tuple[str, ...]], ...]
     unexpected_sources: tuple[str, ...]
     invalid_relations: tuple[tuple[str, str | None, str | None], ...]
+    invalid_replacements: tuple[str, ...]
+    invalid_terminal_transitions: tuple[tuple[str, int], ...]
     noncompleted_sources: tuple[tuple[str, str | None], ...]
     min_active_stream_seconds: float
     max_active_stream_seconds: float
+    full_overlap_seconds: float
     peak_active_streams: int
 
 
@@ -526,6 +529,7 @@ class SustainedStreamCapacityObservation:
     source_audit: SustainedStreamCapacitySourceAudit
     terminal_audit: RecoveryCliffTerminalAudit
     health_samples: tuple[RecoveryCliffHealthSample, ...]
+    health_samples_while_root_release: int
     durable_drain: RecoveryCliffDrainCounts | None
     recovery_abandonment_markers: int
     watchdog_stalls: int
@@ -605,6 +609,7 @@ class _RecoveryCliffEventIndex:
     originals: Mapping[str, tuple[Mapping[str, Any], ...]]
     edits: Mapping[str, tuple[Mapping[str, Any], ...]]
     invalid_relations: tuple[tuple[str, str | None, str | None], ...]
+    invalid_replacements: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -614,18 +619,29 @@ class _RecoveryCliffSourceFold:
     source_event_id: str
     response_event_id: str
     effective_status: str | None
+    terminal_transition_count: int
     started_at_ms: int
     finished_at_ms: int
 
 
 def _recovery_stream_status(event: Mapping[str, Any]) -> str | None:
-    """Read the effective stream status from one original or replacement."""
+    """Read the stream status from one canonical response original."""
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+    status = content.get("io.mindroom.stream_status")
+    return status if isinstance(status, str) else None
+
+
+def _recovery_replacement_status(event: Mapping[str, Any]) -> str | None:
+    """Read a replacement status only from a structurally valid new content body."""
     content = event.get("content")
     if not isinstance(content, dict):
         return None
     new_content = content.get("m.new_content")
-    effective = new_content if isinstance(new_content, dict) else content
-    status = effective.get("io.mindroom.stream_status")
+    if not isinstance(new_content, dict):
+        return None
+    status = new_content.get("io.mindroom.stream_status")
     return status if isinstance(status, str) else None
 
 
@@ -639,6 +655,29 @@ def _recovery_event_order(event: Mapping[str, Any]) -> tuple[int, str]:
     )
 
 
+def _validated_recovery_replacements(
+    originals: Mapping[str, Collection[Mapping[str, Any]]],
+    candidates: Mapping[str, Collection[Mapping[str, Any]]],
+) -> tuple[dict[str, tuple[Mapping[str, Any], ...]], tuple[str, ...]]:
+    """Separate canonical-response replacements from malformed and orphan edits."""
+    response_event_ids = {
+        cast("str", event["event_id"]) for source_events in originals.values() for event in source_events
+    }
+    edits: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    invalid_replacements: list[str] = []
+    for target_event_id, target_edits in candidates.items():
+        valid_edits = []
+        for event in target_edits:
+            event_id = cast("str", event["event_id"])
+            if target_event_id not in response_event_ids or _recovery_replacement_status(event) is None:
+                invalid_replacements.append(event_id)
+            else:
+                valid_edits.append(event)
+        if valid_edits:
+            edits[target_event_id] = tuple(valid_edits)
+    return edits, tuple(sorted(invalid_replacements))
+
+
 def _index_recovery_cliff_events(
     events: Collection[Mapping[str, Any]],
     *,
@@ -646,22 +685,27 @@ def _index_recovery_cliff_events(
 ) -> _RecoveryCliffEventIndex:
     """Index canonical candidates and same-responder replacements."""
     originals: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    edits: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    replacement_candidates: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     invalid_relations: list[tuple[str, str | None, str | None]] = []
+    invalid_replacements: list[str] = []
     for event in events:
         if event.get("type") != "m.room.message" or event.get("sender") != responder_id:
             continue
         event_id = event.get("event_id")
         content = event.get("content")
-        if not isinstance(event_id, str) or not isinstance(content, dict):
+        if not isinstance(content, dict):
             continue
         relation = content.get("m.relates_to")
         if not isinstance(relation, dict):
             continue
         if relation.get("rel_type") == "m.replace":
             target_event_id = relation.get("event_id")
-            if isinstance(target_event_id, str):
-                edits[target_event_id].append(event)
+            if not isinstance(event_id, str) or not isinstance(target_event_id, str):
+                invalid_replacements.append(event_id if isinstance(event_id, str) else "<missing-event-id>")
+            else:
+                replacement_candidates[target_event_id].append(event)
+            continue
+        if not isinstance(event_id, str):
             continue
         if relation.get("rel_type") != "m.thread":
             continue
@@ -674,10 +718,17 @@ def _index_recovery_cliff_events(
             invalid_relations.append((event_id, resolved_thread_id, resolved_reply_id))
             continue
         originals[resolved_reply_id].append(event)
+    edits, invalid_candidate_replacements = _validated_recovery_replacements(
+        originals,
+        replacement_candidates,
+    )
+    invalid_replacements.extend(invalid_candidate_replacements)
+
     return _RecoveryCliffEventIndex(
         originals={source: tuple(source_events) for source, source_events in originals.items()},
-        edits={response: tuple(response_edits) for response, response_edits in edits.items()},
+        edits=edits,
         invalid_relations=tuple(sorted(invalid_relations)),
+        invalid_replacements=tuple(sorted(invalid_replacements)),
     )
 
 
@@ -692,13 +743,24 @@ def _fold_recovery_cliff_source(
         return None
     original = originals[0]
     response_event_id = cast("str", original["event_id"])
-    latest = max((original, *index.edits.get(response_event_id, ())), key=_recovery_event_order)
+    edits = index.edits.get(response_event_id, ())
+    ordered_events = tuple(sorted((original, *edits), key=_recovery_event_order))
+    statuses = tuple(
+        _recovery_stream_status(event) if event is original else _recovery_replacement_status(event)
+        for event in ordered_events
+    )
+    completed_events = tuple(
+        event for event, status in zip(ordered_events, statuses, strict=True) if status == "completed"
+    )
+    latest = ordered_events[-1]
+    terminal = completed_events[0] if len(completed_events) == 1 else latest
     return _RecoveryCliffSourceFold(
         source_event_id=source_event_id,
         response_event_id=response_event_id,
-        effective_status=_recovery_stream_status(latest),
+        effective_status=statuses[-1],
+        terminal_transition_count=len(completed_events),
         started_at_ms=_recovery_event_order(original)[0],
-        finished_at_ms=_recovery_event_order(latest)[0],
+        finished_at_ms=_recovery_event_order(terminal)[0],
     )
 
 
@@ -716,6 +778,16 @@ def _peak_recovery_cliff_streams(folds: Collection[_RecoveryCliffSourceFold]) ->
         active_streams += delta
         peak_active_streams = max(peak_active_streams, active_streams)
     return peak_active_streams
+
+
+def _full_recovery_cliff_overlap_seconds(folds: Collection[_RecoveryCliffSourceFold]) -> float:
+    """Return the common intersection shared by every folded stream interval."""
+    if not folds:
+        return 0.0
+    return max(
+        0.0,
+        (min(fold.finished_at_ms for fold in folds) - max(fold.started_at_ms for fold in folds)) / 1000,
+    )
 
 
 def audit_recovery_cliff_events(
@@ -753,11 +825,18 @@ def audit_recovery_cliff_events(
         duplicate_sources=duplicate_sources,
         unexpected_sources=unexpected_sources,
         invalid_relations=index.invalid_relations,
+        invalid_replacements=index.invalid_replacements,
+        invalid_terminal_transitions=tuple(
+            (fold.response_event_id, fold.terminal_transition_count)
+            for fold in folds
+            if fold.terminal_transition_count != 1
+        ),
         noncompleted_sources=tuple(
             (fold.source_event_id, fold.effective_status) for fold in folds if fold.effective_status != "completed"
         ),
         min_active_stream_seconds=min(durations, default=0.0),
         max_active_stream_seconds=max(durations, default=0.0),
+        full_overlap_seconds=_full_recovery_cliff_overlap_seconds(folds),
         peak_active_streams=_peak_recovery_cliff_streams(folds),
     )
 
@@ -774,6 +853,12 @@ def evaluate_recovery_cliff(observation: RecoveryCliffObservation) -> tuple[str,
         f"duplicate_sources={audit.duplicate_sources}" if audit.duplicate_sources else "",
         f"unknown_sources={audit.unexpected_sources}" if audit.unexpected_sources else "",
         f"invalid_relations={audit.invalid_relations}" if audit.invalid_relations else "",
+        f"invalid_replacements={audit.invalid_replacements}" if audit.invalid_replacements else "",
+        (
+            f"invalid_terminal_transitions={audit.invalid_terminal_transitions}"
+            if audit.invalid_terminal_transitions
+            else ""
+        ),
         f"noncompleted_sources={audit.noncompleted_sources}" if audit.noncompleted_sources else "",
         (
             f"active_stream_duration_too_short={audit.min_active_stream_seconds:.3f} "
@@ -784,6 +869,12 @@ def evaluate_recovery_cliff(observation: RecoveryCliffObservation) -> tuple[str,
         (
             f"peak_active_streams={audit.peak_active_streams} expected={observation.root_count}"
             if audit.peak_active_streams < observation.root_count
+            else ""
+        ),
+        (
+            f"full_overlap_too_short={audit.full_overlap_seconds:.3f} "
+            f"minimum={RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS:.3f}"
+            if audit.full_overlap_seconds < RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS
             else ""
         ),
         "delivery_retry_markers=0" if observation.delivery_retry_markers < 1 else "",
@@ -895,6 +986,12 @@ def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObser
         f"duplicate_sources={terminal_audit.duplicate_sources}" if terminal_audit.duplicate_sources else "",
         f"unknown_sources={terminal_audit.unexpected_sources}" if terminal_audit.unexpected_sources else "",
         f"invalid_relations={terminal_audit.invalid_relations}" if terminal_audit.invalid_relations else "",
+        (f"invalid_replacements={terminal_audit.invalid_replacements}" if terminal_audit.invalid_replacements else ""),
+        (
+            f"invalid_terminal_transitions={terminal_audit.invalid_terminal_transitions}"
+            if terminal_audit.invalid_terminal_transitions
+            else ""
+        ),
         f"noncompleted_sources={terminal_audit.noncompleted_sources}" if terminal_audit.noncompleted_sources else "",
         (
             f"active_stream_duration_too_short={terminal_audit.min_active_stream_seconds:.3f} "
@@ -908,9 +1005,20 @@ def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObser
             else ""
         ),
         (
+            f"full_overlap_too_short={terminal_audit.full_overlap_seconds:.3f} "
+            f"minimum={RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS:.3f}"
+            if terminal_audit.full_overlap_seconds < RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS
+            else ""
+        ),
+        (
             "health_samples_unhealthy"
             if not observation.health_samples
             or any(not sample.healthy or sample.last_sync_time is None for sample in observation.health_samples)
+            else ""
+        ),
+        (
+            f"health_samples_while_root_release={observation.health_samples_while_root_release}"
+            if observation.health_samples_while_root_release < 1
             else ""
         ),
         (
@@ -3259,6 +3367,12 @@ class LiveFuzzRunner:
         health_samples: list[RecoveryCliffHealthSample],
     ) -> tuple[str, ...]:
         """Release no-fault roots while proving the managed runtime stays live."""
+        initial_health_task = asyncio.create_task(
+            self._recovery_cliff_observer_step(
+                deadline=deadline,
+                health_samples=health_samples,
+            ),
+        )
         release_task = asyncio.create_task(
             self._release_managed_roots(
                 run_id=run_id,
@@ -3268,7 +3382,7 @@ class LiveFuzzRunner:
             ),
         )
         try:
-            await asyncio.sleep(0)
+            await initial_health_task
             while not release_task.done():
                 await self._recovery_cliff_observer_step(
                     deadline=deadline,
@@ -3279,6 +3393,9 @@ class LiveFuzzRunner:
             if not release_task.done():
                 release_task.cancel()
                 await asyncio.gather(release_task, return_exceptions=True)
+            if not initial_health_task.done():
+                initial_health_task.cancel()
+                await asyncio.gather(initial_health_task, return_exceptions=True)
 
     def _recovery_cliff_audit(
         self,
@@ -3339,6 +3456,8 @@ class LiveFuzzRunner:
             and not audit.duplicate_sources
             and not audit.unexpected_sources
             and not audit.invalid_relations
+            and not audit.invalid_replacements
+            and not audit.invalid_terminal_transitions
             and not audit.noncompleted_sources
         )
 
@@ -3352,6 +3471,13 @@ class LiveFuzzRunner:
             failures.append(f"unknown_sources={audit.unexpected_sources}")
         if audit.invalid_relations:
             failures.append(f"invalid_relations={audit.invalid_relations}")
+        if audit.invalid_replacements:
+            failures.append(f"invalid_replacements={audit.invalid_replacements}")
+        repeated_terminal_transitions = tuple(
+            transition for transition in audit.invalid_terminal_transitions if transition[1] > 1
+        )
+        if repeated_terminal_transitions:
+            failures.append(f"invalid_terminal_transitions={repeated_terminal_transitions}")
         if failures:
             raise AssertionError("recovery-cliff terminal corruption: " + "; ".join(failures))
 
@@ -3506,6 +3632,7 @@ class LiveFuzzRunner:
             "delivery_worker_markers": observation.delivery_worker_markers,
             "recovery_abandonment_markers": observation.recovery_abandonment_markers,
             "max_active_stream_seconds": round(audit.max_active_stream_seconds, 3),
+            "full_overlap_seconds": round(audit.full_overlap_seconds, 3),
             "peak_active_streams": audit.peak_active_streams,
             "pending_journal_rows": drain.pending_journal_rows,
             "unacknowledged_outbox_rows": drain.unacknowledged_outbox_rows,
@@ -3551,10 +3678,12 @@ class LiveFuzzRunner:
             "canonical_agent_replies": audit.canonical_response_count,
             "min_active_stream_seconds": round(audit.min_active_stream_seconds, 3),
             "max_active_stream_seconds": round(audit.max_active_stream_seconds, 3),
+            "full_overlap_seconds": round(audit.full_overlap_seconds, 3),
             "peak_active_streams": audit.peak_active_streams,
             "pending_journal_rows": drain.pending_journal_rows if drain is not None else 0,
             "unacknowledged_outbox_rows": drain.unacknowledged_outbox_rows if drain is not None else 0,
             "health_checks": len(observation.health_samples),
+            "health_samples_while_root_release": observation.health_samples_while_root_release,
             "recovery_abandonment_markers": observation.recovery_abandonment_markers,
             "watchdog_stalls": observation.watchdog_stalls,
             "durable_drain_failure_markers": observation.durable_drain_failure_markers,
@@ -3582,11 +3711,13 @@ class LiveFuzzRunner:
         deadline = time.monotonic() + self.reply_timeout
         phase_started = time.monotonic()
         health_samples: list[RecoveryCliffHealthSample] = []
+        root_release_health_sample_baseline = len(health_samples)
         source_event_ids = await self._release_sustained_stream_capacity_roots(
             run_id=run_id,
             deadline=deadline,
             health_samples=health_samples,
         )
+        health_samples_while_root_release = len(health_samples) - root_release_health_sample_baseline
         await self._recovery_cliff_observer_step(
             deadline=deadline,
             health_samples=health_samples,
@@ -3653,6 +3784,7 @@ class LiveFuzzRunner:
             source_audit=source_audit,
             terminal_audit=terminal_audit,
             health_samples=tuple(health_samples),
+            health_samples_while_root_release=health_samples_while_root_release,
             durable_drain=durable_drain,
             recovery_abandonment_markers=(
                 final_logs.recovery_abandonment_markers - baseline.log_counts.recovery_abandonment_markers

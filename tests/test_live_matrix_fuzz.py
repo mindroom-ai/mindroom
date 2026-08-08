@@ -1085,6 +1085,45 @@ async def test_sustained_stream_capacity_samples_liveness_while_root_gather_is_o
 
 
 @pytest.mark.asyncio
+async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurrent_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gather completing on its first turn must retain one paired health sample."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(root_count=2),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    health_samples: list[RecoveryCliffHealthSample] = []
+
+    async def release_roots(**_kwargs: object) -> tuple[str, ...]:
+        return "$source-0", "$source-1"
+
+    async def observer_step(**kwargs: object) -> RecoveryCliffHealthSample:
+        sample = RecoveryCliffHealthSample(True, datetime(2026, 8, 8, tzinfo=UTC))
+        cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"]).append(sample)
+        return sample
+
+    monkeypatch.setattr(runner, "_release_managed_roots", release_roots)
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observer_step)
+    try:
+        released = await runner._release_sustained_stream_capacity_roots(
+            run_id="unit-run",
+            deadline=time.monotonic() + 1,
+            health_samples=health_samples,
+        )
+
+        assert released == ("$source-0", "$source-1")
+        assert len(health_samples) == 1
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_cliff_releases_configured_two_hundred_roots_in_one_gather() -> None:
     """A sequential root sender deadlocks before all 200 root sends are entered."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
@@ -1481,12 +1520,11 @@ def _recovery_edit(
         "body": status,
         "io.mindroom.stream_status": outer_status or status,
         "m.relates_to": {"rel_type": "m.replace", "event_id": response_id},
-    }
-    if outer_status is not None:
-        content["m.new_content"] = {
+        "m.new_content": {
             "body": status,
             "io.mindroom.stream_status": status,
-        }
+        },
+    }
     return {
         "event_id": event_id,
         "origin_server_ts": timestamp,
@@ -1625,8 +1663,75 @@ def test_recovery_cliff_event_audit_accepts_exact_completed_streams() -> None:
     )
     assert observation.terminal_audit.canonical_response_count == 2
     assert observation.terminal_audit.max_active_stream_seconds == pytest.approx(47.0)
+    assert observation.terminal_audit.full_overlap_seconds == pytest.approx(46.0)
     assert observation.terminal_audit.peak_active_streams == 2
     assert evaluate_recovery_cliff(observation) == ()
+
+
+def test_recovery_cliff_event_audit_rejects_every_invalid_terminal_replacement() -> None:
+    """Orphan, malformed, and repeated terminal edits cannot be omitted from evidence."""
+    valid = _completed_recovery_cliff_events()
+    malformed = {
+        **valid[1],
+        "content": {
+            **valid[1]["content"],
+            "io.mindroom.stream_status": "completed",
+            "m.new_content": "malformed",
+        },
+    }
+    missing_new_content = {
+        **valid[1],
+        "content": {key: value for key, value in valid[1]["content"].items() if key != "m.new_content"},
+    }
+    mutations = (
+        (
+            (*valid, _recovery_edit("$orphan", "$missing-response", 50_000, "streaming", outer_status="pending")),
+            "invalid_replacements",
+        ),
+        ((valid[0], missing_new_content, valid[2], valid[3]), "invalid_replacements"),
+        ((valid[0], malformed, valid[2], valid[3]), "invalid_replacements"),
+        (
+            (
+                *valid,
+                _recovery_edit(
+                    "$second-terminal",
+                    "$response-0",
+                    100_000,
+                    "completed",
+                    outer_status="streaming",
+                ),
+            ),
+            "terminal_transitions",
+        ),
+    )
+
+    for events, marker in mutations:
+        audit = audit_recovery_cliff_events(
+            events,
+            responder_id="@mindroom_general:example",
+            expected_source_ids=("$source-0", "$source-1"),
+        )
+        failures = evaluate_recovery_cliff(replace(_valid_recovery_cliff_observation(), terminal_audit=audit))
+        assert any(marker in failure for failure in failures), marker
+
+    progressive = audit_recovery_cliff_events(
+        (
+            valid[0],
+            _recovery_edit("$progress-0", "$response-0", 20_000, "streaming", outer_status="pending"),
+            valid[1],
+            valid[2],
+            _recovery_edit("$progress-1", "$response-1", 21_000, "streaming", outer_status="pending"),
+            valid[3],
+        ),
+        responder_id="@mindroom_general:example",
+        expected_source_ids=("$source-0", "$source-1"),
+    )
+    assert (
+        evaluate_recovery_cliff(
+            replace(_valid_recovery_cliff_observation(), terminal_audit=progressive),
+        )
+        == ()
+    )
 
 
 def _valid_sustained_stream_capacity_observation() -> SustainedStreamCapacityObservation:
@@ -1645,6 +1750,7 @@ def _valid_sustained_stream_capacity_observation() -> SustainedStreamCapacityObs
         ),
         terminal_audit=recovery_observation.terminal_audit,
         health_samples=recovery_observation.health_samples,
+        health_samples_while_root_release=1,
         durable_drain=recovery_observation.drain,
         recovery_abandonment_markers=0,
         watchdog_stalls=0,
@@ -1868,6 +1974,8 @@ async def test_sustained_stream_capacity_runner_uses_one_deadline_and_emits_phas
         assert result["roots"] == 2
         assert result["observed_root_sources"] == 2
         assert result["canonical_agent_replies"] == 2
+        assert result["full_overlap_seconds"] == pytest.approx(46.0)
+        assert result["health_samples_while_root_release"] == 1
         assert result["durable_drain_failure_markers"] == 0
         assert result["phase_root_release_seconds"] >= 0
         assert result["phase_terminal_settlement_seconds"] >= 0
@@ -1964,8 +2072,14 @@ def test_sustained_stream_capacity_evaluator_rejects_terminal_corruption() -> No
         (replace(terminal_audit, duplicate_sources=(("$source-1", ("$one", "$two")),)), "duplicate_sources"),
         (replace(terminal_audit, unexpected_sources=("$unknown",)), "unknown_sources"),
         (replace(terminal_audit, invalid_relations=(("$reply", "$thread", "$source"),)), "invalid_relations"),
+        (replace(terminal_audit, invalid_replacements=("$edit",)), "invalid_replacements"),
+        (
+            replace(terminal_audit, invalid_terminal_transitions=(("$response-1", 2),)),
+            "invalid_terminal_transitions",
+        ),
         (replace(terminal_audit, noncompleted_sources=(("$source-1", "streaming"),)), "noncompleted_sources"),
         (replace(terminal_audit, min_active_stream_seconds=44.999), "active_stream_duration_too_short"),
+        (replace(terminal_audit, full_overlap_seconds=44.999), "full_overlap_too_short"),
         (replace(terminal_audit, peak_active_streams=1), "peak_active_streams"),
         (replace(terminal_audit, peak_active_streams=3), "peak_active_streams"),
         (replace(terminal_audit, canonical_responses=()), "canonical_responses"),
@@ -2008,6 +2122,7 @@ def test_sustained_stream_capacity_evaluator_rejects_unsettled_or_incomplete_evi
             "health_samples_unhealthy",
         ),
         (replace(valid, health_samples=()), "health_samples_unhealthy"),
+        (replace(valid, health_samples_while_root_release=0), "health_samples_while_root_release"),
         (replace(valid, recovery_abandonment_markers=1), "recovery_abandonment_markers"),
         (replace(valid, watchdog_stalls=1), "watchdog_stalls"),
         (
@@ -2074,6 +2189,7 @@ def test_recovery_cliff_pass_payload_surfaces_fault_and_worker_debt_evidence() -
         assert result["peak_unacknowledged_final_outbox_rows"] == 1
         assert result["delivery_worker_markers"] == 1
         assert result["recovery_abandonment_markers"] == 0
+        assert result["full_overlap_seconds"] == pytest.approx(46.0)
         assert "recovery_incomplete_markers" not in result
     finally:
         stack.close()
@@ -2270,6 +2386,12 @@ def test_recovery_cliff_evaluator_requires_sustained_overlapping_streams() -> No
         valid_events[2],
         {**valid_events[3], "origin_server_ts": 3_000},
     )
+    insufficient_common_overlap_events = (
+        {**valid_events[0], "origin_server_ts": 0},
+        {**valid_events[1], "origin_server_ts": 100_000},
+        {**valid_events[2], "origin_server_ts": 56_000},
+        {**valid_events[3], "origin_server_ts": 101_000},
+    )
     short_audit = audit_recovery_cliff_events(
         short_events,
         responder_id="@mindroom_general:example",
@@ -2282,6 +2404,11 @@ def test_recovery_cliff_evaluator_requires_sustained_overlapping_streams() -> No
     )
     asymmetric_audit = audit_recovery_cliff_events(
         asymmetric_events,
+        responder_id="@mindroom_general:example",
+        expected_source_ids=expected,
+    )
+    insufficient_common_overlap_audit = audit_recovery_cliff_events(
+        insufficient_common_overlap_events,
         responder_id="@mindroom_general:example",
         expected_source_ids=expected,
     )
@@ -2307,6 +2434,16 @@ def test_recovery_cliff_evaluator_requires_sustained_overlapping_streams() -> No
         "active_stream_duration" in failure
         for failure in evaluate_recovery_cliff(
             replace(_valid_recovery_cliff_observation(), terminal_audit=asymmetric_audit),
+        )
+    )
+    assert insufficient_common_overlap_audit.full_overlap_seconds == pytest.approx(44.0)
+    assert any(
+        "full_overlap" in failure
+        for failure in evaluate_recovery_cliff(
+            replace(
+                _valid_recovery_cliff_observation(),
+                terminal_audit=insufficient_common_overlap_audit,
+            ),
         )
     )
 
