@@ -761,17 +761,30 @@ def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObser
     """Return every ordinary-capacity acceptance failure in one settled observation."""
     source_audit = observation.source_audit
     terminal_audit = observation.terminal_audit
+    expected_source_ids = source_audit.expected_source_ids
+    observed_source_ids = source_audit.observed_source_ids
+    canonical_sources = tuple(source_id for source_id, _response_id in terminal_audit.canonical_responses)
+    canonical_response_ids = tuple(response_id for _source_id, response_id in terminal_audit.canonical_responses)
     before, after = observation.pre_fence_last_sync, observation.post_fence_last_sync
     failures = (
         (
-            f"root_source_count expected={observation.root_count} observed={len(source_audit.expected_source_ids)}"
-            if observation.root_count != len(source_audit.expected_source_ids)
+            f"root_source_count expected={observation.root_count} observed={len(expected_source_ids)}"
+            if observation.root_count != len(expected_source_ids)
             else ""
         ),
         (
-            "root_source_audit_incomplete "
-            f"expected={source_audit.expected_source_ids} observed={source_audit.observed_source_ids}"
-            if frozenset(source_audit.observed_source_ids) != frozenset(source_audit.expected_source_ids)
+            f"root_source_audit_duplicate_ids={expected_source_ids}"
+            if len(expected_source_ids) != len(frozenset(expected_source_ids))
+            else ""
+        ),
+        (
+            f"root_source_audit_duplicate_ids={observed_source_ids}"
+            if len(observed_source_ids) != len(frozenset(observed_source_ids))
+            else ""
+        ),
+        (
+            f"root_source_audit_incomplete expected={expected_source_ids} observed={observed_source_ids}"
+            if frozenset(observed_source_ids) != frozenset(expected_source_ids)
             else ""
         ),
         f"missing_root_sources={source_audit.missing_source_ids}" if source_audit.missing_source_ids else "",
@@ -779,9 +792,42 @@ def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObser
         f"unknown_root_sources={source_audit.unexpected_source_ids}" if source_audit.unexpected_source_ids else "",
         f"invalid_root_sources={source_audit.invalid_source_ids}" if source_audit.invalid_source_ids else "",
         (
-            "root_source_terminal_mismatch "
-            f"sources={source_audit.expected_source_ids} terminals={terminal_audit.expected_sources}"
-            if frozenset(source_audit.expected_source_ids) != frozenset(terminal_audit.expected_sources)
+            f"root_source_terminal_mismatch sources={expected_source_ids} terminals={terminal_audit.expected_sources}"
+            if frozenset(expected_source_ids) != frozenset(terminal_audit.expected_sources)
+            else ""
+        ),
+        (
+            f"terminal_expected_sources expected={observation.root_count} observed={terminal_audit.expected_sources}"
+            if len(terminal_audit.expected_sources) != observation.root_count
+            or len(terminal_audit.expected_sources) != len(frozenset(terminal_audit.expected_sources))
+            else ""
+        ),
+        (
+            f"canonical_responses expected={observation.root_count} observed={len(terminal_audit.canonical_responses)}"
+            if len(terminal_audit.canonical_responses) != observation.root_count
+            else ""
+        ),
+        (
+            f"canonical_response_count expected={observation.root_count} "
+            f"observed={terminal_audit.canonical_response_count}"
+            if terminal_audit.canonical_response_count != observation.root_count
+            else ""
+        ),
+        (
+            f"canonical_response_evidence_count responses={len(terminal_audit.canonical_responses)} "
+            f"count={terminal_audit.canonical_response_count}"
+            if len(terminal_audit.canonical_responses) != terminal_audit.canonical_response_count
+            else ""
+        ),
+        (
+            f"canonical_response_source_ids expected={expected_source_ids} observed={canonical_sources}"
+            if len(canonical_sources) != len(frozenset(canonical_sources))
+            or frozenset(canonical_sources) != frozenset(expected_source_ids)
+            else ""
+        ),
+        (
+            f"canonical_response_ids={canonical_response_ids}"
+            if len(canonical_response_ids) != len(frozenset(canonical_response_ids))
             else ""
         ),
         f"missing_sources={terminal_audit.missing_sources}" if terminal_audit.missing_sources else "",
@@ -797,7 +843,7 @@ def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObser
         ),
         (
             f"peak_active_streams={terminal_audit.peak_active_streams} expected={observation.root_count}"
-            if terminal_audit.peak_active_streams < observation.root_count
+            if terminal_audit.peak_active_streams != observation.root_count
             else ""
         ),
         (

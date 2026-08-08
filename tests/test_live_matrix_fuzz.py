@@ -1535,6 +1535,26 @@ def test_sustained_stream_capacity_evaluator_rejects_terminal_corruption() -> No
         (replace(terminal_audit, noncompleted_sources=(("$source-1", "streaming"),)), "noncompleted_sources"),
         (replace(terminal_audit, min_active_stream_seconds=44.999), "active_stream_duration_too_short"),
         (replace(terminal_audit, peak_active_streams=1), "peak_active_streams"),
+        (replace(terminal_audit, peak_active_streams=3), "peak_active_streams"),
+        (replace(terminal_audit, canonical_responses=()), "canonical_responses"),
+        (replace(terminal_audit, canonical_response_count=0), "canonical_response_count"),
+        (
+            replace(
+                terminal_audit,
+                expected_sources=("$source-0", "$source-1", "$source-1"),
+            ),
+            "terminal_expected_sources",
+        ),
+        (
+            replace(
+                terminal_audit,
+                canonical_responses=(
+                    ("$source-0", "$response-0"),
+                    ("$source-0", "$response-1"),
+                ),
+            ),
+            "canonical_response_source_ids",
+        ),
     )
 
     for audit, marker in cases:
@@ -1580,6 +1600,16 @@ def test_sustained_stream_capacity_evaluator_rejects_unsettled_or_incomplete_evi
                 source_audit=replace(valid.source_audit, observed_source_ids=("$source-0",)),
             ),
             "root_source_audit_incomplete",
+        ),
+        (
+            replace(
+                valid,
+                source_audit=replace(
+                    valid.source_audit,
+                    observed_source_ids=("$source-0", "$source-1", "$source-1"),
+                ),
+            ),
+            "root_source_audit_duplicate_ids",
         ),
         (replace(valid, clean_shutdown=False), "shutdown_not_clean"),
         (replace(valid, durable_drain_failure_markers=1), "durable_drain_failure_markers"),
