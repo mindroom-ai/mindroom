@@ -710,7 +710,7 @@ async def corrupt(store: PrincipalStore, *event_ids: str) -> None:
 class TestUnreadableRowsDoNotEndTheBacklog:
     """A short page of pending work has to mean one thing, or paging is a lie."""
 
-    async def test_a_corrupt_row_does_not_shorten_the_page_it_sits_in(
+    async def test_a_corrupt_row_shortens_its_page_without_ending_the_backlog(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -718,8 +718,9 @@ class TestUnreadableRowsDoNotEndTheBacklog:
 
         Dropping the row is right -- nothing ran, so nothing may claim it did --
         but a page that comes back short for that reason is indistinguishable
-        from the end of the backlog. Everything behind the corrupt row is then
-        durable work no scan ever looks at again.
+        from the end of the backlog *by its length*. Everything behind the
+        corrupt row would then be durable work no scan looks at again, so the
+        page has to say it stopped short and where to resume.
         """
         for index in range(5):
             await admit(alice, f"$m{index}", ts=1_000 + index)
@@ -727,9 +728,14 @@ class TestUnreadableRowsDoNotEndTheBacklog:
 
         page = await alice.pending(limit=4)
 
-        assert [event.event_id for event in page] == ["$m0", "$m2", "$m3", "$m4"]
+        assert [event.event_id for event in page] == ["$m0", "$m2", "$m3"]
+        assert page.unreadable_rows == 1
+        assert not page.reached_end
+        assert [event.event_id for event in await alice.pending(limit=4, after_receipt_order=page.resume_after)] == [
+            "$m4",
+        ]
 
-    async def test_a_page_of_nothing_but_corrupt_rows_is_scanned_through(
+    async def test_a_page_of_nothing_but_corrupt_rows_still_carries_a_cursor(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -740,7 +746,12 @@ class TestUnreadableRowsDoNotEndTheBacklog:
 
         page = await alice.pending(limit=2)
 
-        assert [event.event_id for event in page] == ["$m2"]
+        assert page == ()
+        assert page.unreadable_rows == 2
+        assert not page.reached_end
+        assert [event.event_id for event in await alice.pending(limit=2, after_receipt_order=page.resume_after)] == [
+            "$m2",
+        ]
 
     async def test_a_short_page_still_means_the_end_of_the_backlog(
         self,
@@ -755,12 +766,40 @@ class TestUnreadableRowsDoNotEndTheBacklog:
 
 
 class TestAPageIsBoundedByTheRowsItReads:
-    """Filling a page from as many rows as it takes cannot mean the whole table."""
+    """A page's limit counts rows the query read, not events it managed to decode."""
+
+    async def test_a_page_stops_at_its_row_limit_with_readable_work_behind_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The whole bound is this: one query's worth of rows, then report.
+
+        Going back for more rows because too few decoded is what made the read
+        unbounded, and it is invisible unless the events behind the corruption
+        are readable -- a page that returns them read more rows than it was
+        given a limit of.
+        """
+        for index in range(8):
+            await admit(alice, f"$m{index}", ts=1_000 + index)
+        await corrupt(alice, "$m0", "$m1")
+
+        page = await alice.pending(limit=4)
+
+        assert [event.event_id for event in page] == ["$m2", "$m3"]
+        assert page.unreadable_rows == 2
+        assert not page.reached_end
+        # Four rows read, so the next pass starts on the fifth and nothing in
+        # between is skipped or repeated.
+        assert [event.event_id for event in await alice.pending(limit=4, after_receipt_order=page.resume_after)] == [
+            "$m4",
+            "$m5",
+            "$m6",
+            "$m7",
+        ]
 
     async def test_a_corrupt_prefix_does_not_cost_one_pass_the_whole_backlog(
         self,
         alice: PrincipalStore,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A bounded read that keeps querying until something decodes is not bounded.
 
@@ -769,7 +808,6 @@ class TestAPageIsBoundedByTheRowsItReads:
         scan into a scan of the entire pending table. The pass has to be able
         to stop part way and say so.
         """
-        monkeypatch.setattr("mindroom.event_journal.journal._MAX_UNREADABLE_ROWS_PER_PAGE", 4)
         for index in range(12):
             await admit(alice, f"$m{index:02d}", ts=1_000 + index)
         await corrupt(alice, *(f"$m{index:02d}" for index in range(11)))
@@ -784,7 +822,6 @@ class TestAPageIsBoundedByTheRowsItReads:
     async def test_a_pass_that_ran_out_of_budget_resumes_past_what_it_read(
         self,
         alice: PrincipalStore,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Bounding the pass may not cost the events behind the corruption.
 
@@ -792,7 +829,6 @@ class TestAPageIsBoundedByTheRowsItReads:
         returned, which is the only version of it that exists when a page
         decodes nothing at all.
         """
-        monkeypatch.setattr("mindroom.event_journal.journal._MAX_UNREADABLE_ROWS_PER_PAGE", 4)
         for index in range(12):
             await admit(alice, f"$m{index:02d}", ts=1_000 + index)
         await corrupt(alice, *(f"$m{index:02d}" for index in range(11)))

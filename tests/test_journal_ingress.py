@@ -28,7 +28,6 @@ from mindroom.event_journal import (
     SemanticConsumer,
     VisibleMessage,
 )
-from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
 from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import TEXTUAL_MESSAGE_EVENT_TYPE
@@ -1969,8 +1968,12 @@ class TestABoundedScanIsFair:
 
     @classmethod
     async def _admit_unreadable_window(cls, store: PrincipalStore) -> None:
-        """Fill a whole page with rows nothing can decode, then one readable event."""
-        count = max(_BATCH_SIZE, _MAX_UNREADABLE_ROWS_PER_PAGE)
+        """Fill a whole page with rows nothing can decode, then one readable event.
+
+        A page reads ``_BATCH_SIZE`` raw rows, so exactly that many unreadable
+        ones is a pass that decodes nothing and still knows more is behind it.
+        """
+        count = _BATCH_SIZE
         for index in range(count):
             # Unprojected: nothing will ever read these rows as conversation,
             # and a page of this size is expensive enough to build already.

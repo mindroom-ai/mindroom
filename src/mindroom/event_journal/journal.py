@@ -45,17 +45,6 @@ _JOURNAL_COLUMNS = """
     origin_server_ts, source_json, receipt_order, semantic_consumer
 """
 
-# How many rows one page will step over without being able to read them.
-#
-# Filling a page from as many rows as it takes is what keeps a short page
-# meaning the end of the backlog, but "as many as it takes" across a corrupt
-# prefix is the whole pending table, read inside one transaction, on every
-# wake. So what is bounded is the stepping over: past this many unreadable
-# rows the pass stops, says it stopped short of the end, and reports the last
-# row it looked at -- so the next pass starts behind the corruption instead of
-# in front of it again.
-_MAX_UNREADABLE_ROWS_PER_PAGE = 128
-
 
 def store_generation(transaction: Transaction, *, new_generation: str) -> str:
     """Return this database's generation, minting it on first use.
@@ -506,17 +495,13 @@ def pending(
     seen. Without it, a caller whose first page is entirely events it cannot
     act on yet — turns still running — could never reach the ones behind them.
 
-    A page is filled from as many rows as it takes, because an unreadable row
-    is dropped from the result but not from the backlog. Reading one query's
-    worth of rows and returning what decoded would make a short page mean two
-    different things — "the backlog ended" and "something in it could not be
-    read" — and the caller that paginates on that would stop at the first
-    corrupt row and strand everything behind it.
-
-    Filling is not unbounded, though, so a short page still means two things —
-    and the page itself distinguishes them rather than leaving the caller to
-    guess. ``reached_end`` is the only statement that there is nothing behind
-    this page, and ``resume_after`` is where a pass that stopped short resumes.
+    ``limit`` bounds the rows read, not the events returned. An unreadable row
+    is dropped from the result but not from the backlog, so a page can come
+    back shorter than its limit — or empty — with work still behind it. The
+    page says which of those happened rather than leaving the caller to infer
+    it from a length: ``reached_end`` is the only statement that there is
+    nothing behind this page, and ``resume_after`` is where the next pass
+    starts, counted in rows looked at rather than events returned.
     """
     return _pending_page(transaction, principal_id, limit=limit, after_receipt_order=after_receipt_order)
 
@@ -529,44 +514,31 @@ def _pending_page(
     after_receipt_order: int | None,
     kind: EventKind | None = None,
 ) -> PendingPage:
-    """Return up to ``limit`` readable pending events, filled from raw rows."""
-    events: list[JournalEvent] = []
-    unreadable_rows = 0
-    cursor = after_receipt_order
-    while True:
-        wanted = limit - len(events)
-        rows = _pending_rows(
-            transaction,
-            principal_id,
-            limit=wanted,
-            after_receipt_order=cursor,
-            kind=kind,
-        )
-        if rows:
-            cursor = int(rows[-1]["receipt_order"])
-            readable = _decode_rows(rows)
-            unreadable_rows += len(rows) - len(readable)
-            events.extend(readable)
-        if len(rows) < wanted:
-            # The query had fewer rows to give than it was asked for, so there
-            # is nothing behind this page whatever its length turned out to be.
-            return _page(events, cursor, reached_end=True, unreadable_rows=unreadable_rows)
-        if len(events) == limit or unreadable_rows >= _MAX_UNREADABLE_ROWS_PER_PAGE:
-            return _page(events, cursor, reached_end=False, unreadable_rows=unreadable_rows)
+    """Return whatever decoded from one page of at most ``limit`` raw rows.
 
-
-def _page(
-    events: list[JournalEvent],
-    cursor: int | None,
-    *,
-    reached_end: bool,
-    unreadable_rows: int,
-) -> PendingPage:
+    One query, one page. Reading further because too few rows decoded is how a
+    corrupt prefix turned a bounded read into a scan of the whole pending
+    table, so the bound is on the rows the query may return and nothing here
+    goes back for more.
+    """
+    rows = _pending_rows(
+        transaction,
+        principal_id,
+        limit=limit,
+        after_receipt_order=after_receipt_order,
+        kind=kind,
+    )
+    events = _decode_rows(rows)
     return PendingPage(
-        tuple(events),
-        resume_after=cursor,
-        reached_end=reached_end,
-        unreadable_rows=unreadable_rows,
+        events,
+        # The last row looked at, which is not the last event returned when the
+        # tail of the page is unreadable. Taken from the events, a resume point
+        # would step back onto that row on every pass and never get past it.
+        resume_after=int(rows[-1]["receipt_order"]) if rows else after_receipt_order,
+        # Fewer rows than the query was allowed to return means there were no
+        # more to give, whatever the page's length turned out to be.
+        reached_end=len(rows) < limit,
+        unreadable_rows=len(rows) - len(events),
     )
 
 
