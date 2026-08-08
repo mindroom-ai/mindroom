@@ -1,5 +1,17 @@
 # Matrix Event Pipeline Simplification Plan
 
+> **Archived. Historical record, not current guidance.**
+>
+> This is the working plan and review log for the event-journal cutover, kept
+> for the decisions and the refuted theories in it. It is a chronological
+> document: later sections correct earlier ones, and several claims here were
+> true only of the prototype.
+>
+> **For what the journal actually guarantees today, read
+> [`docs/dev/matrix-event-journal-contracts.md`](../matrix-event-journal-contracts.md).**
+> Nothing below should be quoted as current behaviour without checking it
+> against the code first.
+
 ## Status
 
 This is a feasibility-first architecture and cutover plan, not a prediction of every file or commit that implementation will require.
@@ -16,12 +28,16 @@ The prototype proved out and the cutover is landing on `wip/matrix-journal-ingre
 
 **Done:** the nio prerequisite (merged, released as **0.37.0**, and now resolved from PyPI rather than a branch pin); the journal, principal-bound store, admission and pending worker; the visible-message projection with bounded reads and hydration; the deterministic outbox; the crash matrix and the live Tuwunel harness; ingress cutover; delivery cutover; and **all eleven boundary contracts**, each verified against the code rather than assumed — see the status table below.
 
-**Remaining: defects this branch's own review keeps finding, plus two items that wait on actions outside this repository.**
+**Final state of this line, written after the reviews stopped finding things.**
 
-Review rounds against the running code are still reproducing production defects directly, and fixes for them are landing on this branch faster than this section has been updated.
-They fall into two kinds, both visible in the log above this line: ownership and ordering errors in paths this plan already calls done, and tests that passed without ever exercising the behaviour they are named for.
+Review rounds against the running code kept reproducing production defects directly, in two kinds: ownership and ordering errors in paths this plan already called done, and tests that passed without ever exercising the behaviour they are named for.
 Neither kind is detectable from the status table below, because a boundary contract can be verified against the code and still be broken by the code that calls it, and a green suite proves only that the assertions that ran were satisfied.
-So there is implementable work in this repository, and the honest count is not knowable until the reviews stop finding things.
+
+The last review round found two items, both dead code rather than behaviour, and both were fixed.
+The last defect found by running the suite was a module-global approval manager leaking between tests, which surfaced as an unrelated test hanging to its timeout roughly one run in five; it took sixteen full-suite runs and captured instrumentation to identify, and is fixed.
+What remains is the four deferrals recorded in the pull request, which are decisions rather than defects.
+
+Treat even this version of the line as a claim to check.
 
 Terminal truth now has one owner. The terminal turn record commits inside the acknowledgement's transaction, and `delivered_turn_repair.py` -- which existed only because the two stores could not share one -- is deleted rather than kept. That deletion is the check that this was a collapse and not another reconciler.
 
@@ -38,14 +54,23 @@ The projection cutover landed with the deletion of `src/mindroom/matrix/cache/`,
 
 These are whole-tree figures including deleted tests and tooling. The
 production-source number is the one that answers "did this simplify anything",
-and it is smaller than the headline: `git diff --numstat origin/main...HEAD --
-src/mindroom` is 12,378 added against 20,915 deleted, **net −8,537**.
+and it is smaller than the headline.
+
+Measured at `fa4b3268c`, the merged tip. Every earlier version of this table
+was captured mid-branch and overstated the reduction by roughly 3,400 lines in
+production source and 19,600 across the branch, because deletions landed before
+the additions that replaced them:
 
 | | added | deleted | net |
 | --- | --- | --- | --- |
-| `src/mindroom` (production) | 12,378 | 20,915 | **−8,537** |
-| tests and tooling | 1,149 | 20,570 | −19,421 |
-| whole branch vs `main` | 34,676 | 64,107 | **−29,431** |
+| `src/mindroom` (production) | 16,728 | 21,825 | **−5,097** |
+| tests, docs and tooling | 42,222 | 46,949 | −4,727 |
+| whole branch vs `main` | 58,950 | 68,774 | **−9,824** |
+
+Two structural figures survive restatement better than the line counts, because
+they do not move as the branch does: `matrix/cache/` was 12,441 lines in 29
+files and `event_journal/` is 6,295 in 19, while doing strictly more; and the
+tree holds 328 fewer functions than `main`.
 
 **Closed along the way**, each with a mutation-tested pin:
 
@@ -919,8 +944,8 @@ They are gates on phase 3, not on the phases before it.
   The startup pass that used to rejoin them (`delivered_turn_repair.py`) is deleted rather than kept, which is the check that this is a collapse and not another reconciliation.
 - Bounded prompt reads: **now holds end-to-end.** Every projection read takes a limit, and the thread walk that used to be unbounded behind a strict read now carries the same bounds as the room walk: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` caps the raw relation tree that streaming makes an order of magnitude larger than the message count. See contract 6.
 - Materially fewer production lines: **now holds.**
-  Measured at this HEAD: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +13,216 / -21,474, a net of **-8,258 production lines**. The whole branch is -25,134.
-  Re-measure rather than quoting this figure: it moves with every commit, and four earlier revisions of this row went stale without anyone noticing.
+  Measured at `fa4b3268c`, the merged tip: `git diff --numstat origin/main...HEAD -- src/mindroom` reports +16,728 / -21,825, a net of **-5,097 production lines**. The whole branch is -9,824.
+  Re-measure rather than quoting this figure: it moves with every commit, and five earlier revisions of this row went stale without anyone noticing -- including the one this replaces, which claimed -8,258 and was wrong by 3,161 lines by the time the branch merged.
   The recorded history of this row was +2,624, then +2,754, then +3,940, and every step was in the wrong direction -- because the replacements landed as additions while the thing they replace was still standing. It turned when `matrix/cache/` was deleted, which is exactly where the earlier notes said the turn would come from.
   Read the direction of travel rather than the level, though: production has grown **+2,048** since the cache deletion itself, and that growth is real. Some of it is the replacement finishing (the outbox, the projection, hydration), and some is correctness machinery the reviews demanded. Two known deletions are still queued behind other work: `history_debt.py` (187) and `sync_recovery_escape.py` (98) go when `mindroom-nio` ships per-room continued recovery.
   This row was wrong in the optimistic direction twice before. It is stated as holding now only because the deletion is in the diff and the number is reproducible from the command above.
