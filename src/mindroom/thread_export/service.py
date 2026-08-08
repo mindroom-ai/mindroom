@@ -243,7 +243,6 @@ async def export_threads_to_targets_once(
     targets: Sequence[ThreadExportTarget],
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    prefer_cache: bool = True,
 ) -> tuple[ThreadExportStats, ...]:
     """Login with persisted Matrix accounts and export once to every target.
 
@@ -256,22 +255,11 @@ async def export_threads_to_targets_once(
     way the prompt path does. A thread nobody has read yet is hydrated from the homeserver once;
     after that the body costs no Matrix history call at all.
 
-    ``prefer_cache`` is retained for released first-party plugins and only ``True`` is meaningful:
-    there is one read path and it is the projection. ``False`` used to request a full per-thread
-    room scan, and is rejected rather than silently ignored, because a caller asking for that is
-    asking for a guarantee this no longer offers.
-
     Each source thread is fetched once per room and fanned out to every authorized target.
     Scoped targets export only rooms where their required member is currently joined.
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
     A successful check that proves the member absent removes the prior room export.
     """
-    if not prefer_cache:
-        msg = (
-            "Thread export reads thread bodies from the journal projection; prefer_cache=False "
-            "asked for a direct per-thread Matrix scan, which no longer exists. Drop the argument."
-        )
-        raise ValueError(msg)
     if not targets:
         return ()
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
@@ -349,7 +337,6 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    prefer_cache: bool = True,
     required_member_user_id: str | None = None,
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
@@ -366,6 +353,5 @@ async def export_threads_once(
         ),
         room_filter=room_filter,
         max_thread_roots=max_thread_roots,
-        prefer_cache=prefer_cache,
     )
     return stats[0]

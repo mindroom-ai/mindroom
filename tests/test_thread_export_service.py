@@ -573,59 +573,6 @@ async def test_full_pass_with_zero_exported_rooms_skips_reconciliation(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_a_plugin_style_prefer_cache_call_still_exports(tmp_path: Path) -> None:
-    """The released first-party plugin passes ``prefer_cache=True`` and must keep working.
-
-    It now names the only read path there is rather than choosing between two,
-    so the argument is accepted and the pass runs normally.
-    """
-    config = thread_export_config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path, account_keys=("agent_router",))
-    client = Mock()
-    client.close = AsyncMock()
-
-    with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
-        patch(
-            "mindroom.thread_export.service.export_threads_for_targets_for_client",
-            new=AsyncMock(side_effect=successful_group_result),
-        ) as export_group,
-    ):
-        stats = await export_threads_to_targets_once(
-            config=config,
-            runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(tmp_path / "exports"),),
-            prefer_cache=True,
-        )
-
-    export_group.assert_awaited_once()
-    assert stats[0].rooms_exported == 1
-    assert stats[0].failures == 0
-
-
-@pytest.mark.asyncio
-async def test_prefer_cache_false_is_refused_rather_than_silently_scanning(tmp_path: Path) -> None:
-    """A caller asking for the old direct scan is told it is gone, not quietly given a cache read."""
-    config = thread_export_config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path, account_keys=("agent_router",))
-
-    with (
-        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock()) as login,
-        pytest.raises(ValueError, match="prefer_cache=False"),
-    ):
-        await export_threads_to_targets_once(
-            config=config,
-            runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(tmp_path / "exports"),),
-            prefer_cache=False,
-        )
-
-    login.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_writes(tmp_path: Path) -> None:
     """Reading the wrong principal does not fail; it reports every room as empty.
 
