@@ -2062,6 +2062,9 @@ async def test_sustained_stream_capacity_runner_uses_one_deadline_and_emits_phas
         cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"]).append(sample)
         return sample
 
+    async def forbidden_fault_release(**_kwargs: object) -> tuple[str, ...]:
+        raise AssertionError
+
     async def drain(**_kwargs: object) -> RecoveryCliffDrainCounts:
         order.append("drain")
         return RecoveryCliffDrainCounts(0, 0)
@@ -2078,6 +2081,7 @@ async def test_sustained_stream_capacity_runner_uses_one_deadline_and_emits_phas
     monkeypatch.setattr(runner, "_authenticate_managed_sender", authenticate)
     monkeypatch.setattr(runner, "_prepare_recovery_cliff_baseline", baseline)
     monkeypatch.setattr(runner, "_release_sustained_stream_capacity_roots", release)
+    monkeypatch.setattr(runner, "_release_recovery_cliff_load", forbidden_fault_release)
     monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observe_raw)
     monkeypatch.setattr(runner, "_wait_for_recovery_cliff_terminals", terminals)
     monkeypatch.setattr(runner, "_wait_for_recovery_cliff_drain", drain)
@@ -2345,15 +2349,39 @@ def test_reply_timeout_help_distinguishes_adaptive_and_fixed_profiles(
     assert "one fixed whole-workload non-extending SLA for recovery-cliff" in help_text
 
 
-def test_sustained_stream_capacity_readme_documents_exact_no_fault_invocation() -> None:
+def test_sustained_stream_capacity_readme_documents_parser_and_no_fault_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The capacity invocation and its absence of recovery-cliff fault gates stay documented."""
     readme = (PROJECT_ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
 
+    assert sustained_stream_capacity_scenario().thread_count == 200
     assert (
         "uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity "
         "--threads 200 --reply-timeout 180"
     ) in readme
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuzz_live_matrix.py",
+            "--profile",
+            "sustained-stream-capacity",
+            "--threads",
+            "200",
+            "--reply-timeout",
+            "180",
+        ],
+    )
+    args = fuzz_live_matrix._parse_args()
+    assert args.threads == sustained_stream_capacity_scenario().thread_count
+    assert args.reply_timeout == 180
+    assert fuzz_live_matrix._scenario_from_args(args) == sustained_stream_capacity_scenario()
+    assert "N configured root source events" in readme
+    assert "all N streams" in readme
     assert "does not send SIGSTOP" in readme
+    assert "It does not send SIGSTOP or inject a recovery-cliff context gap" in readme
+    assert "does not fault-inject a context gap or require recovery-cliff-only delivery-retry" in readme
     assert "does not require a recovery marker" in readme
 
 
