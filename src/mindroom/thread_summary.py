@@ -19,7 +19,7 @@ from mindroom.ai_runtime import cached_agent_run
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.conversation_reads import complete_thread_history
+from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.model_defaults import (
@@ -963,16 +963,27 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
     *,
     conversation_reader: ConversationReader,
+    delivered_response: DeliveredResponse,
     entity_name: str | None = None,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     async with _thread_summary_lock(room_id, thread_id):
-        # This background task inherits the response turn's ContextVars, so it
-        # must bypass per-turn memoization to observe the delivered response.
-        thread_history = await _countable_thread_history(conversation_reader, room_id, thread_id)
-        if thread_history is None:
+        projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
+        if projected is None:
             return
+        # This pass starts at delivery time, so the projection cannot hold the
+        # answer that queued it until sync echoes that event back. Counting and
+        # titling the thread without it writes a number one short of the thread
+        # into the summary notice, where it becomes the durable baseline every
+        # later threshold is measured from, and titles the thread from a
+        # question whose answer is missing.
+        thread_history = with_delivered_response(
+            projected,
+            delivered_response,
+            thread_id=thread_id,
+            sender=client.user_id,
+        )
         trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
         recovered_summary_count = _recover_last_summary_count(
             thread_history,

@@ -3302,6 +3302,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
 ]

@@ -89,6 +89,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_runtime_journal_support,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
@@ -834,7 +835,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     runtime = BotRuntimeState(
         client=client,
         config=config,
@@ -906,20 +907,25 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         thread_id="$thread",
         limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="default",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    # Nothing has echoed the response back, so the projection this pass reads
+    # stops one message short of the thread. It summarizes the projected
+    # messages plus the answer it was queued for, and counts that answer -- the
+    # same number the pre-queue gate above already used.
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "default",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
         "$thread",
         "Summary",
-        5,
+        6,
         "default",
         conversation_reader,
         initial_enrichment_complete=None,
@@ -933,7 +939,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     runtime = BotRuntimeState(
         client=client,
         config=config,
@@ -1001,14 +1007,15 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="qwen",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "qwen",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
 
 
 @pytest.mark.asyncio

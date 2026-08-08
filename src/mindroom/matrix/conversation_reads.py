@@ -8,7 +8,8 @@ revision, because the store never returns it to anyone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,8 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
@@ -108,6 +111,77 @@ def projected_thread_history(
         is_full_history=complete and not page.refresh_pending and page.next_cursor is None,
         diagnostics=diagnostics,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredResponse:
+    """An answer one execution just put in a conversation, by logical event ID.
+
+    The single fact about a conversation that its sender holds and the
+    projection does not. A read issued straight after a send is echo-ordered,
+    so until sync hands the event back the projection still answers with
+    whatever preceded it.
+
+    ``event_id`` is the logical event -- the one first sent -- not the newest
+    physical revision of it. A streamed answer edits that same event on every
+    progressive update, so the ID stays stable for the whole turn and matches
+    what the projection keys a message on once the echo lands.
+    """
+
+    event_id: str
+    body: str
+
+
+def with_delivered_response(
+    messages: Sequence[ResolvedVisibleMessage],
+    delivered_response: DeliveredResponse,
+    *,
+    thread_id: str | None,
+    sender: str,
+) -> list[ResolvedVisibleMessage]:
+    """Return one read's messages including an answer the caller just delivered.
+
+    For the caller that must not read itself one message behind. Waiting for
+    the echo is the other way to get this, and it would make the waiter the one
+    reader here that blocks on a sync round-trip -- for a fact it is already
+    holding. So the caller is believed, exactly as ``latest_thread_event_id``
+    believes one holding a newer send.
+
+    The cost is a projection plus a patch rather than a projection alone. It is
+    bounded to one event and keyed on its logical ID, so an echo that lands
+    first collapses the patch onto itself rather than duplicating it.
+
+    What the sender knows better than the projection is exactly one thing: the
+    final text. A streamed answer's placeholder can already be projected while
+    the revision it was edited into is still send-side only, so the delivered
+    body wins even over an echoed row. Everything else about an echoed event --
+    who sent it, when the server stamped it, where it sits in the conversation
+    -- is the projection's to state, and is left alone. Only an event the
+    projection has never seen is built here, and it is the newest message in
+    the conversation by construction.
+    """
+    patched = list(messages)
+    for index, message in enumerate(patched):
+        if message.event_id == delivered_response.event_id:
+            patched[index] = replace(
+                message,
+                body=delivered_response.body,
+                content={**message.content, "body": delivered_response.body},
+            )
+            return patched
+    patched.append(
+        ResolvedVisibleMessage.synthetic(
+            sender=sender,
+            body=delivered_response.body,
+            event_id=delivered_response.event_id,
+            # The server's stamp is the one part of an unechoed event the
+            # sender cannot know, so it carries the send's own clock.
+            timestamp=int(datetime.now(UTC).timestamp() * 1000),
+            content={"msgtype": "m.text", "body": delivered_response.body},
+            thread_id=thread_id,
+        ),
+    )
+    return patched
 
 
 class _StaleConversationError(RuntimeError):

@@ -7,7 +7,7 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -22,6 +22,9 @@ from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
@@ -62,9 +65,19 @@ from mindroom.thread_tags import (
     ThreadTagsState,
 )
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
+from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
+from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
+from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
+from tests.test_thread_export_projected_history import ROUTER as _PROJECTION_BOT
+from tests.test_thread_export_projected_history import FakeHomeserver as ProjectionHomeserver
+from tests.test_thread_export_projected_history import admit_live, prompt_reader_for, serve_thread
+from tests.test_thread_export_projected_history import raw as _projection_raw
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 _TRUSTED_SUMMARY_SENDERS = frozenset(
     {
@@ -96,6 +109,14 @@ def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
         )
         for i in range(count)
     ]
+
+
+# Every automatic pass is queued by a delivery, so the production caller always
+# names the answer it just sent. These fixtures already list the whole thread
+# including that answer, so the delivered fact names a message they contain:
+# the patch collapses onto it, which is the state right after its echo. Tests
+# about the fold itself supply an event the projection has not seen yet.
+_DELIVERED_AND_ECHOED = DeliveredResponse(event_id="$event0", body="Message 0")
 
 
 def _make_summary_notice_message(
@@ -718,6 +739,7 @@ class TestMaybeGenerateThreadSummary:
             config,
             rp,
             conversation_reader=self.conversation_reader,
+            delivered_response=_DELIVERED_AND_ECHOED,
         )
 
     async def test_pinned_thread_skips_generation(self) -> None:
@@ -3122,6 +3144,7 @@ class TestPinLandingDuringGeneration:
                 _mock_config(),
                 _mock_runtime_paths(),
                 conversation_reader=make_conversation_reader_mock(),
+                delivered_response=_DELIVERED_AND_ECHOED,
             )
         return deliver
 
@@ -3194,6 +3217,7 @@ class TestTruncatedHistoryIsNotCounted:
                 _mock_config(),
                 _mock_runtime_paths(),
                 conversation_reader=make_conversation_reader_mock(),
+                delivered_response=_DELIVERED_AND_ECHOED,
             )
 
     async def test_an_automatic_summary_is_skipped_for_a_truncated_history(self) -> None:
@@ -3227,3 +3251,158 @@ class TestTruncatedHistoryIsNotCounted:
         )
 
         generate.assert_awaited()
+
+
+# -- the answer this pass was queued for, before its echo lands --
+
+
+@pytest.mark.asyncio
+class TestSummaryReadsTheAnswerItWasQueuedFor:
+    """The post-response pass over a real projection with no echo admitted.
+
+    Every other test in this file hands the pass a mocked history loader, which
+    is exactly the seam that makes the ordering unobservable: a mocked
+    projection can be told about the answer and a real one cannot. These run
+    the real ``ConversationReader`` over a real journal and never admit the
+    response's echo, which is the state the projection is genuinely in at the
+    moment this pass starts.
+    """
+
+    async def _warm_projection(
+        self,
+        store: PrincipalStore,
+        homeserver: ProjectionHomeserver,
+        *,
+        asks: int,
+    ) -> ConversationReader:
+        """Return a reader over a hydrated thread of *asks* user messages."""
+        root = _projection_raw(_PROJECTION_ROOT, "ask 0", ts=1000)
+        replies = [
+            _projection_raw(f"$ask{index}:example.org", f"ask {index}", ts=1000 + index, thread_id=_PROJECTION_ROOT)
+            for index in range(1, asks)
+        ]
+        serve_thread(homeserver, root, replies)
+        await admit_live(store, [root, *replies])
+        reader = prompt_reader_for(store, homeserver, window_messages=HYDRATED_PROMPT_WINDOW_MESSAGES)
+        # Hydrate through the reader the pass will use, then zero the counters.
+        # Without this the pass's own read could walk the homeserver and find
+        # the answer there, and the test would prove nothing about the
+        # delivered fact being what supplied it.
+        await complete_thread_history(reader, _PROJECTION_ROOM, _PROJECTION_ROOT)
+        homeserver.reset_counts()
+        return reader
+
+    async def _run_pass(
+        self,
+        reader: ConversationReader,
+        *,
+        first_threshold: int,
+        answer: str = "here is the answer",
+        answer_event_id: str = "$answer:example.org",
+    ) -> tuple[AsyncMock, list[dict[str, Any]]]:
+        """Run one post-response pass and return its generator and sent payloads."""
+        client = _mock_client()
+        client.user_id = _PROJECTION_BOT
+        generate = AsyncMock(return_value="🧵 a title")
+        sent: list[dict[str, Any]] = []
+
+        async def capture(_client: object, _room_id: str, content: dict[str, Any], **_: object) -> DeliveredMatrixEvent:
+            sent.append(content)
+            return DeliveredMatrixEvent(event_id="$summary:example.org", content_sent=content)
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=frozenset({_PROJECTION_BOT}),
+            ),
+            patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[])),
+            patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
+            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
+            patch("mindroom.thread_summary._generate_summary", new=generate),
+            patch("mindroom.thread_summary.send_message_result", new=capture),
+        ):
+            await maybe_generate_thread_summary(
+                client,
+                _PROJECTION_ROOM,
+                _PROJECTION_ROOT,
+                _mock_config(first_threshold=first_threshold),
+                _mock_runtime_paths(),
+                conversation_reader=reader,
+                delivered_response=DeliveredResponse(event_id=answer_event_id, body=answer),
+            )
+        return generate, sent
+
+    async def test_the_delivered_answer_is_what_reaches_the_threshold(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Four asks plus the answer is five, so the title lands on this turn.
+
+        Reading the projection alone counts four and returns, leaving the
+        thread untitled until some later message pushes the projection past the
+        threshold on its own -- a title a whole turn late.
+        """
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=4)
+
+        generate, sent = await self._run_pass(reader, first_threshold=5)
+
+        generate.assert_awaited_once()
+        assert len(sent) == 1
+        # The answer came from the delivered fact, not from a homeserver walk.
+        assert homeserver.history_calls == 0
+
+    async def test_the_count_written_down_includes_the_answer(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The count in the summary metadata is the durable baseline.
+
+        Every later threshold is measured from it, so a number one short of the
+        thread is not a transient off-by-one: it persists in the notice and
+        moves every subsequent summary of this thread.
+        """
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=6)
+
+        _, sent = await self._run_pass(reader, first_threshold=5)
+
+        assert sent[0]["io.mindroom.thread_summary"]["message_count"] == 7
+        assert _last_summary_counts[_thread_summary_cache_key(_PROJECTION_ROOM, _PROJECTION_ROOT)] == 7
+
+    async def test_the_title_is_generated_from_a_thread_that_has_its_answer(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A title summarizing a question with no answer describes half a thread."""
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=6)
+
+        generate, _ = await self._run_pass(reader, first_threshold=5, answer="the cache key was stale")
+
+        conversation = _build_conversation_text(
+            generate.await_args.args[0],
+            trusted_sender_ids=frozenset({_PROJECTION_BOT}),
+        )
+        assert f"{_PROJECTION_BOT}: the cache key was stale" in conversation
+
+    async def test_an_echo_that_already_landed_is_not_counted_twice(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The patch is keyed on the logical event, so a raced echo collapses onto it."""
+        store = journal_store.principal(_PROJECTION_PRINCIPAL)
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(store, homeserver, asks=6)
+        echo = _projection_raw(
+            "$answer:example.org",
+            "here is the answer",
+            ts=2000,
+            sender=_PROJECTION_BOT,
+            thread_id=_PROJECTION_ROOT,
+        )
+        await admit_live(store, [echo])
+
+        _, sent = await self._run_pass(reader, first_threshold=5)
+
+        assert sent[0]["io.mindroom.thread_summary"]["message_count"] == 7

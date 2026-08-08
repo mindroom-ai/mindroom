@@ -2070,10 +2070,13 @@ as it was before it spoke, until the echo lands. That is echo ordering, not
 read-your-writes. Code that needs the identity of what it just sent uses the
 send response, which is the only account of it that is certain at that moment.
 
-The affected callers are the ones the earlier audit named: `thread_summary`,
-and the Matrix conversation tools. Each reads to build context rather than to
-confirm its own last message, so an echo-ordered read is the correct input; the
-audit's original conclusion that this is what they should get stands.
+The affected callers are the ones the earlier audit named: `thread_summary`, and the Matrix conversation tools.
+The audit's conclusion holds for the conversation tools, which read to build context rather than to confirm their own last message.
+
+It does not hold for `thread_summary`, and this corrects it.
+That pass does not only build context: it counts the thread and writes the count into the summary notice, where it becomes the durable baseline every later threshold is measured from.
+The message it is counting is the answer whose delivery queued the pass, so an echo-ordered read is one short of the thread by construction — and `should_queue_thread_summary` one layer up already counts that answer, so the two numbers could never agree.
+A count is exactly the "must know its own last message" case named above, so the pass takes the send response too: `with_delivered_response` folds that one logical event into a projected read, and the fold collapses onto the echo as soon as it lands.
 
 ### Why the enumeration tests went
 

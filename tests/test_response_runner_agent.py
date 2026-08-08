@@ -50,6 +50,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import _response_outcome_label
@@ -2334,6 +2335,9 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_reader=bot._conversation_reader,
+            # The answer that queued this pass, which the projection cannot
+            # hold until sync echoes it back.
+            delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -2447,6 +2451,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=bot.runtime_paths,
             conversation_reader=bot._conversation_reader,
+            delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
