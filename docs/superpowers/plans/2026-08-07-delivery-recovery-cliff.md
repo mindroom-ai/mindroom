@@ -46,7 +46,7 @@ No private deployment name, bridge name, credential, access token, or database U
 - Consumes: `DeliveryGateway.recover_deliveries() -> RecoveryOutcome` and owner-scoped `create_background_task` and `wait_for_background_tasks`.
 - Produces: `AgentBot._schedule_delivery_recovery() -> None`, `AgentBot._run_scheduled_delivery_recovery() -> None`, and `AgentBot._recover_unacknowledged_deliveries() -> bool`.
 
-- [ ] **Step 1: Add the causal receive-loop regression**
+- [x] **Step 1: Add the causal receive-loop regression**
 
 Add a test whose recovery coroutine waits for an event set only after the first real `_on_sync_response()` returns and the second response begins.
 
@@ -87,7 +87,7 @@ async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_
             assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 ```
 
-- [ ] **Step 2: Run the causal test and verify RED**
+- [x] **Step 2: Run the causal test and verify RED**
 
 Run:
 
@@ -97,7 +97,7 @@ uv run pytest -q tests/test_sync_task_cancellation.py::test_sync_response_return
 
 Expected: the assertion that the first response returned fails because the callback still awaits recovery.
 
-- [ ] **Step 3: Add coalescing and shutdown ownership regressions**
+- [x] **Step 3: Add coalescing and shutdown ownership regressions**
 
 Add a parked first pass followed by two completed sync callbacks and require exactly two total passes with a maximum active count of one.
 
@@ -105,7 +105,7 @@ Add a shutdown test that forces the existing owner drain to expire immediately a
 
 Update `test_delivery_recovery_asks_the_outbox_on_every_sync_response` to drain owner-scoped tasks after each response so its exception, incomplete, success, and later-new-debt outcomes remain causal after detachment.
 
-- [ ] **Step 4: Implement the minimal owner-scoped recovery task**
+- [x] **Step 4: Implement the minimal owner-scoped recovery task**
 
 Initialize one event and one task reference in `AgentBot.__init__`.
 
@@ -153,7 +153,7 @@ Replace the direct recovery await in `_run_sync_response_side_effects` with `_sc
 
 Set the wake immediately after `_sync_shutting_down = True` so a backoff wait exits and the existing owner drain can finish or cancel the task.
 
-- [ ] **Step 5: Run the focused recovery tests and verify GREEN**
+- [x] **Step 5: Run the focused recovery tests and verify GREEN**
 
 Run:
 
@@ -163,7 +163,7 @@ uv run pytest -q tests/test_sync_task_cancellation.py -k 'delivery_recovery or s
 
 Expected: every selected test passes with no warnings.
 
-- [ ] **Step 6: Run the complete sync lifecycle file and commit**
+- [x] **Step 6: Run the complete sync lifecycle file and commit**
 
 Run:
 
