@@ -60,6 +60,33 @@ def is_v2_sidecar_text_preview(event_source: dict[str, Any]) -> bool:
     return sidecar_mxc_url(content) is not None
 
 
+def _with_event_relation(
+    resolved_content: dict[str, Any],
+    event_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Return hydrated content that still sits where the event sits.
+
+    A sidecar carries the text that did not fit in the event, and nothing else.
+    ``m.relates_to`` is the whole of an event's position in the relation graph --
+    thread, edit, reply, reaction and reference are all read out of it -- and
+    that position is a property of the event the server stored, not of a file
+    the event points at. Letting a downloaded payload restate it would hand
+    whoever uploaded the file the choice of which conversation the message
+    joins, and would leave the journal, which records the event's relation, at
+    odds with the turn, which reads the payload's.
+
+    So the event's relation is restored over whatever the payload named,
+    including when the event has none. On the honest path the two already agree,
+    because a large message uploads its own outer content.
+    """
+    relation = event_content.get("m.relates_to")
+    if relation is None:
+        resolved_content.pop("m.relates_to", None)
+    else:
+        resolved_content["m.relates_to"] = relation
+    return resolved_content
+
+
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
@@ -67,7 +94,9 @@ async def _resolve_event_content(
     """Return one event's canonical content plus whether resolving it changed anything."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
-    return resolved_content, resolved_content is not preview_content
+    if resolved_content is preview_content:
+        return preview_content, False
+    return _with_event_relation(resolved_content, preview_content), True
 
 
 def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:

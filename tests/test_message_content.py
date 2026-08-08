@@ -19,6 +19,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_visible_event_source,
     thread_root_body_preview,
 )
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import (
     _download_mxc_text,
     extract_and_resolve_message,
@@ -335,6 +336,93 @@ class TestResolvedMessageExtraction:
         )
 
         assert event_source["content"] == canonical_content
+
+    @pytest.mark.asyncio
+    async def test_hydration_keeps_the_relation_the_event_carries(self) -> None:
+        """A sidecar payload supplies text, never the event's place in the relation graph.
+
+        The metadata naming the sidecar sits inside ``m.new_content``, so a payload that restated
+        ``m.relates_to`` would erase the ``m.replace`` and hand whoever uploaded the file the choice
+        of which conversation the message joins - a thread nothing about the event agrees with.
+        """
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "msgtype": "m.text",
+                        "body": "Full text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed"},
+                    },
+                ).encode("utf-8"),
+            ),
+        )
+
+        event_source = await resolve_event_source_content(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "* Preview edit",
+                    "m.new_content": {
+                        "msgtype": "m.file",
+                        "body": "Preview edit",
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://server/crafted-edit-sidecar",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+            },
+            client,
+        )
+
+        # The text is hydrated, so this pins preservation rather than a skipped download.
+        assert event_source["content"]["body"] == "Full text"
+        event_info = EventInfo.from_event(event_source)
+        assert event_info.is_edit is True
+        assert event_info.original_event_id == "$original"
+        assert event_info.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_hydration_cannot_give_a_relation_free_event_a_relation(self) -> None:
+        """An event that relates to nothing still relates to nothing once its text arrives."""
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "msgtype": "m.text",
+                        "body": "Full text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed"},
+                    },
+                ).encode("utf-8"),
+            ),
+        )
+
+        event_source = await resolve_event_source_content(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "Preview",
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/crafted-plain-sidecar",
+                },
+            },
+            client,
+        )
+
+        assert event_source["content"]["body"] == "Full text"
+        assert "m.relates_to" not in event_source["content"]
+        assert EventInfo.from_event(event_source).thread_id is None
 
     def test_visible_body_from_event_source_prefers_visible_edit_content(self) -> None:
         """Visible-body extraction should use m.new_content when present."""
