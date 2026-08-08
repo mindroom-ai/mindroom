@@ -47,7 +47,8 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 ```bash
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
-uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
+uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
+uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff
 ```
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
@@ -70,7 +71,11 @@ A run whose interruptions all found an idle journal fails instead of reporting t
 `restart_drain_incomplete` counts the production `runtime_drain_incomplete_with_durable_dispatch_recovery` marker over the whole run.
 It is reported rather than gated: a graceful restart taken mid-turn is allowed to hand unfinished work to durable recovery, and that the work still comes back is what the reply oracle checks.
 
-The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
+The `short-stream-correctness` profile preserves the existing 13-thread hot-then-parallel stream scenario with a 180-second per-reply deadline.
+It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
+
+The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for its fixed 100-root workload.
+Its live acceptance invariants are documented with the delivery-recovery work and should not be inferred from short-stream-correctness results.
 
 #### The live gate is manual, and that is a decision rather than an omission
 

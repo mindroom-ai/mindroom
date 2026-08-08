@@ -54,8 +54,9 @@ from scripts.testing.fuzz_live_matrix import (
     collect_host_load_report,
     evaluate_restart_regression,
     live_scenario_from_seed,
+    recovery_cliff_scenario,
     restart_regression_scenario,
-    saturation_scenario,
+    short_stream_correctness_scenario,
 )
 
 if TYPE_CHECKING:
@@ -429,14 +430,35 @@ def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
     assert seen == set(LiveOperationKind)
 
 
-def test_saturation_scenario_matches_original_two_phase_workload() -> None:
-    """The regression profile must preserve the old hot-then-parallel ordering."""
-    scenario = saturation_scenario()
+def test_short_stream_correctness_scenario_matches_original_two_phase_workload() -> None:
+    """Short-stream correctness preserves the old hot-then-parallel workload."""
+    scenario = short_stream_correctness_scenario()
 
+    assert scenario.profile == "short-stream-correctness"
     assert scenario.thread_count == 13
     assert len(scenario.batches) == 108
     assert all(len(batch) == 1 and batch[0].thread == 0 for batch in scenario.batches[:100])
     assert all([operation.thread for operation in batch] == list(range(1, 13)) for batch in scenario.batches[100:])
+
+
+def test_recovery_cliff_scenario_has_fixed_empty_trace_for_one_hundred_roots() -> None:
+    """The recovery profile owns its fixed 100-root workload outside the trace."""
+    scenario = recovery_cliff_scenario()
+
+    assert scenario == LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
+    scenario.validate()
+
+
+def test_recovery_cliff_scenario_rejects_an_altered_trace_shape() -> None:
+    """The fixed recovery runner must not silently ignore declared trace operations."""
+    scenario = LiveFuzzScenario(
+        thread_count=100,
+        batches=((LiveOperation(0, LiveOperationKind.REACTION, 0, "root:0"),),),
+        profile="recovery-cliff",
+    )
+
+    with pytest.raises(ValueError, match="fixed empty trace"):
+        scenario.validate()
 
 
 def test_live_scenario_rejects_same_batch_dependency() -> None:
@@ -1141,6 +1163,72 @@ def test_restart_config_uses_agent_specific_replacement_model() -> None:
         assert replacement["models"]["router"]["id"] == "mindroom-live-fuzz"
     finally:
         stack.close()
+
+
+def test_recovery_cliff_managed_config_uses_synthetic_responder_and_sliding_sync() -> None:
+    """Recovery-cliff config must use the fixed production-shaped sender and responder setup."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    try:
+        stack._write_config(9292)
+        config = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
+
+        assert config["matrix_sync"] == {
+            "mode": "sliding",
+            "sliding_timeline_limit": 100,
+        }
+        assert config["models"]["synthetic"]["provider"] == "synthetic"
+        assert config["models"]["synthetic"]["extra_kwargs"] == {
+            "seed": 1,
+            "min_response_chars": 4000,
+            "max_response_chars": 4800,
+            "chunk_chars": 40,
+            "chars_per_second": 80,
+            "tool_call_probability": 0.2,
+        }
+        assert config["agents"]["general"]["model"] == "synthetic"
+        assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+    finally:
+        stack.close()
+
+
+@pytest.fixture
+def managed_agent_credentials_stack() -> Iterator[ManagedTuwunelStack]:
+    """Provide two distinct persisted managed-agent credential records."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.storage_path.mkdir()
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "accounts": {
+                        "agent_general": {
+                            "access_token": "general-token",
+                            "device_id": "general-device",
+                        },
+                        "agent_load_sender": {
+                            "access_token": "sender-token",
+                            "device_id": "sender-device",
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        yield stack
+    finally:
+        stack.close()
+
+
+def test_managed_agent_credentials_selects_the_requested_account(
+    managed_agent_credentials_stack: ManagedTuwunelStack,
+) -> None:
+    """The managed load sender must never reuse the responder's persisted credentials."""
+    assert managed_agent_credentials_stack.agent_matrix_credentials() == ("general-token", "general-device")
+    assert managed_agent_credentials_stack.agent_matrix_credentials("load_sender") == (
+        "sender-token",
+        "sender-device",
+    )
 
 
 def test_restart_recovery_hard_kills_and_boots_new_model_generation(

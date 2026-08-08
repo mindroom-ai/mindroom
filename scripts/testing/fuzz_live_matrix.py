@@ -218,8 +218,8 @@ class LiveFuzzScenario:
             msg = "live Matrix fuzz trace must contain at least one thread"
             raise ValueError(msg)
         _reject_unknown_live_scenario_profile(self)
-        if self.profile == "restart-regression":
-            _validate_restart_regression_trace(self)
+        if self.profile in {"restart-regression", "recovery-cliff"}:
+            _validate_fixed_profile_trace(self)
             return
         known_events = {f"root:{thread}" for thread in range(self.thread_count)}
         known_responses = {f"response:root:{thread}" for thread in range(self.thread_count)}
@@ -329,21 +329,29 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float) -> bool:
 
 def _reject_unknown_live_scenario_profile(scenario: LiveFuzzScenario) -> None:
     """Reject profiles without a runner implementation."""
-    if scenario.profile not in {"fuzz", "restart-regression", "saturation"}:
+    if scenario.profile not in {"fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"}:
         msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
         raise ValueError(msg)
 
 
-def _validate_restart_regression_trace(scenario: LiveFuzzScenario) -> None:
-    """Require the fixed restart profile to own its operations outside the trace."""
-    if scenario.thread_count != 1 or scenario.batches:
-        msg = "restart-regression profile requires its fixed empty trace"
+def _validate_fixed_profile_trace(scenario: LiveFuzzScenario) -> None:
+    """Require fixed profiles to own their operations outside replayable traces."""
+    expected_thread_count = 1 if scenario.profile == "restart-regression" else 100
+    if scenario.thread_count != expected_thread_count or scenario.batches:
+        msg = f"{scenario.profile} profile requires its fixed empty trace"
         raise ValueError(msg)
 
 
 def restart_regression_scenario() -> LiveFuzzScenario:
     """Return the fixed config-replacement regression trace."""
     scenario = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+    scenario.validate()
+    return scenario
+
+
+def recovery_cliff_scenario() -> LiveFuzzScenario:
+    """Return the fixed one-hundred-root recovery-cliff trace."""
+    scenario = LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
     scenario.validate()
     return scenario
 
@@ -834,13 +842,13 @@ def live_scenario_from_seed(
     return scenario
 
 
-def saturation_scenario(
+def short_stream_correctness_scenario(
     *,
     hot_turns: int = 100,
     parallel_threads: int = 12,
     parallel_turns: int = 8,
 ) -> LiveFuzzScenario:
-    """Reproduce the long-thread plus 12-way saturation workload."""
+    """Reproduce the existing long-thread plus 12-way short-stream workload."""
     thread_count = parallel_threads + 1
     batches: list[tuple[LiveOperation, ...]] = []
     operation_id = 0
@@ -874,7 +882,7 @@ def saturation_scenario(
     scenario = LiveFuzzScenario(
         thread_count=thread_count,
         batches=tuple(batches),
-        profile="saturation",
+        profile="short-stream-correctness",
     )
     scenario.validate()
     return scenario
@@ -1356,11 +1364,16 @@ class ManagedTuwunelStack:
     def __init__(
         self,
         *,
+        profile: str = "fuzz",
         stream_segments: int = 4,
         stream_delay: float = 0.001,
         model_latch_timeout: float = 60.0,
     ) -> None:
+        if profile not in {"fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"}:
+            msg = f"unsupported live Matrix fuzz profile {profile!r}"
+            raise ValueError(msg)
         token = secrets.token_hex(4)
+        self.profile = profile
         self.instance_name = f"fuzz{token}"
         self.namespace = self.instance_name
         self.temp_dir = tempfile.TemporaryDirectory(prefix="mindroom-live-matrix-fuzz-")
@@ -1561,14 +1574,14 @@ class ManagedTuwunelStack:
         )
         return cast("int", rows[0][0]) if rows else 0
 
-    def agent_matrix_credentials(self) -> tuple[str, str] | None:
-        """Return the managed agent's persisted access token and device ID."""
+    def agent_matrix_credentials(self, agent_name: str = AGENT_NAME) -> tuple[str, str] | None:
+        """Return one managed agent's persisted access token and device ID."""
         state_path = self.storage_path / "matrix_state.yaml"
         if not state_path.is_file():
             return None
         state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
         accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
-        account = accounts.get(f"agent_{AGENT_NAME}") if isinstance(accounts, dict) else None
+        account = accounts.get(f"agent_{agent_name}") if isinstance(accounts, dict) else None
         if not isinstance(account, dict):
             return None
         access_token, device_id = account.get("access_token"), account.get("device_id")
@@ -1814,6 +1827,28 @@ class ManagedTuwunelStack:
                 "agent_reply_permissions": {},
             },
         }
+        if self.profile == "recovery-cliff":
+            config["matrix_sync"] = {"mode": "sliding", "sliding_timeline_limit": 100}
+            config["models"]["synthetic"] = {
+                "provider": "synthetic",
+                "extra_kwargs": {
+                    "seed": 1,
+                    "min_response_chars": 4000,
+                    "max_response_chars": 4800,
+                    "chunk_chars": 40,
+                    "chars_per_second": 80,
+                    "tool_call_probability": 0.2,
+                },
+            }
+            config["agents"][AGENT_NAME]["model"] = "synthetic"
+            config["agents"]["load_sender"] = {
+                "display_name": "Live Fuzz Load Sender",
+                "role": "Author deterministic recovery-cliff workload roots.",
+                "model": "synthetic",
+                "tools": [],
+                "rooms": [ROOM_KEY],
+                "learning": False,
+            }
         self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     def _start_mindroom(self, *, timeout: float = 60) -> None:
@@ -2313,11 +2348,11 @@ class LiveFuzzRunner:
         await asyncio.gather(*(client.join_room() for client in self.clients))
         if self.scenario.profile == "restart-regression":
             return await self._run_restart_regression()
-        if self.scenario.profile == "saturation":
+        if self.scenario.profile == "short-stream-correctness":
             await asyncio.gather(
                 *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
             )
-            return await self._run_saturation()
+            return await self._run_short_stream_correctness()
 
         await self.oracle.initialize()
         await self._await_first_baseline_response()
@@ -2709,12 +2744,12 @@ class LiveFuzzRunner:
 
         return observation
 
-    async def _run_saturation(self) -> dict[str, int | str]:
+    async def _run_short_stream_correctness(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
-        parallel_start = self._saturation_parallel_start()
+        parallel_start = self._short_stream_parallel_start()
         expected_sources: set[str] = set()
 
-        hot_root, hot_response = await self._saturation_turn(
+        hot_root, hot_response = await self._short_stream_turn(
             self.clients[0],
             label="hot-root",
             thread_root=None,
@@ -2723,7 +2758,7 @@ class LiveFuzzRunner:
         )
         for batch in self.scenario.batches[:parallel_start]:
             operation = batch[0]
-            _, hot_response = await self._saturation_turn(
+            _, hot_response = await self._short_stream_turn(
                 self.clients[0],
                 label=operation.event_ref,
                 thread_root=hot_root,
@@ -2737,7 +2772,7 @@ class LiveFuzzRunner:
 
         async def run_parallel_thread(thread: int) -> None:
             client = self._client_for_thread(thread)
-            root, response = await self._saturation_turn(
+            root, response = await self._short_stream_turn(
                 client,
                 label=f"root:{thread}",
                 thread_root=None,
@@ -2746,7 +2781,7 @@ class LiveFuzzRunner:
             )
             for batch in parallel_batches:
                 operation = next(item for item in batch if item.thread == thread)
-                _, response = await self._saturation_turn(
+                _, response = await self._short_stream_turn(
                     client,
                     label=operation.event_ref,
                     thread_root=root,
@@ -2781,7 +2816,7 @@ class LiveFuzzRunner:
         }
         if duplicates or missing or unexpected:
             msg = (
-                "saturation reply invariant failed: "
+                "short-stream correctness reply invariant failed: "
                 f"duplicates={duplicates}, missing={missing}, unexpected={unexpected}"
             )
             raise AssertionError(msg)
@@ -2795,7 +2830,7 @@ class LiveFuzzRunner:
             "status": "PASS",
         }
 
-    async def _saturation_turn(
+    async def _short_stream_turn(
         self,
         client: LiveMatrixClient,
         *,
@@ -2806,7 +2841,7 @@ class LiveFuzzRunner:
     ) -> tuple[str, str]:
         """Send one old-harness turn and wait for its completed stream."""
         content = self._message_content(
-            f"Live saturation {label}",
+            f"Live short-stream correctness {label}",
             relation=(
                 {
                     "rel_type": "m.thread",
@@ -2818,7 +2853,7 @@ class LiveFuzzRunner:
                 else None
             ),
         )
-        txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
+        txn_id = f"live-short-stream-{label}-{secrets.token_hex(4)}"
         source_event_id = await client.send_event("m.room.message", txn_id, content)
         expected_sources.add(source_event_id)
         root_event_id = thread_root or source_event_id
@@ -3000,8 +3035,8 @@ class LiveFuzzRunner:
             )
             raise AssertionError(msg)
 
-    def _saturation_parallel_start(self) -> int:
-        """Return the first batch belonging to the parallel saturation phase."""
+    def _short_stream_parallel_start(self) -> int:
+        """Return the first batch belonging to the parallel short-stream phase."""
         return next(
             (
                 index
@@ -3012,8 +3047,8 @@ class LiveFuzzRunner:
         )
 
     def _client_for_thread(self, thread: int) -> LiveMatrixClient:
-        """Use the original multi-sender mapping for saturation traces."""
-        if self.scenario.profile != "saturation":
+        """Use the original multi-sender mapping for short-stream traces."""
+        if self.scenario.profile != "short-stream-correctness":
             return self.client
         client_index = max(thread - 1, 0)
         return self.clients[client_index]
@@ -3211,7 +3246,11 @@ def _non_negative_int(value: str) -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("fuzz", "restart-regression", "saturation"), default="fuzz")
+    parser.add_argument(
+        "--profile",
+        choices=("fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"),
+        default="fuzz",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
     parser.add_argument("--threads", type=_positive_int, default=45)
@@ -3228,7 +3267,8 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         help=(
             "deadline for a single agent turn, and the floor under every multi-turn deadline "
-            "(default: 60s fuzz and restart-regression, 180s saturation). Waits for N outstanding "
+            "(default: 60s fuzz and restart-regression, 180s short-stream correctness and recovery cliff). "
+            "Waits for N outstanding "
             "turns scale this from measured per-turn latency instead of using it flat."
         ),
     )
@@ -3247,7 +3287,7 @@ async def _run_live(
     settle_seconds: float,
     root_fanout: int,
 ) -> dict[str, int | str]:
-    client_count = scenario.thread_count - 1 if scenario.profile == "saturation" else 1
+    client_count = scenario.thread_count - 1 if scenario.profile == "short-stream-correctness" else 1
     clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id) for _ in range(client_count))
     try:
         return await LiveFuzzRunner(
@@ -3266,10 +3306,12 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     """Select one replay, fixed profile, or generated fuzz scenario."""
     if args.trace is not None:
         return LiveFuzzScenario.from_json(args.trace.read_text(encoding="utf-8"))
-    if args.profile == "saturation":
-        return saturation_scenario()
+    if args.profile == "short-stream-correctness":
+        return short_stream_correctness_scenario()
     if args.profile == "restart-regression":
         return restart_regression_scenario()
+    if args.profile == "recovery-cliff":
+        return recovery_cliff_scenario()
     return live_scenario_from_seed(
         args.seed,
         steps=args.steps,
@@ -3287,13 +3329,14 @@ def main() -> None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
     reply_timeout = args.reply_timeout
     if reply_timeout is None:
-        reply_timeout = 180 if scenario.profile == "saturation" else 60
+        reply_timeout = 180 if scenario.profile in {"short-stream-correctness", "recovery-cliff"} else 60
     host_load = collect_host_load_report()
     print(host_load.render(), file=sys.stderr, flush=True)
 
     stack = ManagedTuwunelStack(
-        stream_segments=96 if scenario.profile == "saturation" else 4,
-        stream_delay=0.012 if scenario.profile == "saturation" else 0.001,
+        profile=scenario.profile,
+        stream_segments=96 if scenario.profile == "short-stream-correctness" else 4,
+        stream_delay=0.012 if scenario.profile == "short-stream-correctness" else 0.001,
         # The hard-restart latch spans the later checkpoint wait plus process scheduling.
         model_latch_timeout=reply_timeout * 3,
     )
