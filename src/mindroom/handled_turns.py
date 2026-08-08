@@ -66,12 +66,29 @@ __all__ = [
     "TurnRecord",
     "TurnRecordCodec",
     "canonicalize_turn_record",
+    "legacy_responses_file_path",
     "merge_edit_facts",
     "with_user_stop",
 ]
 
 _TURN_RECORD_SCHEMA_VERSION = 1
 _LEDGER_RECORDS_KEY = "records"
+
+
+def legacy_responses_file_path(storage_path: Path, agent_name: str) -> Path:
+    """Return where a pre-journal MindRoom kept this agent's handled turns.
+
+    Named rather than spelled out at the one call site because it is half of a
+    contract with a version that is no longer in this tree: the writer is gone,
+    so nothing here fails if the reader drifts off the path that writer used.
+    It would simply find no file, import nothing, and re-answer the backlog of
+    every installation being upgraded -- silently, and only in production.
+    Giving the path a name is what lets a test pin it against the bytes the old
+    version actually wrote.
+
+    See ``HandledTurnLedger._import_legacy_ledger`` for what is done with it.
+    """
+    return storage_path / "tracking" / f"{agent_name}_responded.json"
 
 
 def with_user_stop(

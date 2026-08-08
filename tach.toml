@@ -2696,6 +2696,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.event_journal_open",
+    "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",

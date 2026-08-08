@@ -21,6 +21,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -644,7 +645,7 @@ class AgentBot:
             TurnStoreDeps(
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
-                legacy_responses_file=self.storage_path / "tracking" / f"{self.agent_name}_responded.json",
+                legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
