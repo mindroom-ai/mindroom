@@ -139,6 +139,30 @@ _POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
 _POSTGRES_JOURNAL_IMAGE = "postgres:16"
 _POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
 
+# `postgres:16` declares `VOLUME /var/lib/postgresql/data`, so every container
+# started from it is handed an anonymous volume. That volume does not die with
+# the container: `docker rm -f` without `-v` removes the container and orphans
+# the volume, and only a container that exits on its own reaches `--rm`'s
+# volume-removing path. A suite that starts a server per run therefore left one
+# dangling ~50 MB data directory behind per run forever -- observed here at 742
+# volumes and 169 GB, which filled the root filesystem.
+#
+# Mounting a tmpfs over the data directory means no volume is ever created, so
+# there is nothing to leak down any exit path: clean teardown, `rm -f`, SIGKILL,
+# or a reboot. The database is thrown away at the end of the run either way, so
+# nothing of value was on disk.
+#
+# If this ever regresses, know that it is deliberately hard to see: the volumes
+# live under Docker's storage root, which is unreadable without privileges, so
+# `du -x /` under-reports by the entire leak while `df` counts it. Trust `df`
+# and `docker system df -v`, not `du`.
+_POSTGRES_JOURNAL_DATA_DIR = "/var/lib/postgresql/data"
+# A cap, not an allocation: tmpfs pages are only backed as they are written, and
+# a fresh cluster plus one database per xdist worker measures well under 1 GB.
+# Docker's default of half of host RAM is left behind on purpose -- an uncapped
+# runaway on a shared machine is the same class of failure as the disk leak.
+_POSTGRES_JOURNAL_TMPFS_SIZE = "2g"
+
 
 def _configure_quiet_structlog() -> None:
     """Keep incidental test logging cheap and silent."""
@@ -534,10 +558,32 @@ def _postgres_container_name(run_id: str, prefix: str) -> str:
     return f"{prefix}{run_id}"
 
 
+def _postgres_run_command(docker: str, container_name: str, run_id: str) -> list[str]:
+    """Return the argv that starts one disposable Postgres journal server."""
+    return [
+        docker, "run", "--rm", "-d",
+        "--name", container_name,
+        "--label", f"mindroom.pytest.run={run_id}",
+        # Keeps the image's declared anonymous volume from ever existing.
+        "--tmpfs", f"{_POSTGRES_JOURNAL_DATA_DIR}:size={_POSTGRES_JOURNAL_TMPFS_SIZE}",
+        "-e", "POSTGRES_USER=cache",
+        "-e", "POSTGRES_PASSWORD=test",
+        "-e", "POSTGRES_DB=mindroom",
+        "-e", f"LANG={_POSTGRES_JOURNAL_LOCALE}",
+        "-e", f"POSTGRES_INITDB_ARGS=--locale={_POSTGRES_JOURNAL_LOCALE}",
+        "-p", "127.0.0.1::5432",
+        _POSTGRES_JOURNAL_IMAGE,
+    ]  # fmt: skip
+
+
 def _remove_postgres_container(docker: str, container_name: str) -> None:
-    """Remove one disposable Postgres container if it exists."""
+    """Remove one disposable Postgres container, and anything it owns, if it exists."""
+    # `-v` because a bare `rm -f` orphans a container's anonymous volumes. The
+    # data directory is a tmpfs so today there are none, but a removal that
+    # takes the container's storage with it is what the caller means, and it
+    # keeps a future mount from quietly reopening the leak this replaced.
     result = subprocess.run(
-        [docker, "rm", "-f", container_name],
+        [docker, "rm", "-f", "-v", container_name],
         check=False,
         capture_output=True,
         text=True,
@@ -596,22 +642,11 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
     run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
     container_name = _postgres_container_name(run_id, _POSTGRES_JOURNAL_CONTAINER_PREFIX)
     run_result = subprocess.run(
-        [
-            docker, "run", "--rm", "-d",
-            "--name", container_name,
-            "--label", f"mindroom.pytest.run={run_id}",
-            "-e", "POSTGRES_USER=cache",
-            "-e", "POSTGRES_PASSWORD=test",
-            "-e", "POSTGRES_DB=mindroom",
-            "-e", f"LANG={_POSTGRES_JOURNAL_LOCALE}",
-            "-e", f"POSTGRES_INITDB_ARGS=--locale={_POSTGRES_JOURNAL_LOCALE}",
-            "-p", "127.0.0.1::5432",
-            _POSTGRES_JOURNAL_IMAGE,
-        ],
+        _postgres_run_command(docker, container_name, run_id),
         check=False,
         capture_output=True,
         text=True,
-    )  # fmt: skip
+    )
     created_container = run_result.returncode == 0
     if not created_container:
         if "is already in use by container" not in run_result.stderr:
