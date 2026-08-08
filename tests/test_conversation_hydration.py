@@ -2345,3 +2345,35 @@ class TestLatestSenderMessage:
             )
             is None
         )
+
+    async def test_a_message_from_before_this_run_still_answers(self, alice: PrincipalStore) -> None:
+        """No runtime-start bound is applied here, and that is the decision, not an omission.
+
+        The cache accessor this replaced refused a room-scope answer older than
+        the current process, comparing the row's *cache* time against
+        ``runtime_started_at``. The projection records what the server said,
+        not when this process learned it, so that rule cannot be carried over:
+        reinstating it against ``origin_server_ts`` would be a different rule
+        wearing the same name, and it would blank this read for every
+        conversation that predates a restart.
+
+        A greet-once hook therefore still sees the greeting it posted before
+        the restart, which is what "have I already spoken here" should mean.
+        A hook that genuinely wants the old boundary can still apply it --
+        ``HookContext.runtime_started_at`` is the timestamp and the snapshot
+        carries ``origin_server_ts`` -- so the choice belongs to the plugin
+        rather than to this read.
+        """
+        await admit_all(alice, [raw("$greeted", "hello, I am here", ts=1_000)])
+
+        snapshot = await latest_agent_message_snapshot(
+            self._reader(alice),
+            room_id=ROOM,
+            thread_id=None,
+            sender=ALICE,
+        )
+
+        assert snapshot == AgentMessageSnapshot(
+            content={"msgtype": "m.text", "body": "hello, I am here"},
+            origin_server_ts=1_000,
+        )
