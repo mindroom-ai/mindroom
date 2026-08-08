@@ -43,7 +43,6 @@ from mindroom.event_journal import (
     EventClass,
     EventJournalStore,
     EventKind,
-    SettlementOutcome,
 )
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
@@ -580,7 +579,7 @@ async def _admit_from_server(
         inbound_event(room_id, event, kind, EventClass.ACTIONABLE),
         projected_event(room_id, event, kind, self_sender=client.user_id),
     )
-    await store.settle(event_id, SettlementOutcome.SUCCEEDED)
+    await store.settle(event_id)
 
 
 async def run_proof(homeserver: str) -> Findings:

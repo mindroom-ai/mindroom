@@ -18,7 +18,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.event_journal import SettlementOutcome
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -45,10 +44,10 @@ _DEFERRAL_SCAN_SECONDS = 30.0
 # cannot be read; either way the pass reports that more remains.
 _MAX_SCAN_PAGES = 16
 
-# Returning ``None`` means the handler started work that outlives it — a turn
+# Returning ``False`` means the handler started work that outlives it — a turn
 # that is still running — so the event stays pending and whoever owns that work
-# releases it. Returning an outcome means the work is finished.
-type _EventHandler = Callable[[JournalEvent], Awaitable[SettlementOutcome | None]]
+# releases it. Returning ``True`` means the work is finished.
+type _EventHandler = Callable[[JournalEvent], Awaitable[bool]]
 
 # Whether the owner a deferring handler handed one event to still exists.
 type _DeferralLivenessProbe = Callable[[JournalEvent], bool]
@@ -546,12 +545,11 @@ class PendingEventWorker:
                 if not await self.store.is_pending(event.event_id):
                     self._deferred.pop(event.event_id, None)
                     continue
-                outcome = await self.handle(event)
-                if outcome is None:
+                if not await self.handle(event):
                     self._deferred[event.event_id] = event
                     continue
                 self._deferred.pop(event.event_id, None)
-                await self.store.settle(event.event_id, outcome)
+                await self.store.settle(event.event_id)
             except asyncio.CancelledError:
                 raise
             except Exception:

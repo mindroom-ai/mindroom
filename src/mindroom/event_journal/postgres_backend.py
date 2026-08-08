@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload
-from .schema import POSTGRES_DIALECT, Dialect, render, schema_statements
+from .schema import POSTGRES_DIALECT, render, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -47,11 +47,6 @@ class _PostgresTransaction:
 
     cursor: psycopg.Cursor[dict[str, Any]]
 
-    @property
-    def dialect(self) -> Dialect:
-        """Return the PostgreSQL spelling."""
-        return POSTGRES_DIALECT
-
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
         self.cursor.execute(_statement(sql), tuple(params))
@@ -80,11 +75,6 @@ class PostgresBackend:
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the PostgreSQL spelling."""
-        return POSTGRES_DIALECT
 
     @classmethod
     def open(cls, database_url: str) -> PostgresBackend:

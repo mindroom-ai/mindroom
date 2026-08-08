@@ -144,20 +144,22 @@ def _record_tombstone(
     principal_id: str,
     room_id: str,
     redacted_event_id: str,
-    receipt_order: int,
 ) -> None:
     """Remember a redaction before projecting it.
 
     Recorded first so that an original or edit arriving later — a real ordering
     on a server that backfills — cannot resurrect content the sender deleted.
+
+    The row is the whole fact. Every reader asks only whether one event is
+    tombstoned, so when the redaction was received is not part of the answer.
     """
     transaction.execute(
         """
-        INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id, receipt_order)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id)
+        VALUES (?, ?, ?)
         ON CONFLICT (principal_id, room_id, redacted_event_id) DO NOTHING
         """,
-        (principal_id, room_id, redacted_event_id, receipt_order),
+        (principal_id, room_id, redacted_event_id),
     )
 
 
@@ -196,7 +198,6 @@ def project(
         event,
         target_event_id=replaces,
         receipt_order=receipt_order,
-        membership_epoch=membership_epoch,
     )
 
 
@@ -291,7 +292,6 @@ def _project_edit(
     *,
     target_event_id: str,
     receipt_order: int,
-    membership_epoch: int,
 ) -> None:
     """Replace the target's visible body, or hold the edit until it arrives."""
     current = transaction.fetchone(
@@ -304,13 +304,7 @@ def _project_edit(
     if current is None:
         if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
             return
-        _hold_unresolved_edit(
-            transaction,
-            principal_id,
-            event,
-            target_event_id=target_event_id,
-            membership_epoch=membership_epoch,
-        )
+        _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
         return
     if current["sender"] != event.sender:
         return
@@ -349,10 +343,13 @@ def _hold_unresolved_edit(
     event: ProjectedEvent,
     *,
     target_event_id: str,
-    membership_epoch: int,
 ) -> None:
-    """Keep at most one latest edit per target and sender."""
-    del membership_epoch
+    """Keep at most one latest edit per target and sender.
+
+    A held edit is not scoped to a membership. It survives only until its
+    target arrives, and the fence deletes the whole table for the room it
+    invalidates, so there is nothing an epoch on the row could decide.
+    """
     held = transaction.fetchone(
         """
         SELECT edit_event_id, edit_ts FROM unresolved_edits
@@ -366,12 +363,11 @@ def _hold_unresolved_edit(
         """
         INSERT INTO unresolved_edits (
             principal_id, room_id, target_event_id, sender,
-            edit_event_id, edit_ts, thread_id, content_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            edit_event_id, edit_ts, content_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, target_event_id, sender) DO UPDATE SET
             edit_event_id = excluded.edit_event_id,
             edit_ts = excluded.edit_ts,
-            thread_id = excluded.thread_id,
             content_json = excluded.content_json
         """,
         (
@@ -381,7 +377,6 @@ def _hold_unresolved_edit(
             event.sender,
             event.event_id,
             event.origin_server_ts,
-            encode_thread_id(event.thread_id),
             _dumps(event.content),
         ),
     )
@@ -428,7 +423,7 @@ def _project_redaction(
     target = event.redacts_event_id
     if target is None:
         return
-    _record_tombstone(transaction, principal_id, event.room_id, target, receipt_order)
+    _record_tombstone(transaction, principal_id, event.room_id, target)
     transaction.execute(
         """
         DELETE FROM unresolved_edits

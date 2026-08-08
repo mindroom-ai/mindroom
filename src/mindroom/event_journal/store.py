@@ -20,7 +20,7 @@ from .history_debt import (
     HistoryDebtOutcome,
     RoomHistoryDebt,
 )
-from .models import DeliveryAcknowledgement, SettlementOutcome
+from .models import DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision
 
 if TYPE_CHECKING:
@@ -44,7 +44,6 @@ if TYPE_CHECKING:
         RefreshRequest,
         SemanticConsumer,
         TerminalTurnWrite,
-        VisibleMessage,
     )
     from .projection import ProjectedEvent
 
@@ -104,18 +103,18 @@ class PrincipalStore:
             lambda transaction: journal.is_pending(transaction, self._principal_id, event_id),
         )
 
-    async def settle(self, event_id: str, outcome: SettlementOutcome) -> None:
+    async def settle(self, event_id: str) -> None:
         """Mark one event's semantic work terminal."""
         await self._backend.write(
-            lambda transaction: journal.settle(transaction, self._principal_id, event_id, outcome),
+            lambda transaction: journal.settle(transaction, self._principal_id, event_id),
         )
 
-    async def settle_many(self, event_ids: tuple[str, ...], outcome: SettlementOutcome) -> None:
+    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
         """Settle every event that one terminal turn accounted for."""
         if not event_ids:
             return
         await self._backend.write(
-            lambda transaction: journal.settle_many(transaction, self._principal_id, event_ids, outcome),
+            lambda transaction: journal.settle_many(transaction, self._principal_id, event_ids),
         )
 
     async def unsettled_event_ids(self) -> frozenset[str]:
@@ -196,12 +195,6 @@ class PrincipalStore:
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
         )
 
-    async def advance_membership_epoch(self, room_id: str) -> int:
-        """Invalidate hydration for a room whose membership restarted."""
-        return await self._backend.write(
-            lambda transaction: journal.advance_membership_epoch(transaction, self._principal_id, room_id),
-        )
-
     async def fence_departure(self, room_id: str, *, source: DepartureSource) -> DepartureOutcome:
         """Apply one observation of a departure, invalidating at most once per departure."""
         return await self._backend.write(
@@ -248,17 +241,6 @@ class PrincipalStore:
                 thread_id=thread_id,
                 limit=limit,
                 before=before,
-            ),
-        )
-
-    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
-        """Return the current visible revision of one logical message."""
-        return await self._backend.read(
-            lambda transaction: reads.visible_message(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                logical_event_id=logical_event_id,
             ),
         )
 
@@ -824,7 +806,7 @@ def _enqueue_delivery(
         payload=payload,
         edits_event_id=edits_event_id,
     )
-    journal.settle_many(transaction, principal_id, settle_source_event_ids, SettlementOutcome.SUCCEEDED)
+    journal.settle_many(transaction, principal_id, settle_source_event_ids)
     return transaction_id
 
 
@@ -1052,12 +1034,6 @@ class TurnRecordStore:
                 anchor_event_id=anchor_event_id,
                 record_json=record_json,
             ),
-        )
-
-    async def load(self, *, event_id: str) -> str | None:
-        """Return the record indexed by one event, if there is one."""
-        return await self._backend.read(
-            lambda transaction: turn_records.load(transaction, self._agent_name, event_id=event_id),
         )
 
     async def load_all(self) -> tuple[tuple[str, str, str], ...]:

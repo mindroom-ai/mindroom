@@ -37,9 +37,7 @@ if TYPE_CHECKING:
         PendingPage,
         RefreshRequest,
         SemanticConsumer,
-        SettlementOutcome,
         TerminalTurnWrite,
-        VisibleMessage,
     )
     from .projection import ProjectedEvent
 
@@ -72,7 +70,7 @@ class ReplayView(Protocol):
         """Return whether one event still owes semantic work."""
         ...
 
-    async def settle(self, event_id: str, outcome: SettlementOutcome) -> None:
+    async def settle(self, event_id: str) -> None:
         """Mark one event's semantic work terminal."""
         ...
 
@@ -80,7 +78,7 @@ class ReplayView(Protocol):
 class DispatchView(ReplayView, AdmissionView, Protocol):
     """Everything the dispatcher coordinates: admission, replay, and claims."""
 
-    async def settle_many(self, event_ids: tuple[str, ...], outcome: SettlementOutcome) -> None:
+    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
         """Settle every event that one terminal turn accounted for."""
         ...
 
@@ -140,23 +138,12 @@ class RelationView(Protocol):
         ...
 
 
-class PointLookupView(Protocol):
-    """Resolving one named message, with no way to read a conversation.
+class ConversationReadView(Protocol):
+    """Reading a conversation, plus the evidence needed to judge completeness.
 
-    Separate from ``ProjectionView`` because the callers are different kinds of
-    thing. A conversation read builds a prompt; a point lookup answers "what is
-    this one event", usually to place it in a thread. Handing the second one a
-    paging API is what let the old cache be reached for whatever a caller
-    happened to want.
+    Nothing here can change a conversation, which is the point: a reader that
+    could write one is a reader that can be made to.
     """
-
-    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
-        """Return the current visible revision of one logical message."""
-        ...
-
-
-class ProjectionView(Protocol):
-    """Reading a conversation, without any way to change one."""
 
     async def read_conversation(
         self,
@@ -168,10 +155,6 @@ class ProjectionView(Protocol):
     ) -> ConversationPage:
         """Return one bounded page of a conversation."""
         ...
-
-
-class ConversationReadView(ProjectionView, Protocol):
-    """Reading a conversation plus the evidence needed to judge completeness."""
 
     async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
         """Return the newest visible event in one thread, or nothing."""
@@ -434,8 +417,6 @@ __all__ = [
     "HydrationView",
     "OutboxView",
     "PendingTurnView",
-    "PointLookupView",
-    "ProjectionView",
     "RelationView",
     "ReplayView",
 ]

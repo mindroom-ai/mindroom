@@ -124,42 +124,6 @@ def _page_rows(
     return tuple(rows)
 
 
-def visible_message(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    logical_event_id: str,
-) -> VisibleMessage | None:
-    """Return the current visible revision of one logical message, or nothing.
-
-    The point-lookup counterpart of ``read_conversation``, and it answers with
-    the same content that read would: an edited message is one row whose
-    ``revision_event_id`` is the edit on screen, so there is no second lookup
-    for "and what replaced it".
-
-    Keyed by the logical event only. Asking with a revision's event ID answers
-    nothing rather than answering with the message that revision belongs to:
-    the caller named an edit and would be handed an original, which reads as an
-    event that is not an edit at all.
-
-    A row whose body is withheld -- its visible revision redacted, or its text
-    still in a sidecar -- is also nothing. Both mean the projection does not
-    have the content yet, and a point lookup that served the row anyway would
-    hand back a message with no body as though that were what the room shows.
-    """
-    row = transaction.fetchone(
-        f"""
-        SELECT {_PAGE_COLUMNS} FROM visible_messages
-        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (principal_id, room_id, logical_event_id),
-    )
-    if row is None or row["content_json"] is None:
-        return None
-    return _visible_message(row)
-
-
 def latest_visible_event_id(
     transaction: Transaction,
     principal_id: str,

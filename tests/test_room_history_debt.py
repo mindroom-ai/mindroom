@@ -24,6 +24,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.event_journal import (
+    DepartureSource,
     EventClass,
     EventKind,
     HistoryDebtOutcome,
@@ -633,8 +634,9 @@ async def test_a_rejoin_during_the_repayment_walk_installs_nothing(alice: Princi
         """A homeserver whose answer arrives after the bot left and rejoined."""
 
         async def room_messages(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - matches the fake it overrides
-            """Advance membership before answering, as a racing rejoin would."""
-            await alice.advance_membership_epoch(ROOM)
+            """Leave and rejoin before answering, as a racing rejoin would."""
+            await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+            await alice.note_membership_restarted(ROOM)
             return await super().room_messages(*args, **kwargs)
 
     client = _RejoiningClient(pages=[[raw("$two", "two", ts=2_000)]])
@@ -764,7 +766,7 @@ async def test_a_rejoin_drops_a_debt_for_the_membership_that_owed_it(alice: Prin
     await admit_all(alice, [raw("$one", "one", ts=1_000)])
     await alice.record_room_history_debt(ROOM)
 
-    await alice.advance_membership_epoch(ROOM)
+    await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
     assert await alice.room_history_debt(ROOM) is None
 
@@ -1136,7 +1138,8 @@ async def test_a_single_rejoin_during_hydration_retries_under_the_new_epoch(
             self.calls += 1
             if not self.rejoined:
                 self.rejoined = True
-                await alice.advance_membership_epoch(ROOM)
+                await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+                await alice.note_membership_restarted(ROOM)
             chunk = [parse(raw("$two", "two", ts=2_000))]
             return nio.RoomMessagesResponse(ROOM, chunk, "start", None)
 

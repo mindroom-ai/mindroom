@@ -65,7 +65,6 @@ from mindroom.event_journal import (
     EventKind,
     JournalEvent,
     PendingTurnView,
-    SettlementOutcome,
 )
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
@@ -5452,10 +5451,7 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
         },
     )
     if settled:
-        await bot._journal_store.principal(bot._journal_principal_id).settle(
-            "$m2",
-            SettlementOutcome.SUCCEEDED,
-        )
+        await bot._journal_store.principal(bot._journal_principal_id).settle("$m2")
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))

@@ -31,7 +31,6 @@ from mindroom.event_journal import (
     AdmissionResult,
     EventKind,
     SemanticConsumer,
-    SettlementOutcome,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
@@ -281,9 +280,8 @@ class JournalDispatcher:
                 # would hold it for a run that cannot come.
                 self._live_events.pop(event.event_id, None)
                 return
-            outcome = await self._run_event(stored)
-            if outcome is not None:
-                await self.store.settle(event.event_id, outcome)
+            if await self._run_event(stored):
+                await self.store.settle(event.event_id)
 
     def _has_live_owner(self, event_id: str) -> bool:
         """Return whether something in this process is already holding one source.
@@ -317,8 +315,13 @@ class JournalDispatcher:
             return True
         return self._has_live_owner(event.event_id)
 
-    async def _run_event(self, event: JournalEvent) -> SettlementOutcome | None:
-        """Run one journal event's callback and report how it settled.
+    async def _run_event(self, event: JournalEvent) -> bool:
+        """Run one journal event's callback and report whether it may settle.
+
+        True means the event's semantic work is over. False means something in
+        this process still owns it, so the row stays pending and the worker
+        offers it again. Why the work ended is not part of the answer: nothing
+        durable records it and nothing reads it back.
 
         There is no "has this turn finished?" question here any more. A source
         leaves the journal when its answer is durably owed to a room, and a
@@ -335,14 +338,14 @@ class JournalDispatcher:
             # A turn replayed from a previous process needs responders that may
             # not exist yet. Live events are unaffected: their responders are
             # whatever is running now.
-            return None
+            return False
         if event.kind in TURN_BACKED_KINDS and self._has_live_owner(event.event_id):
             # A coalescing batch or a running turn already holds this source
             # and will hand it back. Starting a second turn on it does not
             # answer twice, but the loser of the claim blocks until the winner
             # settles, and it blocks holding the room's lane. Returning here
             # leaves the source deferred, which is what it already was.
-            return None
+            return False
         live = self._live_events.pop(event.event_id, None)
         # An event the journal loaded rather than nio just delivered is a
         # replay. Turn work behaves differently there: it defers silently
@@ -361,7 +364,7 @@ class JournalDispatcher:
                     kind=event.kind.value,
                     room_id=event.room_id,
                 )
-                return SettlementOutcome.INTENTIONALLY_IGNORED
+                return True
         if room is None:
             room = self.room_for_id(event.room_id)
         with turn_dispatch_recovery_scope(active=replaying and event.kind in TURN_BACKED_KINDS):
@@ -372,7 +375,7 @@ class JournalDispatcher:
         event: JournalEvent,
         room: nio.MatrixRoom,
         matrix_event: nio.Event,
-    ) -> SettlementOutcome | None:
+    ) -> bool:
         """Dispatch to the one callback that owns this event's kind."""
         binding = _BINDINGS.get(event.kind)
         if binding is None or not isinstance(matrix_event, binding.event_types):
@@ -390,7 +393,7 @@ class JournalDispatcher:
                 room_id=event.room_id,
                 payload_type=type(matrix_event).__name__,
             )
-            return SettlementOutcome.INTENTIONALLY_IGNORED
+            return True
         token = _RUNNING_EVENT.set(event)
         try:
             return await binding.run(self, room, matrix_event)
@@ -438,7 +441,7 @@ class JournalDispatcher:
     async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Settle turn-backed events that produced no dispatch payload."""
         self._worker.release(event_ids)
-        await self.store.settle_many(event_ids, SettlementOutcome.INTENTIONALLY_IGNORED)
+        await self.store.settle_many(event_ids)
 
     def retry_turn_source(self, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""
@@ -499,12 +502,12 @@ class _Binding:
     """The event types one kind accepts, and what to run for them."""
 
     event_types: type | tuple[type, ...]
-    run: Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]
+    run: Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]
 
 
 def _turn_backed(
     callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[TurnDispatchOutcome]]],
-) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]:
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]:
     """Wrap a callback whose work may outlive it inside a turn.
 
     Neither of these two asks whether someone already owns the source. That is
@@ -517,24 +520,24 @@ def _turn_backed(
         dispatcher: JournalDispatcher,
         room: nio.MatrixRoom,
         event: Any,  # noqa: ANN401 - the binding already checked the type
-    ) -> SettlementOutcome | None:
-        return _turn_outcome(await callback(dispatcher.callbacks)(room, event))
+    ) -> bool:
+        return _turn_settles(await callback(dispatcher.callbacks)(room, event))
 
     return run
 
 
 def _completing(
     callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[None]]],
-) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[SettlementOutcome | None]]:
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]:
     """Wrap a callback whose work is finished when it returns."""
 
     async def run(
         dispatcher: JournalDispatcher,
         room: nio.MatrixRoom,
         event: Any,  # noqa: ANN401 - the binding already checked the type
-    ) -> SettlementOutcome | None:
+    ) -> bool:
         await callback(dispatcher.callbacks)(room, event)
-        return SettlementOutcome.SUCCEEDED
+        return True
 
     return run
 
@@ -550,12 +553,12 @@ _BINDINGS: dict[EventKind, _Binding] = {
 }
 
 
-def _turn_outcome(outcome: TurnDispatchOutcome) -> SettlementOutcome | None:
+def _turn_settles(outcome: TurnDispatchOutcome) -> bool:
     """Translate a turn callback's report into a settlement decision."""
     if outcome is TurnDispatchOutcome.DEFERRED:
-        return None
+        return False
     if outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED:
-        return SettlementOutcome.INTENTIONALLY_IGNORED
+        return True
     msg = f"Turn callback returned invalid outcome {outcome!r}"
     raise TypeError(msg)
 

@@ -27,7 +27,13 @@ import pytest
 
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, SettlementOutcome
+from mindroom.event_journal import (
+    DeliveryStage,
+    DepartureSource,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+)
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
@@ -278,7 +284,7 @@ class TestTheHandoffIsTheDurableEnqueue:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
-        await journal(bot).advance_membership_epoch(ROOM)
+        await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
         sends: list[str] = []
 
         event_id = await deliver_answer(bot, "$cause", sends=sends)
@@ -311,9 +317,9 @@ class TestWhatARestartOwesAfterTheHandoff:
         """Drain the journal as a restart does and report what it re-dispatched."""
         replayed: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+        async def handle(event: JournalEvent) -> bool:
             replayed.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await PendingEventWorker(store=journal(bot), handle=handle).drain_once()
         return replayed
@@ -502,9 +508,9 @@ class TestTheHandoffCarriesTheWholeTurn:
         await adopt(bot, batch)
         replayed: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+        async def handle(event: JournalEvent) -> bool:
             replayed.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await deliver_answer(bot, "$caption")
         await PendingEventWorker(store=journal(bot), handle=handle).drain_once()
@@ -541,7 +547,7 @@ class TestTheHandoffIsOneCommit:
         sends: list[str] = []
         model_runs = 0
 
-        async def run_turn(_event: JournalEvent) -> SettlementOutcome | None:
+        async def run_turn(_event: JournalEvent) -> bool:
             nonlocal model_runs
             model_runs += 1
             await deliver_answer(
@@ -552,7 +558,7 @@ class TestTheHandoffIsOneCommit:
                 outbox=crashing,
             )
             # The handoff settled this turn's sources; nothing else may.
-            return None
+            return False
 
         backend.armed = True
         with pytest.raises(CrashError):
@@ -648,7 +654,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         await admit(journal(bot), text_event("$cause"))
         assert await pending_ids(bot) == ["$cause"]
 
-        await journal(bot).advance_membership_epoch(ROOM)
+        await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await pending_ids(bot) == []
         assert await journal(bot).load_event("$cause") is not None, "the dedup proof was deleted with the work"
@@ -670,7 +676,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         await admit_redaction(journal(bot), "$redaction", redacts="$cause")
         assert sorted(await pending_ids(bot)) == ["$cause", "$redaction"]
 
-        await journal(bot).advance_membership_epoch(ROOM)
+        await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await pending_ids(bot) == ["$redaction"]
 
@@ -679,7 +685,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
-        await journal(bot).advance_membership_epoch(ROOM)
+        await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
         sends: list[str] = []
 
         assert await deliver_answer(bot, "$cause", sends=sends) is None

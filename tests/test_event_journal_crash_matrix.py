@@ -29,10 +29,10 @@ import pytest
 
 from mindroom.event_journal import (
     DeliveryStage,
+    DepartureSource,
     EventClass,
     EventJournalStore,
     EventKind,
-    SettlementOutcome,
 )
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
@@ -167,7 +167,7 @@ class TurnRuntime:
             return principal
         return cast("OutboxView", DiesAfterAcknowledgement(principal))
 
-    async def handle(self, event: JournalEvent) -> SettlementOutcome | None:
+    async def handle(self, event: JournalEvent) -> bool:
         """Run one turn: model, the durable handoff, then claim and send.
 
         Nothing here asks whether this turn was already answered. It cannot:
@@ -193,9 +193,9 @@ class TurnRuntime:
             thread_id=event.thread_id,
             payload={"msgtype": "m.text", "body": answer},
         )
-        # The handoff already settled this source. Reporting an outcome as
-        # well would be a second authority over the same fact.
-        return None
+        # The handoff already settled this source. Settling it here as well
+        # would be a second authority over the same fact.
+        return False
 
     def worker(self) -> PendingEventWorker:
         """Return a fresh worker, as a restart would."""
@@ -566,7 +566,7 @@ class TestModelIsNotRerun:
         await runtime.worker().drain_once()
         assert runtime.homeserver.visible_messages == 1
 
-        await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
         await runtime.delivery.recover()
         await runtime.worker().drain_once()
 
@@ -606,7 +606,7 @@ class TestModelIsNotRerun:
         # The claim committed and the send did not, so the server holds nothing.
         assert runtime.homeserver.visible_messages == 0
 
-        await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
         await runtime.delivery.recover()
 
         # The deliberate cost: the previous membership's answer lands in the new one.
@@ -711,7 +711,7 @@ class TestTheHandoffIsOneTransaction:
         offered, re-run, and refused again on every restart.
         """
         await admit(runtime.store)
-        await runtime.store.advance_membership_epoch(ROOM)
+        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
         assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
         transaction_id = await runtime.store.enqueue_delivery(

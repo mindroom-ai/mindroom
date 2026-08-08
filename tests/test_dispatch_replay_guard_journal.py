@@ -29,7 +29,7 @@ import structlog
 
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_replay_guard import has_newer_unresponded_journal_thread_event
-from mindroom.event_journal import EventClass, EventKind, JournalEvent
+from mindroom.event_journal import EventKind, JournalEvent
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -69,12 +69,10 @@ def _pending(
         room_id=ROOM,
         thread_id=THREAD,
         kind=EventKind.MESSAGE,
-        event_class=EventClass.ACTIONABLE,
         sender=sender,
         origin_server_ts=origin_server_ts,
         source={"sender": sender, "content": content},
         receipt_order=1,
-        membership_epoch=1,
     )
 
 

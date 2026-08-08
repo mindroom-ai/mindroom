@@ -27,7 +27,6 @@ anchor alone would make "was this source answered?" a scan.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -82,19 +81,17 @@ def upsert(
         """,  # noqa: S608 - placeholders are generated, values are still bound
         (agent_name, *sorted(anchors), *index_event_ids),
     )
-    updated_at_ns = time.time_ns()
     for index_event_id in index_event_ids:
         transaction.execute(
             """
             INSERT INTO turn_records (
-                agent_name, index_event_id, anchor_event_id, record_json, updated_at_ns
-            ) VALUES (?, ?, ?, ?, ?)
+                agent_name, index_event_id, anchor_event_id, record_json
+            ) VALUES (?, ?, ?, ?)
             ON CONFLICT (agent_name, index_event_id) DO UPDATE SET
                 anchor_event_id = excluded.anchor_event_id,
-                record_json = excluded.record_json,
-                updated_at_ns = excluded.updated_at_ns
+                record_json = excluded.record_json
             """,
-            (agent_name, index_event_id, anchor_event_id, record_json, updated_at_ns),
+            (agent_name, index_event_id, anchor_event_id, record_json),
         )
 
 
@@ -128,7 +125,6 @@ def adopt_missing(
     """
     if not index_event_ids:
         return 0
-    updated_at_ns = time.time_ns()
     adopted = 0
     for index_event_id in index_event_ids:
         existing = transaction.fetchone(
@@ -143,26 +139,14 @@ def adopt_missing(
         transaction.execute(
             """
             INSERT INTO turn_records (
-                agent_name, index_event_id, anchor_event_id, record_json, updated_at_ns
-            ) VALUES (?, ?, ?, ?, ?)
+                agent_name, index_event_id, anchor_event_id, record_json
+            ) VALUES (?, ?, ?, ?)
             ON CONFLICT (agent_name, index_event_id) DO NOTHING
             """,
-            (agent_name, index_event_id, anchor_event_id, record_json, updated_at_ns),
+            (agent_name, index_event_id, anchor_event_id, record_json),
         )
         adopted += 1
     return adopted
-
-
-def load(transaction: Transaction, agent_name: str, *, event_id: str) -> str | None:
-    """Return the stored record indexed by one event, if there is one."""
-    row = transaction.fetchone(
-        f"""
-        SELECT {_COLUMNS} FROM turn_records
-        WHERE agent_name = ? AND index_event_id = ?
-        """,  # noqa: S608 - a fixed column list, not interpolated input
-        (agent_name, event_id),
-    )
-    return None if row is None else str(row["record_json"])
 
 
 def load_all(transaction: Transaction, agent_name: str) -> tuple[tuple[str, str, str], ...]:
@@ -198,4 +182,4 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["adopt_missing", "forget", "load", "load_all", "upsert"]
+__all__ = ["adopt_missing", "forget", "load_all", "upsert"]

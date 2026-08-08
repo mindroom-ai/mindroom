@@ -45,13 +45,6 @@ class EventKind(StrEnum):
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
 
 
-class SettlementOutcome(StrEnum):
-    """Terminal outcomes for one journal event's semantic work."""
-
-    SUCCEEDED = "succeeded"
-    INTENTIONALLY_IGNORED = "intentionally_ignored"
-
-
 class SemanticConsumer(StrEnum):
     """The one application consumer that claimed a multi-purpose event.
 
@@ -146,18 +139,24 @@ class InboundEvent:
 
 @dataclass(frozen=True, slots=True)
 class JournalEvent:
-    """One admitted event replayed from the journal."""
+    """One admitted event replayed from the journal.
+
+    Carries neither the class that decided whether it was actionable nor the
+    membership it was admitted under. Both are settled at admission and read
+    from the row by the journal itself -- the class becomes the ``pending``
+    state, and the epoch is asked for by ``admitted_membership_epoch`` when a
+    delivery is fenced. Replaying them beside the event would offer a consumer
+    a second, staler way to ask the same questions.
+    """
 
     event_id: str
     room_id: str
     thread_id: str | None
     kind: EventKind
-    event_class: EventClass
     sender: str
     origin_server_ts: int
     source: Mapping[str, object]
     receipt_order: int
-    membership_epoch: int
     semantic_consumer: SemanticConsumer | None = None
 
 

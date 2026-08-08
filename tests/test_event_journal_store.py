@@ -36,7 +36,6 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     ProjectedEvent,
-    SettlementOutcome,
     TerminalTurnWrite,
     delivery_transaction_id,
 )
@@ -52,9 +51,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore
+    from mindroom.event_journal import OutboxDelivery, PrincipalStore, TurnRecordStore
     from mindroom.event_journal.backend import Backend, Operation, Transaction
-    from mindroom.event_journal.schema import Dialect
 
 pytestmark = pytest.mark.asyncio
 
@@ -162,11 +160,6 @@ class _PausingTransaction:
         self._hook = hook
         self._paused = False
 
-    @property
-    def dialect(self) -> Dialect:
-        """Return the wrapped transaction's spelling."""
-        return self._inner.dialect
-
     def _pause(self) -> None:
         if not self._paused:
             self._paused = True
@@ -202,11 +195,6 @@ class _PausingBackend:
 
     inner: Backend
     after_first_statement: Callable[[], object]
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the wrapped backend's spelling."""
-        return self.inner.dialect
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Run one write, pausing inside its transaction."""
@@ -302,7 +290,7 @@ class TestPrincipalIsolation:
         await admit(first, "$shared-id")
         await admit(second, "$shared-id")
 
-        await second.settle("$shared-id", SettlementOutcome.SUCCEEDED)
+        await second.settle("$shared-id")
 
         assert await first.is_pending("$shared-id")
         assert not await second.is_pending("$shared-id")
@@ -371,7 +359,7 @@ class TestAdmission:
     async def test_settled_events_stay_out_of_replay(self, alice: PrincipalStore) -> None:
         """Settled events stay out of replay."""
         await admit(alice, "$one")
-        await alice.settle("$one", SettlementOutcome.SUCCEEDED)
+        await alice.settle("$one")
 
         assert await alice.pending() == ()
         assert await admit(alice, "$one") is AdmissionResult.DUPLICATE
@@ -380,7 +368,7 @@ class TestAdmission:
     async def test_settlement_releases_the_replay_payload(self, alice: PrincipalStore) -> None:
         """The row outlives its payload: it is the proof, not the work item."""
         await admit(alice, "$one")
-        await alice.settle("$one", SettlementOutcome.SUCCEEDED)
+        await alice.settle("$one")
 
         settled = await alice.load_event("$one")
         assert settled is not None
@@ -1150,7 +1138,7 @@ class TestLatestVisibleEvent:
         await admit(alice, "$reply", ts=2_000, thread_id="$root")
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") == "$reply"
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
@@ -1170,7 +1158,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     ) -> None:
         """Fence first, then enqueue: the enqueue is refused."""
         await admit(alice, "$turn")
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         transaction_id = await alice.enqueue_delivery(
             turn_id="$turn",
@@ -1200,7 +1188,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
             is not None
         )
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.load_delivery(turn_id="$turn", stage=DeliveryStage.FINAL) is None
 
@@ -1226,7 +1214,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         )
         await alice.claim_delivery(turn_id="$turn", stage=DeliveryStage.FINAL)
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         retried = await alice.enqueue_delivery(
             turn_id="$turn",
@@ -1249,7 +1237,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         work to belong to. Refusing it would silence scheduled delivery in
         every room the bot has ever left and rejoined.
         """
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         transaction_id = await alice.enqueue_delivery(
             turn_id="scheduled-task-7",
@@ -1281,7 +1269,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
 
         assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert not await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
 
@@ -1289,7 +1277,7 @@ class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
         """Leaving one room says nothing about a turn running in a different one."""
         await admit(alice, "$turn")
 
-        await alice.advance_membership_epoch(OTHER_ROOM)
+        await alice.fence_departure(OTHER_ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.turn_membership_is_current(turn_id="$turn", room_id=ROOM)
         assert (
@@ -1416,7 +1404,7 @@ class TestMembershipEpoch:
             expected_membership_epoch=epoch,
         )
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
@@ -1440,7 +1428,7 @@ class TestMembershipEpoch:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
@@ -1469,7 +1457,7 @@ class TestMembershipEpoch:
             payload=text("answer"),
         )
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.unacknowledged_deliveries() == ()
         assert await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL) is None
@@ -1493,7 +1481,7 @@ class TestMembershipEpoch:
         )
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         kept = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert kept is not None
@@ -1516,7 +1504,7 @@ class TestMembershipEpoch:
         await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         await alice.acknowledge_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL, event_id="$sent")
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
@@ -1570,7 +1558,7 @@ class TestMembershipEpoch:
         )
         assert await bodies(alice) == ["$before"]
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await bodies(alice) == []
 
@@ -1581,9 +1569,9 @@ class TestMembershipEpoch:
         """The dedup record has to outlive any rejoin, or the turn runs twice."""
         admission, projected = message("$answered")
         await alice.admit(admission, projected)
-        await alice.settle("$answered", SettlementOutcome.SUCCEEDED)
+        await alice.settle("$answered")
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.load_event("$answered") is not None
         assert await alice.admit(*message("$answered")) is AdmissionResult.DUPLICATE
@@ -1591,7 +1579,7 @@ class TestMembershipEpoch:
     async def test_hydration_racing_a_rejoin_installs_nothing(self, alice: PrincipalStore) -> None:
         """A partly applied hydration would look complete to the next reader."""
         stale_epoch = await alice.membership_epoch(ROOM)
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         installed = await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -2451,7 +2439,7 @@ class TestApprovalCards:
         """
         await self.remember(alice, "$card")
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await alice.pending_approval_card(room_id=ROOM, card_event_id="$card") is None
         assert await alice.pending_approval_cards(room_id=ROOM) == ()
@@ -2471,7 +2459,7 @@ class TestApprovalCards:
         """
         await self.remember(alice, "$card")
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         unanswerable = await alice.resolve_approval_card(card_event_id="$card", resolution={"status": "approved"})
         assert unanswerable.recorded is False
@@ -2494,7 +2482,7 @@ class TestApprovalCards:
             card=self.card("$other"),
         )
 
-        await alice.advance_membership_epoch(ROOM)
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         stored = await alice.pending_approval_card(room_id=OTHER_ROOM, card_event_id="$other")
         assert stored is not None
@@ -2831,6 +2819,16 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
     that can answer a message twice.
     """
 
+    @staticmethod
+    async def _stored(records: TurnRecordStore) -> dict[str, str]:
+        """Return one agent's records keyed by the event that indexes each.
+
+        Read through `load_all`, which is the whole read surface: a warm-up
+        rebuilds the map once and answers every later question from memory, so
+        the store has no point lookup for anything else to depend on.
+        """
+        return {index: record for index, _anchor, record in await records.load_all()}
+
     async def test_a_record_is_reachable_from_every_event_that_indexes_it(
         self,
         journal_store: EventJournalStore,
@@ -2847,9 +2845,11 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
             record_json='{"anchor_event_id": "$a"}',
         )
 
-        for event_id in ("$a", "$b", "$c"):
-            assert await records.load(event_id=event_id) == '{"anchor_event_id": "$a"}'
-        assert await records.load(event_id="$missing") is None
+        assert await self._stored(records) == {
+            "$a": '{"anchor_event_id": "$a"}',
+            "$b": '{"anchor_event_id": "$a"}',
+            "$c": '{"anchor_event_id": "$a"}',
+        }
 
     async def test_an_index_the_turn_no_longer_answers_is_dropped(
         self,
@@ -2870,8 +2870,7 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
 
         await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 2}')
 
-        assert await records.load(event_id="$a") == '{"v": 2}'
-        assert await records.load(event_id="$b") is None
+        assert await self._stored(records) == {"$a": '{"v": 2}'}
 
     async def test_a_re_anchored_record_leaves_no_row_under_its_old_anchor(
         self,
@@ -2896,9 +2895,7 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         # `$a` is redacted away, so the record re-anchors onto `$b`.
         await records.upsert(index_event_ids=("$b",), anchor_event_id="$b", record_json='{"v": 2}')
 
-        assert await records.load(event_id="$a") is None, "the old anchor's row survived re-anchoring"
-        assert await records.load(event_id="$b") == '{"v": 2}'
-        assert [index for index, _anchor, _json in await records.load_all()] == ["$b"]
+        assert await self._stored(records) == {"$b": '{"v": 2}'}, "the old anchor's row survived re-anchoring"
 
     async def test_records_are_scoped_to_the_agent_not_the_matrix_identity(
         self,
@@ -2919,8 +2916,8 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         other_agent = journal_store.turn_records("other-agent")
         await first.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 1}')
 
-        assert await journal_store.turn_records("agent").load(event_id="$a") == '{"v": 1}'
-        assert await other_agent.load(event_id="$a") is None, "one agent read another's turn records"
+        assert await self._stored(journal_store.turn_records("agent")) == {"$a": '{"v": 1}'}
+        assert await self._stored(other_agent) == {}, "one agent read another's turn records"
 
     async def test_a_warm_up_reads_every_record_in_a_stable_order(
         self,
@@ -2949,5 +2946,4 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
 
         await records.forget(index_event_ids=("$a",))
 
-        assert await records.load(event_id="$a") is None
-        assert await records.load(event_id="$b") == '{"v": 1}'
+        assert await self._stored(records) == {"$b": '{"v": 1}'}

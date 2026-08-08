@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from .schema import Dialect
-
 
 type _Params = Sequence[Any]
 type Row = Mapping[str, Any]
@@ -22,11 +20,6 @@ type Row = Mapping[str, Any]
 
 class Transaction(Protocol):
     """Statement execution inside one committed unit of work."""
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the backend spelling in use, for the rare divergent statement."""
-        ...
 
     def execute(self, sql: str, params: _Params = ()) -> None:
         """Run one statement."""
@@ -46,11 +39,6 @@ type Operation[T] = Callable[[Transaction], T]
 
 class Backend(Protocol):
     """A durable store that can run read and write transactions."""
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the SQL spelling this backend uses."""
-        ...
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Run one operation in a serialized write transaction and commit it."""

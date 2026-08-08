@@ -17,7 +17,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import DepartureSource, EventClass, EventKind
 from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
     _MAX_MESSAGES_REQUESTS,
@@ -553,7 +553,7 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     await export(reader)
     homeserver.reset_counts()
 
-    await router.advance_membership_epoch(ROOM)
+    await router.fence_departure(ROOM, source=DepartureSource.LOCAL)
     homeserver.relations[ROOT] = [
         raw("$a:example.org", "first", ts=200, thread_id=ROOT),
         raw("$b:example.org", "second", ts=300, thread_id=ROOT),

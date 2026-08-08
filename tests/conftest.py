@@ -122,7 +122,6 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
-    from mindroom.event_journal.schema import Dialect
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -1136,11 +1135,6 @@ class DiesAfterNextWriteCommit:
     # How many write transactions have committed through this view, so a test
     # can say which side of a commit something else happened on.
     commits: int = 0
-
-    @property
-    def dialect(self) -> "Dialect":
-        """Return the SQL spelling the wrapped backend uses."""
-        return self.inner.dialect
 
     async def write[T](self, operation: "Operation[T]") -> T:
         """Commit one write transaction, then die if this was the armed one."""

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, Dialect, render, schema_statements
+from .schema import SQLITE_DIALECT, render, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -38,11 +38,6 @@ class _SqliteTransaction:
     """Statement execution against one open SQLite connection."""
 
     connection: sqlite3.Connection
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the SQLite spelling."""
-        return SQLITE_DIALECT
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
@@ -78,11 +73,6 @@ class SqliteBackend:
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
-
-    @property
-    def dialect(self) -> Dialect:
-        """Return the SQLite spelling."""
-        return SQLITE_DIALECT
 
     @classmethod
     def open(cls, database_path: Path) -> SqliteBackend:

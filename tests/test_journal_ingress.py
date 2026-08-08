@@ -26,7 +26,6 @@ from mindroom.event_journal import (
     EventClass,
     EventKind,
     SemanticConsumer,
-    SettlementOutcome,
     VisibleMessage,
 )
 from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
@@ -1182,7 +1181,7 @@ class TestDurableAdmission:
             inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
             projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
-        await alice.settle(event.event_id, SettlementOutcome.SUCCEEDED)
+        await alice.settle(event.event_id)
         dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
 
         await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
@@ -1265,9 +1264,9 @@ class TestPendingEventWorker:
         """A rooms events run in receipt order."""
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$second", ts=9_000))
         await self._admit(alice, text_event("$first", ts=1_000))
@@ -1280,11 +1279,11 @@ class TestPendingEventWorker:
         """A settled event never runs again."""
         runs = 0
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             nonlocal runs
             runs += 1
             del event
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         worker = PendingEventWorker(store=alice, handle=handle)
@@ -1297,7 +1296,7 @@ class TestPendingEventWorker:
     async def test_a_failed_event_stays_pending(self, alice: PrincipalStore) -> None:
         """A failed event stays pending."""
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             del event
             msg = "model unavailable"
             raise RuntimeError(msg)
@@ -1315,12 +1314,12 @@ class TestPendingEventWorker:
         """Otherwise the room is answered out of order, and the retry lands last."""
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
             if event.event_id == "$first":
                 msg = "model unavailable"
                 raise RuntimeError(msg)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$first", ts=1_000))
         await self._admit(alice, text_event("$second", ts=2_000))
@@ -1356,7 +1355,7 @@ class TestPendingEventWorker:
         inside_first = asyncio.Event()
         release_first = asyncio.Event()
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             nonlocal concurrent, peak_concurrent
             handled.append(event.event_id)
             concurrent += 1
@@ -1370,7 +1369,7 @@ class TestPendingEventWorker:
                 await alice.claim_semantic_consumer(event.event_id, SemanticConsumer.REACTION_HOOKS)
             finally:
                 concurrent -= 1
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         for event_id in ("$first", "$second", "$third"):
             await self._admit_reaction(alice, reaction_event(event_id))
@@ -1402,13 +1401,13 @@ class TestPendingEventWorker:
         fast_finished = asyncio.Event()
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             if event.room_id == ROOM:
                 await released.wait()
             handled.append(event.event_id)
             if event.room_id == other_room:
                 fast_finished.set()
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$slow"))
         await self._admit(alice, text_event("$fast"), room_id=other_room)
@@ -1432,11 +1431,11 @@ class TestPendingEventWorker:
         """A crash mid-turn must make the event eligible again, not stranded."""
         started = asyncio.Event()
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             del event
             started.set()
             await asyncio.sleep(3600)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         worker = PendingEventWorker(store=alice, handle=handle)
@@ -1454,14 +1453,14 @@ class TestPendingEventWorker:
         """A restart resumes what the previous process left."""
         handled: list[str] = []
 
-        async def never(event: JournalEvent) -> SettlementOutcome:
+        async def never(event: JournalEvent) -> bool:
             del event
             await asyncio.sleep(3600)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         crashed = PendingEventWorker(store=alice, handle=never)
@@ -1487,9 +1486,9 @@ class TestPendingEventWorker:
         count = _BATCH_SIZE + 1
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         for index in range(count):
             await self._admit(alice, text_event(f"$m{index:04d}", ts=1_000 + index))
@@ -1515,11 +1514,11 @@ class TestPendingEventWorker:
         released = asyncio.Event()
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             if event.event_id == "$slow":
                 await released.wait()
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         worker = PendingEventWorker(store=alice, handle=handle)
         await self._admit(alice, text_event("$slow", ts=1_000))
@@ -1551,9 +1550,9 @@ class TestPendingEventWorker:
         """
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return None if event.event_id.startswith("$busy") else SettlementOutcome.SUCCEEDED
+            return not event.event_id.startswith("$busy")
 
         for index in range(_BATCH_SIZE):
             await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), room_id=f"!r{index}:x")
@@ -1579,12 +1578,12 @@ class TestPendingEventWorker:
         """Nothing else wakes the pump, so the failure has to schedule its own retry."""
         attempts: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
             if len(attempts) == 1:
                 msg = "model unavailable"
                 raise RuntimeError(msg)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         worker = PendingEventWorker(store=alice, handle=handle)
@@ -1952,7 +1951,7 @@ class TestUnsettledLifecycleIdentities:
             await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
 
 
-async def _never_called(event: JournalEvent) -> SettlementOutcome:
+async def _never_called(event: JournalEvent) -> bool:
     """Fail loudly, for a worker whose scan is under test rather than its lanes."""
     msg = f"no handler should have run for {event.event_id}"
     raise AssertionError(msg)
@@ -2004,9 +2003,9 @@ class TestABoundedScanIsFair:
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return None if event.event_id.startswith("$busy") else SettlementOutcome.SUCCEEDED
+            return not event.event_id.startswith("$busy")
 
         for index in range(_BATCH_SIZE):
             await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
@@ -2043,11 +2042,11 @@ class TestABoundedScanIsFair:
         handled: list[str] = []
         lost: set[str] = set()
 
-        async def handle(event: JournalEvent) -> SettlementOutcome | None:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
             # A source taken back from a dead owner is answered rather than
             # deferred again, so the count below stays a count of one.
-            return SettlementOutcome.SUCCEEDED if event.event_id in lost else None
+            return event.event_id in lost
 
         for index in range(_BATCH_SIZE):
             await self._admit(alice, text_event(f"$busy{index:04d}", ts=1_000 + index), f"!r{index}:x")
@@ -2089,9 +2088,9 @@ class TestABoundedScanIsFair:
         """
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit_unreadable_window(alice)
 
@@ -2157,9 +2156,9 @@ class TestABoundedScanIsFair:
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         handled: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             handled.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit_unreadable_window(alice)
 
@@ -2283,7 +2282,7 @@ class TestADrainSeesTheWholeBacklog:
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             msg = f"nothing can run {event.event_id}"
             raise RuntimeError(msg)
 
@@ -2307,8 +2306,8 @@ class TestADrainSeesTheWholeBacklog:
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
 
-        async def handle(_event: JournalEvent) -> SettlementOutcome:
-            return SettlementOutcome.SUCCEEDED
+        async def handle(_event: JournalEvent) -> bool:
+            return True
 
         for index in range(5):
             await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), f"!r{index}:x")
@@ -2346,12 +2345,12 @@ class _FlakyReplayView:
             raise RuntimeError(msg)
         return await self.inner.is_pending(event_id)
 
-    async def settle(self, event_id: str, outcome: SettlementOutcome) -> None:
+    async def settle(self, event_id: str) -> None:
         if event_id in self.fail_settle:
             self.fail_settle.discard(event_id)
             msg = "the journal is unwritable"
             raise RuntimeError(msg)
-        await self.inner.settle(event_id, outcome)
+        await self.inner.settle(event_id)
 
 
 class TestStoreFailuresBelongToTheLane:
@@ -2376,9 +2375,9 @@ class TestStoreFailuresBelongToTheLane:
         """
         attempts: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         store = _FlakyReplayView(alice, fail_is_pending={"$m"})
@@ -2406,9 +2405,9 @@ class TestStoreFailuresBelongToTheLane:
         """
         attempts: list[str] = []
 
-        async def handle(event: JournalEvent) -> SettlementOutcome:
+        async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
-            return SettlementOutcome.SUCCEEDED
+            return True
 
         await self._admit(alice, text_event("$m"))
         store = _FlakyReplayView(alice, fail_settle={"$m"})

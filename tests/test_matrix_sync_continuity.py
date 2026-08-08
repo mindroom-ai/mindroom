@@ -77,6 +77,7 @@ if TYPE_CHECKING:
 
     from mindroom.cancellation import TaskCancelSource
     from mindroom.coalescing import LaneSlot, _GateEntry
+    from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.models import DepartureOutcome, DepartureSource
     from mindroom.final_delivery import FinalDeliveryOutcome
 
@@ -486,11 +487,11 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
     await admission(room, event, nio.TimelineEventProvenance.HISTORY)
 
     # Cold history is admitted as context, so it owes no semantic work at all
-    # rather than being admitted and then refused.
+    # rather than being admitted and then refused. Being admitted settled is
+    # the whole of what "context only" means durably; nothing records the
+    # classification beside it.
     assert not await bot._journal_dispatcher.store.is_pending(event.event_id)
-    stored = await bot._journal_dispatcher.store.load_event(event.event_id)
-    assert stored is not None
-    assert stored.event_class is EventClass.CONTEXT_ONLY
+    assert await bot._journal_dispatcher.store.load_event(event.event_id) is not None
 
 
 @pytest.mark.asyncio
@@ -711,6 +712,16 @@ def _limited_empty_classic_response(room_id: str) -> nio.SyncResponse:
     )
     assert isinstance(response, nio.SyncResponse)
     return response
+
+
+async def _is_projected(store: PrincipalStore, *, room_id: str, event_id: str) -> bool:
+    """Return whether one message is readable in a room's projected conversation.
+
+    Asked through the conversation read every production caller uses, rather
+    than through a point lookup that exists for nobody else.
+    """
+    page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)
+    return any(message.logical_event_id == event_id for message in page.messages)
 
 
 def _register_counted_source_callbacks(bot: AgentBot, client: nio.AsyncClient) -> MagicMock:
@@ -2445,11 +2456,13 @@ async def test_nio_limited_recovery_projects_history_before_dispatch(tmp_path: P
         room: nio.MatrixRoom,
         event: nio.Event,
     ) -> TurnDispatchOutcome:
-        projected = await bot._journal_dispatcher.store.visible_message(
-            room_id=room.room_id,
-            logical_event_id=event.event_id,
+        was_projected_at_dispatch.append(
+            await _is_projected(
+                bot._journal_dispatcher.store,
+                room_id=room.room_id,
+                event_id=event.event_id,
+            ),
         )
-        was_projected_at_dispatch.append(projected is not None)
         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     turn_callback = AsyncMock(side_effect=observe_projection_before_turn)
@@ -2655,13 +2668,13 @@ async def test_nio_retries_recovered_event_when_journal_admission_fails(
         recovery = cast("Any", client)._recovery
         assert isinstance(exc_info.value.__cause__, OSError)
         assert history_text.event_id not in recovery.completed.get(room_id, {})
-        assert (await store.visible_message(room_id=room_id, logical_event_id=history_text.event_id)) is None
+        assert not await _is_projected(store, room_id=room_id, event_id=history_text.event_id)
 
         await client.receive_response(response)
 
         assert admit_attempts == 2
         assert response.recovered_room_ids == frozenset({room_id})
-        assert (await store.visible_message(room_id=room_id, logical_event_id=history_text.event_id)) is not None
+        assert await _is_projected(store, room_id=room_id, event_id=history_text.event_id)
         await bot._journal_dispatcher.drain_once()
         assert await bot._journal_dispatcher.store.pending() == ()
         turn_callback.assert_awaited_once()

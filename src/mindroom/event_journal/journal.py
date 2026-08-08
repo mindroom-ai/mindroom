@@ -13,7 +13,6 @@ noticed.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,7 +30,6 @@ from .models import (
     JournalEvent,
     PendingPage,
     SemanticConsumer,
-    SettlementOutcome,
 )
 from .projection import ProjectedEvent, project
 from .schema import PENDING_STATE, SETTLED_STATE
@@ -43,8 +41,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _JOURNAL_COLUMNS = """
-    event_id, room_id, thread_id, kind, event_class, sender,
-    origin_server_ts, source_json, receipt_order, membership_epoch, semantic_consumer
+    event_id, room_id, thread_id, kind, sender,
+    origin_server_ts, source_json, receipt_order, semantic_consumer
 """
 
 # How many rows one page will step over without being able to read them.
@@ -76,11 +74,11 @@ def store_generation(transaction: Transaction, *, new_generation: str) -> str:
     """
     transaction.execute(
         """
-        INSERT INTO journal_identity (singleton, generation, created_at_ns)
-        VALUES (?, ?, ?)
+        INSERT INTO journal_identity (singleton, generation)
+        VALUES (?, ?)
         ON CONFLICT (singleton) DO NOTHING
         """,
-        (True, new_generation, time.time_ns()),
+        (True, new_generation),
     )
     row = transaction.fetchone("SELECT generation FROM journal_identity WHERE singleton = ?", (True,))
     if row is None:
@@ -220,18 +218,11 @@ def advance_membership_epoch(
     transaction.execute(
         f"""
         UPDATE journal_events
-        SET state = ?, outcome = ?, settled_at_ns = ?, source_json = '', semantic_consumer = NULL
+        SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND state = 'pending'
           AND kind IN ({kind_placeholders})
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (
-            SETTLED_STATE,
-            SettlementOutcome.INTENTIONALLY_IGNORED.value,
-            time.time_ns(),
-            principal_id,
-            room_id,
-            *turn_backed,
-        ),
+        (SETTLED_STATE, principal_id, room_id, *turn_backed),
     )
     return epoch
 
@@ -417,9 +408,9 @@ def admit(
     row = transaction.fetchone(
         """
         INSERT INTO journal_events (
-            principal_id, event_id, room_id, thread_id, kind, event_class, sender,
-            origin_server_ts, source_json, membership_epoch, state, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            principal_id, event_id, room_id, thread_id, kind, sender,
+            origin_server_ts, source_json, membership_epoch, state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, event_id) DO NOTHING
         RETURNING receipt_order
         """,
@@ -429,7 +420,6 @@ def admit(
             event.room_id,
             encode_thread_id(event.thread_id),
             event.kind.value,
-            event.event_class.value,
             event.sender,
             event.origin_server_ts,
             (
@@ -439,7 +429,6 @@ def admit(
             ),
             epoch,
             PENDING_STATE if actionable else SETTLED_STATE,
-            time.time_ns(),
         ),
     )
     if row is None:
@@ -701,37 +690,31 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
     return row is not None
 
 
-def settle(
-    transaction: Transaction,
-    principal_id: str,
-    event_id: str,
-    outcome: SettlementOutcome,
-) -> None:
+def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     """Mark one event's semantic work terminal and release its replay payload.
 
     The payload is cleared rather than the row deleted: the row is the proof
     that this event already produced its one turn, and it has to outlive the
     work it authorized.
+
+    Settled is the whole fact. Why the work ended -- answered, or deliberately
+    not answered -- was recorded for a while and never once read back, and a
+    durable column nothing consults is a claim nothing keeps honest.
     """
     transaction.execute(
         """
         UPDATE journal_events
-        SET state = ?, outcome = ?, settled_at_ns = ?, source_json = '', semantic_consumer = NULL
+        SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
         """,
-        (SETTLED_STATE, outcome.value, time.time_ns(), principal_id, event_id),
+        (SETTLED_STATE, principal_id, event_id),
     )
 
 
-def settle_many(
-    transaction: Transaction,
-    principal_id: str,
-    event_ids: tuple[str, ...],
-    outcome: SettlementOutcome,
-) -> None:
+def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:
     """Settle several events that one terminal turn accounted for."""
     for event_id in event_ids:
-        settle(transaction, principal_id, event_id, outcome)
+        settle(transaction, principal_id, event_id)
 
 
 def unsettled_event_ids(transaction: Transaction, principal_id: str) -> frozenset[str]:
@@ -803,12 +786,10 @@ def _journal_event(row: Row) -> JournalEvent:
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
         kind=EventKind(row["kind"]),
-        event_class=EventClass(row["event_class"]),
         sender=row["sender"],
         origin_server_ts=int(row["origin_server_ts"]),
         source=source,
         receipt_order=int(row["receipt_order"]),
-        membership_epoch=int(row["membership_epoch"]),
         semantic_consumer=(
             SemanticConsumer(row["semantic_consumer"]) if row["semantic_consumer"] is not None else None
         ),

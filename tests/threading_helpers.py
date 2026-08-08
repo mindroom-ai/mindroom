@@ -22,7 +22,6 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     ProjectedEvent,
-    SettlementOutcome,
     VisibleMessage,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -141,7 +140,7 @@ async def seed_thread_history(
                 redacts_event_id=None,
             ),
         )
-        await store.settle(message.event_id, SettlementOutcome.SUCCEEDED)
+        await store.settle(message.event_id)
     if not hydrated:
         return
     # A strict read hydrates before it answers, and hydration talks to Matrix.
