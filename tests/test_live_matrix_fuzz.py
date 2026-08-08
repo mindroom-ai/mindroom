@@ -170,7 +170,6 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
             historical_output_counts=(0, 0),
             historical_callback_counts=(0, 0),
             projected_after_answer_count=0,
-            context_only_count=4,
             historical_projected_on_room_read=0,
             fresh_agent_output_count=1,
             fresh_router_output_count=0,
@@ -273,7 +272,7 @@ def seeded_restart_observation_stack(
     stop_calls: list[float] = []
     stack.agent_id, stack.router_id = "@agent:example", "@router:example"
     monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-    monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
+    monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "settled")
 
     def record_stop(*, timeout: float = 20) -> bool:
         stop_calls.append(timeout)
@@ -453,7 +452,6 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         historical_output_counts=(0, 0),
         historical_callback_counts=(0, 0),
         projected_after_answer_count=0,
-        context_only_count=4,
         historical_projected_on_room_read=2,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
@@ -475,7 +473,6 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
             projected_after_answer_count=0,
-            context_only_count=0,
             historical_projected_on_room_read=0,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
@@ -756,118 +753,6 @@ def test_restart_regression_projection_evidence_uses_production_schema_and_exact
         stack.close()
 
 
-def _seed_journal_event(
-    stack: ManagedTuwunelStack,
-    *,
-    principal: str,
-    event_id: str,
-    room_id: str,
-    event_class: str = "context_only",
-    state: str = "settled",
-    outcome: str | None = None,
-) -> None:
-    """Write one journal row through the production schema."""
-    database_path = stack.storage_path / "tracking" / "event_journal.db"
-    EventJournalStore.open_sqlite(database_path)
-    with closing(sqlite3.connect(database_path)) as fixture_database:
-        fixture_database.execute(
-            """
-            INSERT INTO journal_events(
-                principal_id,
-                event_id,
-                room_id,
-                thread_id,
-                kind,
-                event_class,
-                sender,
-                origin_server_ts,
-                source_json,
-                membership_epoch,
-                created_at_ns,
-                state,
-                outcome
-            ) VALUES (?, ?, ?, '', 'message', ?, '@sender:example', 1, '{}', 0, 1, ?, ?)
-            """,
-            (principal, event_id, room_id, event_class, state, outcome),
-        )
-        fixture_database.commit()
-
-
-def _seed_qualifying_restart_history(stack: ManagedTuwunelStack, **overrides: object) -> None:
-    """Seed the four qualifying rows, optionally spoiling exactly one.
-
-    Spoiling one row is what isolates a clause: ``(principal_id, event_id)`` is
-    unique, so a clause can only be probed by making a row that would otherwise
-    count stop counting.
-    """
-    rows = (
-        ("general@@agent:example", "$old-text"),
-        ("general@@agent:example", "$old-media"),
-        ("router@@router:example", "$old-text"),
-        ("router@@router:example", "$old-media"),
-    )
-    for index, (principal, event_id) in enumerate(rows):
-        _seed_journal_event(
-            stack,
-            principal=principal,
-            event_id=event_id,
-            room_id="!target:example",
-            **(cast("Any", overrides) if index == 0 else {}),
-        )
-
-
-def test_restart_context_only_measurement_uses_production_schema_and_exact_filters() -> None:
-    """Principal, room, and event filters must reject plausible distractor rows."""
-    stack = ManagedTuwunelStack()
-    try:
-        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-        _seed_qualifying_restart_history(stack)
-        _seed_journal_event(
-            stack,
-            principal="general@@wrong:example",
-            event_id="$old-text",
-            room_id="!target:example",
-        )
-        _seed_journal_event(
-            stack,
-            principal="general@@agent:example",
-            event_id="$wrong-event",
-            room_id="!target:example",
-        )
-
-        event_ids = ("$old-text", "$old-media")
-        assert stack.context_only_restart_event_pair_count("!target:example", event_ids) == 4
-        # The room filter cannot be probed with a colliding row, because
-        # (principal_id, event_id) is unique. Ask a different room instead.
-        assert stack.context_only_restart_event_pair_count("!wrong:example", event_ids) == 0
-    finally:
-        stack.close()
-
-
-@pytest.mark.parametrize(
-    ("spoiled", "reason"),
-    [
-        ({"event_class": "actionable"}, "an actionable event is the turn this measurement excludes"),
-        ({"outcome": "succeeded"}, "an outcome means a turn ran"),
-        ({"state": "pending"}, "an unsettled event has not finished being nothing"),
-    ],
-)
-def test_restart_context_only_measurement_requires_every_clause(
-    spoiled: dict[str, str],
-    reason: str,
-) -> None:
-    """Class, outcome, and settlement must each independently drop the count."""
-    assert reason
-    stack = ManagedTuwunelStack()
-    try:
-        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-        _seed_qualifying_restart_history(stack, **spoiled)
-
-        assert stack.context_only_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 3
-    finally:
-        stack.close()
-
-
 def _seed_visible_message(
     stack: ManagedTuwunelStack,
     *,
@@ -992,7 +877,6 @@ async def test_restart_room_read_without_persisted_credentials_fails_the_invaria
                     historical_output_counts=(0, 0),
                     historical_callback_counts=(0, 0),
                     projected_after_answer_count=0,
-                    context_only_count=4,
                     historical_projected_on_room_read=observed,
                     fresh_agent_output_count=1,
                     fresh_router_output_count=0,
@@ -1142,14 +1026,12 @@ def test_restart_regression_reads_exact_durable_journal_state() -> None:
             timeout=0.01,
         )
 
-        # A settled row reports its outcome, which is the fact the oracle needs.
+        # Settling is the fact the oracle needs; the journal records no reason.
         with closing(sqlite3.connect(database_path)) as database:
-            database.execute(
-                "UPDATE journal_events SET state = 'settled', outcome = 'succeeded', settled_at_ns = 2",
-            )
+            database.execute("UPDATE journal_events SET state = 'settled'")
             database.commit()
 
-        assert stack.restart_journal_event_state("$fresh") == "succeeded"
+        assert stack.restart_journal_event_state("$fresh") == "settled"
     finally:
         stack.close()
 
@@ -1805,7 +1687,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "projected_restart_event_pair_count", lambda _room_id, _event_ids: 4)
-        monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "succeeded")
+        monkeypatch.setattr(stack, "restart_journal_event_state", lambda _event_id: "settled")
         dormant = DormantClient()
 
         def drain_callbacks(*, timeout: float = 20) -> bool:
@@ -2273,14 +2155,12 @@ def test_require_runtime_alive_reports_an_exited_child() -> None:
         stack.close()
 
 
-def _journal_row(*, state: str, outcome: str | None) -> JournalRow:
+def _journal_row(*, state: str) -> JournalRow:
     """Build one durable journal row for the classifier."""
     return JournalRow(
         principal_id="general@@agent:example",
         kind="message",
-        event_class="actionable",
         state=state,
-        outcome=outcome,
         semantic_consumer=None,
         receipt_order=12,
     )
@@ -2301,22 +2181,22 @@ def _outbox_row(*, acknowledged_event_id: str | None) -> OutboxRow:
     [
         ((), (), MissingReplyStage.NOT_ADMITTED),
         (
-            (_journal_row(state="pending", outcome=None),),
+            (_journal_row(state="pending"),),
             (),
             MissingReplyStage.ADMITTED_NEVER_DISPATCHED,
         ),
         (
-            (_journal_row(state="settled", outcome="intentionally_ignored"),),
+            (_journal_row(state="settled"),),
             (),
             MissingReplyStage.SETTLED_WITHOUT_REPLY,
         ),
         (
-            (_journal_row(state="pending", outcome=None),),
+            (_journal_row(state="pending"),),
             (_outbox_row(acknowledged_event_id=None),),
             MissingReplyStage.DISPATCHED_NEVER_SENT,
         ),
         (
-            (_journal_row(state="settled", outcome="succeeded"),),
+            (_journal_row(state="settled"),),
             (_outbox_row(acknowledged_event_id="$reply"),),
             MissingReplyStage.SENT_BUT_UNOBSERVED,
         ),

@@ -353,7 +353,6 @@ class RestartRegressionObservation:
     historical_output_counts: tuple[int, int]
     historical_callback_counts: tuple[int, int]
     projected_after_answer_count: int
-    context_only_count: int
     historical_projected_on_room_read: int
     fresh_agent_output_count: int
     fresh_router_output_count: int
@@ -1154,9 +1153,7 @@ class JournalRow:
 
     principal_id: str
     kind: str
-    event_class: str
     state: str
-    outcome: str | None
     semantic_consumer: str | None
     receipt_order: int
 
@@ -1204,7 +1201,6 @@ def classify_missing_reply(
         )
     states = ", ".join(
         f"{row.principal_id}={row.state}"
-        + (f"/{row.outcome}" if row.outcome else "")
         + (f" consumer={row.semantic_consumer}" if row.semantic_consumer else "")
         + f" receipt_order={row.receipt_order}"
         for row in sorted(journal_rows, key=lambda row: row.principal_id)
@@ -1443,35 +1439,6 @@ class ManagedTuwunelStack:
         )
         return cast("int", rows[0][0]) if rows else 0
 
-    def context_only_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
-        """Count exact principal/event pairs admitted as context and settled without a turn.
-
-        Reported rather than asserted. Whether pre-gap history reaches a
-        principal as ``context_only`` or as an actionable event the policy then
-        ignores is a classification detail this profile does not control, and
-        both suppress the turn. The invariant that matters — no output, no
-        callback, no prompt — is asserted separately and does not care which
-        mechanism did it.
-        """
-        rows = self._journal_query(
-            """
-            SELECT COUNT(*) FROM journal_events
-            WHERE principal_id IN (?, ?)
-              AND room_id = ?
-              AND event_id IN (?, ?)
-              AND event_class = 'context_only'
-              AND state = 'settled'
-              AND outcome IS NULL
-            """,
-            (
-                self._journal_principal_id(self.agent_id),
-                self._journal_principal_id(self.router_id, agent_name=ROUTER_NAME),
-                room_id,
-                *event_ids,
-            ),
-        )
-        return cast("int", rows[0][0]) if rows else 0
-
     def agent_matrix_credentials(self) -> tuple[str, str] | None:
         """Return the managed agent's persisted access token and device ID."""
         state_path = self.storage_path / "matrix_state.yaml"
@@ -1531,11 +1498,10 @@ class ManagedTuwunelStack:
     def restart_journal_event_state(self, event_id: str) -> str | None:
         """Return the durable state of one agent message without creating storage.
 
-        A settled event reports its outcome rather than the literal `settled`,
-        because the outcome is the fact a caller cares about. An event whose
-        turn is still running is simply pending: the journal has no separate
-        `deferred` state, since a process that dies mid-turn must leave the
-        event eligible for retry either way.
+        Settled or pending, which is the whole of what the journal records.
+        An event whose turn is still running is simply pending: there is no
+        separate `deferred` state, since a process that dies mid-turn must
+        leave the event eligible for retry either way.
         """
         database_path = self.storage_path / "tracking" / "event_journal.db"
         if not database_path.exists():
@@ -1543,7 +1509,7 @@ class ManagedTuwunelStack:
         with closing(sqlite3.connect(database_path)) as database:
             row = database.execute(
                 """
-                SELECT state, outcome
+                SELECT state
                 FROM journal_events
                 WHERE principal_id = ? AND event_id = ? AND kind = 'message'
                 """,
@@ -1551,8 +1517,7 @@ class ManagedTuwunelStack:
             ).fetchone()
         if row is None:
             return None
-        state, outcome = row
-        return str(outcome) if state == "settled" and outcome else str(state)
+        return str(row[0])
 
     def _journal_query(self, query: str, parameters: tuple[object, ...]) -> list[tuple[object, ...]]:
         """Read the durable journal without creating it when it is absent."""
@@ -1568,15 +1533,13 @@ class ManagedTuwunelStack:
             JournalRow(
                 principal_id=str(row[0]),
                 kind=str(row[1]),
-                event_class=str(row[2]),
-                state=str(row[3]),
-                outcome=None if row[4] is None else str(row[4]),
-                semantic_consumer=None if row[5] is None else str(row[5]),
-                receipt_order=int(cast("int", row[6])),
+                state=str(row[2]),
+                semantic_consumer=None if row[3] is None else str(row[3]),
+                receipt_order=int(cast("int", row[4])),
             )
             for row in self._journal_query(
                 """
-                SELECT principal_id, kind, event_class, state, outcome, semantic_consumer, receipt_order
+                SELECT principal_id, kind, state, semantic_consumer, receipt_order
                 FROM journal_events
                 WHERE event_id = ?
                 """,
@@ -2413,7 +2376,6 @@ class LiveFuzzRunner:
             _raise_restart_failures(failures)
         return {
             "historical_events_projected_after_answer": observation.projected_after_answer_count,
-            "historical_events_context_only": observation.context_only_count,
             "historical_events_projected_on_room_read": observation.historical_projected_on_room_read,
             "historical_outputs": sum(observation.historical_output_counts),
             "status": "PASS",
@@ -2456,10 +2418,6 @@ class LiveFuzzRunner:
             dormant.room_id,
             historical_event_ids,
         )
-        context_only_count = self.stack.context_only_restart_event_pair_count(
-            dormant.room_id,
-            historical_event_ids,
-        )
         fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
             log,
             fresh_event_id,
@@ -2493,9 +2451,14 @@ class LiveFuzzRunner:
                 bool(fresh_response_bodies)
                 and all(RECOVERED_RUNTIME_GENERATION_MARKER in body for body in fresh_response_bodies)
             ),
-            fresh_obligation_recovered=(self.stack.restart_journal_event_state(fresh_event_id) == "succeeded"),
+            # Settled, which after recovery means the obligation was picked up
+            # and finished. The journal no longer records *why* it finished --
+            # nothing production reads that -- so whether the turn answered is
+            # asserted by `recovered_generation_response_observed` and the
+            # fresh-output count instead, which measure the visible reply
+            # rather than a claim about it.
+            fresh_obligation_recovered=(self.stack.restart_journal_event_state(fresh_event_id) == "settled"),
             projected_after_answer_count=projected_after_answer_count,
-            context_only_count=context_only_count,
             # Filled in by the runner once every other observation is safely
             # made, because reading a conversation hydrates it.
             historical_projected_on_room_read=0,
