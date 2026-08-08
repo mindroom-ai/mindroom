@@ -1673,6 +1673,74 @@ class TestPendingEventWorker:
 
         assert attempts == ["$m", "$m"]
 
+    async def test_a_reclaimed_deferral_does_not_jump_ahead_of_an_earlier_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A lane runs its list verbatim, so the list has to be in receipt order.
+
+        Reclaimed deferrals seed the grouping before any page is read, and the
+        reclaim knows nothing about where they sit in the backlog. So a later
+        message taken back from a dead owner was handed to the room's lane
+        ahead of an earlier one that had simply never run -- the room answered
+        out of order, which is the one thing a lane exists to prevent.
+        """
+        handled: list[str] = []
+        owner_alive = True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return False
+
+        await self._admit(alice, text_event("$early", ts=1_000))
+        await self._admit(alice, text_event("$late", ts=2_000))
+        worker = PendingEventWorker(
+            store=alice,
+            handle=handle,
+            deferral_is_live=lambda _event: owner_alive,
+        )
+
+        # `$early` is claimed by a caller running it itself, so only `$late`
+        # reaches a lane and defers to an owner that then dies.
+        with worker.sole_handler("$early"):
+            await worker.drain_once()
+        assert handled == ["$late"]
+        handled.clear()
+
+        owner_alive = False
+        await worker.drain_once()
+
+        assert handled == ["$early", "$late"]
+
+    async def test_a_wrapped_pass_does_not_run_its_tail_before_its_head(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The other way one room's list comes out inverted.
+
+        A pass that ran out of page budget resumes at its cursor, reads to the
+        end of the backlog, and only then wraps to the front. Those two blocks
+        arrive in the opposite order to the one they were received in, and the
+        room's lane is handed the concatenation.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 3)
+        for index in range(8):
+            await self._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        # One budget-limited pass parks the cursor part way through the
+        # backlog; the next reads the tail, hits the end, and wraps.
+        await worker._collect_dispatchable()
+        by_room, _more = await worker._collect_dispatchable()
+
+        assert [event.event_id for event in by_room[ROOM]] == ["$m0", "$m1", "$m6", "$m7"]
+
     async def test_a_lost_owner_is_noticed_without_any_further_admission(
         self,
         alice: PrincipalStore,
@@ -2188,6 +2256,10 @@ class TestABoundedScanIsFair:
         Asked of the scan rather than of a lane, because the duplicate is in
         the list the scan produces and reading it there is exact -- through a
         lane it is a race between two dispatches of one event.
+
+        Five events, each once, is what the stop proves: a pass that ran past
+        its origin collects ``$e3`` and ``$e4`` twice, which no ordering of the
+        result can hide.
         """
         for index in range(5):
             await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
@@ -2197,7 +2269,7 @@ class TestABoundedScanIsFair:
 
         by_room, more_remains = await worker._collect_dispatchable()
 
-        assert [event.event_id for event in by_room[ROOM]] == ["$e3", "$e4", "$e0", "$e1", "$e2"]
+        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
         assert not more_remains
         assert worker._scan_cursor is None
 

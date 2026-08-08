@@ -68,6 +68,29 @@ def _release_nothing(event_ids: frozenset[str]) -> None:
     del event_ids
 
 
+def _in_receipt_order(by_room: dict[str, list[JournalEvent]]) -> dict[str, list[JournalEvent]]:
+    """Put each room's collected events back into receipt order.
+
+    A lane runs its list verbatim, so the list is where a room's order is
+    decided -- and a collected list is segments concatenated, none of which is
+    placed by receipt order. Reclaimed deferrals are seeded before any page is
+    read, whatever their position in the backlog, and a wrapped pass reads the
+    events after its resume point before the ones in front of it. Either one
+    hands a lane a later message to answer before an earlier one, which is the
+    single thing a lane exists to prevent.
+
+    Sorted rather than merged, because there are not two ordered runs to merge.
+    Only the pages carry the store's ``ORDER BY``; the reclaim walks the
+    deferral map in insertion order, and an event released and deferred again
+    moves to the back of it, behind one that never moved. Sorting also costs
+    nothing to state: these lists are near-sorted and bounded by the page
+    budget, which is the case a sort is cheapest on.
+    """
+    for events in by_room.values():
+        events.sort(key=lambda event: event.receipt_order)
+    return by_room
+
+
 def _assume_owner_is_live(event: JournalEvent) -> bool:
     """Treat every deferral as owned, which is all a worker alone can know.
 
@@ -407,7 +430,7 @@ class PendingEventWorker:
             if reached_origin or (page.reached_end and wrapped):
                 self._scan_cursor = None
                 self._release_events_no_run_can_reach(retained, still_pending)
-                return by_room, False
+                return _in_receipt_order(by_room), False
             if not page.reached_end:
                 cursor = page.resume_after
                 continue
@@ -416,7 +439,7 @@ class PendingEventWorker:
             # of the budget goes on it rather than on another pass.
             cursor, wrapped = None, True
         self._scan_cursor = cursor
-        return by_room, True
+        return _in_receipt_order(by_room), True
 
     async def _collect_whole_backlog(self) -> dict[str, list[JournalEvent]]:
         """Group every pending event this worker may act on, front to back.
@@ -437,7 +460,7 @@ class PendingEventWorker:
             self._collect_page(page, by_room, still_pending, already_taken=reclaimed, stop_after=None)
             if page.reached_end:
                 self._release_events_no_run_can_reach(retained, still_pending)
-                return by_room
+                return _in_receipt_order(by_room)
             cursor = page.resume_after
 
     def _collect_page(
