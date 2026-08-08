@@ -814,6 +814,105 @@ async def test_a_gap_deeper_than_the_cost_ceiling_stops_without_declaring_it_los
     assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
 
 
+async def test_a_ceiling_stops_the_threads_it_left_behind_calling_themselves_whole(
+    alice: PrincipalStore,
+) -> None:
+    """Clearing the debt hands the answer back to every marker, not just the repaid one.
+
+    The gate an outstanding debt holds is room-wide -- a read joins the debt on
+    the room, whichever conversation it asked about -- so the anchor going away
+    re-blesses every hydration marker the room has. The repayment writes one, for
+    the room conversation. The rest were written before anyone knew about the
+    hole, by walks that really did reach the start of a thread that has since
+    grown a gap in the middle, and they come back answering `complete` over it.
+
+    Only ``history_lost`` was ever read room-wide, and a ceiling deliberately
+    does not set it, so nothing else stood between a stale thread marker and a
+    prompt served a conversation missing its middle and told it was whole.
+    """
+    thread = "$root"
+    await admit_all(
+        alice,
+        [raw(thread, "root", ts=1_000), raw("$reply", "reply", ts=1_100, thread_id=thread)],
+    )
+    epoch = await alice.membership_epoch(ROOM)
+    # A thread walk that ran before the gap and reached the start of the thread.
+    assert await alice.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=thread,
+        events=(),
+        complete=True,
+        expected_membership_epoch=epoch,
+    )
+    await alice.record_room_history_debt(ROOM)
+    # A repayment that spends its ceiling without reaching the anchor: the debt
+    # is cleared, no loss is declared, and the hole is still there.
+    client = FakeClient(endless=True)
+
+    with capture_logs() as logs:
+        await hydrator(alice, client, prompt_window_messages=3, max_requests=5).ensure_hydrated(
+            room_id=ROOM,
+            thread_id=None,
+        )
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.TRUNCATED.value]
+    assert await alice.room_history_debt(ROOM) is None
+    assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=thread)
+    assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=thread)
+    # Retracted rather than withdrawn: the thread is still hydrated, so this
+    # costs the honest answer and not a walk of every thread on every read.
+    assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=thread)
+    # And nothing here is sticky, which is the whole difference from lost
+    # history: a later walk that does reach the start of the thread is believed.
+    assert await alice.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=thread,
+        events=(),
+        complete=True,
+        expected_membership_epoch=epoch,
+    )
+    assert await alice.conversation_is_complete(room_id=ROOM, thread_id=thread)
+
+
+async def test_a_ceiling_outranks_the_completeness_the_room_claimed_before_the_gap(
+    alice: PrincipalStore,
+) -> None:
+    """The repayment's own answer, which the row it writes to would otherwise eat.
+
+    Completeness is monotonic inside a membership epoch: walks of different
+    widths race over one marker and the narrower must not un-say the wider, so
+    the upsert keeps a stored `complete` in preference to the one it is handed. A
+    room walked to its start before the gap therefore holds a row that swallows
+    the repayment's `complete = False` -- the one write in the system that has to
+    make completeness shrink, arriving through the clause built to stop exactly
+    that, and leaving a room that cannot be marked incomplete by the walk that
+    just failed to fill its hole.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+    epoch = await alice.membership_epoch(ROOM)
+    assert await alice.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=None,
+        events=(),
+        complete=True,
+        expected_membership_epoch=epoch,
+    )
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(endless=True)
+
+    with capture_logs() as logs:
+        await hydrator(alice, client, prompt_window_messages=3, max_requests=5).ensure_hydrated(
+            room_id=ROOM,
+            thread_id=None,
+        )
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.TRUNCATED.value]
+    assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+    assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id=None)
+
+
 async def test_a_failed_repayment_leaves_the_debt_for_the_next_read(alice: PrincipalStore) -> None:
     """An unreachable homeserver degrades a read rather than settling a debt."""
     await admit_all(alice, [raw("$one", "one", ts=1_000)])

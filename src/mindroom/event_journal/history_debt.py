@@ -30,8 +30,8 @@ A walk that reaches the beginning of what the server still holds without seeing
 the anchor is the one case where accepting loss is honest, and it says so:
 ``history_lost`` is set and every completeness question about the room answers
 no from then on. A walk that merely spent its cost ceiling clears the debt
-without that flag -- the room is incomplete, which its hydration row already
-records, rather than incompletable.
+without that flag -- the room is incomplete, which every hydration marker in it
+is made to record, rather than incompletable.
 """
 
 from __future__ import annotations
@@ -247,8 +247,9 @@ def settle(
         # The debt is still cleared, because leaving it outstanding re-walks the
         # ceiling on every read forever for a strictly worse answer each time.
         # What is not written is the sticky flag: this room is incomplete now,
-        # which the hydration row already records, rather than incompletable
-        # for as long as this membership lasts.
+        # which every hydration marker in it is made to record, rather than
+        # incompletable for as long as this membership lasts.
+        _retract_completeness(transaction, principal_id, debt.room_id)
         _clear(transaction, principal_id, debt.room_id)
         return HistoryDebtOutcome.TRUNCATED
     if saw_anchor:
@@ -263,6 +264,37 @@ def settle(
         (principal_id, debt.room_id),
     )
     return HistoryDebtOutcome.LOST
+
+
+def _retract_completeness(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Withdraw every claim that a conversation in this room is whole.
+
+    Clearing the anchor is what lifts the gate the debt held over the room's
+    hydration markers, and every one of them goes back to answering. The
+    repayment installed a marker for the room conversation and nothing else, so
+    the markers that come back are the ones written before anyone knew about the
+    hole -- threads whose walk reached the start of a conversation that has since
+    grown a gap in the middle. Left alone they answer `complete` over it, which
+    is the one answer the whole mechanism exists to prevent.
+
+    The claim is retracted rather than the marker deleted, and the difference is
+    the read tax. Deleting would send the next read of every thread in the room
+    back to the server, which is the unbounded re-walk clearing the debt was
+    meant to avoid; `complete = 0` leaves the conversation hydrated and merely
+    stops it calling itself whole. It also lands on the row the repayment just
+    wrote, whose own `complete = False` the monotonic carry-forward in
+    `mark_conversation_hydrated` would otherwise discard in favour of the
+    pre-gap value -- within one epoch that clause only ever lets completeness
+    grow, and this is the one event that has to shrink it.
+
+    Nothing here is sticky. A later walk that genuinely reaches the start of a
+    conversation writes `complete = 1` over this and is believed, which is
+    exactly what separates a ceiling from lost history.
+    """
+    transaction.execute(
+        "UPDATE conversation_hydration SET complete = 0 WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
 
 
 def _clear(transaction: Transaction, principal_id: str, room_id: str) -> None:
