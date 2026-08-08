@@ -76,6 +76,7 @@ The `short-stream-correctness` profile preserves the existing 13-thread hot-then
 It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
 
 The `sustained-stream-capacity` profile is the ordinary no-fault capacity workload and releases N configured managed roots together under one fixed 180-second whole-workload deadline, with 200 as the default example.
+Its responder emits exactly 4,800 characters in 40-character chunks at 80 characters per second, making each stream nominally 60 seconds so launch spread does not make the 45-second all-stream overlap gate impossible.
 
 ```bash
 uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180

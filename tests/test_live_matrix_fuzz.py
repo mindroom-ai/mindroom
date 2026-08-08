@@ -3375,7 +3375,7 @@ def test_recovery_cliff_managed_config_uses_synthetic_responder_and_sliding_sync
 
 
 def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_responder() -> None:
-    """The no-fault profile needs the same deterministic long-stream principals."""
+    """The no-fault profile must leave 45 seconds of overlap after a spread launch."""
     stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
     try:
         stack._write_config(9292)
@@ -3387,6 +3387,14 @@ def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_resp
         }
         assert config["agents"]["general"]["model"] == "synthetic"
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+        assert config["models"]["synthetic"]["extra_kwargs"] == {
+            "seed": 1,
+            "min_response_chars": 4800,
+            "max_response_chars": 4800,
+            "chunk_chars": 40,
+            "chars_per_second": 80,
+            "tool_call_probability": 0.2,
+        }
     finally:
         stack.close()
 

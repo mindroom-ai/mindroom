@@ -108,9 +108,10 @@ _MAX_BUDGET_EXTENSIONS = 3
 # any one deadline has to cover and how much a failure report has to explain.
 DEFAULT_ROOT_FANOUT = 8
 
-# The fixed synthetic profile emits at least 4,000 characters at 80 characters
-# per second. Allow setup and chunk boundaries five seconds of slack while
-# still rejecting a fast or accidentally non-streaming responder.
+# Recovery-cliff emits 4,000 to 4,800 characters, while sustained capacity
+# fixes every response at 4,800 characters so launch spread cannot consume the
+# 45-second all-stream overlap. Both profiles stream at 80 characters per
+# second, and this lower bound still rejects a fast or non-streaming responder.
 RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS = 45.0
 
 
@@ -2693,7 +2694,7 @@ class ManagedTuwunelStack:
                 "id": "lorem-ipsum",
                 "extra_kwargs": {
                     "seed": 1,
-                    "min_response_chars": 4000,
+                    "min_response_chars": 4800 if self.profile == "sustained-stream-capacity" else 4000,
                     "max_response_chars": 4800,
                     "chunk_chars": 40,
                     "chars_per_second": 80,
