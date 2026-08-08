@@ -332,6 +332,12 @@ class StreamingDeliveryRequest:
 
     target: MessageTarget
     response_stream: AsyncIterator[StreamInputChunk]
+    # The visible response this stream is. Required, because every stream is
+    # some turn's answer: the gateway reads the causing event from it to key
+    # the durable terminal delivery, and the final-answer transform from it to
+    # shape the text before that payload is frozen rather than as a second edit
+    # after it was delivered.
+    identity: ResponseIdentity
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
     header: str | None = None
@@ -340,15 +346,8 @@ class StreamingDeliveryRequest:
     tool_trace_collector: list[ToolTraceEntry] | None = None
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
-    # The turn this stream answers, when it has one. Its terminal edit is the
-    # delivery that makes the answer visible, so it becomes durable; every
-    # earlier edit stays transport.
-    delivery_turn_id: str | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
-    # Carried so the final-answer transform runs before the terminal payload is
-    # built, rather than as a second edit after it was frozen and delivered.
-    identity: ResponseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -1380,6 +1379,10 @@ class DeliveryGateway:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
+        # The turn this stream answers. Its terminal edit is the delivery that
+        # makes the answer visible, so that one becomes durable; every earlier
+        # edit stays transport.
+        delivery_turn_id = request.identity.response_envelope.source_event_id
         latest_thread_event_id = await self.deps.resolver.deps.conversation_reader.latest_thread_event_id(
             room_id=request.target.room_id,
             thread_id=request.target.resolved_thread_id,
@@ -1406,17 +1409,17 @@ class DeliveryGateway:
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
-            terminal_edit=self._durable_terminal_edit(request.delivery_turn_id, request.target),
-            terminal_send=self._durable_terminal_send(request.delivery_turn_id, request.target),
+            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target),
+            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target),
             final_text_transform=self._final_text_transform(request.identity),
-            transport_is_current=self._stream_transport_gate(request.delivery_turn_id, request.target.room_id),
+            transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
         )
 
     def _stream_transport_gate(
         self,
-        turn_id: str | None,
+        turn_id: str,
         room_id: str,
-    ) -> Callable[[], Awaitable[bool]] | None:
+    ) -> Callable[[], Awaitable[bool]]:
         """Return the check that stops a stream editing into an ended membership.
 
         Progressive edits never reach the outbox, so the durable refusal that
@@ -1424,15 +1427,13 @@ class DeliveryGateway:
         turn that began before a fence keeps writing into a conversation the
         fence deleted, for as long as the model keeps producing text.
         """
-        if turn_id is None:
-            return None
 
         async def transport_is_current() -> bool:
             return await self.deps.outbox.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
         return transport_is_current
 
-    def _durable_terminal_send(self, turn_id: str | None, target: MessageTarget) -> TerminalSend | None:
+    def _durable_terminal_send(self, turn_id: str, target: MessageTarget) -> TerminalSend:
         """Return a sender that records a stream's terminal *send* before making it.
 
         A stream normally edits a placeholder, but there is not always one to
@@ -1441,8 +1442,6 @@ class DeliveryGateway:
         visible event, and without this it would reach the room with no
         durable row behind it -- the one thing the outbox exists to prevent.
         """
-        if turn_id is None:
-            return None
 
         async def terminal_send(
             client: nio.AsyncClient,
@@ -1499,15 +1498,13 @@ class DeliveryGateway:
             return content
         return await prepare_large_message(self._client(), room_id, content)
 
-    def _final_text_transform(self, identity: ResponseIdentity | None) -> FinalTextTransform | None:
+    def _final_text_transform(self, identity: ResponseIdentity) -> FinalTextTransform:
         """Return the hook that shapes the answer before its terminal payload is built.
 
         Applying it here keeps the durable row and the room in agreement: the
         payload is frozen from the transformed text, so there is no later edit
         to lose to a crash.
         """
-        if identity is None:
-            return None
 
         async def transform(response_text: str) -> str:
             draft = await self.deps.response_hooks._apply_final_response_transform(
@@ -1518,7 +1515,7 @@ class DeliveryGateway:
 
         return transform
 
-    def _durable_terminal_edit(self, turn_id: str | None, target: MessageTarget) -> TerminalEdit | None:
+    def _durable_terminal_edit(self, turn_id: str, target: MessageTarget) -> TerminalEdit:
         """Return a sender that records a stream's terminal edit before making it.
 
         Nothing extra is sent. The edit the stream was going to make anyway is
@@ -1526,8 +1523,6 @@ class DeliveryGateway:
         exactly "the terminal edit never landed" -- which is the condition
         startup recovery should act on, and the only one.
         """
-        if turn_id is None:
-            return None
 
         async def terminal_edit(
             client: nio.AsyncClient,

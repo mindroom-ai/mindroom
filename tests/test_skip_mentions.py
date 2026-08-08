@@ -451,6 +451,11 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
             StreamingDeliveryRequest(
                 target=target,
                 response_stream=stream(),
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id="corr-stream",
+                ),
                 existing_event_id="$existing",
             ),
         )

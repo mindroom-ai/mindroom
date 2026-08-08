@@ -62,6 +62,15 @@ _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
 
 
+def _identity(source_event_id: str = "$cause") -> ResponseIdentity:
+    """Return the identity of one visible response, caused by one event."""
+    return ResponseIdentity(
+        response_kind="agent",
+        response_envelope=SimpleNamespace(source_event_id=source_event_id),  # type: ignore[arg-type]
+        correlation_id="c1",
+    )
+
+
 @pytest.fixture
 def alice(journal_store: EventJournalStore) -> PrincipalStore:
     """Return one bound principal view."""
@@ -137,11 +146,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             target=target,
             existing_event_id=None,
             response_text=text,
-            identity=ResponseIdentity(
-                response_kind="agent",
-                response_envelope=SimpleNamespace(source_event_id="$cause"),  # type: ignore[arg-type]
-                correlation_id="c1",
-            ),
+            identity=_identity(),
             tool_trace=None,
             extra_content=None,
         )
@@ -568,7 +573,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         request = StreamingDeliveryRequest(
             target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
             response_stream=_empty_stream(),
-            delivery_turn_id="$cause",
+            identity=_identity(),
         )
 
         with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
@@ -576,23 +581,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert stream.await_args.kwargs["terminal_edit"] is not None
         assert stream.await_args.kwargs["terminal_send"] is not None
-
-    async def test_a_turnless_stream_is_given_neither_terminal_path(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A stream with no turn behind it has nothing for recovery to key on."""
-        gateway = _gateway(tmp_path, FakeOutbox())
-        request = StreamingDeliveryRequest(
-            target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
-            response_stream=_empty_stream(),
-        )
-
-        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
-            await gateway.deliver_stream(request)
-
-        assert stream.await_args.kwargs["terminal_edit"] is None
-        assert stream.await_args.kwargs["terminal_send"] is None
 
     async def test_a_stream_that_only_ever_said_thinking_does_not_settle_the_turn(
         self,
@@ -826,7 +814,7 @@ class TestAnEndedMembershipStopsTheAnswer:
         request = StreamingDeliveryRequest(
             target=self._target(),
             response_stream=_empty_stream(),
-            delivery_turn_id="$cause",
+            identity=_identity(),
         )
 
         with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
@@ -835,19 +823,6 @@ class TestAnEndedMembershipStopsTheAnswer:
         gate = stream.await_args.kwargs["transport_is_current"]
         assert gate is not None
         assert not await gate()
-
-    async def test_a_turnless_stream_is_given_no_gate(self, tmp_path: Path) -> None:
-        """A stream with no turn behind it belongs to no membership to be stale against."""
-        gateway = _gateway(tmp_path, FakeOutbox())
-        request = StreamingDeliveryRequest(
-            target=self._target(),
-            response_stream=_empty_stream(),
-        )
-
-        with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
-            await gateway.deliver_stream(request)
-
-        assert stream.await_args.kwargs["transport_is_current"] is None
 
     async def test_a_cancellation_note_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """The note has nowhere to go: the fence deleted what it would annotate."""
@@ -910,7 +885,7 @@ class TestAnEndedMembershipStopsTheAnswer:
         request = StreamingDeliveryRequest(
             target=self._target(),
             response_stream=_empty_stream(),
-            delivery_turn_id="$cause",
+            identity=_identity(),
         )
 
         with patch("mindroom.delivery_gateway.send_streaming_response", AsyncMock()) as stream:
