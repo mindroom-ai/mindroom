@@ -31,8 +31,10 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
+    bundled_replacement_candidates,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.room_history_reads import bundled_replacement_source
 from tests.threading_helpers import _text_event
 
 if TYPE_CHECKING:
@@ -482,3 +484,73 @@ class TestReplacementWinnerSelection:
 
         assert messages[_ORIGINAL_ID].body == "original"
         assert messages[_ORIGINAL_ID].latest_event_id == _ORIGINAL_ID
+
+
+class TestBundledReplacementPrecedence:
+    """Every reader of a bundled `m.replace` has to pick the same candidate."""
+
+    @staticmethod
+    def _bundled(*, under_unsigned: bool) -> dict[str, object]:
+        """Return one source whose bundle carries both keys, disagreeing."""
+
+        def _replacement(event_id: str, body: str) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "sender": _AUTHOR,
+                "type": "m.room.message",
+                "origin_server_ts": 5_000,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"* {body}",
+                    "m.new_content": {"msgtype": "m.text", "body": body},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": _ORIGINAL_ID},
+                },
+            }
+
+        relations = {
+            "m.replace": {
+                "event": _replacement("$stale", "stale"),
+                "latest_event": _replacement("$newest", "newest"),
+            },
+        }
+        source: dict[str, object] = {
+            "event_id": _ORIGINAL_ID,
+            "sender": _AUTHOR,
+            "type": "m.room.message",
+            "origin_server_ts": 1_000,
+            "content": {"msgtype": "m.text", "body": "original"},
+        }
+        if under_unsigned:
+            source["unsigned"] = {"m.relations": relations}
+        else:
+            source["m.relations"] = relations
+        return source
+
+    @pytest.mark.parametrize("under_unsigned", [True, False])
+    def test_the_latest_event_wins_wherever_the_bundle_is_carried(self, *, under_unsigned: bool) -> None:
+        """`latest_event` is the answer to the question a reader is asking.
+
+        `event` is whichever replacement the server chose to include; only
+        `latest_event` claims to be the most recent one. A source can carry
+        both, and they can disagree.
+        """
+        candidates = bundled_replacement_candidates(self._bundled(under_unsigned=under_unsigned))
+
+        assert [candidate["event_id"] for candidate in candidates[:2]] == ["$newest", "$stale"]
+
+    @pytest.mark.parametrize("under_unsigned", [True, False])
+    def test_history_reconstruction_picks_what_a_preview_would_show(self, *, under_unsigned: bool) -> None:
+        """The two readers used to disagree, so one message read two ways.
+
+        History searched `unsigned` alone and preferred `event`; a preview
+        searched both containers and preferred `latest_event`. A source with
+        both keys therefore showed one body in a thread preview and another in
+        the history rebuilt beside it.
+        """
+        source = self._bundled(under_unsigned=under_unsigned)
+
+        chosen = bundled_replacement_source(source)
+
+        assert chosen is not None
+        assert chosen["event_id"] == "$newest"
+        assert chosen == bundled_replacement_candidates(source)[0]

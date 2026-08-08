@@ -243,8 +243,23 @@ def message_preview(body: object, max_length: int = 120) -> str:
     return f"{compact[: max_length - 3].rstrip()}..."
 
 
-def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return bundled replacement candidates in preference order."""
+def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return bundled replacement candidates in preference order.
+
+    One order, shared by every reader, because the alternative is what this
+    replaced: a preview and a reconstructed history disagreeing about which
+    edit a message currently shows, for a source carrying both keys.
+
+    ``latest_event`` before ``event`` is the order that is correct when they
+    differ. ``event`` is whichever replacement the server chose to bundle;
+    ``latest_event`` is the statement that this is the most recent one, which
+    is the question a reader is asking. The bare aggregation is last because it
+    is a stub rather than an event and only sometimes carries enough to parse.
+
+    Whether a candidate may be trusted is not decided here. Consumers differ on that
+    -- a preview validates the sender, a history read parses and type-checks --
+    so this yields candidates and each reader refuses the ones it cannot use.
+    """
     candidates: list[dict[str, Any]] = []
     unsigned = event_source.get("unsigned")
     for container in (unsigned, event_source):
@@ -278,7 +293,7 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    for candidate in _bundled_replacement_candidates(event_source):
+    for candidate in bundled_replacement_candidates(event_source):
         resolved_candidate = await resolve_event_source_content(candidate, client)
         body = bundled_visible_body_preview(
             resolved_candidate,
@@ -289,8 +304,8 @@ async def bundled_replacement_body(
     return None
 
 
-def _event_fallback_body(event: nio.Event) -> str:
-    """Return one best-effort Matrix body for preview fallback."""
+def room_message_fallback_body(event: nio.Event) -> str:
+    """Return one best-effort Matrix body for a room message event."""
     if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
         return event.body
     event_source = event.source if isinstance(event.source, dict) else {}
@@ -327,7 +342,7 @@ async def thread_root_body_preview(
     _resolved_event_source, visible_body = await resolve_visible_event_source(
         event_source,
         client,
-        fallback_body=_event_fallback_body(event),
+        fallback_body=room_message_fallback_body(event),
         config=config,
         runtime_paths=runtime_paths,
         trusted_sender_ids=trusted_sender_ids,
@@ -587,12 +602,14 @@ __all__ = [
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",
+    "room_message_fallback_body",
     "thread_root_body_preview",
     "trusted_visible_sender_ids",
 ]

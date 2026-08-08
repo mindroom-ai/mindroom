@@ -25,6 +25,8 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
+    bundled_replacement_candidates,
+    room_message_fallback_body,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.event_normalization import (
@@ -670,19 +672,6 @@ async def enumerate_room_thread_root_ids(
     return thread_root_ids, truncated
 
 
-def room_message_fallback_body(event: nio.Event) -> str:
-    """Return one best-effort fallback body for a room message event."""
-    if isinstance(event, VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-        return event.body
-    event_source = event.source if isinstance(event.source, dict) else {}
-    content = event_source.get("content")
-    if isinstance(content, dict):
-        body = content.get("body")
-        if isinstance(body, str):
-            return body
-    return ""
-
-
 def parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
     if is_encrypted_media_event_source(event_source):
@@ -700,34 +689,20 @@ def parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
 
 
 def bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return one bundled replacement event source when Matrix already included it."""
-    unsigned = event_source.get("unsigned")
-    if not isinstance(unsigned, Mapping):
-        return None
-    relations = unsigned.get("m.relations")
-    if not isinstance(relations, Mapping):
-        return None
-    replacement = relations.get("m.replace")
-    if not isinstance(replacement, Mapping):
-        return None
-    candidates: tuple[object, ...] = (
-        replacement.get("event"),
-        replacement.get("latest_event"),
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
-        if _parse_visible_text_message_event(normalized_candidate) is not None:
-            return normalized_candidate
-    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
-    if {
-        "event_id",
-        "sender",
-        "type",
-        "origin_server_ts",
-    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
-        return replacement_candidate
+    """Return one bundled replacement event source when Matrix already included it.
+
+    Candidate order is not this module's to choose. It used to be, and it chose
+    differently from the preview reader -- ``event`` before ``latest_event``,
+    and only under ``unsigned`` -- so one source carrying both keys produced one
+    body in a thread preview and another in the history rebuilt beside it.
+
+    What stays here is the part that is this reader's own: a candidate is usable
+    only if it parses as a visible room message, which is stricter than a
+    preview needs and is why the two cannot simply share a single function.
+    """
+    for candidate in bundled_replacement_candidates(event_source):
+        if _parse_visible_text_message_event(candidate) is not None:
+            return candidate
     return None
 
 
