@@ -324,7 +324,7 @@ Compare health `last_sync_time` before and after the post-load fence, require ze
 
 Return a machine-readable result with the root count, canonical response count, recovery marker counts, maximum active stream duration, drain counts, and `status: PASS`.
 
-- [ ] **Step 5: Run acceptance unit tests and the complete harness test file**
+- [x] **Step 5: Run acceptance unit tests and the complete harness test file**
 
 Run:
 
@@ -335,7 +335,7 @@ uv run pytest -q tests/test_live_matrix_fuzz.py -n 0 --no-cov
 
 Expected: both commands pass without warnings.
 
-- [ ] **Step 6: Commit the live runner**
+- [x] **Step 6: Commit the live runner**
 
 ```bash
 git add scripts/testing/fuzz_live_matrix.py tests/test_live_matrix_fuzz.py
@@ -356,7 +356,7 @@ git commit -m "test(matrix): exercise 100 sustained managed streams"
 - Consumes: the runtime and harness changes from Tasks 1 through 3.
 - Produces: evidence that the focused behavior, broader lifecycle, formatting, boundaries, and live workflow are all valid.
 
-- [ ] **Step 1: Run focused and adjacent tests**
+- [x] **Step 1: Run focused and adjacent tests**
 
 ```bash
 uv run pytest -q \
@@ -369,7 +369,7 @@ uv run pytest -q \
   -n 0 --no-cov
 ```
 
-- [ ] **Step 2: Run static checks**
+- [x] **Step 2: Run static checks**
 
 ```bash
 uv run ruff check src/mindroom/bot.py scripts/testing/fuzz_live_matrix.py tests/test_sync_task_cancellation.py tests/test_live_matrix_fuzz.py
@@ -378,7 +378,7 @@ uv run tach check --dependencies --interfaces
 git diff --check e4cdd2f32733..HEAD
 ```
 
-- [ ] **Step 3: Run the live acceptance profile**
+- [x] **Step 3: Run the live acceptance profile**
 
 ```bash
 uv run python scripts/testing/fuzz_live_matrix.py \
@@ -389,7 +389,7 @@ uv run python scripts/testing/fuzz_live_matrix.py \
 
 Expected: exactly 100 canonical completed replies, at least one exact-room delivery-retry marker, observed attempted and unacknowledged workload FINAL debt, a `general` detached-worker resend marker, no recovery abandonment, zero pending journal rows, zero unacknowledged outbox rows, healthy advancing sync, zero watchdog stalls, clean shutdown, and `status: PASS`.
 
-- [ ] **Step 4: Review the diff and record verification**
+- [x] **Step 4: Review the diff and record verification**
 
 Inspect every production branch added to `bot.py`, confirm no durable debt flag or extra lifecycle owner exists, and confirm the harness never prints credentials or database URLs.
 
