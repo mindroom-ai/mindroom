@@ -537,6 +537,67 @@ class SustainedStreamCapacityObservation:
     phase_durations: tuple[tuple[str, float], ...]
 
 
+def audit_sustained_stream_capacity_sources(
+    events: Collection[Mapping[str, Any]],
+    *,
+    expected_source_ids: Collection[str],
+    load_sender_id: str,
+    responder_id: str,
+    run_id: str,
+) -> SustainedStreamCapacitySourceAudit:
+    """Validate exact managed-sender roots from one no-fault workload interval."""
+    expected_source_tuple = tuple(expected_source_ids)
+    expected = frozenset(expected_source_tuple)
+    events_by_id: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    unexpected: set[str] = set()
+    run_marker = re.compile(rf"run={re.escape(run_id)} thread=(\d+)")
+
+    for event in events:
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str):
+            continue
+        if event_id in expected:
+            events_by_id[event_id].append(event)
+            continue
+        content = event.get("content")
+        body = content.get("body") if isinstance(content, dict) else None
+        if (
+            event.get("type") == "m.room.message"
+            and event.get("sender") == load_sender_id
+            and isinstance(body, str)
+            and run_marker.search(body) is not None
+        ):
+            unexpected.add(event_id)
+
+    missing = tuple(source_id for source_id in expected_source_tuple if source_id not in events_by_id)
+    duplicates = tuple(source_id for source_id in expected_source_tuple if len(events_by_id[source_id]) > 1)
+    invalid: list[str] = []
+    for thread, source_id in enumerate(expected_source_tuple):
+        expected_marker = f"run={run_id} thread={thread}"
+        source_events = events_by_id.get(source_id, ())
+        if any(
+            event.get("type") != "m.room.message"
+            or event.get("sender") != load_sender_id
+            or not isinstance((content := event.get("content")), dict)
+            or content.get("msgtype") != "m.text"
+            or content.get("m.mentions") != {"user_ids": [responder_id]}
+            or not isinstance((body := content.get("body")), str)
+            or body.count(expected_marker) != 1
+            or run_marker.findall(body) != [str(thread)]
+            for event in source_events
+        ):
+            invalid.append(source_id)
+
+    return SustainedStreamCapacitySourceAudit(
+        expected_source_ids=expected_source_tuple,
+        observed_source_ids=tuple(source_id for source_id in expected_source_tuple if source_id in events_by_id),
+        missing_source_ids=missing,
+        duplicate_source_ids=duplicates,
+        unexpected_source_ids=tuple(sorted(unexpected)),
+        invalid_source_ids=tuple(invalid),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _RecoveryCliffEventIndex:
     """Responder originals, edits, and malformed canonical relations."""
@@ -1916,6 +1977,7 @@ class ManagedTuwunelStack:
         self.server_name = ""
         self.room_id = ""
         self.agent_id = ""
+        self.load_sender_id = ""
         self.router_id = ""
         self._created = False
         self._model_server: ThreadingHTTPServer | None = None
@@ -1938,6 +2000,7 @@ class ManagedTuwunelStack:
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
         self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
+        self.load_sender_id = f"@mindroom_load_sender_{self.namespace}:{self.server_name}"
         self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
 
         _run_command("just", "local-instances-start-matrix", self.instance_name)
@@ -2483,7 +2546,7 @@ class ManagedTuwunelStack:
                 "agent_reply_permissions": {},
             },
         }
-        if self.profile == "recovery-cliff":
+        if self.profile in {"recovery-cliff", "sustained-stream-capacity"}:
             config["matrix_sync"] = {"mode": "sliding", "sliding_timeline_limit": 100}
             config["models"]["synthetic"] = {
                 "provider": "synthetic",
@@ -2502,7 +2565,7 @@ class ManagedTuwunelStack:
             config["agents"][AGENT_NAME]["worker_tools"] = []
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
-                "role": "Author deterministic recovery-cliff workload roots.",
+                "role": "Author deterministic managed-load workload roots.",
                 "model": "synthetic",
                 "tools": [],
                 "rooms": [ROOM_KEY],
@@ -3093,6 +3156,8 @@ class LiveFuzzRunner:
         """Execute every batch and enforce the reply invariant after each."""
         if self.scenario.profile == "recovery-cliff":
             return await self._run_recovery_cliff()
+        if self.scenario.profile == "sustained-stream-capacity":
+            return await self._run_sustained_stream_capacity()
         await asyncio.gather(*(client.register() for client in self.clients))
         await asyncio.gather(*(client.join_room() for client in self.clients))
         if self.scenario.profile == "restart-regression":
@@ -3110,33 +3175,35 @@ class LiveFuzzRunner:
             self.scenario.batches,
         )
 
-    async def _authenticate_recovery_cliff_sender(self) -> None:
+    async def _authenticate_managed_sender(self) -> None:
         """Select the already-managed load sender without registering a user."""
         credentials = self.stack.agent_matrix_credentials("load_sender")
         if credentials is None:
-            msg = "recovery-cliff managed load_sender credentials are missing"
+            msg = f"{self.scenario.profile} managed load_sender credentials are missing"
             raise RuntimeError(msg)
         access_token, _device_id = credentials
         self.client.access_token = access_token
         await self.client.join_room()
 
-    async def _release_recovery_cliff_roots(
+    async def _release_managed_roots(
         self,
         *,
         run_id: str,
         deadline: float,
+        transaction_prefix: str,
+        body_prefix: str,
     ) -> tuple[str, ...]:
         """Release every configured mentioned root in one gather."""
 
         async def send_root(thread: int) -> tuple[int, str]:
             content = {
                 "msgtype": "m.text",
-                "body": f"Recovery cliff run={run_id} thread={thread} {self.stack.agent_id}",
+                "body": f"{body_prefix} run={run_id} thread={thread} {self.stack.agent_id}",
                 "m.mentions": {"user_ids": [self.stack.agent_id]},
             }
             event_id = await self.client.send_event(
                 "m.room.message",
-                f"recovery-cliff-root-{run_id}-{thread}",
+                f"{transaction_prefix}-{run_id}-{thread}",
                 content,
             )
             return thread, event_id
@@ -3175,9 +3242,43 @@ class LiveFuzzRunner:
         try:
             async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
                 await asyncio.gather(*(send_context(index) for index in range(shape.context_event_count)))
-            return await self._release_recovery_cliff_roots(run_id=run_id, deadline=deadline)
+            return await self._release_managed_roots(
+                run_id=run_id,
+                deadline=deadline,
+                transaction_prefix="recovery-cliff-root",
+                body_prefix="Recovery cliff",
+            )
         finally:
             self.stack.resume_mindroom()
+
+    async def _release_sustained_stream_capacity_roots(
+        self,
+        *,
+        run_id: str,
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> tuple[str, ...]:
+        """Release no-fault roots while proving the managed runtime stays live."""
+        release_task = asyncio.create_task(
+            self._release_managed_roots(
+                run_id=run_id,
+                deadline=deadline,
+                transaction_prefix="sustained-stream-capacity-root",
+                body_prefix="Sustained stream capacity",
+            ),
+        )
+        try:
+            await asyncio.sleep(0)
+            while not release_task.done():
+                await self._recovery_cliff_observer_step(
+                    deadline=deadline,
+                    health_samples=health_samples,
+                )
+            return await release_task
+        finally:
+            if not release_task.done():
+                release_task.cancel()
+                await asyncio.gather(release_task, return_exceptions=True)
 
     def _recovery_cliff_audit(
         self,
@@ -3418,9 +3519,162 @@ class LiveFuzzRunner:
             "clean_shutdown": observation.clean_shutdown,
         }
 
+    def _sustained_stream_capacity_source_audit(
+        self,
+        *,
+        baseline_event_ids: frozenset[str],
+        expected_source_ids: Collection[str],
+        run_id: str,
+    ) -> SustainedStreamCapacitySourceAudit:
+        """Audit raw workload roots against the exact managed sender and run markers."""
+        return audit_sustained_stream_capacity_sources(
+            tuple(event for event_id, event in self.client.seen_events.items() if event_id not in baseline_event_ids),
+            expected_source_ids=expected_source_ids,
+            load_sender_id=self.stack.load_sender_id,
+            responder_id=self.stack.agent_id,
+            run_id=run_id,
+        )
+
+    def _sustained_stream_capacity_pass_result(
+        self,
+        observation: SustainedStreamCapacityObservation,
+    ) -> dict[str, float | int | str]:
+        """Render self-evidencing no-fault capacity evidence as JSON scalars."""
+        audit = observation.terminal_audit
+        source_audit = observation.source_audit
+        drain = observation.durable_drain
+        result: dict[str, float | int | str] = {
+            "profile": self.scenario.profile,
+            "status": "PASS",
+            "roots": observation.root_count,
+            "observed_root_sources": len(source_audit.observed_source_ids),
+            "canonical_agent_replies": audit.canonical_response_count,
+            "min_active_stream_seconds": round(audit.min_active_stream_seconds, 3),
+            "max_active_stream_seconds": round(audit.max_active_stream_seconds, 3),
+            "peak_active_streams": audit.peak_active_streams,
+            "pending_journal_rows": drain.pending_journal_rows if drain is not None else 0,
+            "unacknowledged_outbox_rows": drain.unacknowledged_outbox_rows if drain is not None else 0,
+            "health_checks": len(observation.health_samples),
+            "recovery_abandonment_markers": observation.recovery_abandonment_markers,
+            "watchdog_stalls": observation.watchdog_stalls,
+            "durable_drain_failure_markers": observation.durable_drain_failure_markers,
+            "reaction_settled": observation.reaction_settled,
+            "post_load_sync_advanced": (
+                observation.pre_fence_last_sync is not None
+                and observation.post_fence_last_sync is not None
+                and observation.post_fence_last_sync > observation.pre_fence_last_sync
+            ),
+            "clean_shutdown": observation.clean_shutdown,
+        }
+        result.update(
+            {f"phase_{phase}_seconds": round(duration, 3) for phase, duration in observation.phase_durations},
+        )
+        return result
+
+    async def _run_sustained_stream_capacity(self) -> dict[str, float | int | str]:
+        """Exercise 200 ordinary overlapping streams under one fixed no-fault SLA."""
+        await self._authenticate_managed_sender()
+        run_id = secrets.token_hex(6)
+        baseline = await self._prepare_recovery_cliff_baseline(run_id=run_id)
+        watchdog_stalls_before = self.stack.log_count("matrix_sync_watchdog_stalled")
+        durable_drain_failure_markers_before = self.stack.restart_shutdown_failure_count()
+
+        deadline = time.monotonic() + self.reply_timeout
+        phase_started = time.monotonic()
+        health_samples: list[RecoveryCliffHealthSample] = []
+        source_event_ids = await self._release_sustained_stream_capacity_roots(
+            run_id=run_id,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        await self._recovery_cliff_observer_step(
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        phase_durations = [("root_release", time.monotonic() - phase_started)]
+
+        phase_started = time.monotonic()
+        terminal_audit = await self._wait_for_recovery_cliff_terminals(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=source_event_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        phase_durations.append(("terminal_settlement", time.monotonic() - phase_started))
+
+        phase_started = time.monotonic()
+        durable_drain = await self._wait_for_recovery_cliff_drain(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=source_event_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        phase_durations.append(("durable_drain", time.monotonic() - phase_started))
+
+        phase_started = time.monotonic()
+        reaction_settled, pre_fence_last_sync, post_fence_last_sync = await self._wait_for_recovery_cliff_fence(
+            target_event_id=terminal_audit.canonical_responses[0][1],
+            run_id=run_id,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        phase_durations.append(("reaction_fence", time.monotonic() - phase_started))
+
+        phase_started = time.monotonic()
+        durable_drain = await self._wait_for_recovery_cliff_drain(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=source_event_ids,
+            deadline=deadline,
+            health_samples=health_samples,
+        )
+        terminal_audit = self._recovery_cliff_audit(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=source_event_ids,
+        )
+        source_audit = self._sustained_stream_capacity_source_audit(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=source_event_ids,
+            run_id=run_id,
+        )
+        phase_durations.append(("final_audit", time.monotonic() - phase_started))
+
+        shutdown_started = time.monotonic()
+        shutdown_remaining = self._recovery_cliff_remaining(deadline)
+        async with asyncio.timeout(shutdown_remaining):
+            clean_shutdown = await asyncio.to_thread(
+                self.stack.stop_mindroom,
+                timeout=min(20.0, shutdown_remaining),
+            )
+        phase_durations.append(("shutdown", time.monotonic() - shutdown_started))
+
+        final_logs = self._recovery_cliff_log_counts()
+        observation = SustainedStreamCapacityObservation(
+            root_count=self.scenario.thread_count,
+            source_audit=source_audit,
+            terminal_audit=terminal_audit,
+            health_samples=tuple(health_samples),
+            durable_drain=durable_drain,
+            recovery_abandonment_markers=(
+                final_logs.recovery_abandonment_markers - baseline.log_counts.recovery_abandonment_markers
+            ),
+            watchdog_stalls=self.stack.log_count("matrix_sync_watchdog_stalled") - watchdog_stalls_before,
+            durable_drain_failure_markers=(
+                self.stack.restart_shutdown_failure_count() - durable_drain_failure_markers_before
+            ),
+            reaction_settled=reaction_settled,
+            pre_fence_last_sync=pre_fence_last_sync,
+            post_fence_last_sync=post_fence_last_sync,
+            clean_shutdown=clean_shutdown,
+            phase_durations=tuple(phase_durations),
+        )
+        failures = evaluate_sustained_stream_capacity(observation)
+        if failures:
+            raise AssertionError("sustained-stream-capacity acceptance failures:\n" + "\n".join(failures))
+        return self._sustained_stream_capacity_pass_result(observation)
+
     async def _run_recovery_cliff(self) -> dict[str, float | int | str]:
         """Exercise and evaluate the configured delivery recovery cliff."""
-        await self._authenticate_recovery_cliff_sender()
+        await self._authenticate_managed_sender()
         run_id = secrets.token_hex(6)
         baseline = await self._prepare_recovery_cliff_baseline(run_id=run_id)
         shape = recovery_cliff_fault_shape(

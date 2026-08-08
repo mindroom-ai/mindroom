@@ -885,8 +885,8 @@ def test_recovery_cliff_fault_shape_accepts_the_recovery_cap_and_refuses_the_fir
 
 
 @pytest.mark.asyncio
-async def test_recovery_cliff_authenticates_the_managed_sender_without_registering() -> None:
-    """Recovery load must use the persisted sender instead of creating an account."""
+async def test_managed_load_authenticates_the_sender_without_registering() -> None:
+    """Managed load must use the persisted sender instead of creating an account."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
     client = _RecoveryCliffBoundaryClient()
     runner = LiveFuzzRunner(
@@ -912,7 +912,7 @@ async def test_recovery_cliff_authenticates_the_managed_sender_without_registeri
             encoding="utf-8",
         )
 
-        await runner._authenticate_recovery_cliff_sender()
+        await runner._authenticate_managed_sender()
 
         assert client.access_token == "managed-sender-token"  # noqa: S105 - fake live-test token
         assert client.calls == ["join_room"]
@@ -950,6 +950,141 @@ async def test_recovery_cliff_run_dispatches_before_disposable_registration(
 
 
 @pytest.mark.asyncio
+async def test_sustained_stream_capacity_run_dispatches_before_disposable_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity must select managed credentials before the disposable-user path."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    calls: list[str] = []
+
+    async def run_capacity() -> dict[str, float | int | str]:
+        calls.append("capacity")
+        return {"profile": "sustained-stream-capacity", "status": "PASS"}
+
+    monkeypatch.setattr(runner, "_run_sustained_stream_capacity", run_capacity, raising=False)
+    try:
+        assert await runner.run() == {"profile": "sustained-stream-capacity", "status": "PASS"}
+        assert calls == ["capacity"]
+        assert client.calls == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_sustained_stream_capacity_releases_two_hundred_roots_without_fault_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every no-fault root enters one gather and carries one exact marker and mention."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=200)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    fault_calls: list[str] = []
+    stack.pause_mindroom = lambda **_kwargs: fault_calls.append("pause")  # type: ignore[method-assign]
+
+    async def release_fault_load(**_kwargs: object) -> tuple[str, ...]:
+        fault_calls.append("recovery-load")
+        return ()
+
+    monkeypatch.setattr(runner, "_release_recovery_cliff_load", release_fault_load)
+    try:
+        released = await asyncio.wait_for(
+            runner._release_managed_roots(
+                run_id="unit-run",
+                deadline=time.monotonic() + 1,
+                transaction_prefix="sustained-stream-capacity-root",
+                body_prefix="Sustained stream capacity",
+            ),
+            timeout=1,
+        )
+
+        assert fault_calls == []
+        assert len(client.sent_payloads) == 200
+        assert len(released) == 200
+        root_payloads = {
+            txn_id: content
+            for event_type, txn_id, content in client.sent_payloads
+            if event_type == "m.room.message" and content["msgtype"] == "m.text"
+        }
+        assert len(root_payloads) == 200
+        observed_markers: set[str] = set()
+        for thread in range(200):
+            content = root_payloads[f"sustained-stream-capacity-root-unit-run-{thread}"]
+            marker = f"run=unit-run thread={thread}"
+            assert content["body"].count(marker) == 1
+            observed_markers.add(marker)
+            assert content["m.mentions"] == {"user_ids": [stack.agent_id]}
+        assert len(observed_markers) == 200
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_sustained_stream_capacity_samples_liveness_while_root_gather_is_outstanding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The root gather cannot finish before an in-flight health/process sample."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=200, finish=False)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    sampled: list[RecoveryCliffHealthSample] = []
+    pause_calls: list[str] = []
+    stack.pause_mindroom = lambda **_kwargs: pause_calls.append("pause")  # type: ignore[method-assign]
+
+    async def observer_step(
+        *,
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> RecoveryCliffHealthSample:
+        assert deadline > time.monotonic()
+        await client.all_entered.wait()
+        assert client.all_entered.is_set()
+        assert len(client.sent_payloads) == 200
+        sample = RecoveryCliffHealthSample(True, datetime(2026, 8, 8, tzinfo=UTC))
+        health_samples.append(sample)
+        sampled.append(sample)
+        client.never.set()
+        await asyncio.sleep(0)
+        return sample
+
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observer_step)
+    try:
+        released = await runner._release_sustained_stream_capacity_roots(
+            run_id="unit-run",
+            deadline=time.monotonic() + 5,
+            health_samples=[],
+        )
+
+        assert len(released) == 200
+        assert sampled
+        assert pause_calls == []
+    finally:
+        client.never.set()
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_cliff_releases_configured_two_hundred_roots_in_one_gather() -> None:
     """A sequential root sender deadlocks before all 200 root sends are entered."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
@@ -964,9 +1099,11 @@ async def test_recovery_cliff_releases_configured_two_hundred_roots_in_one_gathe
     )
     try:
         released = await asyncio.wait_for(
-            runner._release_recovery_cliff_roots(
+            runner._release_managed_roots(
                 run_id="unit-run",
                 deadline=time.monotonic() + 1,
+                transaction_prefix="recovery-cliff-root",
+                body_prefix="Recovery cliff",
             ),
             timeout=1,
         )
@@ -1068,9 +1205,11 @@ async def test_recovery_cliff_root_gather_is_bounded_by_the_fixed_sla() -> None:
     asyncio.get_running_loop().call_later(0.2, client.never.set)
     try:
         with pytest.raises(TimeoutError):
-            await runner._release_recovery_cliff_roots(
+            await runner._release_managed_roots(
                 run_id="unit-run",
                 deadline=time.monotonic() + 0.075,
+                transaction_prefix="recovery-cliff-root",
+                body_prefix="Recovery cliff",
             )
         assert len(client.sent_payloads) == 100
     finally:
@@ -1516,6 +1655,299 @@ def _valid_sustained_stream_capacity_observation() -> SustainedStreamCapacityObs
         clean_shutdown=True,
         phase_durations=(("root_release", 1.0), ("terminal_settlement", 47.0), ("shutdown", 1.0)),
     )
+
+
+def _capacity_root(
+    event_id: str,
+    thread: int,
+    *,
+    run_id: str = "unit-run",
+    sender: str = "@mindroom_load_sender:example",
+    body: str | None = None,
+    mentions: tuple[str, ...] = ("@mindroom_general:example",),
+) -> dict[str, Any]:
+    """Build one production-shaped managed capacity root."""
+    marker = f"run={run_id} thread={thread}"
+    return {
+        "event_id": event_id,
+        "type": "m.room.message",
+        "sender": sender,
+        "content": {
+            "msgtype": "m.text",
+            "body": body or f"Sustained stream capacity {marker} @mindroom_general:example",
+            "m.mentions": {"user_ids": list(mentions)},
+        },
+    }
+
+
+def test_sustained_stream_capacity_source_audit_requires_exact_managed_roots() -> None:
+    """Raw root proof rejects missing, forged, malformed, duplicated, and unknown sources."""
+    valid = (_capacity_root("$source-0", 0), _capacity_root("$source-1", 1))
+    audit = fuzz_live_matrix.audit_sustained_stream_capacity_sources(
+        valid,
+        expected_source_ids=("$source-0", "$source-1"),
+        load_sender_id="@mindroom_load_sender:example",
+        responder_id="@mindroom_general:example",
+        run_id="unit-run",
+    )
+
+    assert audit == SustainedStreamCapacitySourceAudit(
+        expected_source_ids=("$source-0", "$source-1"),
+        observed_source_ids=("$source-0", "$source-1"),
+        missing_source_ids=(),
+        duplicate_source_ids=(),
+        unexpected_source_ids=(),
+        invalid_source_ids=(),
+    )
+
+    mutations = (
+        (valid[:1], "missing_source_ids", ("$source-1",)),
+        (
+            (_capacity_root("$source-0", 0, sender="@foreign:example"), valid[1]),
+            "invalid_source_ids",
+            ("$source-0",),
+        ),
+        (
+            (_capacity_root("$source-0", 0, mentions=("@wrong:example",)), valid[1]),
+            "invalid_source_ids",
+            ("$source-0",),
+        ),
+        (
+            (
+                _capacity_root(
+                    "$source-0",
+                    0,
+                    body=(
+                        "Sustained stream capacity run=unit-run thread=0 "
+                        "run=unit-run thread=0 @mindroom_general:example"
+                    ),
+                ),
+                valid[1],
+            ),
+            "invalid_source_ids",
+            ("$source-0",),
+        ),
+        (
+            (*valid, _capacity_root("$source-0", 0)),
+            "duplicate_source_ids",
+            ("$source-0",),
+        ),
+        (
+            (*valid, _capacity_root("$unknown", 2)),
+            "unexpected_source_ids",
+            ("$unknown",),
+        ),
+    )
+    for events, field, expected in mutations:
+        mutated = fuzz_live_matrix.audit_sustained_stream_capacity_sources(
+            events,
+            expected_source_ids=("$source-0", "$source-1"),
+            load_sender_id="@mindroom_load_sender:example",
+            responder_id="@mindroom_general:example",
+            run_id="unit-run",
+        )
+        observed = {
+            "missing_source_ids": mutated.missing_source_ids,
+            "invalid_source_ids": mutated.invalid_source_ids,
+            "duplicate_source_ids": mutated.duplicate_source_ids,
+            "unexpected_source_ids": mutated.unexpected_source_ids,
+        }[field]
+        assert observed == expected, field
+
+
+@pytest.mark.asyncio
+async def test_sustained_stream_capacity_runner_uses_one_deadline_and_emits_phase_evidence(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-fault lifecycle stays ordered and shutdown consumes only the fixed SLA remainder."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    stack.load_sender_id = "@mindroom_load_sender:example"
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(root_count=2),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    order: list[str] = []
+    deadline_seen = 0.0
+    shutdown_timeouts: list[float] = []
+    marker_count = 0
+    before = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    after = datetime(2026, 8, 8, 12, 1, tzinfo=UTC)
+
+    async def authenticate() -> None:
+        order.append("authenticate")
+
+    async def baseline(*, run_id: str) -> fuzz_live_matrix.RecoveryCliffBaseline:
+        assert run_id
+        order.append("warm-and-baseline")
+        return fuzz_live_matrix.RecoveryCliffBaseline(
+            event_ids=frozenset(),
+            log_counts=fuzz_live_matrix.RecoveryCliffLogCounts(0, 0, 0),
+        )
+
+    async def release(
+        *,
+        run_id: str,
+        deadline: float,
+        health_samples: list[RecoveryCliffHealthSample],
+    ) -> tuple[str, ...]:
+        nonlocal deadline_seen
+        order.append("root-release")
+        deadline_seen = deadline
+        assert deadline > time.monotonic()
+        health_samples.append(RecoveryCliffHealthSample(True, before))
+        roots = (
+            _capacity_root("$source-0", 0, run_id=run_id),
+            _capacity_root("$source-1", 1, run_id=run_id),
+        )
+        client.seen_events.update({event["event_id"]: event for event in roots})
+        return "$source-0", "$source-1"
+
+    async def terminals(**_kwargs: object) -> fuzz_live_matrix.RecoveryCliffTerminalAudit:
+        order.append("terminals")
+        events = _completed_recovery_cliff_events()
+        client.seen_events.update({event["event_id"]: event for event in events})
+        return audit_recovery_cliff_events(
+            events,
+            responder_id=stack.agent_id,
+            expected_source_ids=("$source-0", "$source-1"),
+        )
+
+    async def observe_raw(**kwargs: object) -> RecoveryCliffHealthSample:
+        order.append("raw-observe")
+        sample = RecoveryCliffHealthSample(True, before)
+        cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"]).append(sample)
+        return sample
+
+    async def drain(**_kwargs: object) -> RecoveryCliffDrainCounts:
+        order.append("drain")
+        return RecoveryCliffDrainCounts(0, 0)
+
+    async def fence(**_kwargs: object) -> tuple[bool, datetime, datetime]:
+        order.append("fence")
+        return True, before, after
+
+    def stop_mindroom(*, timeout: float = 20) -> bool:
+        order.append("shutdown")
+        shutdown_timeouts.append(timeout)
+        return True
+
+    monkeypatch.setattr(runner, "_authenticate_managed_sender", authenticate)
+    monkeypatch.setattr(runner, "_prepare_recovery_cliff_baseline", baseline)
+    monkeypatch.setattr(runner, "_release_sustained_stream_capacity_roots", release)
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observe_raw)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_terminals", terminals)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_drain", drain)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_fence", fence)
+    monkeypatch.setattr(stack, "stop_mindroom", stop_mindroom)
+    monkeypatch.setattr(stack, "restart_shutdown_failure_count", lambda: marker_count)
+    monkeypatch.setattr(stack, "log_count", lambda *_markers: 0)
+    try:
+        result = await runner._run_sustained_stream_capacity()
+
+        assert order == [
+            "authenticate",
+            "warm-and-baseline",
+            "root-release",
+            "raw-observe",
+            "terminals",
+            "drain",
+            "fence",
+            "drain",
+            "shutdown",
+        ]
+        assert deadline_seen > 0
+        assert shutdown_timeouts
+        assert 0 < shutdown_timeouts[0] <= min(20, deadline_seen - time.monotonic() + 0.1)
+        assert result["profile"] == "sustained-stream-capacity"
+        assert result["status"] == "PASS"
+        assert result["roots"] == 2
+        assert result["observed_root_sources"] == 2
+        assert result["canonical_agent_replies"] == 2
+        assert result["durable_drain_failure_markers"] == 0
+        assert result["phase_root_release_seconds"] >= 0
+        assert result["phase_terminal_settlement_seconds"] >= 0
+        assert result["phase_shutdown_seconds"] >= 0
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_sustained_stream_capacity_rejects_shutdown_durable_recovery_marker_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean stop verdict cannot hide a new incomplete-drain recovery marker."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    stack.load_sender_id = "@mindroom_load_sender:example"
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        sustained_stream_capacity_scenario(root_count=2),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    marker_count = 3
+    before = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    after = datetime(2026, 8, 8, 12, 1, tzinfo=UTC)
+    terminal = _valid_recovery_cliff_observation().terminal_audit
+
+    async def baseline(*, run_id: str) -> fuzz_live_matrix.RecoveryCliffBaseline:
+        del run_id
+        return fuzz_live_matrix.RecoveryCliffBaseline(
+            event_ids=frozenset(),
+            log_counts=fuzz_live_matrix.RecoveryCliffLogCounts(0, 0, 0),
+        )
+
+    async def release(**kwargs: object) -> tuple[str, ...]:
+        health_samples = cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"])
+        run_id = cast("str", kwargs["run_id"])
+        health_samples.append(RecoveryCliffHealthSample(True, before))
+        roots = (
+            _capacity_root("$source-0", 0, run_id=run_id),
+            _capacity_root("$source-1", 1, run_id=run_id),
+        )
+        client.seen_events.update({event["event_id"]: event for event in roots})
+        client.seen_events.update({event["event_id"]: event for event in _completed_recovery_cliff_events()})
+        return "$source-0", "$source-1"
+
+    async def drain(**_kwargs: object) -> RecoveryCliffDrainCounts:
+        return RecoveryCliffDrainCounts(0, 0)
+
+    async def observe_raw(**kwargs: object) -> RecoveryCliffHealthSample:
+        sample = RecoveryCliffHealthSample(True, before)
+        cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"]).append(sample)
+        return sample
+
+    async def fence(**_kwargs: object) -> tuple[bool, datetime, datetime]:
+        return True, before, after
+
+    def stop_mindroom(*, timeout: float = 20) -> bool:
+        nonlocal marker_count
+        assert timeout > 0
+        marker_count += 1
+        return True
+
+    monkeypatch.setattr(runner, "_authenticate_managed_sender", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(runner, "_prepare_recovery_cliff_baseline", baseline)
+    monkeypatch.setattr(runner, "_release_sustained_stream_capacity_roots", release)
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observe_raw)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_terminals", lambda **_kwargs: asyncio.sleep(0, terminal))
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_drain", drain)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_fence", fence)
+    monkeypatch.setattr(stack, "stop_mindroom", stop_mindroom)
+    monkeypatch.setattr(stack, "restart_shutdown_failure_count", lambda: marker_count)
+    monkeypatch.setattr(stack, "log_count", lambda *_markers: 0)
+    try:
+        with pytest.raises(AssertionError, match="durable_drain_failure_markers=1"):
+            await runner._run_sustained_stream_capacity()
+    finally:
+        stack.close()
 
 
 def test_sustained_stream_capacity_evaluator_accepts_complete_no_fault_evidence() -> None:
@@ -2628,6 +3060,23 @@ def test_recovery_cliff_managed_config_uses_synthetic_responder_and_sliding_sync
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
         parsed = Config.model_validate(config)
         assert parsed.models["synthetic"].id == "lorem-ipsum"
+    finally:
+        stack.close()
+
+
+def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_responder() -> None:
+    """The no-fault profile needs the same deterministic long-stream principals."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    try:
+        stack._write_config(9292)
+        config = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
+
+        assert config["matrix_sync"] == {
+            "mode": "sliding",
+            "sliding_timeline_limit": 100,
+        }
+        assert config["agents"]["general"]["model"] == "synthetic"
+        assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
     finally:
         stack.close()
 
