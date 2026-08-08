@@ -17,6 +17,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import _SYNC_TIMELINE_LIMIT, AgentBot, _classic_sync_rebuild_backoff_seconds
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import (
@@ -1562,17 +1563,145 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
         patch.object(bot, "_register_room_member_callback_after_initial_sync"),
         patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
         patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS", 0.0),
+        patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS", 0.0),
     ):
-        # A pass that raises must not be the last one.
+        # A pass that raises or reports an incomplete recovery retries through
+        # the durable outbox before releasing the owner task.
         await bot._run_sync_response_side_effects(first_sync_response=True)
-        # A pass that reported a failure must not be the last one either.
-        await bot._run_sync_response_side_effects(first_sync_response=False)
-        await bot._run_sync_response_side_effects(first_sync_response=False)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
         # And a delivery refused after every earlier pass completed is still
         # found, because the outbox is asked rather than a flag.
         await bot._run_sync_response_side_effects(first_sync_response=False)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert recover.await_count == len(outcomes)
+
+
+@pytest.mark.asyncio
+async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_response(
+    tmp_path: Path,
+) -> None:
+    """A parked recovery pass cannot block the next receive-loop callback."""
+    bot = _sliding_response_bot(tmp_path)
+    recovery_started = asyncio.Event()
+    next_response_started = asyncio.Event()
+    first_response_returned = asyncio.Event()
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        await next_response_started.wait()
+        return RecoveryOutcome(recovered=0, failed=0)
+
+    async def drive_responses() -> None:
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos-one"))
+        first_response_returned.set()
+        next_response_started.set()
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos-two"))
+
+    with patch.object(
+        bot,
+        "_delivery_gateway",
+        new=SimpleNamespace(recover_deliveries=recover_deliveries),
+    ):
+        driver = asyncio.create_task(drive_responses())
+        try:
+            await recovery_started.wait()
+            await asyncio.sleep(0)
+            assert first_response_returned.is_set()
+        finally:
+            next_response_started.set()
+            await driver
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_delivery_recovery_coalesces_sync_wakes_without_overlapping_passes(
+    tmp_path: Path,
+) -> None:
+    """Several responses during one recovery pass request one follow-up pass."""
+    bot = _sliding_response_bot(tmp_path)
+    first_pass_started = asyncio.Event()
+    allow_first_pass_finish = asyncio.Event()
+    second_pass_started = asyncio.Event()
+    pass_count = 0
+    active_count = 0
+    max_active_count = 0
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        nonlocal active_count, max_active_count, pass_count
+        pass_count += 1
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        try:
+            if pass_count == 1:
+                first_pass_started.set()
+                await allow_first_pass_finish.wait()
+            else:
+                second_pass_started.set()
+            return RecoveryOutcome(recovered=0, failed=0)
+        finally:
+            active_count -= 1
+
+    with patch.object(
+        bot,
+        "_delivery_gateway",
+        new=SimpleNamespace(recover_deliveries=recover_deliveries),
+    ):
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos-one"))
+        await first_pass_started.wait()
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos-two"))
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos-three"))
+
+        allow_first_pass_finish.set()
+        await second_pass_started.wait()
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert pass_count == 2
+    assert max_active_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_shutdown_cancels_the_owned_delivery_recovery(tmp_path: Path) -> None:
+    """The existing owner drain cancels a parked delivery-recovery task."""
+    bot = _sliding_response_bot(tmp_path)
+    recovery_started = asyncio.Event()
+    recovery_cancelled = asyncio.Event()
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            recovery_cancelled.set()
+            raise
+
+    async def expire_owner_drain(
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
+        owner: object | None = None,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> bool:
+        assert timeout == 5.0
+        return await wait_for_background_tasks(
+            timeout=0,
+            owner=owner,
+            shutdown_intent=shutdown_intent,
+        )
+
+    with (
+        patch.object(
+            bot,
+            "_delivery_gateway",
+            new=SimpleNamespace(recover_deliveries=recover_deliveries),
+        ),
+        patch("mindroom.bot.wait_for_background_tasks", new=expire_owner_drain),
+    ):
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
+        await recovery_started.wait()
+        await bot.prepare_for_sync_shutdown()
+
+    assert recovery_cancelled.is_set()
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:

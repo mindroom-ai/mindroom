@@ -183,6 +183,8 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 30000
 _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
 _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
+_DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
+_DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 # Raise the per-room timeline limit above the homeserver default (~10) so a
 # room has to flood much harder before the server truncates its timeline and
 # forces a limited-sync gap backfill. This only widens the timeline window; it
@@ -343,6 +345,8 @@ class AgentBot:
     _classic_sync_rebuild_pending: bool
     _classic_sync_rebuild_attempt: int
     _sync_shutting_down: bool
+    _delivery_recovery_wake: asyncio.Event
+    _delivery_recovery_task: asyncio.Task[None] | None
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -419,6 +423,8 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
+        self._delivery_recovery_wake = asyncio.Event()
+        self._delivery_recovery_task = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -1458,7 +1464,7 @@ class AgentBot:
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
 
-    async def _recover_unacknowledged_deliveries(self) -> None:
+    async def _recover_unacknowledged_deliveries(self) -> bool:
         """Resend answers this bot could not confirm reaching Matrix.
 
         After the first sync response, not before it. A send into an encrypted
@@ -1487,11 +1493,51 @@ class AgentBot:
             outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")
-            return
+            return False
         if outcome.recovered:
             self.logger.info("Resent unacknowledged deliveries", deliveries=outcome.recovered)
         if not outcome.complete:
             self.logger.warning("Deliveries still unsent after recovery", deliveries=outcome.failed)
+        return outcome.complete
+
+    def _schedule_delivery_recovery(self) -> None:
+        """Wake this bot's one outbox recovery task after sync progress."""
+        if self._sync_shutting_down:
+            return
+        self._delivery_recovery_wake.set()
+        task = self._delivery_recovery_task
+        if task is not None and not task.done():
+            return
+        self._delivery_recovery_task = create_background_task(
+            self._run_scheduled_delivery_recovery(),
+            name=f"delivery_recovery_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
+    async def _run_scheduled_delivery_recovery(self) -> None:
+        """Recover outbox debt without making Matrix receive progress wait."""
+        retry_delay = _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS
+        try:
+            while not self._sync_shutting_down:
+                self._delivery_recovery_wake.clear()
+                complete = await self._recover_unacknowledged_deliveries()
+                if complete:
+                    retry_delay = _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS
+                    if not self._delivery_recovery_wake.is_set():
+                        return
+                    continue
+                if self._delivery_recovery_wake.is_set():
+                    continue
+                try:
+                    await asyncio.wait_for(self._delivery_recovery_wake.wait(), timeout=retry_delay)
+                except TimeoutError:
+                    retry_delay = min(
+                        retry_delay * 2,
+                        _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS,
+                    )
+        finally:
+            if self._delivery_recovery_task is asyncio.current_task():
+                self._delivery_recovery_task = None
 
     async def _run_sync_response_side_effects(
         self,
@@ -1501,7 +1547,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
-        await self._recover_unacknowledged_deliveries()
+        self._schedule_delivery_recovery()
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
@@ -2069,6 +2115,7 @@ class AgentBot:
                 resulting_action="drain_then_cancel_response_runtime",
             )
         self._sync_shutting_down = True
+        self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
