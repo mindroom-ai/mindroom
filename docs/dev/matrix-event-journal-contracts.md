@@ -41,7 +41,18 @@ Each contract is stated as a rule, then as what actually shipped.
 
 A bounded, recent, latest-visible view whose purpose is prompt construction.
 No certification, no periodic scan, no unbounded export API.
-A genuine full export paginates Matrix directly.
+
+**Export reads this projection; it does not paginate Matrix itself.**
+Before the cutover it did, and owning a second Matrix reducer meant an exported
+thread and the history a model was shown could disagree about which edit won or
+what a redaction left behind.
+`thread_export/projected_history.py` now pages the same `ConversationReader` a
+prompt uses, under its own far larger bounds (`EXPORT_WINDOW_MESSAGES`,
+`EXPORT_MAX_FETCHED_EVENTS`, `EXPORT_MAX_MESSAGES_REQUESTS`), so a cold thread
+still reaches the server — through the shared hydrator, not through a walk of
+export's own.
+Do not re-impose the prompt window on hydration on the belief that export is an
+independent consumer.
 
 One repair exists and is deliberate: contract 7's point refetch.
 
@@ -95,14 +106,19 @@ The point refetch, and nothing else.
 Exactly-once is the substance of this contract, and it is durable rather than in-process: `fence_departure(room_id, source=LOCAL|REPORTED)` returns a `DepartureOutcome`, and `rooms_owing_departure_reports` / `retire_owed_departure_reports` carry the owed-report set across a restart.
 An in-process marker was not enough — an advance that raised left the marker set and swallowed the echo, a restart lost it, and two leaves before one echo needed two markers.
 
-An epoch advance drops `conversation_hydration`, `visible_messages`, `unresolved_edits`, `redaction_tombstones`, and `room_history_debt` in one transaction, plus unattempted outbox rows.
+An epoch advance drops `conversation_hydration`, `visible_messages`, `unresolved_edits`, `redaction_tombstones`, `room_history_debt`, and `approval_cards` in one transaction, plus unattempted outbox rows.
 **Attempted** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
+
+The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
+This is what makes the enqueue refusal below *final* rather than permanent: left pending, the worker would offer the source again on every replay, the model would run again, and enqueue would refuse again, forever.
+Only turn-backed kinds are swept. A redaction, reaction, approval reply, or decryption failure enqueues no answer, so the epoch predicate never blocks it — and a redaction in particular still owes real cleanup, which sweeping it here would drop silently.
 
 The in-flight turn is fenced at enqueue: `_enqueue_delivery` compares the epoch that admitted the turn against the room's current one and refuses to write the row when they differ.
 
 ### 9. One backend, several narrow views
 
-Twelve structural protocols — eleven in `event_journal/views.py` plus `MembershipView` in `event_journal/membership.py`.
+Eleven structural protocols — ten in `event_journal/views.py` (`AdmissionView`, `ReplayView`, `DispatchView`, `PendingTurnView`, `RelationView`, `ConversationReadView`, `HistoryDebtRecordView`, `HydrationView`, `OutboxView`, `ApprovalView`) plus `MembershipView` in `event_journal/membership.py`.
+Count them rather than quoting this line; the archived plan's count named two views that no longer exist and missed one that does.
 Each collaborator takes the slice it calls, and the type checker enforces it: a hydrator reaching for `enqueue_delivery` fails `ty` before any test runs.
 
 `grep -rn ": PrincipalStore" src/` returns nothing outside `event_journal/` itself.
