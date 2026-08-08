@@ -48,6 +48,7 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
+uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --reply-timeout 180
 ```
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
@@ -74,8 +75,10 @@ The `short-stream-correctness` profile preserves the existing 13-thread hot-then
 It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
 
 The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for its fixed 100-root workload.
-It intentionally refuses to run until the dedicated Task 3 workload and acceptance checks land, so it is not yet an executable live profile.
-Its future live acceptance results must not be inferred from short-stream-correctness results.
+It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases exactly 100 managed roots concurrently, and resumes the runtime even if a send fails.
+One fixed whole-workload `--reply-timeout` covers the fault boundary, root sends, terminal replies, durable debt observation, final drain, and post-load fence without extension.
+PASS requires exact completed replies, sustained 100-stream overlap, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
+Short-stream-correctness results are not recovery-cliff acceptance evidence.
 
 #### The live gate is manual, and that is a decision rather than an omission
 
@@ -105,7 +108,8 @@ It is not claimed here because it has not been run on a GitHub runner, and shipp
 Every event in one Matrix room is handled by a single sequential lane, so a batch that asks forty-five threads for a reply is asking for forty-five agent turns back to back.
 Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
 
-- `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger deadline; it is no longer applied flat to a whole batch.
+- For fuzz, restart-regression, and short-stream-correctness, `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger adaptive deadline.
+- For recovery-cliff, `--reply-timeout` is one fixed non-extending deadline for the complete held-load, reply, drain, and fence workflow.
 - A wait for N outstanding replies gets `N x measured-turn-latency x 3`, floored at `--reply-timeout`.
   The turn latency is measured from the warm-up exchange and from every completed wait after it, keeping the slowest observation, so nothing new is hardcoded.
 - Silence, not the deadline, is what identifies a wedge.

@@ -12,7 +12,7 @@ The live harness adds a fixed `recovery-cliff` profile with a managed sender, a 
 
 ## Global Constraints
 
-The worktree starts at published PR head `ff466ad2a049f5006e303c7162d2d1d3698f87a4`.
+The worktree was rebased at the user's request onto `e4cdd2f32733f304e76ff2a4cef8a0d0b6a71495`.
 
 The response outbox remains the only durable delivery-recovery authority.
 
@@ -373,7 +373,7 @@ uv run pytest -q \
 uv run ruff check src/mindroom/bot.py scripts/testing/fuzz_live_matrix.py tests/test_sync_task_cancellation.py tests/test_live_matrix_fuzz.py
 uv run ruff format --check src/mindroom/bot.py scripts/testing/fuzz_live_matrix.py tests/test_sync_task_cancellation.py tests/test_live_matrix_fuzz.py
 uv run tach check --dependencies --interfaces
-git diff --check ff466ad2a049..HEAD
+git diff --check e4cdd2f32733..HEAD
 ```
 
 - [ ] **Step 3: Run the live acceptance profile**

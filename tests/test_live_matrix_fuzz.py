@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from contextlib import closing
@@ -46,6 +47,7 @@ from scripts.testing.fuzz_live_matrix import (
     MissingReplyStage,
     OutboxRow,
     RecoveryCliffDrainCounts,
+    RecoveryCliffFaultShape,
     RecoveryCliffHealthSample,
     RecoveryCliffObservation,
     RestartRegressionObservation,
@@ -62,6 +64,7 @@ from scripts.testing.fuzz_live_matrix import (
     evaluate_recovery_cliff,
     evaluate_restart_regression,
     live_scenario_from_seed,
+    recovery_cliff_fault_shape,
     recovery_cliff_scenario,
     restart_regression_scenario,
     short_stream_correctness_scenario,
@@ -136,6 +139,35 @@ class _RecoveryCliffLaunchBarrierClient:
         await self.all_entered.wait()
         if not self.finish:
             await self.never.wait()
+        return f"${txn_id}"
+
+
+class _RecoveryCliffHeldLoadClient:
+    """Require every held context event before the simultaneous root barrier."""
+
+    room_id = "!recovery:example"
+
+    def __init__(self, *, context_events: int, fail_context: bool = False) -> None:
+        self.context_events = context_events
+        self.fail_context = fail_context
+        self.context_payloads: list[tuple[str, dict[str, Any]]] = []
+        self.root_payloads: list[tuple[str, dict[str, Any]]] = []
+        self.all_roots_entered = asyncio.Event()
+
+    async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        assert event_type == "m.room.message"
+        if content["msgtype"] == "m.notice":
+            assert not self.root_payloads
+            self.context_payloads.append((txn_id, content))
+            if self.fail_context and len(self.context_payloads) == 1:
+                msg = "held context send failed"
+                raise RuntimeError(msg)
+            return f"${txn_id}"
+        assert len(self.context_payloads) == self.context_events
+        self.root_payloads.append((txn_id, content))
+        if len(self.root_payloads) == 100:
+            self.all_roots_entered.set()
+        await self.all_roots_entered.wait()
         return f"${txn_id}"
 
 
@@ -519,6 +551,31 @@ def test_recovery_cliff_scenario_rejects_an_altered_trace_shape() -> None:
         scenario.validate()
 
 
+def test_recovery_cliff_fault_shape_exceeds_one_live_window_and_one_recovery_pump() -> None:
+    """The held burst must leave more history than one bounded recovery pump can close."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    try:
+        stack.config_path.write_text(
+            "matrix_sync:\n  mode: sliding\n  sliding_timeline_limit: 100\n",
+            encoding="utf-8",
+        )
+
+        shape = recovery_cliff_fault_shape(stack.config_path, root_count=100)
+
+        assert shape == RecoveryCliffFaultShape(
+            timeline_limit=100,
+            recovery_max_pages=10,
+            recovery_page_size=50,
+            recovery_max_events=2_000,
+            context_event_count=601,
+            root_count=100,
+        )
+        assert shape.context_event_count + shape.root_count == 701
+        assert shape.context_event_count + shape.root_count < shape.recovery_max_events
+    finally:
+        stack.close()
+
+
 @pytest.mark.asyncio
 async def test_recovery_cliff_authenticates_the_managed_sender_without_registering() -> None:
     """Recovery load must use the persisted sender instead of creating an account."""
@@ -556,11 +613,40 @@ async def test_recovery_cliff_authenticates_the_managed_sender_without_registeri
 
 
 @pytest.mark.asyncio
-async def test_recovery_cliff_releases_one_hundred_roots_and_boundary_in_one_gather() -> None:
-    """A sequential root sender deadlocks before the 101-event burst is entered."""
+async def test_recovery_cliff_run_dispatches_before_disposable_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving recovery dispatch below generic register makes this regression fail."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    calls: list[str] = []
+
+    async def run_recovery() -> dict[str, float | int | str]:
+        calls.append("recovery")
+        return {"profile": "recovery-cliff", "status": "PASS"}
+
+    monkeypatch.setattr(runner, "_run_recovery_cliff", run_recovery)
+    try:
+        assert await runner.run() == {"profile": "recovery-cliff", "status": "PASS"}
+        assert calls == ["recovery"]
+        assert client.calls == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_releases_exactly_one_hundred_roots_in_one_gather() -> None:
+    """A sequential root sender deadlocks before all 100 root sends are entered."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
     stack.agent_id = "@mindroom_general:example"
-    client = _RecoveryCliffLaunchBarrierClient(expected_sends=101)
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=100)
     runner = LiveFuzzRunner(
         stack,
         (cast("LiveMatrixClient", client),),
@@ -577,7 +663,7 @@ async def test_recovery_cliff_releases_one_hundred_roots_and_boundary_in_one_gat
             timeout=1,
         )
 
-        assert len(client.sent_payloads) == 101
+        assert len(client.sent_payloads) == 100
         assert len(released) == 100
         root_payloads = {
             txn_id: content
@@ -589,16 +675,71 @@ async def test_recovery_cliff_releases_one_hundred_roots_and_boundary_in_one_gat
             content = root_payloads[f"recovery-cliff-root-unit-run-{thread}"]
             assert f"run=unit-run thread={thread}" in content["body"]
             assert content["m.mentions"] == {"user_ids": [stack.agent_id]}
-        boundary = next(
-            content
-            for _event_type, txn_id, content in client.sent_payloads
-            if txn_id == "recovery-cliff-boundary-unit-run"
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_holds_context_before_releasing_roots_and_always_resumes() -> None:
+    """The stopped runtime sees 601 notices before the exact 100-root barrier."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffHeldLoadClient(context_events=601)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    lifecycle: list[str] = []
+    stack.pause_mindroom = lambda **_kwargs: lifecycle.append("pause")  # type: ignore[method-assign]
+    stack.resume_mindroom = lambda: lifecycle.append("resume")  # type: ignore[method-assign]
+    shape = RecoveryCliffFaultShape(100, 10, 50, 2_000, 601, 100)
+    try:
+        released = await asyncio.wait_for(
+            runner._release_recovery_cliff_load(
+                run_id="unit-run",
+                deadline=time.monotonic() + 1,
+                shape=shape,
+            ),
+            timeout=2,
         )
-        assert boundary == {
-            "msgtype": "m.notice",
-            "body": "Recovery cliff load boundary run=unit-run",
-            "m.mentions": {"user_ids": []},
-        }
+
+        assert lifecycle == ["pause", "resume"]
+        assert len(client.context_payloads) == 601
+        assert len(client.root_payloads) == 100
+        assert len(released) == 100
+        assert all(content["m.mentions"] == {"user_ids": []} for _txn, content in client.context_payloads)
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_resumes_the_process_group_when_a_held_send_fails() -> None:
+    """No Matrix send failure may strand the managed runtime under SIGSTOP."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffHeldLoadClient(context_events=601, fail_context=True)
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    lifecycle: list[str] = []
+    stack.pause_mindroom = lambda **_kwargs: lifecycle.append("pause")  # type: ignore[method-assign]
+    stack.resume_mindroom = lambda: lifecycle.append("resume")  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="held context send failed"):
+            await runner._release_recovery_cliff_load(
+                run_id="unit-run",
+                deadline=time.monotonic() + 1,
+                shape=RecoveryCliffFaultShape(100, 10, 50, 2_000, 601, 100),
+            )
+
+        assert lifecycle == ["pause", "resume"]
+        assert client.root_payloads == []
     finally:
         stack.close()
 
@@ -608,7 +749,7 @@ async def test_recovery_cliff_root_gather_is_bounded_by_the_fixed_sla() -> None:
     """Entered but unfinished homeserver sends cannot outlive the one SLA."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
     stack.agent_id = "@mindroom_general:example"
-    client = _RecoveryCliffLaunchBarrierClient(expected_sends=101, finish=False)
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=100, finish=False)
     runner = LiveFuzzRunner(
         stack,
         (cast("LiveMatrixClient", client),),
@@ -616,13 +757,14 @@ async def test_recovery_cliff_root_gather_is_bounded_by_the_fixed_sla() -> None:
         reply_timeout=1,
         settle_seconds=0,
     )
+    asyncio.get_running_loop().call_later(0.2, client.never.set)
     try:
         with pytest.raises(TimeoutError):
             await runner._release_recovery_cliff_roots(
                 run_id="unit-run",
-                deadline=time.monotonic() + 0.01,
+                deadline=time.monotonic() + 0.075,
             )
-        assert len(client.sent_payloads) == 101
+        assert len(client.sent_payloads) == 100
     finally:
         stack.close()
 
@@ -651,11 +793,11 @@ async def test_recovery_cliff_health_and_sync_poll_cannot_overrun_the_fixed_sla(
         )
 
     monkeypatch.setattr(stack, "recovery_health_sample", blocked_health)
-    asyncio.get_running_loop().call_later(0.1, health_release.set)
+    asyncio.get_running_loop().call_later(0.2, health_release.set)
     try:
         with pytest.raises(TimeoutError):
             await runner._recovery_cliff_observer_step(
-                deadline=time.monotonic() + 0.01,
+                deadline=time.monotonic() + 0.075,
                 health_samples=[],
             )
         assert client.sync_calls == 0
@@ -712,6 +854,46 @@ async def test_recovery_cliff_samples_post_fence_health_after_exact_settlement(
         assert settled is True
         assert (pre_fence, post_fence) == (before, after)
         assert order == ["health", "send-reaction", "settled-query", "health"]
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_terminal_wait_samples_exact_workload_outbox_debt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient attempted FINAL row must be retained before the terminal audit passes."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    complete = _valid_recovery_cliff_observation().terminal_audit
+    audits = iter((replace(complete, noncompleted_sources=(("$source-0", "streaming"),)), complete))
+    debt = iter((0, 3))
+    debt_samples: list[int] = []
+
+    async def observer_step(**_kwargs: object) -> RecoveryCliffHealthSample:
+        return RecoveryCliffHealthSample(True, datetime(2026, 8, 7, tzinfo=UTC))
+
+    monkeypatch.setattr(runner, "_recovery_cliff_audit", lambda **_kwargs: next(audits))
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observer_step)
+    monkeypatch.setattr(stack, "recovery_outbox_debt", lambda _source_ids: next(debt))
+    try:
+        terminal = await runner._wait_for_recovery_cliff_terminals(
+            baseline_event_ids=frozenset(),
+            expected_source_ids=("$source-0", "$source-1"),
+            deadline=time.monotonic() + 1,
+            health_samples=[],
+            debt_samples=debt_samples,
+        )
+
+        assert terminal is complete
+        assert debt_samples == [0, 3]
     finally:
         stack.close()
 
@@ -774,6 +956,92 @@ def _completed_recovery_cliff_events() -> tuple[dict[str, Any], ...]:
     )
 
 
+@pytest.mark.asyncio
+async def test_recovery_cliff_warm_completion_precedes_event_and_log_baselines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm output is excluded from workload audit and its markers are already baselined."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    warm_completed = False
+    log_queries: list[tuple[str, ...]] = []
+
+    async def send_warm(_event_type: str, _txn_id: str, _content: dict[str, Any]) -> str:
+        return "$warm"
+
+    async def wait_for_warm(**_kwargs: object) -> object:
+        nonlocal warm_completed
+        client.seen_events["$warm-response"] = _recovery_original(
+            "$warm-response",
+            "$warm",
+            1_000,
+            "completed",
+        )
+        warm_completed = True
+        return object()
+
+    def log_count(*markers: str) -> int:
+        assert warm_completed
+        log_queries.append(markers)
+        if "matrix_sync_recovery_incomplete" in markers:
+            return 2
+        if "Waiting to retry Matrix delivery after sync recovery" in markers:
+            return 3
+        if "Resent unacknowledged deliveries" in markers:
+            return 4
+        return 0
+
+    monkeypatch.setattr(client, "send_event", send_warm)
+    monkeypatch.setattr(runner, "_wait_for_recovery_cliff_terminals", wait_for_warm)
+    monkeypatch.setattr(stack, "log_count", log_count)
+    try:
+        baseline = await runner._prepare_recovery_cliff_baseline(run_id="unit-run")
+        client.seen_events.update(
+            {
+                event["event_id"]: event
+                for event in (
+                    _recovery_original("$response", "$workload", 2_000, "streaming"),
+                    _recovery_edit("$terminal", "$response", 49_000, "completed"),
+                )
+            },
+        )
+        audit = runner._recovery_cliff_audit(
+            baseline_event_ids=baseline.event_ids,
+            expected_source_ids=("$workload",),
+        )
+
+        assert "$warm-response" in baseline.event_ids
+        assert baseline.log_counts.recovery_incomplete_markers == 2
+        assert baseline.log_counts.delivery_retry_markers == 3
+        assert baseline.log_counts.delivery_worker_markers == 4
+        assert log_queries == [
+            (
+                "matrix_sync_recovery_incomplete",
+                "agent=general",
+                "transport=sliding",
+                client.room_id,
+            ),
+            (
+                "Waiting to retry Matrix delivery after sync recovery",
+                f"room_id={client.room_id}",
+            ),
+            ("Resent unacknowledged deliveries", "agent=general"),
+            ("Abandoning", client.room_id),
+        ]
+        assert audit.unexpected_sources == ()
+        assert audit.canonical_responses == (("$workload", "$response"),)
+    finally:
+        stack.close()
+
+
 def _valid_recovery_cliff_observation() -> RecoveryCliffObservation:
     """Build a settled observation whose expected values are hand-checked."""
     before = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
@@ -788,6 +1056,9 @@ def _valid_recovery_cliff_observation() -> RecoveryCliffObservation:
         terminal_audit=audit,
         recovery_incomplete_markers=1,
         delivery_retry_markers=1,
+        peak_unacknowledged_final_outbox_rows=1,
+        delivery_worker_markers=1,
+        recovery_abandonment_markers=0,
         drain=RecoveryCliffDrainCounts(
             pending_journal_rows=0,
             unacknowledged_outbox_rows=0,
@@ -816,6 +1087,49 @@ def test_recovery_cliff_event_audit_accepts_exact_completed_streams() -> None:
     assert observation.terminal_audit.max_active_stream_seconds == pytest.approx(47.0)
     assert observation.terminal_audit.peak_active_streams == 2
     assert evaluate_recovery_cliff(observation) == ()
+
+
+def test_recovery_cliff_pass_payload_surfaces_fault_and_worker_debt_evidence() -> None:
+    """Machine-readable PASS must retain the causal fault and detached-worker proof."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", _RecoveryCliffBoundaryClient()),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    observation = _valid_recovery_cliff_observation()
+    try:
+        result = runner._recovery_cliff_pass_result(
+            observation,
+            shape=RecoveryCliffFaultShape(100, 10, 50, 2_000, 601, 100),
+        )
+
+        assert result["context_events"] == 601
+        assert result["held_events"] == 701
+        assert result["peak_unacknowledged_final_outbox_rows"] == 1
+        assert result["delivery_worker_markers"] == 1
+        assert result["recovery_abandonment_markers"] == 0
+    finally:
+        stack.close()
+
+
+def test_reply_timeout_help_distinguishes_adaptive_and_fixed_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Operators must not mistake recovery-cliff's whole-workload SLA for an adaptive floor."""
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr(sys, "argv", ["fuzz_live_matrix.py", "--help"])
+
+    with pytest.raises(SystemExit) as raised:
+        fuzz_live_matrix._parse_args()
+
+    assert raised.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "adaptive per-turn floor for fuzz, restart-regression, and short-stream-correctness" in help_text
+    assert "one fixed whole-workload non-extending SLA for recovery-cliff" in help_text
 
 
 def test_recovery_cliff_event_audit_folds_only_same_responder_edits_in_total_order() -> None:
@@ -943,6 +1257,9 @@ def test_recovery_cliff_evaluator_rejects_unexercised_or_unsettled_completion() 
     bad_observations = (
         (replace(valid, recovery_incomplete_markers=0), "recovery_incomplete"),
         (replace(valid, delivery_retry_markers=0), "delivery_retry"),
+        (replace(valid, peak_unacknowledged_final_outbox_rows=0), "peak_unacknowledged_final_outbox_rows"),
+        (replace(valid, delivery_worker_markers=0), "delivery_worker"),
+        (replace(valid, recovery_abandonment_markers=1), "recovery_abandonment"),
         (
             replace(valid, drain=replace(valid.drain, pending_journal_rows=1)),
             "pending_journal_rows",
@@ -1860,6 +2177,37 @@ def test_recovery_cliff_drain_fails_when_the_journal_database_is_missing() -> No
         stack.close()
 
 
+def test_recovery_cliff_debt_counts_only_exact_workload_final_rows() -> None:
+    """Only attempted unacknowledged FINAL debt for general workload roots is evidence."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    stack.agent_id = "@mindroom_general:example"
+    expected_principal = f"general@{stack.agent_id}"
+    try:
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "CREATE TABLE response_outbox("
+                "principal_id TEXT, turn_id TEXT, stage TEXT, attempted INTEGER, acknowledged_event_id TEXT)",
+            )
+            database.executemany(
+                "INSERT INTO response_outbox VALUES (?, ?, ?, ?, ?)",
+                (
+                    (expected_principal, "$source-0", "final", 1, None),
+                    ("router@@mindroom_router:example", "$source-0", "final", 1, None),
+                    (expected_principal, "$unknown", "final", 1, None),
+                    (expected_principal, "$source-1", "initial", 1, None),
+                    (expected_principal, "$source-1", "final", 0, None),
+                    (expected_principal, "$source-1", "final", 1, "$acknowledged"),
+                ),
+            )
+            database.commit()
+
+        assert stack.recovery_outbox_debt(("$source-0", "$source-1")) == 1
+    finally:
+        stack.close()
+
+
 def test_recovery_cliff_reaction_state_filters_exact_principal_event_and_kind() -> None:
     """A distractor principal cannot prove that the responder settled the fence."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
@@ -2424,6 +2772,64 @@ def test_crash_kills_the_runtime_without_giving_it_a_chance_to_drain(
         stack.close()
 
 
+def test_recovery_cliff_pause_confirms_stopped_state_without_consuming_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGSTOP is complete only after every managed process-group member stops."""
+
+    class Process:
+        pid = 10
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    class Stopped:
+        si_code = os.CLD_STOPPED
+        si_status = signal.SIGSTOP
+
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    signals: list[tuple[int, int]] = []
+    wait_calls: list[tuple[int, int, int]] = []
+    state_calls: list[int] = []
+    group_states = iter(({10: "T", 11: "R"}, {10: "T", 11: "T"}))
+    try:
+        stack._mindroom_process = cast("Any", Process())
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
+
+        def waitid(idtype: int, pid: int, options: int) -> Stopped:
+            wait_calls.append((idtype, pid, options))
+            return Stopped()
+
+        monkeypatch.setattr(os, "waitid", waitid)
+
+        def process_group_states(process_group_id: int) -> dict[int, str]:
+            state_calls.append(process_group_id)
+            return next(group_states)
+
+        monkeypatch.setattr(
+            fuzz_live_matrix,
+            "_process_group_states",
+            process_group_states,
+            raising=False,
+        )
+
+        stack.pause_mindroom(timeout=0.1)
+        stack.resume_mindroom()
+
+        assert signals == [(10, signal.SIGSTOP), (10, signal.SIGCONT)]
+        expected_wait = (
+            os.P_PID,
+            10,
+            os.WSTOPPED | os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+        assert wait_calls == [expected_wait, expected_wait]
+        assert state_calls == [10, 10]
+    finally:
+        stack._mindroom_process = None
+        stack.close()
+
+
 def test_pending_journal_work_counts_only_unsettled_events() -> None:
     """The interruption probe must read the production journal, not a log line.
 
@@ -2662,6 +3068,42 @@ async def test_restart_response_index_honors_sender_override() -> None:
         assert runner._canonical_response_ids(events, sender_id=stack.router_id) == {
             "$router-source": {"$router-response"},
         }
+    finally:
+        await client.close()
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_generic_response_index_preserves_nested_thread_root_and_direct_source() -> None:
+    """A reply inside an existing thread may target a source below that thread's root."""
+    stack = ManagedTuwunelStack()
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    try:
+        stack.agent_id = "@agent:example"
+        runner = LiveFuzzRunner(
+            stack,
+            (client,),
+            LiveFuzzScenario(thread_count=1, batches=()),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+        nested_reply = {
+            "event_id": "$response",
+            "sender": stack.agent_id,
+            "type": "m.room.message",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread-root",
+                    "m.in_reply_to": {"event_id": "$nested-source"},
+                },
+            },
+        }
+
+        assert runner._canonical_response_ids(
+            (nested_reply,),
+            root_event_id="$thread-root",
+        ) == {"$nested-source": {"$response"}}
     finally:
         await client.close()
         stack.close()

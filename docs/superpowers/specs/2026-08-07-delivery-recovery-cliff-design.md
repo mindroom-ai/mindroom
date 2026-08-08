@@ -1,5 +1,7 @@
 # Delivery Recovery Cliff Design
 
+Implementation base: `e4cdd2f32733f304e76ff2a4cef8a0d0b6a71495` after the user-requested rebase.
+
 ## Purpose
 
 Prevent durable response recovery from blocking Matrix receive progress, and add a live acceptance profile that exercises the production-shaped workload which exposed the cycle.
