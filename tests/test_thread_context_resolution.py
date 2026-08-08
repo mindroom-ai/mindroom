@@ -930,7 +930,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             "$incoming-edit:localhost",
             event_info,
-            mode=ThreadReadMode.ADVISORY_FULL,
+            mode=ThreadReadMode.STRICT,
             caller_label="threading_error_test",
         )
 
@@ -1194,7 +1194,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             context_result = await bot._conversation_resolver.extract_dispatch_context(
                 room,
                 event,
-                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+                mode=ThreadReadMode.NONBLOCKING,
             )
             context = context_result.context
 
@@ -1717,12 +1717,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert mock_access.call_args_list == [
             call(
-                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+                mode=ThreadReadMode.NONBLOCKING,
                 caller_label="coalescing_thread_id",
                 requires_complete_history=True,
             ),
             call(
-                mode=ThreadReadMode.STRICT_FULL,
+                mode=ThreadReadMode.STRICT,
                 caller_label="coalescing_thread_id_strict_candidate_fallback",
                 requires_complete_history=True,
             ),
@@ -1794,7 +1794,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             room_id,
             incoming_event_id,
             event_info,
-            mode=ThreadReadMode.ADVISORY_FULL,
+            mode=ThreadReadMode.STRICT,
             caller_label="threading_error_test",
         )
 

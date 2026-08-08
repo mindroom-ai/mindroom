@@ -41,21 +41,13 @@ class ThreadReadMode(Enum):
 
     What this names is the caller's *contract*, not a storage policy: whether a
     read is on the live dispatch path and so must fail open rather than block.
+    There are exactly two contracts because there are exactly two answers to
+    that question; a caller that may block says so, and every other caller
+    takes whatever is already local.
     """
 
-    ADVISORY_FULL = auto()
-    DISPATCH_SNAPSHOT = auto()
-    DISPATCH_FULL = auto()
-    STRICT_FULL = auto()
-
-    @property
-    def dispatch_safe(self) -> bool:
-        """Return whether this mode is on the live dispatch fail-open path."""
-        # STRICT_FULL intentionally stays false: it may block for authoritative post-lock model context.
-        return self in {
-            ThreadReadMode.DISPATCH_SNAPSHOT,
-            ThreadReadMode.DISPATCH_FULL,
-        }
+    NONBLOCKING = auto()
+    STRICT = auto()
 
 
 def projected_visible_messages(page: ConversationPage) -> list[ResolvedVisibleMessage]:

@@ -1596,7 +1596,7 @@ class TestExtractedModuleLoggerRebinding:
             room.room_id,
             event.event_id,
             EventInfo.from_event(event.source),
-            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            mode=ThreadReadMode.NONBLOCKING,
             caller_label="thread_mode_test",
         )
 

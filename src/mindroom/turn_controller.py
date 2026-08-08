@@ -1107,7 +1107,7 @@ class TurnController:
             dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
                 context_event,
-                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+                mode=ThreadReadMode.NONBLOCKING,
                 payload_metadata=payload_metadata,
                 caller_label="dispatch_command_context",
             )
