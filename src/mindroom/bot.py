@@ -2175,17 +2175,13 @@ class AgentBot:
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
         for pending_event in pending_events:
-            self._retry_pending_dispatch_source(
-                pending_event.event.event_id,
-                pending_event.callback_source_kind or pending_event.source_kind,
-            )
+            self._retry_pending_dispatch_source(pending_event.event.event_id)
 
-    def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
+    def _retry_pending_dispatch_source(self, source_event_id: str) -> None:
         """Return one undelivered source to its exact durable callback owner."""
-        del source_kind
         self._journal_dispatcher.retry_turn_source(source_event_id)
 
-    async def _settle_ignored_dispatch_source(self, source_event_id: str, _source_kind: str) -> None:
+    async def _settle_ignored_dispatch_source(self, source_event_id: str) -> None:
         """Settle one asynchronously normalized source that produced no dispatch payload."""
         await self._journal_dispatcher.settle_intentionally_ignored_turn_sources(
             (source_event_id,),

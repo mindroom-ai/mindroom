@@ -199,8 +199,8 @@ class CoalescingGate:
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
         on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
-        on_undelivered_source: Callable[[str, str], None] | None = None,
-        on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
+        on_undelivered_source: Callable[[str], None] | None = None,
+        on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -259,7 +259,6 @@ class CoalescingGate:
         key: CoalescingKey,
         source_event_id: str | None,
         source_kind: str,
-        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
@@ -270,7 +269,6 @@ class CoalescingGate:
             key=key,
             source_event_id=source_event_id,
             source_kind=source_kind,
-            callback_source_kind=callback_source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at,
@@ -281,19 +279,19 @@ class CoalescingGate:
         """Release one lane slot that will not be admitted."""
         self._lanes.release(slot)
 
-    def _handle_undelivered_lane_source(self, source_event_id: str, source_kind: str) -> None:
+    def _handle_undelivered_lane_source(self, source_event_id: str) -> None:
         """Return a source that left its lane without another live gate owner."""
         if self.has_pending_source_event(source_event_id):
             return
         if self._on_undelivered_source is not None:
-            self._on_undelivered_source(source_event_id, source_kind)
+            self._on_undelivered_source(source_event_id)
 
-    async def _handle_intentionally_ignored_lane_source(self, source_event_id: str, source_kind: str) -> None:
+    async def _handle_intentionally_ignored_lane_source(self, source_event_id: str) -> None:
         """Settle a source whose asynchronous readiness completed with no payload."""
         if self._gate_owns_source_event(source_event_id):
             return
         if self._on_intentionally_ignored_source is not None:
-            await self._on_intentionally_ignored_source(source_event_id, source_kind)
+            await self._on_intentionally_ignored_source(source_event_id)
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
         return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)

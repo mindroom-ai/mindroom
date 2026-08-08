@@ -73,7 +73,6 @@ class PendingEvent:
     trust_internal_payload_metadata: bool = False
     requester_user_id: str | None = None
     discovery_event_id: str | None = None
-    callback_source_kind: str | None = None
     turn_dispatch_recovery: bool = False
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()

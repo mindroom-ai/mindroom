@@ -96,8 +96,8 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
-    on_undelivered_source: Callable[[str, str], None] | None = None,
-    on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
+    on_undelivered_source: Callable[[str], None] | None = None,
+    on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
@@ -520,34 +520,6 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
 
 
 @pytest.mark.asyncio
-async def test_failed_lane_readiness_reports_original_callback_source_kind() -> None:
-    """Lane failure must return a transformed sidecar to its MEDIA callback owner."""
-    undelivered_sources: list[tuple[str, str]] = []
-    gate, _batches = _gate(
-        debounce_seconds=0.0,
-        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
-    )
-
-    async def failing_ready() -> ReadyPendingEvent:
-        msg = "sidecar hydration failed"
-        raise RuntimeError(msg)
-
-    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
-    gate.submit_lane_slot(
-        slot,
-        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
-        source_event_id="$sidecar",
-        source_kind="message",
-        callback_source_kind=MEDIA_SOURCE_KIND,
-        ready_task=asyncio.create_task(failing_ready()),
-    )
-
-    await _wait_for(lambda: slot.settled.is_set())
-
-    assert undelivered_sources == [("$sidecar", MEDIA_SOURCE_KIND)]
-
-
-@pytest.mark.asyncio
 async def test_ignored_source_remains_owned_during_durable_settlement(
     journal_store: EventJournalStore,
 ) -> None:
@@ -555,7 +527,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
 
-    async def settle_source(_event_id: str, _source_kind: str) -> None:
+    async def settle_source(_event_id: str) -> None:
         settlement_started.set()
         await release_settlement.wait()
 
@@ -617,15 +589,15 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
 @pytest.mark.asyncio
 async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() -> None:
     """A failed terminal write must not suppress its own durable retry handoff."""
-    undelivered_sources: list[tuple[str, str]] = []
+    undelivered_sources: list[str] = []
 
-    async def fail_settlement(_event_id: str, _source_kind: str) -> None:
+    async def fail_settlement(_event_id: str) -> None:
         msg = "tracking store unavailable"
         raise RuntimeError(msg)
 
     gate, _batches = _gate(
         debounce_seconds=0.0,
-        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+        on_undelivered_source=undelivered_sources.append,
         on_intentionally_ignored_source=fail_settlement,
     )
 
@@ -642,7 +614,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
     )
 
     await slot.settled.wait()
-    assert undelivered_sources == [("$ignored-media", MEDIA_SOURCE_KIND)]
+    assert undelivered_sources == ["$ignored-media"]
 
 
 @pytest.mark.asyncio
