@@ -1966,6 +1966,24 @@ class TestABoundedScanIsFair:
             projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
+    @classmethod
+    async def _admit_unreadable_window(cls, store: PrincipalStore) -> None:
+        """Fill a whole page with rows nothing can decode, then one readable event."""
+        count = max(_BATCH_SIZE, _MAX_UNREADABLE_ROWS_PER_PAGE)
+        for index in range(count):
+            # Unprojected: nothing will ever read these rows as conversation,
+            # and a page of this size is expensive enough to build already.
+            await store.admit(
+                inbound_event(
+                    ROOM,
+                    text_event(f"$corrupt{index:04d}", ts=1_000 + index),
+                    EventKind.MESSAGE,
+                    EventClass.ACTIONABLE,
+                ),
+            )
+        await corrupt(store, *(f"$corrupt{index:04d}" for index in range(count)))
+        await cls._admit(store, text_event("$behind", ts=9_000), "!behind:x")
+
     async def test_a_full_budget_of_owned_events_does_not_hide_what_is_behind_them(
         self,
         alice: PrincipalStore,
@@ -2073,25 +2091,80 @@ class TestABoundedScanIsFair:
             handled.append(event.event_id)
             return SettlementOutcome.SUCCEEDED
 
-        count = max(_BATCH_SIZE, _MAX_UNREADABLE_ROWS_PER_PAGE)
-        for index in range(count):
-            # Unprojected: nothing will ever read these rows as conversation,
-            # and a page of this size is expensive enough to build already.
-            await alice.admit(
-                inbound_event(
-                    ROOM,
-                    text_event(f"$corrupt{index:04d}", ts=1_000 + index),
-                    EventKind.MESSAGE,
-                    EventClass.ACTIONABLE,
-                ),
-            )
-        await corrupt(alice, *(f"$corrupt{index:04d}" for index in range(count)))
-        await self._admit(alice, text_event("$behind", ts=9_000), "!behind:x")
+        await self._admit_unreadable_window(alice)
 
         worker = PendingEventWorker(store=alice, handle=handle)
         worker.start()
         try:
             await _eventually(lambda: handled == ["$behind"], seconds=10)
+        finally:
+            await worker.stop()
+
+    async def test_a_pass_that_dispatched_nothing_arms_its_own_next_pass(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Where a pass stopped short is the scan's position, not any room's.
+
+        Every other bound here is paired with a signal, and each is owned by
+        something: a room skipped because its lane is busy is woken by that
+        lane, a failure arms a retry, a deferral arms a scan. Unreadable rows
+        are owned by nobody. They yield no event, so a window made entirely of
+        them starts no lane and holds no deferral, and a continuation carried
+        by the rooms a pass dispatched to has nothing left to hang off.
+
+        The end state this asserts is the whole defect: the pass moved its
+        cursor, so it knows more of the backlog remains, and then armed
+        nothing -- no lane to finish, no deferral timer, no retry, and the wake
+        flag clear. Everything queued behind the corruption is then durable
+        work no later pass reaches until unrelated traffic happens to arrive.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        await self._admit_unreadable_window(alice)
+        worker = PendingEventWorker(store=alice, handle=_never_called)
+
+        await worker._dispatch_ready_rooms()
+
+        try:
+            assert worker._lanes == {}
+            assert worker._deferral_scan is None
+            assert not worker._wake.is_set()
+            assert worker._scan_cursor is not None
+            assert worker._retry is not None
+        finally:
+            await worker.stop()
+
+    async def test_a_backlog_behind_an_unreadable_window_is_still_reached(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """And the rearm has to be real: the events behind it actually run.
+
+        The budget is cut to one page so the window is a page rather than two
+        thousand admissions; the arithmetic being proven is the same. Nothing
+        is admitted after the worker starts, because an admission is the very
+        thing the worker must not have to wait for.
+
+        The retry delay is left at its production value. Compressing one
+        towards the poll interval below is how this suite has flaked before,
+        and a short delay would buy nothing here: without the rearm the events
+        never run however long the wait, and with it they run on the first one.
+        """
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> SettlementOutcome:
+            handled.append(event.event_id)
+            return SettlementOutcome.SUCCEEDED
+
+        await self._admit_unreadable_window(alice)
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: handled == ["$behind"], seconds=30)
         finally:
             await worker.stop()
 

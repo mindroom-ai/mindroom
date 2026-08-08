@@ -251,7 +251,7 @@ class PendingEventWorker:
         """
         while (active := self._lanes.get(room_id)) is not None and not active.done():
             await asyncio.wait([active])
-        lane = self._start_lane(room_id, events, more_remains=False)
+        lane = self._start_lane(room_id, events)
         await asyncio.wait([lane])
         # This lane is the drain's own, so whatever ended it is the drain's to
         # report. A cancelled turn is not a failed one: it leaves its event
@@ -281,22 +281,41 @@ class PendingEventWorker:
                 self._rooms_with_more.add(room_id)
                 continue
             started = True
-            self._start_lane(room_id, events, more_remains=more_remains)
+            self._start_lane(room_id, events)
         if started:
             self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
+        if more_remains:
+            self._continue_scanning(dispatched=started)
         # A pass that found every deferral still owned starts no lane, so the
         # lane-finished path cannot be the only thing that arms the next look.
         self._schedule_deferral_scan()
 
-    def _start_lane(self, room_id: str, events: list[JournalEvent], *, more_remains: bool) -> asyncio.Task[None]:
+    def _continue_scanning(self, *, dispatched: bool) -> None:
+        """Arm the pass that resumes where this one stopped short.
+
+        Where a pass stopped is the scan's own position, so the scan is what
+        has to carry it. Hung off the rooms a pass dispatched to instead, it
+        was simply lost whenever a pass dispatched to none -- and a window of
+        nothing but rows the store could not decode is exactly that. Those rows
+        yield no event and belong to no owner, so nothing would wake the pump
+        on their behalf and everything queued behind them stayed pending until
+        unrelated traffic happened to arrive, which in a quiet room is never.
+
+        A pass that dispatched something left the cursor past what it
+        dispatched, so the next one reads a different window and may run at
+        once. A pass that dispatched nothing would read the same window
+        immediately and spin on it, so that one waits out the backoff instead.
+        """
+        if dispatched:
+            self._wake.set()
+        else:
+            self._schedule_retry()
+
+    def _start_lane(self, room_id: str, events: list[JournalEvent]) -> asyncio.Task[None]:
         """Make one room's lane, which is the only one that room may have."""
         self._rooms_with_more.discard(room_id)
         lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
-        if more_remains:
-            # This pass could not see the whole backlog, so the room may still
-            # owe work that no later admission would reveal.
-            self._rooms_with_more.add(room_id)
         lane.add_done_callback(lambda task: self._lane_finished(room_id, task))
         return lane
 
