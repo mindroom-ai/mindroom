@@ -8,15 +8,22 @@ from urllib.parse import quote
 
 import pytest
 
-from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal import (
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    InboundEvent,
+    ProjectedEvent,
+)
 from mindroom.event_journal_open import (
     EventJournalBinding,
     EventJournalBindingError,
     write_event_journal_binding,
 )
+from mindroom.constants import RuntimePaths
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
-from mindroom.thread_export.models import ThreadExportGroupFailure, ThreadExportRoom
+from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportGroupFailure, ThreadExportRoom
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME
 from tests.conftest import runtime_paths_for
 from tests.thread_export_helpers import (
@@ -26,6 +33,39 @@ from tests.thread_export_helpers import (
     write_invited_rooms,
     write_thread_export_matrix_state,
 )
+
+
+async def _admit_as_running_bot(runtime_paths: RuntimePaths, principal_id: str, event_id: str) -> None:
+    """Write one projected message the way the running bot for that account would."""
+    journal_file = runtime_paths.storage_root / "tracking" / "event_journal.db"
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+    content: dict[str, object] = {"msgtype": "m.text", "body": "written by the running bot"}
+    store = EventJournalStore.open_sqlite(journal_file)
+    try:
+        await store.principal(principal_id).admit(
+            InboundEvent(
+                event_id=event_id,
+                room_id="!lobby:localhost",
+                thread_id=None,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@alice:localhost",
+                origin_server_ts=1,
+                source={"event_id": event_id, "content": content},
+            ),
+            ProjectedEvent(
+                event_id=event_id,
+                room_id="!lobby:localhost",
+                thread_id=None,
+                sender="@alice:localhost",
+                origin_server_ts=1,
+                content=content,
+                replaces_event_id=None,
+                redacts_event_id=None,
+            ),
+        )
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -583,14 +623,23 @@ async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_write
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path, account_keys=("agent_router",))
+    await _admit_as_running_bot(runtime_paths, "router@@agent_router:localhost", "$router-wrote-this")
     client = Mock()
     client.close = AsyncMock()
+    # The store is closed when the export returns, so the read that proves which
+    # principal it is bound to has to happen while the export still holds it.
+    read_back: list[object] = []
+
+    async def read_while_open(**kwargs: object) -> tuple[ThreadExportAccumulator, ...]:
+        reader = kwargs["reader"]
+        read_back.append(await reader.reader.store.load_event("$router-wrote-this"))
+        return successful_group_result(**kwargs)  # type: ignore[arg-type]
 
     with (
         patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
         patch(
             "mindroom.thread_export.service.export_threads_for_targets_for_client",
-            new=AsyncMock(side_effect=successful_group_result),
+            new=AsyncMock(side_effect=read_while_open),
         ) as export_group,
     ):
         await export_threads_to_targets_once(
@@ -600,6 +649,7 @@ async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_write
         )
 
     projection = export_group.await_args.kwargs["reader"]
-    assert projection.reader.store.principal_id == "router@@agent_router:localhost"
-    assert projection.completeness.principal_id == "router@@agent_router:localhost"
+    assert [event.event_id for event in read_back if event is not None] == ["$router-wrote-this"]
+    # Both halves answer for one principal, so proving the reader is enough.
+    assert projection.completeness is projection.reader.store
     assert projection.reader.hydrator.self_sender == "@agent_router:localhost"

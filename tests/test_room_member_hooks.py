@@ -1085,12 +1085,6 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
 
     await bot._on_sync_error(sync_error)
     bot.client.rooms = {room.room_id: room}
-    assert (
-        bot._journal_dispatcher.ingress_admission_kind(
-            _room_member_event(event_id="$timeline-snapshot"),
-        )
-        is None
-    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -1238,12 +1232,6 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     assert bot.client.next_batch == ""
     bot.client.rooms = {room.room_id: room}
 
-    assert (
-        bot._journal_dispatcher.ingress_admission_kind(
-            _room_member_event(event_id="$timeline-snapshot"),
-        )
-        is None
-    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -1367,12 +1355,29 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     assert seen == ["$join1"]
 
 
-def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path) -> None:
     """Initial sync history must not enter the delayed live-callback boundary."""
-    bot = _router_bot(tmp_path)
-    bot._first_sync_done = False
+    seen: list[str] = []
 
-    assert bot._journal_dispatcher.ingress_admission_kind(_room_member_event()) is None
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._journal_dispatcher.register(bot.client)
+    admit = bot.client.add_event_admission_callback.call_args.args[0]
+
+    await admit(room, _room_member_event(event_id="$history-join"), nio.TimelineEventProvenance.LIVE)
+    await bot._journal_dispatcher.drain_once()
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == []
+    assert await bot._journal_dispatcher.store.load_event("$history-join") is None
 
 
 @pytest.mark.asyncio

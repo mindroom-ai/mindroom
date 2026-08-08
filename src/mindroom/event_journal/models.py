@@ -61,13 +61,6 @@ class SemanticConsumer(StrEnum):
     INTERACTIVE_REACTION = "interactive_reaction"
     REACTION_HOOKS = "reaction_hooks"
 
-    @property
-    def _event_kind(self) -> EventKind:
-        """Return the only event kind allowed to claim this consumer."""
-        if self is SemanticConsumer.APPROVAL_REPLY:
-            return EventKind.MESSAGE
-        return EventKind.REACTION
-
 
 class AdmissionResult(StrEnum):
     """What durable admission did with one event."""

@@ -1154,7 +1154,8 @@ class TestStoreGeneration:
         """Every principal in one database lost the same history if it were replaced."""
         generation = await journal_store.generation(new_generation="shared")
 
-        assert journal_store.principal(ALICE).principal_id != journal_store.principal(BOB).principal_id
+        await admit(journal_store.principal(ALICE), "$only-alice")
+        assert await journal_store.principal(BOB).load_event("$only-alice") is None
         assert await journal_store.generation(new_generation="ignored") == generation
 
 

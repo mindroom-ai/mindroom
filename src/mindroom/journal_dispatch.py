@@ -25,7 +25,6 @@ import nio
 
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import (
     TURN_BACKED_KINDS,
     AdmissionResult,
@@ -70,13 +69,6 @@ type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
-
-
-def event_kind_for_source_kind(source_kind: str) -> EventKind:
-    """Return the journal kind that owns one coalescing source kind."""
-    if source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND}:
-        return EventKind.MEDIA
-    return EventKind.MESSAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,10 +165,6 @@ class JournalDispatcher:
     def wake(self) -> None:
         """Signal that newly admitted work is waiting."""
         self._worker.wake()
-
-    def ingress_admission_kind(self, event: nio.Event) -> EventKind | None:
-        """Return the kind timeline admission would give one event, if any."""
-        return self._ingress.admission_kind(event)
 
     @property
     def timeline_member_provenance(self) -> TimelineMemberProvenance:
@@ -567,5 +555,4 @@ __all__ = [
     "TURN_BACKED_KINDS",
     "JournalCallbacks",
     "JournalDispatcher",
-    "event_kind_for_source_kind",
 ]

@@ -60,11 +60,6 @@ class PrincipalStore:
     _backend: Backend
     _principal_id: str
 
-    @property
-    def principal_id(self) -> str:
-        """Return the bound principal, for logging and deterministic IDs."""
-        return self._principal_id
-
     async def admit(
         self,
         event: InboundEvent,

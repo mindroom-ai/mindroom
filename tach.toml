@@ -186,7 +186,6 @@ path = "mindroom.journal_dispatch"
 depends_on = [
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
-    "mindroom.dispatch_source",
     "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.journal_ingress",
