@@ -4075,7 +4075,7 @@ from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [
-    "VISIBLE_ROOM_MESSAGE_EVENT_TYPES",
+    "TEXTUAL_MESSAGE_EVENT_TYPE",
     "ResolvedVisibleMessage",
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
@@ -4097,7 +4097,6 @@ expose = [
     "OpaqueEncryptedThreadHistoryError",
     "RoomThreadsPageError",
     "UnresolvedOpaqueRoomHistoryError",
-    "VISIBLE_ROOM_MESSAGE_EVENT_TYPES",
     "bulk_scan_thread_event_sources",
     "bundled_replacement_source",
     "enumerate_room_thread_root_ids",

@@ -33,6 +33,17 @@ def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
 _ROOM_ID = "!room:localhost"
 
 
+def _parsed_room_message(event_source: dict[str, Any]) -> nio.RoomMessage:
+    """Return the class nio itself picks for one `m.room.message` source.
+
+    Built through nio's own msgtype dispatch rather than a named class, so a
+    fixture cannot claim a parse the production reader would not get.
+    """
+    event = nio.RoomMessage.parse_event(event_source)
+    assert isinstance(event, nio.RoomMessage)
+    return event
+
+
 def _message_event(
     event_id: str,
     body: str,
@@ -42,8 +53,9 @@ def _message_event(
     reply_to_event_id: str | None = None,
     is_falling_back: bool = False,
     sender: str = "@alice:localhost",
-) -> nio.RoomMessageText:
-    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    msgtype: str = "m.text",
+) -> nio.RoomMessage:
+    content: dict[str, object] = {"body": body, "msgtype": msgtype}
     if thread_root_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
     if reply_to_event_id is not None:
@@ -52,7 +64,7 @@ def _message_event(
         relation["m.in_reply_to"] = {"event_id": reply_to_event_id}
         if is_falling_back:
             relation["is_falling_back"] = True
-    return nio.RoomMessageText.from_dict(
+    return _parsed_room_message(
         {
             "event_id": event_id,
             "sender": sender,
@@ -72,8 +84,9 @@ def _edit_event(
     thread_root_id: str,
     sender: str = "@alice:localhost",
     new_body: str = "edited reply",
-) -> nio.RoomMessageText:
-    return nio.RoomMessageText.from_dict(
+    msgtype: str = "m.text",
+) -> nio.RoomMessage:
+    return _parsed_room_message(
         {
             "event_id": event_id,
             "sender": sender,
@@ -82,11 +95,11 @@ def _edit_event(
             "type": "m.room.message",
             "content": {
                 "body": f"* {new_body}",
-                "msgtype": "m.text",
+                "msgtype": msgtype,
                 "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
                 "m.new_content": {
                     "body": new_body,
-                    "msgtype": "m.text",
+                    "msgtype": msgtype,
                     "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
                 },
             },
@@ -368,6 +381,162 @@ async def test_thread_messages_from_source_resolves_edits_without_touching_a_sto
     # so the parameter list is the thing worth pinning.
     parameters = inspect.signature(fetch_thread_messages_from_source).parameters
     assert not [name for name in parameters if "cache" in name or "store" in name]
+
+
+def _emote_thread_client(chunk: list[nio.Event]) -> AsyncMock:
+    """Return a client serving one page of room history and nothing else."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(side_effect=[_messages_response(chunk, end=None)])
+    return client
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_contains_the_emote_the_projection_kept() -> None:
+    """`/me` is ordinary user input, so a rebuilt thread has to contain it.
+
+    Journal admission matches `m.room.message` at the base class, so a watched
+    conversation holds emotes. A server-paginated read that dropped them would
+    make one conversation read two ways depending on whether this process saw
+    it happen -- which is the divergence the projection exists to remove.
+    """
+    root_id = "$root:localhost"
+    emote_id = "$emote:localhost"
+    client = _emote_thread_client(
+        [
+            _message_event(
+                emote_id,
+                "waves at the bot",
+                timestamp=3000,
+                thread_root_id=root_id,
+                msgtype="m.emote",
+            ),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    emote = next(message for message in messages if message.event_id == emote_id)
+    assert emote.body == "waves at the bot"
+    # Carried through rather than flattened to text: nothing downstream renders
+    # an action differently, but a read that silently relabelled the msgtype
+    # would be inventing a fact the room never stated.
+    assert emote.to_dict()["msgtype"] == "m.emote"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_applies_an_emote_replacement() -> None:
+    """An edit of a `/me` message used to be dropped, showing the pre-edit body.
+
+    The projection applies `m.replace` off the relation alone and never looks
+    at the msgtype, so it showed the correction while this read showed the
+    original. Both halves failed the same way: the replacement was excluded
+    from the candidate pool, and an excluded replacement is also skipped as a
+    message, so the read produced the stale body with nothing logged.
+    """
+    root_id = "$root:localhost"
+    emote_id = "$emote:localhost"
+    client = _emote_thread_client(
+        [
+            _edit_event(
+                "$emote-edit:localhost",
+                emote_id,
+                timestamp=4000,
+                thread_root_id=root_id,
+                new_body="waves politely",
+                msgtype="m.emote",
+            ),
+            _message_event(
+                emote_id,
+                "waves at the bot",
+                timestamp=3000,
+                thread_root_id=root_id,
+                msgtype="m.emote",
+            ),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    edited = next(message for message in messages if message.event_id == emote_id)
+    assert edited.body == "waves politely"
+    assert edited.latest_event_id == "$emote-edit:localhost"
+    assert [message.event_id for message in messages] == [root_id, emote_id]
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_collapses_to_the_newest_revision_across_msgtypes() -> None:
+    """A message edited from text into an action collapses to the action.
+
+    A client may change the msgtype in a replacement, and the newest one wins
+    whatever it is. While emotes were unrankable this read answered with the
+    older text revision, which is the ranking half of the same defect.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    client = _emote_thread_client(
+        [
+            _edit_event(
+                "$edit-emote:localhost",
+                reply_id,
+                timestamp=5000,
+                thread_root_id=root_id,
+                new_body="shrugs",
+                msgtype="m.emote",
+            ),
+            _edit_event(
+                "$edit-text:localhost",
+                reply_id,
+                timestamp=4000,
+                thread_root_id=root_id,
+                new_body="superseded correction",
+            ),
+            _message_event(reply_id, "first draft", timestamp=3000, thread_root_id=root_id),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    collapsed = next(message for message in messages if message.event_id == reply_id)
+    assert collapsed.body == "shrugs"
+    assert collapsed.latest_event_id == "$edit-emote:localhost"
+
+
+@pytest.mark.asyncio
+async def test_a_msgtype_nio_cannot_type_stays_out_of_the_replacement_pool() -> None:
+    """`RoomMessageUnknown` carries no body, which is why it is not widened in.
+
+    It is the boundary of the widening and the same line admission draws: the
+    conversation still contains the event, but nothing treats it as a textual
+    message. A pool defined by `RoomMessage` instead of `RoomMessageFormatted`
+    would reach `.body` on a class that has none.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    location_edit = _edit_event(
+        "$edit-location:localhost",
+        reply_id,
+        timestamp=9000,
+        thread_root_id=root_id,
+        new_body="somewhere else",
+        msgtype="m.location",
+    )
+    assert isinstance(location_edit, nio.RoomMessageUnknown), "fixture must reach nio's unknown-msgtype class"
+    client = _emote_thread_client(
+        [
+            location_edit,
+            _message_event(reply_id, "first draft", timestamp=3000, thread_root_id=root_id),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    unedited = next(message for message in messages if message.event_id == reply_id)
+    assert unedited.body == "first draft"
+    assert unedited.latest_event_id == reply_id
 
 
 def _injected_edit_scan_client(root_id: str, reply_id: str) -> AsyncMock:

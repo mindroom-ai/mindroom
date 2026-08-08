@@ -35,7 +35,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_history_reads import bundled_replacement_source
-from tests.threading_helpers import _text_event
+from tests.threading_helpers import _emote_event, _text_event
 
 if TYPE_CHECKING:
     import nio
@@ -58,7 +58,7 @@ def _original_message(*, sender: str = _AUTHOR, body: str = "original") -> Resol
     )
 
 
-def _record(candidates: ThreadEditCandidates, event: nio.RoomMessageText) -> None:
+def _record(candidates: ThreadEditCandidates, event: nio.RoomMessageFormatted) -> None:
     candidates.record(event, event_info=EventInfo.from_event(event.source))
 
 
@@ -484,6 +484,94 @@ class TestReplacementWinnerSelection:
 
         assert messages[_ORIGINAL_ID].body == "original"
         assert messages[_ORIGINAL_ID].latest_event_id == _ORIGINAL_ID
+
+
+class TestEveryTextualMsgtypeRanksTogether:
+    """An `m.emote` replacement is ranked against `m.text` ones, not below them.
+
+    The candidate pool was `(RoomMessageText, RoomMessageNotice)`, so an emote
+    replacement was not a candidate at all. That is not a tie broken one way: a
+    replacement nobody ranks cannot win, so the collapsed read showed whichever
+    older revision happened to be a text event -- or the unedited original when
+    every replacement was an emote. The projection applies `m.replace` off the
+    relation alone and never looks at the msgtype, so the two disagreed.
+
+    Widening the pool changes ranking in exactly one direction. The order is
+    still `(server_timestamp, event_id)` and emotes carry no privilege in it, so
+    the only outcomes that move are the ones where an unrankable replacement was
+    being passed over.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_newest_replacement_wins_even_when_it_is_an_emote(self) -> None:
+        """The stale text edit used to win because the newer emote was invisible."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit-text",
+                body="* superseded",
+                new_body="superseded",
+                sender=_AUTHOR,
+                server_timestamp=4_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        _record(
+            candidates,
+            _emote_event(
+                event_id="$edit-emote",
+                body="* waves goodbye",
+                new_body="waves goodbye",
+                sender=_AUTHOR,
+                server_timestamp=5_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages = {_ORIGINAL_ID: _original_message()}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].body == "waves goodbye"
+        assert messages[_ORIGINAL_ID].latest_event_id == "$edit-emote"
+
+    @pytest.mark.asyncio
+    async def test_an_older_emote_replacement_does_not_outrank_a_newer_text_one(self) -> None:
+        """Admitting emotes to the pool must not promote them within it.
+
+        This is the half of the widening that has to change nothing. If it did,
+        every already-collapsed conversation containing one emote edit would
+        start reading at an older revision than it does today.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _emote_event(
+                event_id="$edit-emote",
+                body="* waves",
+                new_body="waves",
+                sender=_AUTHOR,
+                server_timestamp=4_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit-text",
+                body="* the final word",
+                new_body="the final word",
+                sender=_AUTHOR,
+                server_timestamp=5_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages = {_ORIGINAL_ID: _original_message()}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].body == "the final word"
+        assert messages[_ORIGINAL_ID].latest_event_id == "$edit-text"
 
 
 class TestBundledReplacementPrecedence:

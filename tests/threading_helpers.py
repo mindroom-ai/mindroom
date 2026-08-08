@@ -252,6 +252,45 @@ def _matrix_room(
     return room
 
 
+def _formatted_event_source(
+    *,
+    msgtype: str,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str,
+    thread_id: str | None,
+    replacement_of: str | None,
+    new_body: str | None,
+    new_thread_id: str | None,
+) -> dict[str, object]:
+    """Return one `m.room.message` source for a msgtype that carries a body."""
+    content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+    }
+    if replacement_of is not None:
+        new_content: dict[str, object] = {
+            "body": new_body or body.removeprefix("* ").strip() or body,
+            "msgtype": msgtype,
+        }
+        if new_thread_id is not None:
+            new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": new_thread_id}
+        content["m.new_content"] = new_content
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replacement_of}
+    elif thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    return {
+        "content": content,
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": server_timestamp,
+        "room_id": room_id,
+        "type": "m.room.message",
+    }
+
+
 def _text_event(
     *,
     event_id: str,
@@ -265,32 +304,58 @@ def _text_event(
     new_thread_id: str | None = None,
 ) -> nio.RoomMessageText:
     """Build one Matrix text event with optional thread or edit relations."""
-    content: dict[str, object] = {
-        "body": body,
-        "msgtype": "m.text",
-    }
-    if replacement_of is not None:
-        new_content: dict[str, object] = {
-            "body": new_body or body.removeprefix("* ").strip() or body,
-            "msgtype": "m.text",
-        }
-        if new_thread_id is not None:
-            new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": new_thread_id}
-        content["m.new_content"] = new_content
-        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replacement_of}
-    elif thread_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     return cast(
         "nio.RoomMessageText",
         nio.RoomMessageText.from_dict(
-            {
-                "content": content,
-                "event_id": event_id,
-                "sender": sender,
-                "origin_server_ts": server_timestamp,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
+            _formatted_event_source(
+                msgtype="m.text",
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=server_timestamp,
+                room_id=room_id,
+                thread_id=thread_id,
+                replacement_of=replacement_of,
+                new_body=new_body,
+                new_thread_id=new_thread_id,
+            ),
+        ),
+    )
+
+
+def _emote_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+    replacement_of: str | None = None,
+    new_body: str | None = None,
+    new_thread_id: str | None = None,
+) -> nio.RoomMessageEmote:
+    """Build the same event as `_text_event`, sent as `/me`.
+
+    Identical in every way a reader looks at except its msgtype, which is the
+    point: the two are siblings under `RoomMessageFormatted` and every rule
+    about visible messages has to treat them alike.
+    """
+    return cast(
+        "nio.RoomMessageEmote",
+        nio.RoomMessageEmote.from_dict(
+            _formatted_event_source(
+                msgtype="m.emote",
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=server_timestamp,
+                room_id=room_id,
+                thread_id=thread_id,
+                replacement_of=replacement_of,
+                new_body=new_body,
+                new_thread_id=new_thread_id,
+            ),
         ),
     )
 

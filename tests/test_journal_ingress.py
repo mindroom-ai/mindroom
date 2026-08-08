@@ -32,6 +32,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
 from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_visible_messages import TEXTUAL_MESSAGE_EVENT_TYPE
 from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -2875,6 +2876,34 @@ class TestAdmittedWorkReachesItsCallback:
 
         assert not actionable or isinstance(event, _BINDINGS[kind].event_types), (
             f"{msgtype} is admitted as {kind.value} work that dispatch would refuse to run"
+        )
+
+    @pytest.mark.parametrize(("msgtype", "extra_content"), _ROOM_MESSAGE_MSGTYPES)
+    async def test_a_server_paginated_read_sees_the_same_textual_messages(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """The third rule in this family, compared against the first two.
+
+        `matrix.client_visible_messages` decides which parsed events a
+        server-paginated read treats as textual messages -- which edits it
+        collapses, and which bodies it resolves in full. It was a list of two
+        siblings while admission had already generalized to the base class, so
+        an emote was a message when watched and not one when the same thread
+        was rebuilt from `/messages`.
+
+        The two rules coincide exactly: a textual message is an
+        `m.room.message` that is not media and not the class nio uses for a
+        msgtype it cannot type. Parametrizing over nio's own parse branches
+        means the next msgtype either side stops agreeing on fails here.
+        """
+        event = message_event(f"$read-{msgtype}", msgtype, extra_content=extra_content)
+        admitted_as_message = _event_kind(event) is EventKind.MESSAGE
+        has_a_body = not isinstance(event, nio.RoomMessageUnknown)
+
+        assert isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) == (admitted_as_message and has_a_body), (
+            f"{msgtype} is a message to one layer and not the other, so one conversation reads two ways"
         )
 
     async def test_a_payload_that_is_not_its_stored_kind_is_reported(

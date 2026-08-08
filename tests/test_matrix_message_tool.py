@@ -2489,13 +2489,27 @@ async def test_matrix_message_read_room_happy_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_read_room_includes_notice_events() -> None:
-    """Room reads should keep both text and notice events."""
+async def test_matrix_message_read_room_includes_every_msgtype_that_carries_a_body() -> None:
+    """A room read keeps text, notices, and emotes: one rule, not a curated list.
+
+    The emote was missing, because this read kept its own copy of the visible
+    msgtype list and that copy said text and notice. The journal projection
+    admits `m.room.message` at the base class, so an agent reading the room
+    saw a conversation with a `/me` cut out of it while the same conversation
+    watched live still had it.
+    """
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id=None)
     response = nio.RoomMessagesResponse.from_dict(
         {
             "chunk": [
+                {
+                    "type": "m.room.message",
+                    "event_id": "$emote",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 3,
+                    "content": {"msgtype": "m.emote", "body": "waves at the bot"},
+                },
                 {
                     "type": "m.room.message",
                     "event_id": "$notice",
@@ -2525,6 +2539,7 @@ async def test_matrix_message_read_room_includes_notice_events() -> None:
     assert [(message["event_id"], message["body"], message.get("msgtype")) for message in payload["messages"]] == [
         ("$text", "hello", None),
         ("$notice", "Compacted 12 messages", "m.notice"),
+        ("$emote", "waves at the bot", "m.emote"),
     ]
 
 

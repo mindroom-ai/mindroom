@@ -158,7 +158,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
 
 
 async def extract_and_resolve_message(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
+    event: nio.RoomMessageFormatted,
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),
