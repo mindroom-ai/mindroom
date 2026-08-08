@@ -346,9 +346,20 @@ def _hold_unresolved_edit(
 ) -> None:
     """Keep at most one latest edit per target and sender.
 
-    A held edit is not scoped to a membership. It survives only until its
-    target arrives, and the fence deletes the whole table for the room it
-    invalidates, so there is nothing an epoch on the row could decide.
+    A held edit is not scoped to a membership. It survives until its target
+    arrives or that target is redacted, whichever happens first, and the fence
+    deletes the whole table for the room it invalidates, so there is nothing an
+    epoch on the row could decide.
+
+    Both endings have to be spelled out, because the row holds a message body
+    and only one of them is the ordinary case. A target that is redacted before
+    it ever arrives never lands afterwards -- ``project`` turns it away at the
+    tombstone -- so the arrival this row is waiting for is not coming, and
+    ``_project_redaction`` is the only thing left to collect it.
+
+    A target that neither arrives nor is redacted has no third ending, and the
+    membership fence is the whole bound on it. That is deliberate: the row is
+    the only record of an edit whose message may still be one sync away.
     """
     held = transaction.fetchone(
         """
@@ -431,6 +442,25 @@ def _project_redaction(
         """,
         (principal_id, event.room_id, target),
     )
+    # Held edits for this target, and not only when the target is visible. An
+    # edit is held only while its target has no visible row, and the insert
+    # that makes one visible drops the held edits for it in the same
+    # transaction -- so the two states never coexist, and this delete guarded
+    # on the visible row matched nothing every time it ran.
+    #
+    # Unguarded it collects the case that has no other ending. A target that is
+    # redacted before it arrives never arrives afterwards either, because
+    # `project` turns it away at the tombstone, so the arrival the row waits
+    # for is not coming. It would otherwise outlive the redaction for the whole
+    # membership epoch holding the only copy of the replacement text left on
+    # this host, settlement having already blanked the journal's `source_json`.
+    transaction.execute(
+        """
+        DELETE FROM unresolved_edits
+        WHERE principal_id = ? AND room_id = ? AND target_event_id = ?
+        """,
+        (principal_id, event.room_id, target),
+    )
     logical = transaction.fetchone(
         """
         SELECT logical_event_id FROM visible_messages
@@ -443,13 +473,6 @@ def _project_redaction(
             """
             DELETE FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
-            """,
-            (principal_id, event.room_id, target),
-        )
-        transaction.execute(
-            """
-            DELETE FROM unresolved_edits
-            WHERE principal_id = ? AND room_id = ? AND target_event_id = ?
             """,
             (principal_id, event.room_id, target),
         )

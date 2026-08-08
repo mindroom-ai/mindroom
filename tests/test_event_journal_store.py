@@ -127,6 +127,19 @@ async def _membership_principals(store: EventJournalStore) -> list[str]:
     return sorted(str(row["principal_id"]) for row in rows)
 
 
+async def _held_edit_bodies(store: EventJournalStore) -> list[str]:
+    """Return every replacement body still held in ``unresolved_edits``.
+
+    Read straight off the backend because that is the whole point: a held edit
+    for a target that never arrived has no reader above the table, so the only
+    way to ask whether its text is still on this host is to look.
+    """
+    rows = await store.backend.read(
+        lambda transaction: transaction.fetchall("SELECT content_json FROM unresolved_edits"),
+    )
+    return [str(row["content_json"]) for row in rows]
+
+
 @pytest.fixture
 def alice(journal_store: EventJournalStore) -> PrincipalStore:
     """Return one bound principal view."""
@@ -511,6 +524,52 @@ class TestRedaction:
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$original", content=text("first"))
 
+        assert await bodies(alice) == ["first"]
+
+    async def test_redacting_a_target_that_never_arrived_drops_its_held_edit(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The replacement text must not outlive the redaction of what it revises.
+
+        An edit that arrives before its target is parked in ``unresolved_edits``
+        with its body, and only the target's arrival collected it. Redacting a
+        target that never arrived left the row untouched: the target never
+        lands afterwards either, because ``project`` turns it away at the
+        tombstone, so nothing was left to collect it for the rest of the
+        membership epoch.
+
+        The body is what makes that matter. Settlement blanks the journal's own
+        ``source_json``, so this row is the last copy of the replacement text on
+        the host -- and `docs/architecture/matrix-event-journal-security.md`
+        states the row is deleted the moment its target lands *or is redacted*.
+        """
+        await admit(alice, "$edit", ts=2_000, content=edit("$original", "secret replacement"))
+        assert [body for body in await _held_edit_bodies(journal_store) if "secret replacement" in body]
+
+        await admit(alice, "$redaction", ts=3_000, redacts="$original", kind=EventKind.REDACTION)
+
+        assert await _held_edit_bodies(journal_store) == []
+
+    async def test_a_held_edit_never_coexists_with_a_visible_target(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Why the delete had to move rather than be duplicated.
+
+        An edit is only held when its target has no visible row, and the one
+        statement that makes a row visible applies and drops the held edits for
+        it in the same transaction. So the two states are mutually exclusive,
+        and a delete guarded on the target being visible could only ever match
+        nothing -- which is how the guarded one survived without any test
+        noticing it did no work.
+        """
+        await admit(alice, "$original", content=text("first"))
+        await admit(alice, "$forged", sender=BOB, ts=2_000, content=edit("$original", "forged"))
+
+        assert await _held_edit_bodies(journal_store) == []
         assert await bodies(alice) == ["first"]
 
     async def test_redacting_a_superseded_edit_changes_nothing(self, alice: PrincipalStore) -> None:
