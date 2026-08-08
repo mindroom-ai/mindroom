@@ -19,6 +19,7 @@ from mindroom.approval_events import parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
+    DEFAULT_SHUTDOWN_REASON,
     ApprovalDecision,
     ApprovalStartupSweep,
     PendingApproval,
@@ -1444,7 +1445,7 @@ async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mindroom.approval_manager._POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.01)
     send_started = asyncio.Event()
     never_release_sender = asyncio.Event()
 
@@ -3633,6 +3634,150 @@ def transaction_id_for_approval(cards: FakeApprovalCards) -> str:
     """Return the transaction the single claimed card was sent under."""
     (transaction_id,) = cards.rows
     return transaction_id
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_leaves_alone_a_card_a_cancelled_request_is_still_sending(tmp_path: Path) -> None:
+    """Cancelling the requester does not end the send; it hands it to another owner.
+
+    The caller is gone, so the request-side registration goes with it, but the
+    send is shielded and still open behind the cleanup that will bind a waiter
+    to whatever it returns and expire the card properly. From the sweep the row
+    is once again indistinguishable from one a dead process left: claimed, no
+    event id, and attempted by a device this process can still present from.
+
+    Acting on it presents the transaction a second time, expires the card, and
+    deletes the row -- and because that expiry belongs to no waiter, the
+    cleanup then binds one to a card already recorded as decided and waits
+    forever for a decision that was made before it existed.
+    """
+    cards = FakeApprovalCards()
+    editor = AsyncMock(return_value=True)
+    sending = asyncio.Event()
+    finish_send = asyncio.Event()
+    sends: list[str] = []
+
+    async def sender(
+        room_id: str,  # noqa: ARG001 - matches the transport signature
+        thread_id: str | None,  # noqa: ARG001 - matches the transport signature
+        content: dict[str, Any],  # noqa: ARG001 - matches the transport signature
+        transaction_id: str,
+    ) -> SentApprovalEvent:
+        sends.append(transaction_id)
+        if len(sends) == 1:
+            sending.set()
+            await finish_send.wait()
+        return SentApprovalEvent("$card")
+
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    request = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    async with asyncio.timeout(5):
+        await sending.wait()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await request
+    # The owner the cancelled request handed the still-open send to.
+    (cleanup,) = store._post_cancel_cleanup_tasks
+
+    sweep = await store.discard_pending_on_startup()
+
+    # Still not this sweep's row. The request that owned it is gone, but the
+    # send it started is not, and the cleanup standing in for it is the one
+    # thing that can expire the card exactly once.
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    assert sends == [transaction_id_for_approval(cards)]
+    editor.assert_not_awaited()
+
+    finish_send.set()
+    await asyncio.wait_for(asyncio.wrap_future(cleanup.cleanup_future), timeout=5)
+    assert not store.has_live_work()
+
+    # One expiry, by the cleanup, against the card the one send produced -- and
+    # the row goes with it rather than outliving the card it accounts for.
+    assert [call.args[1] for call in editor.await_args_list] == ["$card"]
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
+    assert not cards.rows
+
+
+@pytest.mark.asyncio
+async def test_shutdown_gives_up_on_a_decision_a_hung_edit_is_still_holding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown waits for the owner of a claimed resolution, and owners can stall.
+
+    A click claims the card and only completes the waiter once its edit comes
+    back. Shutdown, finding the claim taken, waits for that decision rather
+    than racing it -- correctly, because it must not hand the caller an answer
+    the owner is about to contradict.
+
+    What it must not do is wait without end. The homeserver is the one thing in
+    this path that may simply never answer during a teardown, which is why the
+    drains below this wait are all bounded -- and every one of them is queued
+    behind it, as is ``orchestrator.stop()``, which has no bound of its own.
+    """
+    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.05)
+    edit_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+
+    async def editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        edit_started.set()
+        await never_finishes.wait()
+        return True
+
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    request = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+    click = asyncio.create_task(_resolve_pending_approval(store, pending, status="approved"))
+    async with asyncio.timeout(5):
+        await edit_started.wait()
+
+    try:
+        # Bounded by the test as well, because an unbounded stand-down is the
+        # defect: a test that hangs on it reports nothing.
+        await asyncio.wait_for(store.shutdown(reason=DEFAULT_SHUTDOWN_REASON), timeout=5)
+
+        # The claim is still held, so shutdown stood down rather than inventing
+        # a second decision for a card whose first one is still being written.
+        assert not click.done()
+        assert not request.done()
+    finally:
+        never_finishes.set()
+
+    assert (await asyncio.wait_for(click, timeout=5)).resolved is True
+    assert (await asyncio.wait_for(request, timeout=5)).status == "approved"
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,10 @@ SendingDeviceProvider = Callable[[], str | None]
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
-_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+# How long shutdown waits on work it does not own. Every such wait is on a
+# Matrix round trip, which is the thing most likely to never come back while
+# the runtime is tearing down around it.
+_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
@@ -313,6 +316,12 @@ class _PostCancelCleanupTask:
     cleanup_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     send_task: asyncio.Future[SentApprovalEvent | None]
+    # The row this send belongs to, for the same reason the active send carries
+    # it. Cancelling the requester ends the request, not the send: the send is
+    # shielded and still open, and this task is what will bind a waiter to
+    # whatever it returns. Until then this is the only thing that says the row
+    # is spoken for.
+    transaction_id: str
 
 
 @dataclass(slots=True, eq=False)
@@ -767,7 +776,11 @@ class _ApprovalManager:
                     cleanup_future=cleanup_future,
                     owner_loop=active_send.owner_loop,
                     send_task=send_task,
+                    transaction_id=transaction_id,
                 )
+                # Registered before the raise, so the ``finally`` below hands
+                # the row over rather than dropping it: there is no instant at
+                # which neither owner claims this transaction.
                 with self._live_lock:
                     self._post_cancel_cleanup_tasks.add(cleanup_task)
                 cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
@@ -802,6 +815,12 @@ class _ApprovalManager:
                 await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
             return waiter
         finally:
+            # Retires the request's hold on the send, not the send. On the
+            # cancelled path the send is still open and now belongs to the
+            # cleanup task registered above, which is what keeps its row
+            # spoken for; ``done_future`` has to be released either way, or the
+            # shutdown drain would wait on a request that has already left and
+            # then cancel a send its new owner is still shielding.
             with self._live_lock:
                 self._active_approval_sends.discard(active_send)
             with suppress(InvalidStateError):
@@ -1600,8 +1619,7 @@ class _ApprovalManager:
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
             claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
             if claimed_waiter is None:
-                with suppress(Exception):
-                    await self._wait_for_competing_terminal_decision(waiter)
+                await self._stand_down_for_the_claim_holder(waiter)
                 continue
             with self._claimed_resolution(claimed_waiter.card_event_id):
                 await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
@@ -1610,6 +1628,42 @@ class _ApprovalManager:
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
         await self._drain_detached_card_writes()
+
+    async def _stand_down_for_the_claim_holder(self, waiter: _LiveApprovalWaiter) -> None:
+        """Leave one card to whoever already claimed it, for as long as shutdown can afford.
+
+        Waiting is right and racing would be wrong: the holder is partway
+        through committing a decision, and publishing a second one for the same
+        card is the outcome that cannot be walked back -- a tool released on an
+        answer the record disagrees with.
+
+        What the holder is waiting on is a Matrix round trip, which is the one
+        thing here that may simply never come back while the runtime tears down
+        around it. That is why the drains below this loop are bounded, and this
+        wait, which every one of them is queued behind, was not.
+
+        Bounded and reported, never bounded and quiet. Standing down leaves a
+        clickable card and the row that accounts for it, which is work the next
+        startup sweep is owed -- not work that disappeared.
+        """
+        try:
+            await asyncio.wait_for(
+                self._wait_for_competing_terminal_decision(waiter),
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out waiting for an approval decision claimed elsewhere during shutdown",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+            )
+        except Exception:
+            logger.warning(
+                "An approval decision claimed elsewhere failed during shutdown",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+                exc_info=True,
+            )
 
     async def _drain_active_approval_sends(self) -> None:
         while True:
@@ -1621,7 +1675,7 @@ class _ApprovalManager:
             wrapped_by_done = {asyncio.wrap_future(active.done_future): active for active in active_sends}
             done, pending = await asyncio.wait(
                 wrapped_by_done,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
             )
             for done_future in done:
                 with suppress(asyncio.CancelledError, Exception):
@@ -1673,7 +1727,7 @@ class _ApprovalManager:
             wrapped_by_cleanup = {asyncio.wrap_future(cleanup.cleanup_future): cleanup for cleanup in futures}
             done, pending = await asyncio.wait(
                 wrapped_by_cleanup,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
             )
             for done_future in done:
                 with suppress(asyncio.CancelledError, Exception):
@@ -1711,9 +1765,20 @@ class _ApprovalManager:
         return has_waiters or has_active_sends or has_cleanup_tasks
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
-        """Return whether a live request is between claiming this row and binding to it."""
+        """Return whether this row is still owned by a send that has not come back.
+
+        Both owners count, because both end the same way: whoever holds the
+        send binds a waiter to what it returns and settles the card exactly
+        once. A cancelled requester changes which owner that is -- the send is
+        shielded and outlives the request -- and nothing else about the row.
+        Answering on the request alone would call a handed-over send finished
+        and let the sweep present its transaction a second time. This is the
+        same pair ``has_live_work`` already counts as live.
+        """
         with self._live_lock:
-            return any(send.transaction_id == transaction_id for send in self._active_approval_sends)
+            return any(send.transaction_id == transaction_id for send in self._active_approval_sends) or any(
+                cleanup.transaction_id == transaction_id for cleanup in self._post_cancel_cleanup_tasks
+            )
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:
