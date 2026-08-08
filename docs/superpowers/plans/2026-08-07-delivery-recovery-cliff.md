@@ -191,7 +191,7 @@ git commit -m "fix(matrix): keep delivery recovery off sync callbacks"
 - Consumes: `LiveFuzzScenario`, `ManagedTuwunelStack`, `LiveMatrixClient`, and the existing exact-response relation index.
 - Produces: `short_stream_correctness_scenario() -> LiveFuzzScenario`, `recovery_cliff_scenario() -> LiveFuzzScenario`, and profile-specific managed config.
 
-- [ ] **Step 1: Write profile and config tests**
+- [x] **Step 1: Write profile and config tests**
 
 Rename the old saturation test and require the fixed short-stream shape under profile `short-stream-correctness`.
 
@@ -219,7 +219,7 @@ assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
 
 Add a credential fixture containing both `agent_general` and `agent_load_sender`, and require lookup for `load_sender` to return only its token and device.
 
-- [ ] **Step 2: Run the new profile tests and verify RED**
+- [x] **Step 2: Run the new profile tests and verify RED**
 
 Run:
 
@@ -229,7 +229,7 @@ uv run pytest -q tests/test_live_matrix_fuzz.py -k 'short_stream or recovery_cli
 
 Expected: imports or assertions fail because the fixed profile, renamed profile, and managed-sender config do not exist.
 
-- [ ] **Step 3: Implement fixed profile selection and managed configuration**
+- [x] **Step 3: Implement fixed profile selection and managed configuration**
 
 Allow exactly `fuzz`, `restart-regression`, `short-stream-correctness`, and `recovery-cliff` profiles.
 
@@ -243,7 +243,7 @@ Generalize `agent_matrix_credentials()` to accept `agent_name: str = AGENT_NAME`
 
 Update CLI choices, default deadlines, result labels, and `scripts/README.md` so short-stream correctness cannot be presented as a capacity result.
 
-- [ ] **Step 4: Run the profile tests and verify GREEN**
+- [x] **Step 4: Run the profile tests and verify GREEN**
 
 Run:
 
@@ -253,7 +253,7 @@ uv run pytest -q tests/test_live_matrix_fuzz.py -k 'short_stream or recovery_cli
 
 Expected: every selected test passes.
 
-- [ ] **Step 5: Commit profile configuration**
+- [x] **Step 5: Commit profile configuration**
 
 ```bash
 git add scripts/testing/fuzz_live_matrix.py tests/test_live_matrix_fuzz.py scripts/README.md
