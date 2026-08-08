@@ -43,7 +43,6 @@ from mindroom.event_journal import (
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
     SQLITE_DIALECT,
-    added_columns,
     render,
     schema_statements,
 )
@@ -1156,170 +1155,6 @@ class TestLatestVisibleEvent:
         assert await alice.latest_visible_event_id(room_id=ROOM, thread_id="$root") is None
 
 
-class TestSchemaUpgrade:
-    """A database that predates a column has to gain it, not fail on it."""
-
-    async def test_a_database_with_the_predecessor_indexes_is_upgraded(self, tmp_path: Path) -> None:
-        """A widened index has to replace its predecessor, not sit beside it.
-
-        `CREATE INDEX IF NOT EXISTS` cannot redefine an existing index, so
-        widening one means giving it a new name -- and then the old, narrower
-        index survives every upgrade unless it is dropped by name. It would
-        still be maintained on every write while being unusable for the
-        ordering it was widened to serve.
-        """
-        from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements  # noqa: PLC0415
-
-        database = sqlite3.connect(tmp_path / "predecessor.db")
-        for statement in schema_statements(SQLITE_DIALECT):
-            if "CREATE INDEX" in statement or "DROP INDEX" in statement:
-                continue
-            database.execute(statement)
-        # Exactly what an earlier revision of this branch created.
-        database.execute(
-            "CREATE INDEX response_outbox_unacknowledged ON response_outbox (principal_id, created_at_ns) "
-            "WHERE acknowledged_event_id IS NULL",
-        )
-        database.execute(
-            "CREATE INDEX approval_cards_room_scan "
-            "ON approval_cards (principal_id, room_id, created_at_ns, card_event_id)",
-        )
-
-        for statement in schema_statements(SQLITE_DIALECT):
-            database.execute(statement)
-
-        indexes = {
-            row[0]
-            for row in database.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'",
-            )
-        }
-        assert not indexes & {"response_outbox_unacknowledged", "approval_cards_room_scan"}
-        assert {"response_outbox_unacknowledged_scan", "approval_cards_room_transaction_scan"} <= indexes
-        # And the upgraded database really uses the replacement for its ordering.
-        plan = " | ".join(
-            row[-1]
-            for row in database.execute(
-                "EXPLAIN QUERY PLAN SELECT * FROM response_outbox WHERE principal_id=? "
-                "AND acknowledged_event_id IS NULL ORDER BY created_at_ns, turn_id, stage LIMIT 50",
-                ("principal",),
-            )
-        )
-        assert "response_outbox_unacknowledged_scan" in plan
-        assert "TEMP B-TREE" not in plan
-
-    async def test_a_database_without_a_later_column_is_upgraded(self, tmp_path: Path) -> None:
-        """`CREATE TABLE IF NOT EXISTS` leaves an existing table untouched.
-
-        Which means a column added later never appears, and the failure lands
-        at the first statement that names it rather than at startup. The
-        journal runs in production, so every upgrade meets this.
-        """
-        database_path = tmp_path / "old.db"
-        connection = sqlite3.connect(database_path)
-        connection.execute(
-            """
-            CREATE TABLE visible_messages (
-                principal_id TEXT NOT NULL, room_id TEXT NOT NULL, logical_event_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL, sender TEXT NOT NULL, created_ts BIGINT NOT NULL,
-                revision_event_id TEXT NOT NULL, revision_ts BIGINT NOT NULL, content_json TEXT,
-                refresh_token BIGINT, membership_epoch BIGINT NOT NULL,
-                PRIMARY KEY (principal_id, room_id, logical_event_id)
-            )
-            """,
-        )
-        connection.commit()
-        connection.close()
-
-        store = EventJournalStore.open_sqlite(database_path)
-        try:
-            principal = store.principal("agent@alice")
-            inbound, projected = message("$m", sender=BOB, content=text("hello"))
-            await principal.admit(inbound, projected)
-
-            page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=5)
-            assert [m.content["body"] for m in page.messages] == ["hello"]
-        finally:
-            await store.close()
-
-    async def test_a_membership_table_predating_its_departure_columns_still_works(
-        self,
-        legacy_journal_store: EventJournalStore,
-    ) -> None:
-        """Membership epochs shipped before departure bookkeeping sat beside them.
-
-        A room already fenced by the old code has a row with no departure
-        columns at all, and the very first departure observed after the upgrade
-        reads them.
-        """
-        store = legacy_journal_store
-        try:
-            alice = store.principal("agent@alice")
-            await alice.advance_membership_epoch(ROOM)
-
-            local = await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
-            assert local.observation is DepartureObservation.FENCED
-            assert local.membership_epoch == 2
-
-            reported = await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-            assert reported.observation is DepartureObservation.OWED_REPORT_CONSUMED
-            assert await alice.membership_epoch(ROOM) == 2
-        finally:
-            await store.close()
-
-    async def test_an_outbox_predating_the_sending_device_column_still_delivers(
-        self,
-        legacy_journal_store: EventJournalStore,
-    ) -> None:
-        """The upgrade has to reach the outbox, not just the tables it shipped with.
-
-        Every statement the delivery path runs names ``sending_device_id``, so
-        a database created before that column stops delivering entirely if the
-        add does not run -- and it runs through a different mechanism on each
-        backend, one guarding the add itself and the other inspecting the
-        existing columns.
-
-        The row that comes back reads the new column as NULL, which is the
-        answer the resend guard is built to accept: unknown device, resend as
-        before.
-        """
-        store = legacy_journal_store
-        try:
-            alice = store.principal("agent@alice")
-            await alice.enqueue_delivery(
-                turn_id="turn-1",
-                stage=DeliveryStage.FINAL,
-                room_id=ROOM,
-                thread_id=None,
-                payload=text("answer"),
-            )
-
-            claimed = await alice.claim_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-            assert claimed is not None
-            assert claimed.sending_device_id is None
-            assert not claimed.attempted
-            await alice.record_sending_device(
-                turn_id="turn-1",
-                stage=DeliveryStage.FINAL,
-                device_id="DEVICE1",
-            )
-
-            stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
-            assert stored is not None
-            assert stored.attempted
-            assert stored.sending_device_id == "DEVICE1"
-
-            assert [d.turn_id for d in await alice.unacknowledged_deliveries()] == ["turn-1"]
-        finally:
-            await store.close()
-
-    async def test_every_added_column_is_declared_in_the_table_too(self) -> None:
-        """The two lists are edited by hand and drift silently otherwise."""
-        statements = " ".join(schema_statements(SQLITE_DIALECT))
-        for _table, column, _definition in added_columns():
-            assert column in statements
-
-
 class TestDeliveryIsScopedToTheMembershipThatAuthorizedIt:
     """A turn that outlived its membership must not answer into the next one.
 
@@ -2339,32 +2174,6 @@ class TestApprovalCards:
 
         assert await alice.mark_approval_card_attempted(transaction_id="txn", sending_device_id=DEVICE) is False
 
-    async def test_a_row_predating_the_attempt_column_reads_as_attempted(self, alice: PrincipalStore) -> None:
-        """The upgrade's default has to be the answer that cannot strand a card.
-
-        A row written before this column existed was claimed by a process that
-        may well have gone on to send, and nothing recorded which. Read as
-        unattempted it would be dropped on the next sweep without the room ever
-        being asked, which is exactly the stranded card the column was added to
-        prevent -- so the default says "may already be visible" instead.
-
-        Written as a real insert that omits the column, because the value a
-        backfilled row gets is the column default and nothing else.
-        """
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                """
-                INSERT INTO approval_cards (
-                    principal_id, room_id, transaction_id, card_json, membership_epoch, created_at_ns
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                ("agent@alice", ROOM, "txn-legacy", json.dumps(self.card("$legacy")), 0, 1),
-            ),
-        )
-
-        scanned = await alice.pending_approval_cards(room_id=ROOM)
-        assert [(entry.transaction_id, entry.attempted) for entry in scanned] == [("txn-legacy", True)]
-
     async def test_a_second_claim_cannot_walk_an_attempt_back(self, alice: PrincipalStore) -> None:
         """Claiming again over an attempted row would erase the fact that it may be visible.
 
@@ -2978,10 +2787,6 @@ class TestHotQueriesAreIndexCovered:
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:
         """No hot query falls back to a table scan or a temporary sort."""
-        import sqlite3  # noqa: PLC0415 - the plan is a SQLite-specific measurement
-
-        from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements  # noqa: PLC0415
-
         database = sqlite3.connect(tmp_path / "plans.db")
         for statement in schema_statements(SQLITE_DIALECT):
             database.execute(statement)
@@ -3005,8 +2810,6 @@ class TestHotQueriesAreIndexCovered:
         the rendered DDL rather than a plan, because that is the part that
         differs.
         """
-        from mindroom.event_journal.schema import POSTGRES_DIALECT, schema_statements  # noqa: PLC0415
-
         rendered = [" ".join(s.split()) for s in schema_statements(POSTGRES_DIALECT)]
         indexes = [s for s in rendered if "CREATE INDEX" in s]
 

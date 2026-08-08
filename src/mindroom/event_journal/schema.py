@@ -223,7 +223,10 @@ _TABLES = (
         -- between leaves a claim for a card that provably never left it. Only
         -- an attempted row can have put something clickable in the room, and
         -- only an attempted row therefore has to be reconciled against it.
-        attempted INTEGER NOT NULL DEFAULT 1,
+        --
+        -- No default. Every insert names it, and a row that failed to would be
+        -- a claim nothing could account for; refusing it is better than guessing.
+        attempted INTEGER NOT NULL,
         -- The device whose transaction-ID namespace was used, written with
         -- `attempted` and only by the path that is about to send. Only that
         -- device's repeat is deduplicated by the homeserver; from any other it
@@ -332,78 +335,6 @@ _INDEXES = (
 )
 
 
-# Indexes an earlier schema created that a later one replaced. `CREATE INDEX IF
-# NOT EXISTS` cannot redefine one, so a widened index has to be given a new name
-# and its predecessor dropped -- otherwise every existing database keeps paying
-# to maintain an index nothing can use for its ordering.
-_DROPPED_INDEXES = (
-    # Never served a query. Its predicate -- a final stage with an
-    # acknowledged event -- appears in no statement in this repository, so
-    # every write to `response_outbox` was maintaining it for nobody.
-    "DROP INDEX IF EXISTS response_outbox_delivered_scan",
-    "DROP INDEX IF EXISTS response_outbox_unacknowledged",
-    "DROP INDEX IF EXISTS approval_cards_room",
-    "DROP INDEX IF EXISTS approval_cards_room_scan",
-)
-
-
-# Columns added to a table after it first shipped. `CREATE TABLE IF NOT EXISTS`
-# leaves an existing table exactly as it is, so a database created before one of
-# these columns existed keeps working right up until the first statement that
-# names it, and then fails at runtime rather than at startup. Every column added
-# to an existing table has to be listed here as well as in the table above.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("room_membership", "departure_fenced", "INTEGER NOT NULL DEFAULT 0"),
-    ("room_membership", "owed_departure_reports", "BIGINT NOT NULL DEFAULT 0"),
-    # A row that predates this column was written by a walk that stopped at the
-    # prompt window as often as not, so the default has to be the conservative
-    # answer. Claiming completeness for a conversation nobody measured is the
-    # one direction that silently serves a truncated read.
-    ("conversation_hydration", "complete", "INTEGER NOT NULL DEFAULT 0"),
-    # Zero says "no walk of any policy is on record here", which for a row that
-    # predates this column is the truth: nothing recorded what it was walked
-    # under. It costs one deeper walk per conversation after the upgrade, which
-    # is the direction that cannot serve a truncated read as a whole one.
-    ("conversation_hydration", "attempted_policy_rank", "BIGINT NOT NULL DEFAULT 0"),
-    # NULL means "no device is recorded", which for an already-attempted row is
-    # not the same as "no device sent it" -- it is a row from before this column
-    # existed, whose sending device is simply unknown. Recovery treats unknown
-    # as changed and reconciles, because the alternative is posting an answer
-    # twice; the cost is one room scan for a row that is simultaneously
-    # unacknowledged, attempted, and older than this column.
-    ("response_outbox", "sending_device_id", "TEXT"),
-    # One means "this row may already have put a card in the room", which for a
-    # row that predates the column is the only answer that can be defended:
-    # nothing recorded whether its send was reached, and the claim it was
-    # written by was made by a process that may well have gone on to send. The
-    # opposite default would let recovery drop such a row without looking, which
-    # is the strand this column exists to make impossible. Every row this code
-    # writes names the column, so the default is only ever read by an upgrade.
-    ("approval_cards", "attempted", "INTEGER NOT NULL DEFAULT 1"),
-    # The anchor is what says a debt is outstanding, so a row that predates this
-    # column reads as owing nothing however its timestamp was left. That is the
-    # only direction that terminates: a debt whose anchor cannot be named can
-    # never be proven covered, so honoring it would withhold the room's marker
-    # on every read while no walk could ever settle it.
-    ("room_history_debt", "owed_through_event_id", "TEXT"),
-)
-
-
-def added_columns() -> tuple[tuple[str, str, str], ...]:
-    """Return every (table, column, definition) that may predate a database."""
-    return _ADDED_COLUMNS
-
-
-def add_column_statement(table: str, column: str, definition: str, *, if_not_exists: bool = False) -> str:
-    """Return the DDL that adds one column to an existing table.
-
-    PostgreSQL can guard the add itself; SQLite cannot, and its caller checks
-    the existing columns first instead.
-    """
-    guard = "IF NOT EXISTS " if if_not_exists else ""
-    return f"ALTER TABLE {table} ADD COLUMN {guard}{column} {definition}"
-
-
 def _expand_byte_order(sql: str, dialect: Dialect) -> str:
     """Spell the byte-order pin for one backend."""
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
@@ -411,6 +342,11 @@ def _expand_byte_order(sql: str, dialect: Dialect) -> str:
 
 def schema_statements(dialect: Dialect) -> tuple[str, ...]:
     """Return every DDL statement needed to create the schema.
+
+    Creation only. There is no upgrade path and deliberately so: this schema
+    has never shipped, so the only databases carrying an older shape are
+    prerelease ones on this branch, and those are required to be deleted rather
+    than migrated.
 
     The byte-order marker is substituted here as well as in queries. An index
     whose trailing columns sort in the server's own collation cannot satisfy an
@@ -424,7 +360,7 @@ def schema_statements(dialect: Dialect) -> tuple[str, ...]:
             receipt_order_column=dialect.receipt_order_column,
             ordered_text=dialect.ordered_text,
         )
-        for statement in (*_TABLES, *_DROPPED_INDEXES, *_INDEXES)
+        for statement in (*_TABLES, *_INDEXES)
     )
 
 

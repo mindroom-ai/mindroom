@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, LiteralString, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -740,68 +740,6 @@ def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "Event
     because that comes from the fixture it asks for.
     """
     return journal_database()
-
-
-_LEGACY_TABLE_DDL = (
-    """
-    CREATE TABLE room_membership (
-        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, membership_epoch BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, room_id)
-    )
-    """,
-    """
-    CREATE TABLE response_outbox (
-        principal_id TEXT NOT NULL, turn_id TEXT NOT NULL, stage TEXT NOT NULL,
-        room_id TEXT NOT NULL, thread_id TEXT NOT NULL, transaction_id TEXT NOT NULL,
-        payload_json TEXT NOT NULL, edits_event_id TEXT,
-        attempted INTEGER NOT NULL DEFAULT 0, acknowledged_event_id TEXT,
-        created_at_ns BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, turn_id, stage)
-    )
-    """,
-    """
-    CREATE TABLE conversation_hydration (
-        principal_id TEXT NOT NULL, room_id TEXT NOT NULL, thread_id TEXT NOT NULL,
-        membership_epoch BIGINT NOT NULL,
-        PRIMARY KEY (principal_id, room_id, thread_id)
-    )
-    """,
-)
-
-
-@pytest_asyncio.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
-async def legacy_journal_store(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-) -> AsyncGenerator["EventJournalStore", None]:
-    """Return a store opened onto tables that predate their later columns.
-
-    `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it is, so
-    a later column arrives only if the upgrade path runs. Both backends have
-    their own upgrade path and neither can vouch for the other.
-    """
-    import sqlite3  # noqa: PLC0415
-
-    from mindroom.event_journal import EventJournalStore  # noqa: PLC0415
-
-    if str(request.param) == "sqlite":
-        database_path = tmp_path / "legacy_event_journal.db"
-        with sqlite3.connect(database_path) as connection:
-            for statement in _LEGACY_TABLE_DDL:
-                connection.execute(statement)
-        store = EventJournalStore.open_sqlite(database_path)
-    else:
-        import psycopg  # noqa: PLC0415
-
-        schema_url = postgres_journal_schema_url(request.getfixturevalue("postgres_journal_url"))
-        with psycopg.connect(schema_url, autocommit=True) as db:
-            for statement in _LEGACY_TABLE_DDL:
-                db.execute(cast("LiteralString", statement))
-        store = EventJournalStore.open_postgres(schema_url)
-    try:
-        yield store
-    finally:
-        await store.close()
 
 
 async def _empty_async_iterator() -> AsyncGenerator[object, None]:

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, Dialect, add_column_statement, added_columns, render, schema_statements
+from .schema import SQLITE_DIALECT, Dialect, render, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -121,10 +121,6 @@ class SqliteBackend:
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)
-        for table, column, definition in added_columns():
-            existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-            if column not in existing:
-                connection.execute(add_column_statement(table, column, definition))
         connection.execute("COMMIT")
         return connection
 
