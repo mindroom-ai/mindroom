@@ -93,6 +93,10 @@ _SETTLEMENT_WAIT_SECONDS = 5.0
 # below the old bound of 512 passes against the bug that stranded the rest.
 _WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND = 1_100
 
+# `PRAGMA synchronous` reports the mode it is set to as an integer.
+_SQLITE_SYNCHRONOUS_NORMAL = 1
+_SQLITE_SYNCHRONOUS_FULL = 2
+
 # A statement against a real table, so the connection a test's operation holds
 # is genuinely in use rather than merely borrowed.
 _INSERT_MEMBERSHIP = "INSERT INTO room_membership (principal_id, room_id, membership_epoch) VALUES (?, ?, ?)"
@@ -116,6 +120,20 @@ def _hold_the_connection(
     running.set()
     while not release.wait(_STATEMENT_GAP_SECONDS):
         transaction.fetchall("SELECT 1 AS one")
+
+
+def _synchronous_mode(transaction: Transaction) -> int:
+    """Return the durability the connection running this commits at."""
+    row = transaction.fetchone("PRAGMA synchronous")
+    assert row is not None
+    return int(row["synchronous"])
+
+
+def _journal_mode(transaction: Transaction) -> str:
+    """Return the rollback journal the connection running this uses."""
+    row = transaction.fetchone("PRAGMA journal_mode")
+    assert row is not None
+    return str(row["journal_mode"])
 
 
 async def _release_writes_the_store_abandoned(
@@ -3019,6 +3037,46 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         assert all(isinstance(refusal, RuntimeError) for refusal in refusals), (
             "a write the closed store never ran reported something other than a refusal"
         )
+
+
+class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
+    """A committed row must survive every crash the checkpoint naming it survives.
+
+    SQLite-only because the setting is. PostgreSQL commits durably by default
+    and nothing here relaxes that, so its half of this rule is not configured
+    but inherited.
+    """
+
+    async def test_the_writer_commits_reach_the_disk_and_the_readers_do_not_pay_for_it(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The one connection that commits fsyncs; the ones that never commit do not.
+
+        A Matrix sync checkpoint goes to disk through ``write_json_file_durable``,
+        which fsyncs the record and the directory holding it. Under
+        ``synchronous = NORMAL`` the WAL frames that checkpoint certifies do
+        not, so a host reset can leave a fsynced token that resumes past events
+        the journal no longer holds. Nothing asks for them again: the token
+        says they were consumed, its store generation still matches, and a
+        history debt is only recorded for a recovery gap the certifier can
+        still see. The events are simply never answered.
+
+        Readers are excluded rather than overlooked. Every statement that
+        writes runs inside ``write``, on the writer connection, so a reader
+        would pay an fsync it has nothing to flush.
+        """
+        backend = SqliteBackend.open(tmp_path / "durable.db")
+        try:
+            writer = await backend.write(_synchronous_mode)
+            reader = await backend.read(_synchronous_mode)
+            wal = await backend.write(_journal_mode)
+        finally:
+            await backend.close()
+
+        assert writer == _SQLITE_SYNCHRONOUS_FULL, "the journal writer does not fsync the commits it reports as landed"
+        assert reader == _SQLITE_SYNCHRONOUS_NORMAL, "a reader is paying for durability it cannot use"
+        assert wal == "wal", "the durability this pins is the durability of WAL mode"
 
 
 class TestConnectionSecretsStayOutOfLogs:

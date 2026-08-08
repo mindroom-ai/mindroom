@@ -52,10 +52,16 @@ class _SqliteTransaction:
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
 
 
-def _configure(connection: sqlite3.Connection) -> None:
+def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
+    """Open one connection onto the journal, durable as far as its role needs.
+
+    ``synchronous`` is asked for rather than assumed because the writer and the
+    readers do not need the same thing, and the difference is expensive in one
+    direction and unsafe in the other.
+    """
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
 
@@ -116,7 +122,16 @@ class SqliteBackend:
             isolation_level=None,
             check_same_thread=False,
         )
-        _configure(connection)
+        # The only connection that commits, and the only one whose commits have
+        # to reach the disk before they are reported as landed. A Matrix sync
+        # checkpoint is written through `write_json_file_durable`, so it is
+        # fsynced; under `synchronous = NORMAL` the WAL frames it certifies are
+        # not, and a host reset can leave the checkpoint pointing past events
+        # the journal no longer holds. Nothing re-delivers those: the token says
+        # they were consumed, and history debt is only recorded for a recovery
+        # gap the certifier can see. Readers commit nothing, so this is the
+        # writer's cost alone.
+        _configure(connection, synchronous="FULL")
         connection.execute("BEGIN IMMEDIATE")
         for statement in schema_statements(SQLITE_DIALECT):
             connection.execute(statement)
@@ -134,7 +149,7 @@ class SqliteBackend:
                 isolation_level=None,
                 check_same_thread=False,
             )
-            _configure(connection)
+            _configure(connection, synchronous="NORMAL")
             self._readers.connection = connection
             with self._reader_lock:
                 self._open_readers.append(connection)
