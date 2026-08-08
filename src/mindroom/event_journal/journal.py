@@ -112,7 +112,7 @@ def current_membership_epoch(
     return 0 if row is None else int(row["membership_epoch"])
 
 
-def advance_membership_epoch(
+def _advance_membership_epoch(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -292,7 +292,7 @@ def fence_departure(
             membership_epoch=state.membership_epoch,
             owed_reports=state.owed_reports,
         )
-    membership_epoch = advance_membership_epoch(transaction, principal_id, room_id)
+    membership_epoch = _advance_membership_epoch(transaction, principal_id, room_id)
     owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports
     _write_departure_state(
         transaction,
