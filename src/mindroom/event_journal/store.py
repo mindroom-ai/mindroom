@@ -48,7 +48,6 @@ if TYPE_CHECKING:
     from .projection import ProjectedEvent
 
 _DEFAULT_PENDING_LIMIT = 256
-_DEFAULT_REFRESH_LIMIT = 64
 _DEFAULT_UNACKNOWLEDGED_LIMIT = 256
 _DEFAULT_ROOM_CARD_LIMIT = 256
 
@@ -247,24 +246,6 @@ class PrincipalStore:
                 self._principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
-            ),
-        )
-
-    async def pending_refreshes(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        limit: int = _DEFAULT_REFRESH_LIMIT,
-    ) -> tuple[RefreshRequest, ...]:
-        """Return logical messages in one conversation that owe a point refetch."""
-        return await self._backend.read(
-            lambda transaction: reads.pending_refreshes(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                limit=limit,
             ),
         )
 

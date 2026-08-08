@@ -311,9 +311,6 @@ _.asearch  # agno Agent knowledge retrieval calls it dynamically (src/mindroom/s
 INITIAL  # unused variable (src/mindroom/event_journal/models.py)
 FINAL  # unused variable (src/mindroom/event_journal/models.py)
 
-# The conversation projection and delivery outbox, which are complete and
-# tested but not yet wired into `bot.py`. Each entry disappears as its call
-# site replaces the owner it supersedes.
+# Named only inside a `cast("_RoomIdEvent", event)` string literal, which
+# vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
-load_delivery  # unused method (src/mindroom/event_journal/store.py)
-recover  # unused method (src/mindroom/response_delivery.py)

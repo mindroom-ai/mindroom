@@ -196,47 +196,6 @@ def latest_visible_event_id(
     return None if row is None else str(row["reply_target"])
 
 
-def pending_refreshes(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    thread_id: str | None,
-    limit: int,
-) -> tuple[RefreshRequest, ...]:
-    """Return logical messages in one conversation that owe a point refetch.
-
-    A thread's root is stored in the room conversation, so a read of the thread
-    merges it in. This has to merge it the same way: a root whose visible
-    revision was redacted is missing from the thread read, and a repair pass
-    that could not see it would leave that read permanently incomplete.
-    """
-    rows = list(
-        transaction.fetchall(
-            f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND refresh_token IS NOT NULL
-            ORDER BY created_ts DESC, logical_event_id DESC
-            LIMIT ?
-            """,  # noqa: S608 - a fixed column list, not interpolated input
-            (principal_id, room_id, encode_thread_id(thread_id), limit),
-        ),
-    )
-    if thread_id is not None:
-        root = transaction.fetchone(
-            f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
-            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ? AND refresh_token IS NOT NULL
-            """,  # noqa: S608 - a fixed column list, not interpolated input
-            (principal_id, room_id, thread_id),
-        )
-        if root is not None and all(row["logical_event_id"] != thread_id for row in rows):
-            rows.append(root)
-            rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
-            del rows[limit:]
-    return tuple(_refresh_request(row) for row in rows)
-
-
 def _current_hydration(
     transaction: Transaction,
     principal_id: str,

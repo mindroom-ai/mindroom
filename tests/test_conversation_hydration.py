@@ -44,7 +44,7 @@ from mindroom.matrix.journal_ingress import inbound_event, projected_event
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
 
-    from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, PrincipalStore, RefreshRequest
 
 pytestmark = pytest.mark.asyncio
 
@@ -427,6 +427,12 @@ async def bodies(store: PrincipalStore, thread_id: str | None = None) -> list[st
     """Return the visible bodies of one conversation."""
     page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=50)
     return [str(m.content["body"]) for m in page.messages]
+
+
+async def refreshes(store: PrincipalStore, thread_id: str | None = None) -> tuple[RefreshRequest, ...]:
+    """Return the refetch debts one conversation read reports, the way production learns them."""
+    page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=50)
+    return page.refresh_pending
 
 
 async def revisions(store: PrincipalStore, thread_id: str | None = None) -> list[str]:
@@ -1687,7 +1693,7 @@ class TestPointRefetch:
         )
 
         assert await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
         assert await bodies(alice) == ["second"]
 
@@ -1704,7 +1710,7 @@ class TestPointRefetch:
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
 
         assert await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
         assert await bodies(alice) == ["first"]
 
@@ -1714,7 +1720,7 @@ class TestPointRefetch:
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
         assert await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert page.messages == ()
@@ -1729,10 +1735,10 @@ class TestPointRefetch:
         client = FakeClient(events={}, relations={})
 
         assert not await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
         assert await bodies(alice) == []
-        assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+        assert len(await refreshes(alice)) == 1
 
 
 class TestEncryptedRelations:
@@ -1820,10 +1826,10 @@ class TestEncryptedRelations:
         )
 
         assert not await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
         assert await bodies(alice) == []
-        assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+        assert len(await refreshes(alice)) == 1
 
     async def test_a_message_that_could_not_be_decrypted_is_not_treated_as_deleted(
         self,
@@ -1839,9 +1845,9 @@ class TestEncryptedRelations:
         client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
 
         assert not await hydrator(alice, client).refresh(
-            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+            (await refreshes(alice))[0],
         )
-        assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+        assert len(await refreshes(alice)) == 1
 
     async def test_a_thread_whose_root_could_not_be_read_is_not_complete(
         self,

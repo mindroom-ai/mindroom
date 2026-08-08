@@ -779,11 +779,13 @@ class TestStreamingProgressIsTransport:
             ),
         )
 
-        visible = await self._one_visible(alice)
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        assert len(page.messages) == 1, f"expected one logical message, got {len(page.messages)}"
+        visible = page.messages[0]
         assert visible.logical_event_id == PLACEHOLDER_ID
         assert visible.revision_event_id == "$terminal"
         assert visible.content["body"] == "the whole answer"
-        assert await alice.pending_refreshes(room_id=ROOM, thread_id=None) == ()
+        assert page.refresh_pending == ()
 
     async def test_a_skipped_progress_edit_is_still_an_admitted_event(
         self,

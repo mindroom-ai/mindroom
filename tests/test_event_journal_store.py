@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore, TurnRecordStore
+    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, TurnRecordStore
     from mindroom.event_journal.backend import Backend, Operation, Transaction
 
 pytestmark = pytest.mark.asyncio
@@ -340,6 +340,17 @@ async def bodies(store: PrincipalStore, *, thread_id: str | None = None, limit: 
     """Return the visible bodies of one conversation, oldest first."""
     page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=limit)
     return [str(m.content["body"]) for m in page.messages]
+
+
+async def refreshes(
+    store: PrincipalStore,
+    *,
+    thread_id: str | None = None,
+    limit: int = 50,
+) -> tuple[RefreshRequest, ...]:
+    """Return the refetch debts one conversation read reports, the way production learns them."""
+    page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=limit)
+    return page.refresh_pending
 
 
 class TestPrincipalIsolation:
@@ -701,29 +712,26 @@ class TestRedaction:
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
 
-        requests = await alice.pending_refreshes(room_id=ROOM, thread_id=None)
+        requests = await refreshes(alice)
         assert len(requests) == 1
 
-        still_pending = await alice.pending_refreshes(room_id=ROOM, thread_id=None)
+        still_pending = await refreshes(alice)
         assert still_pending == requests
 
     async def test_a_thread_read_can_repair_its_own_root(self, alice: PrincipalStore) -> None:
         """A read that can see a message must be able to repair it.
 
         The root belongs to the room conversation, so a thread read merges it
-        in. If the repair pass cannot see it by the same rule, a strict thread
-        read raises forever: it reports the root as needing a refetch that
-        nothing will ever be asked to perform.
+        in. The refetch debt it owes has to be merged in by that same read, or a
+        strict thread read raises forever: it reports the root as needing a
+        refetch that nothing will ever be asked to perform.
         """
         await admit(alice, "$root", content=text("first"))
         await admit(alice, "$reply", ts=2_000, thread_id="$root")
         await admit(alice, "$edit", ts=3_000, content=edit("$root", "deleted"))
         await admit(alice, "$redaction", ts=4_000, redacts="$edit", kind=EventKind.REDACTION)
 
-        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
-        assert [request.logical_event_id for request in page.refresh_pending] == ["$root"]
-
-        requests = await alice.pending_refreshes(room_id=ROOM, thread_id="$root")
+        requests = await refreshes(alice, thread_id="$root")
 
         assert [request.logical_event_id for request in requests] == ["$root"]
 
@@ -735,7 +743,7 @@ class TestRedaction:
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
-        request = (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0]
+        request = (await refreshes(alice))[0]
 
         installed = await alice.install_refetched_revision(
             request,
@@ -746,7 +754,7 @@ class TestRedaction:
 
         assert installed
         assert await bodies(alice) == ["first"]
-        assert await alice.pending_refreshes(room_id=ROOM, thread_id=None) == ()
+        assert await refreshes(alice) == ()
 
     async def test_a_refetch_cannot_install_a_revision_that_was_itself_redacted(
         self,
@@ -767,7 +775,7 @@ class TestRedaction:
         await admit(alice, "$e1", ts=2_000, content=edit("$original", "first edit"))
         await admit(alice, "$e2", ts=3_000, content=edit("$original", "second edit"))
         await admit(alice, "$red2", ts=4_000, redacts="$e2", kind=EventKind.REDACTION)
-        request = (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0]
+        request = (await refreshes(alice))[0]
 
         # Redacting the superseded revision the refetch happens to be carrying.
         await admit(alice, "$red1", ts=5_000, redacts="$e1", kind=EventKind.REDACTION)
@@ -787,7 +795,7 @@ class TestRedaction:
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
-        stale_request = (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0]
+        stale_request = (await refreshes(alice))[0]
 
         await admit(alice, "$newer", ts=4_000, content=edit("$original", "newest"))
 
@@ -809,7 +817,7 @@ class TestRedaction:
         await admit(alice, "$original", content=text("first"))
         await admit(alice, "$edit", ts=2_000, content=edit("$original", "deleted"))
         await admit(alice, "$redaction", ts=3_000, redacts="$edit", kind=EventKind.REDACTION)
-        request = (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0]
+        request = (await refreshes(alice))[0]
 
         assert await alice.drop_refetched_message(request)
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)

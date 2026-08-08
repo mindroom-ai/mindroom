@@ -233,16 +233,6 @@ class HydrationView(Protocol):
         """Install a completed hydration atomically, or install nothing."""
         ...
 
-    async def pending_refreshes(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        limit: int = ...,
-    ) -> tuple[RefreshRequest, ...]:
-        """Return logical messages in one conversation that owe a point refetch."""
-        ...
-
     async def install_refetched_revision(
         self,
         request: RefreshRequest,
