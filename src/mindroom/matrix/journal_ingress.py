@@ -41,6 +41,16 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
+# What an `m.room.message` must have parsed to before MindRoom can treat it as
+# work: nio's base class for every msgtype that carries a textual body, which
+# is `m.text`, `m.emote`, and `m.notice`. Everything else an `m.room.message`
+# can become is either media (claimed by an earlier kind rule) or a
+# `RoomMessageUnknown`, which has no body at all and is demoted to context by
+# `_event_class_for`. `journal_dispatch` binds `EventKind.MESSAGE` to this same
+# class, so what admission can hand the message callback and what that callback
+# accepts are one statement instead of two that drifted apart.
+TEXTUAL_MESSAGE_EVENT_TYPE = nio.RoomMessageFormatted
+
 type _MatrixEvent = nio.Event | nio.InviteEvent
 
 
@@ -77,7 +87,9 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # `RoomMessageNotice`, and `RoomMessageEmote` are siblings under
     # `RoomMessage`, so no list of them is self-maintaining. What a message
     # becomes -- work or context -- is `_event_class_for`'s question, not this
-    # one's.
+    # one's, and which payloads the message callback accepts is
+    # `TEXTUAL_MESSAGE_EVENT_TYPE`'s. Generalizing here while `journal_dispatch`
+    # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
     (_is_tool_approval_response, EventKind.APPROVAL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
@@ -115,10 +127,16 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
 
     That subsumes the narrower rule this used to carry for this bot's own
     stream frames: those are notices, so they are covered by being notices.
+
+    A msgtype nio could not type is the other exception, for a plainer reason:
+    `RoomMessageUnknown` carries no `body`, so there is no utterance for a turn
+    to answer. Demoting the class nio uses for "I do not know this msgtype" is
+    not the same mistake as enumerating msgtypes -- the set stays correct as
+    Matrix grows -- and it still projects, so the conversation keeps the event.
     """
     if provenance is nio.TimelineEventProvenance.HISTORY:
         return EventClass.CONTEXT_ONLY
-    if isinstance(event, nio.RoomMessageNotice):
+    if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 

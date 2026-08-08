@@ -35,6 +35,7 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.journal_ingress import (
+    TEXTUAL_MESSAGE_EVENT_TYPE,
     JournalCorruptionError,
     JournalIngress,
     inbound_event,
@@ -63,7 +64,7 @@ _RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_ev
 # walk continues past it; this only bounds how much is held at once.
 _LIFECYCLE_PAGE_SIZE = 256
 
-type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
+type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageFormatted], Awaitable[TurnDispatchOutcome]]
 type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
 type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
 type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
@@ -375,8 +376,20 @@ class JournalDispatcher:
         """Dispatch to the one callback that owns this event's kind."""
         binding = _BINDINGS.get(event.kind)
         if binding is None or not isinstance(matrix_event, binding.event_types):
-            # The stored kind and the replayed event disagree, which means the
-            # payload is not the event that was admitted. Nothing can run.
+            # The stored kind and the payload disagree, which means the payload
+            # is not the event that was admitted. Nothing can run -- but the
+            # journal has just dropped work it accepted, so this is a
+            # corruption report like `journal_event_unreplayable` above, not a
+            # routine outcome. It was silent once, and an `m.emote` admitted as
+            # actionable work fell through it into nothing for a whole release
+            # with no line anywhere saying a message had been discarded.
+            logger.error(
+                "journal_event_kind_mismatch",
+                event_id=event.event_id,
+                kind=event.kind.value,
+                room_id=event.room_id,
+                payload_type=type(matrix_event).__name__,
+            )
             return SettlementOutcome.INTENTIONALLY_IGNORED
         token = _RUNNING_EVENT.set(event)
         try:
@@ -527,7 +540,7 @@ def _completing(
 
 
 _BINDINGS: dict[EventKind, _Binding] = {
-    EventKind.MESSAGE: _Binding(nio.RoomMessageText, _turn_backed(lambda c: c.on_message)),
+    EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
     EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _completing(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),

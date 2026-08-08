@@ -5,9 +5,7 @@ from __future__ import annotations
 import enum
 from typing import TYPE_CHECKING
 
-import nio
-
-from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
+from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event, is_text_dispatch_event
 from .dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -57,7 +55,7 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     clients upload attachments first and send the caption text last, so a batch
     ending in text is complete and a batch ending in media may still grow.
     """
-    return isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent)
+    return is_text_dispatch_event(pending_event.event)
 
 
 def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:

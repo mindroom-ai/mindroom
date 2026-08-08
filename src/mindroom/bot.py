@@ -2192,7 +2192,7 @@ class AgentBot:
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText | MatrixMediaEvent,
+        event: nio.RoomMessageFormatted | MatrixMediaEvent,
         *,
         callback_name: str,
     ) -> None:
@@ -2211,8 +2211,15 @@ class AgentBot:
             log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
         self.logger.info("matrix_event_callback_started", **log_context)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> TurnDispatchOutcome:
-        """Delegate one inbound text event to the turn engine."""
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+        """Delegate one inbound text event to the turn engine.
+
+        Every `m.room.message` the journal admitted as work reaches here, which
+        is `m.text` and `m.emote`. An emote is a user utterance whose body is
+        written in the third person, so it needs no special handling: the same
+        mentions, commands, and routing apply to `/me asks the bot to X` as to
+        the sentence typed without the `/me`.
+        """
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
         semantic_consumer = self._journal_dispatcher.semantic_consumer()

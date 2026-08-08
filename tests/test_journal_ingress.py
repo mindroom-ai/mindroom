@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
@@ -29,7 +30,7 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal.journal import _MAX_UNREADABLE_ROWS_PER_PAGE
-from mindroom.journal_dispatch import _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
+from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
@@ -2651,3 +2652,256 @@ class TestTimelineMemberProvenance:
         ingress.timeline_member_provenance.clear()
 
         assert ingress.timeline_member_event_class(event) is None
+
+
+def message_event(
+    event_id: str,
+    msgtype: str,
+    body: str = "waves at the bot",
+    *,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.Event:
+    """Return one parsed `m.room.message` of the given msgtype."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": ts,
+            "type": "m.room.message",
+            "content": {"msgtype": msgtype, "body": body, **(extra_content or {})},
+        },
+    )
+    assert isinstance(event, nio.Event)
+    return event
+
+
+# Every msgtype nio has a parse branch for, plus one it has none for, so a rule
+# that stops agreeing with another rule about any of them fails in a test.
+_ROOM_MESSAGE_MSGTYPES = [
+    ("m.text", {}),
+    ("m.emote", {}),
+    ("m.notice", {}),
+    ("m.image", {"url": "mxc://example.org/i"}),
+    ("m.file", {"url": "mxc://example.org/f"}),
+    ("m.video", {"url": "mxc://example.org/v"}),
+    ("m.audio", {"url": "mxc://example.org/a"}),
+    # Absent from that list, so nio produces `RoomMessageUnknown`, which has no
+    # `body` for a turn to answer.
+    ("m.location", {"geo_uri": "geo:51.5,-0.1"}),
+]
+
+
+class _AdmissionClient:
+    """The one nio surface ``JournalDispatcher.register`` uses.
+
+    Registering rather than reaching for the dispatcher's private ingress is
+    what makes these tests exercise the real admission callback: the same
+    function nio calls, with the provenance nio supplies.
+    """
+
+    def __init__(self) -> None:
+        self.admit: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]] | None = None
+
+    def add_event_admission_callback(
+        self,
+        callback: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]],
+    ) -> None:
+        """Capture the callback the dispatcher installs."""
+        self.admit = callback
+
+
+@dataclass(frozen=True)
+class _Delivery:
+    """What one admitted event owed, and what actually ran for it."""
+
+    handled: tuple[nio.Event, ...]
+    owed_work: bool
+
+
+class TestAdmittedWorkReachesItsCallback:
+    """What admission calls work and what dispatch will run must be one set.
+
+    Admission was widened to `nio.RoomMessage` so a watched conversation and a
+    rebuilt one agree on what is in it, and the commit that did it said plainly
+    that "an emote is ordinary user input and is actionable". Only half of that
+    shipped: dispatch stayed bound to `RoomMessageText`, so an `m.emote` was
+    committed as actionable work and then discarded by an `isinstance` check
+    that logged nothing. A user typing `/me asks the bot to X` got silence.
+    """
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        """Build a dispatcher whose only interesting callback is the message one."""
+
+        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+            return None
+
+        return JournalDispatcher(
+            store=store,
+            self_sender=BOT,
+            callbacks=JournalCallbacks(
+                on_message=cast("Any", on_message),
+                on_media=cast("Any", noop),
+                on_reaction=cast("Any", noop),
+                on_approval=cast("Any", noop),
+                on_room_lifecycle=cast("Any", noop),
+                on_redaction=cast("Any", noop),
+                on_decryption_failure=cast("Any", noop),
+                source_has_live_owner=lambda _event_id: False,
+                turn_has_live_claim=lambda _event_id: False,
+            ),
+            room_for_id=lambda _room_id: room(),
+        )
+
+    async def _deliver(
+        self,
+        store: PrincipalStore,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> _Delivery:
+        """Admit one event the way nio does and drain whatever it owes."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(store, on_message)
+        client = _AdmissionClient()
+        dispatcher.register(cast("nio.AsyncClient", client))
+        assert client.admit is not None
+        await client.admit(room(), event, provenance)
+        # Read before draining: "was this committed as work?" and "did anything
+        # run for it?" are different questions, and a context-only event has to
+        # answer no to both. Work that is committed and then refused by the
+        # binding answers no to the second alone, which is the shape of the bug
+        # these tests exist for.
+        owed_work = await store.is_pending(event.event_id)
+        await dispatcher.drain_once()
+        return _Delivery(handled=tuple(handled), owed_work=owed_work)
+
+    async def _projected_ids(self, store: PrincipalStore) -> list[str]:
+        """Return the conversation the projection would serve."""
+        page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+        return [message.logical_event_id for message in page.messages]
+
+    async def test_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
+        """`/me asks the bot to X` is a user turn and must be answered like one."""
+        emote = message_event("$emote", "m.emote", "asks the bot to summarise the thread")
+
+        delivery = await self._deliver(alice, emote, nio.TimelineEventProvenance.LIVE)
+
+        assert delivery.owed_work
+        assert [event.event_id for event in delivery.handled] == ["$emote"]
+        delivered = delivery.handled[0]
+        assert isinstance(delivered, nio.RoomMessageEmote)
+        # The body reaches the turn unchanged. An emote is third-person text,
+        # not a distinct kind of utterance, so nothing downstream is told it
+        # was one.
+        assert delivered.body == "asks the bot to summarise the thread"
+        assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
+        """`m.notice` means "automated, do not react", at any provenance.
+
+        Without this the widened binding would have agents answering each
+        other's thread summaries and their own streaming placeholders.
+        """
+        notice = message_event("$notice", "m.notice", "So far: they asked about X.")
+
+        delivery = await self._deliver(alice, notice, nio.TimelineEventProvenance.LIVE)
+
+        assert not delivery.owed_work
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$notice"]
+
+    async def test_an_emote_from_cold_history_is_context_and_never_a_turn(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history is a conversation that already ended, emotes included."""
+        emote = message_event("$old-emote", "m.emote", "waved, a year ago")
+
+        delivery = await self._deliver(alice, emote, nio.TimelineEventProvenance.HISTORY)
+
+        assert not delivery.owed_work
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$old-emote"]
+
+    async def test_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """`RoomMessageUnknown` has no body, so there is no utterance to answer.
+
+        It still belongs to the conversation, so it is projected -- but it is
+        admitted already settled instead of being committed as work and then
+        thrown away by the binding, which is what used to happen to every
+        msgtype nio has no class for.
+        """
+        location = message_event("$where", "m.location", extra_content={"geo_uri": "geo:51.5,-0.1"})
+        assert isinstance(location, nio.RoomMessageUnknown), "fixture must reach nio's unknown-msgtype class"
+
+        delivery = await self._deliver(alice, location, nio.TimelineEventProvenance.LIVE)
+
+        assert not delivery.owed_work, "an unreadable msgtype was committed as work the binding then discarded"
+        assert delivery.handled == ()
+        assert await alice.unsettled_event_ids() == frozenset()
+        assert await self._projected_ids(alice) == ["$where"]
+
+    @pytest.mark.parametrize(("msgtype", "extra_content"), _ROOM_MESSAGE_MSGTYPES)
+    async def test_anything_admitted_as_work_is_a_payload_dispatch_accepts(
+        self,
+        msgtype: str,
+        extra_content: dict[str, str],
+    ) -> None:
+        """The two rules are compared against each other, not against one assumption.
+
+        Admission's kind rules and `_BINDINGS` are separate statements about
+        the same set, and the emote bug is exactly what their disagreeing looks
+        like. Parametrizing over nio's own parse branches means the next
+        msgtype either side stops agreeing on fails here.
+        """
+        event = message_event(f"$msg-{msgtype}", msgtype, extra_content=extra_content)
+        kind = _event_kind(event)
+        assert kind is not None, f"{msgtype} is projected by hydration, so admission must give it a kind"
+        actionable = _event_class_for(nio.TimelineEventProvenance.LIVE, event) is EventClass.ACTIONABLE
+
+        assert not actionable or isinstance(event, _BINDINGS[kind].event_types), (
+            f"{msgtype} is admitted as {kind.value} work that dispatch would refuse to run"
+        )
+
+    async def test_a_payload_that_is_not_its_stored_kind_is_reported(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A row whose payload contradicts its kind is corruption, not routine.
+
+        The journal accepted work and is now dropping it, which is the same
+        class of event as an unreplayable payload and deserves the same noise.
+        It was silent, and that silence is why the emote bug survived a release
+        with no line anywhere saying a message had been discarded.
+        """
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        await dispatcher.admit_out_of_band(
+            room(),
+            reaction_event("$mislabelled"),
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            live=False,
+        )
+
+        with capture_logs() as logs:
+            await dispatcher.drain_once()
+
+        mismatches = [entry for entry in logs if entry["event"] == "journal_event_kind_mismatch"]
+        assert [entry["event_id"] for entry in mismatches] == ["$mislabelled"]
+        assert mismatches[0]["kind"] == EventKind.MESSAGE.value
+        assert mismatches[0]["payload_type"] == "ReactionEvent"
+        assert await alice.unsettled_event_ids() == frozenset()

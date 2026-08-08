@@ -376,7 +376,7 @@ class _EditRegenerator(Protocol):
     async def handle_message_edit(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
     ) -> None:
@@ -722,7 +722,7 @@ class TurnController:
     async def _should_skip_router_before_shared_ingress_work(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         *,
         requester_user_id: str,
         thread_id: str | None,
@@ -797,7 +797,7 @@ class TurnController:
 
     async def _resolve_text_event_with_ingress_timing(
         self,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         *,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedTextEvent:
@@ -900,7 +900,7 @@ class TurnController:
     async def _handle_edit_event(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
+        prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         event_info: EventInfo,
     ) -> None:
         """Hand one edited user turn to the edit regenerator."""
@@ -914,7 +914,7 @@ class TurnController:
     async def _notify_command_target_not_ready(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
     ) -> bool:
         """Fail one command visibly when its conversation cannot be resolved yet."""
         if command_parser.parse(event.body.strip()) is None:
@@ -2125,7 +2125,7 @@ class TurnController:
     async def handle_text_event(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         *,
         receipt_time: float | None = None,
         reservation_owner: _PromptIngressReservationOwner | None = None,
@@ -2142,7 +2142,7 @@ class TurnController:
     async def _handle_message_inner(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         *,
         receipt_time: float | None = None,
         reservation_owner: _PromptIngressReservationOwner | None = None,
@@ -2214,7 +2214,7 @@ class TurnController:
     async def _ingest_live_text_event(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageText],
+        prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         *,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,

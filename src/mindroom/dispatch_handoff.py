@@ -58,7 +58,11 @@ class PreparedTextEvent:
 # Voice messages are normalized into PreparedTextEvent before coalescing, so
 # this contract only includes routed image/file/video events.
 type MediaDispatchEvent = MatrixMediaDispatchEvent
-type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
+# `RoomMessageFormatted` rather than `RoomMessageText`: journal admission hands
+# the message callback every `m.room.message` carrying a textual body, and
+# `m.emote` is one of those. Naming the base class is what keeps this contract
+# from having to be widened again per msgtype.
+type TextDispatchEvent = nio.RoomMessageFormatted | PreparedTextEvent
 type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 
 
@@ -128,6 +132,17 @@ def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
 def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEvent]:
     """Return whether one dispatch event is image, file, or video media."""
     return is_matrix_media_dispatch_event(event)
+
+
+def is_text_dispatch_event(event: DispatchEvent) -> TypeGuard[TextDispatchEvent]:
+    """Return whether one dispatch event is a text-like utterance.
+
+    The runtime companion to ``TextDispatchEvent``, which cannot be used with
+    ``isinstance`` directly. Every caller asking this question used to spell the
+    class list out, and each copy had to be widened separately -- which is how
+    `m.emote` came to be text in one place and media-ish in another.
+    """
+    return isinstance(event, nio.RoomMessageFormatted | PreparedTextEvent)
 
 
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:
@@ -358,7 +373,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
     if (
         len(batch.pending_events) == 1
-        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
+        and is_text_dispatch_event(batch.primary_event)
         and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
     ):
         if isinstance(batch.primary_event, PreparedTextEvent):

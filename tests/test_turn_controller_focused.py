@@ -593,6 +593,28 @@ def _text_event(
     )
 
 
+def _emote_event(
+    body: str,
+    *,
+    event_id: str = _EVENT_ID,
+    origin_server_ts: int = 1_000_000,
+) -> nio.RoomMessageEmote:
+    """Return one `/me` message: an ordinary user turn written in third person."""
+    return cast(
+        "nio.RoomMessageEmote",
+        nio.RoomMessageEmote.from_dict(
+            {
+                "content": {"body": body, "msgtype": "m.emote"},
+                "event_id": event_id,
+                "sender": _SENDER,
+                "origin_server_ts": origin_server_ts,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        ),
+    )
+
+
 def _image_event(*, event_id: str) -> nio.RoomMessageImage:
     return cast(
         "nio.RoomMessageImage",
@@ -1476,6 +1498,40 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     metadata = request.matrix_run_metadata
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
+    assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_an_emote_is_answered_like_any_other_user_message(config: Config, tmp_path: Path) -> None:
+    """`/me asks the bot to X` produces a reply, with its body as the prompt.
+
+    Driven through ``admit_and_run`` rather than the controller directly,
+    because the thing that refused an emote was the journal's kind binding, not
+    the turn engine: the event was committed as actionable work and then
+    discarded by an ``isinstance`` check before any turn existed.
+
+    An emote is text written in the third person, so the prompt is the body
+    verbatim. Nothing downstream is told the message was an emote, which is why
+    mentions, routing, and commands need no emote-specific handling.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _emote_event("asks the bot to summarize the build failure", event_id="$emote:localhost")
+    obligation_runner = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+
+    await obligation_runner.admit_and_run(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    assert harness.policy.plan_turn_calls == 1
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].prompt == "asks the bot to summarize the build failure"
     assert harness.turn_store.is_handled(event.event_id) is True
 
 
