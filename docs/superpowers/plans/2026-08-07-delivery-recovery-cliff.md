@@ -274,7 +274,7 @@ git commit -m "test(matrix): define the delivery recovery cliff profile"
 - Consumes: the fixed `recovery-cliff` scenario and managed `load_sender` credentials from Task 2.
 - Produces: concurrent root release, terminal stream audit, post-load drain audit, health and sync-progress audit, and clean bounded shutdown.
 
-- [ ] **Step 1: Write the 100-root launch barrier test**
+- [x] **Step 1: Write the 100-root launch barrier test**
 
 Use a fake sender whose every `send_event()` waits until all 100 calls have entered.
 
@@ -282,7 +282,7 @@ Run the root-release helper and require all calls to complete, which fails if th
 
 Require every payload to contain one distinct `run=<id> thread=<0..99>` marker and an explicit `m.mentions.user_ids` entry for `general`.
 
-- [ ] **Step 2: Write pure terminal and drain audit tests**
+- [x] **Step 2: Write pure terminal and drain audit tests**
 
 Build literal Matrix originals and `m.replace` edits with `io.mindroom.stream_status` values.
 
@@ -292,7 +292,7 @@ Require it to reject a missing original, duplicate originals, a nonterminal late
 
 Seed SQLite with both terminal and live rows and prove that the drain query counts only `journal_events.state = 'pending'` and `response_outbox.acknowledged_event_id IS NULL`.
 
-- [ ] **Step 3: Run the acceptance tests and verify RED**
+- [x] **Step 3: Run the acceptance tests and verify RED**
 
 Run:
 
@@ -302,7 +302,7 @@ uv run pytest -q tests/test_live_matrix_fuzz.py -k 'recovery_cliff' -n 0 --no-co
 
 Expected: the launch helper and acceptance evaluator are absent or fail their new assertions.
 
-- [ ] **Step 4: Implement the fixed live runner**
+- [x] **Step 4: Implement the fixed live runner**
 
 Authenticate a `LiveMatrixClient` with the persisted `load_sender` access token without registering another Matrix user.
 
