@@ -557,6 +557,27 @@ class TestRevisionReduction:
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
+    async def test_a_redacted_event_this_projection_never_held_deletes_nothing(self) -> None:
+        """Only a message can be deleted from a projection, because only a message is in one.
+
+        A redaction preserves its target's ``type``, so a stripped event whose
+        type is not ``m.room.message`` is the remains of something this
+        projection never stored -- a reaction, a state event. Reading that as a
+        deletion of itself writes a durable tombstone naming an event no visible
+        message ever had: it removes nothing, and every later walk of the room
+        has to carry it.
+        """
+        source = {
+            "event_id": "$reaction",
+            "sender": ALICE,
+            "origin_server_ts": 1_000,
+            "type": "m.reaction",
+            "content": {},
+            "unsigned": {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}},
+        }
+
+        assert _projected_from_event(ROOM, parse(source), self_sender=BOT) is None
+
 
 class TestThreadHydration:
     """A thread is built from its root plus its whole relation tree."""

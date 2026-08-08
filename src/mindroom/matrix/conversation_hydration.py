@@ -150,9 +150,17 @@ def _redaction_target(event: nio.Event) -> str | None:
     the whole fact on its own, and for a thread walk it is the only shape there
     is: a redaction carries no ``m.relates_to``, so it is not in any relation
     tree. Reading it as a redaction of itself is what makes both walks agree.
+
+    The second shape is confined to events this projection could be storing. A
+    redaction preserves its target's ``type``, so the type check is enough to
+    say so, and without it a redacted reaction or state event would tombstone
+    itself -- a durable row naming an event no visible message ever had, which
+    deletes nothing and has to be read past forever after.
     """
     if isinstance(event, nio.RedactionEvent):
         return event.redacts
+    if event.source.get("type") != "m.room.message":
+        return None
     return event.event_id if _is_redacted(event.source) else None
 
 
