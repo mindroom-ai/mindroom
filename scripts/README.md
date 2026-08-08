@@ -45,12 +45,55 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 
 ### Fuzz live Matrix behavior
 ```bash
-uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
+uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 ```
 
+`--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
+The default of 100 buys one interruption in a 200-step run; `5` buys around forty.
+
+Forty rather than four because one interruption is not a sample.
+A crashed turn has two ways back: the journal replays it, or the homeserver re-delivers it because the sync checkpoint never advanced past it, and the second path hides a broken first one whenever it happens to fire.
+Measured against a MindRoom whose cross-process turn replay was disabled: four interruptions were all rescued by re-delivery and the run reported `PASS`, while twenty-four found the hole after sixteen batches and failed with `admitted_never_dispatched`.
+That is the whole argument for the interval, and the reason a run that quietly took the default is not the gate.
+
+Each interruption is scheduled as the tail of a batch that still owes the agent a reply, and the harness waits for that batch to become durable-but-unfinished in the journal before it takes the process down.
+That is what makes it land inside a turn instead of against an idle runtime, which is all a restart between drained batches could ever do.
+Interruptions alternate between two kinds, because they prove different things:
+
+- `restart_mindroom` sends SIGINT, so MindRoom drains. The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
+- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery. There is no shutdown verdict to check here; the oracle is that each interrupted turn still produces exactly one reply.
+
+A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
+`restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.
+`restart_drain_incomplete` counts the production `runtime_drain_incomplete_with_durable_dispatch_recovery` marker over the whole run.
+It is reported rather than gated: a graceful restart taken mid-turn is allowed to hand unfinished work to durable recovery, and that the work still comes back is what the reply oracle checks.
+
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
+
+#### The live gate is manual, and that is a decision rather than an omission
+
+Nothing in `.github/`, the `justfile`, or pre-commit used to run this harness, so a change to Matrix ingress, the event journal, dispatch, or shutdown could reach `main` with no live evidence behind it at all.
+The gate is now a single named command:
+
+```bash
+just test-live-journal-gate
+```
+
+It runs the fuzz profile with restarts turned up and then the restart-recovery profile, and it is the check to run before merging anything that touches those paths.
+`tests/test_live_matrix_fuzz.py` is what CI runs, and it is a unit test of this harness against fakes: it proves the oracle and the invariants behave, and it boots no Docker, no homeserver, and no MindRoom.
+
+This gate is deliberately not a CI job, and the reason is wall time and latency sensitivity rather than missing infrastructure.
+The harness needs nothing supplied: it starts its own Tuwunel through `just local-instances-create`, its own model stub, and its own MindRoom child, so Docker is the only requirement and `ubuntu-latest` has it.
+What it needs that a shared runner does not have is quiet.
+Measured here on 32 cores at load 16, a deliberately small 40-step, 6-thread, 3-interruption run took 105 seconds end to end at 4.9 seconds per agent turn; the gate above is 200 steps across 45 threads with around forty interruptions, and every interruption is a full MindRoom boot.
+The harness scales its deadlines from measured turn latency and prints a contention warning precisely because that latency is what decides whether a red run means anything, so a busy four-core runner does not fail fast — it fails slowly, for reasons that have nothing to do with the code under test.
+A gate that is allowed to be flaky gets muted, which leaves the same hole this section exists to close while looking like it does not.
+A job that skipped itself would be worse still: it would report green on every PR without ever having run.
+
+A scaled-down live job is not obviously impossible, and the 105-second measurement above is the argument for someone trying it.
+It is not claimed here because it has not been run on a GitHub runner, and shipping an unverified green check is the exact defect this section exists to remove.
 
 #### Making a red run mean the product is broken
 

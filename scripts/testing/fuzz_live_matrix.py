@@ -62,6 +62,26 @@ RESTART_SHUTDOWN_FAILURE_MARKER = "runtime_drain_incomplete_with_durable_dispatc
 ORDERLY_SHUTDOWN_MARKER = "All agent bots stopped"
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
+# What a run is allowed to tell us about itself, keyed by the exact production
+# marker that says it. Every one of these has to exist in `src/`:
+# a counter whose marker no longer exists prints a zero that reads like
+# evidence of health, which is worse than printing nothing, and three of them
+# survived here for months after the module that logged them was deleted.
+# `test_diagnostic_counters_track_live_production_markers` fails if any entry
+# stops being a real marker, so the next deletion cannot leave one behind.
+DIAGNOSTIC_MARKERS: dict[str, str] = {
+    # A conversation read that stopped short of the prompt window it was asked
+    # for. This is the surviving form of the deleted cache's degraded-read
+    # signal: the reader is the journal now, but "the turn was built from less
+    # history than it wanted" is still a thing that can happen under load.
+    "degraded_conversation_reads": "conversation_hydration_ceiling_reached",
+    "event_loop_stalls": "event_loop_stall_detected",
+    # A shutdown whose drain did not finish and handed its unfinished work to
+    # durable recovery. Expected during a restart that lands mid-turn, and the
+    # whole point of the journal -- but it must be visible, not silent.
+    "restart_drain_incomplete": RESTART_SHUTDOWN_FAILURE_MARKER,
+}
+
 # Every event in one room is handled by a single sequential lane, so a wait for
 # N outstanding replies is a wait for N agent turns end to end. The budget is
 # therefore N times the turn latency this machine is actually showing us, times
@@ -112,7 +132,12 @@ class LiveOperationKind(StrEnum):
     REACTION = "reaction"
     REDACTION = "redaction"
     IDEMPOTENT_RETRY = "idempotent_retry"
+    # Two different product guarantees, so two different operations. A signal
+    # MindRoom can answer is a drain: it must come down in order and lose
+    # nothing. A kill it cannot answer is a crash: nothing drains, and every
+    # committed obligation has to come back from the journal on its own.
     RESTART_MINDROOM = "restart_mindroom"
+    CRASH_MINDROOM = "crash_mindroom"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,21 +230,8 @@ class LiveFuzzScenario:
             if not batch:
                 msg = "live Matrix fuzz batches must not be empty"
                 raise ValueError(msg)
-            restart_operations = [
-                operation for operation in batch if operation.kind is LiveOperationKind.RESTART_MINDROOM
-            ]
-            if restart_operations and len(batch) != 1:
-                msg = "MindRoom restart must be a singleton batch"
-                raise ValueError(msg)
-            reply_threads = [
-                operation.thread
-                for operation in batch
-                if operation.kind
-                in {
-                    LiveOperationKind.THREAD_MESSAGE,
-                    LiveOperationKind.PLAIN_REPLY,
-                }
-            ]
+            _validate_interruption_placement(batch)
+            reply_threads = [operation.thread for operation in batch if _owes_reply(operation)]
             if len(reply_threads) != len(set(reply_threads)):
                 msg = "same-thread messages requiring replies must use separate batches"
                 raise ValueError(msg)
@@ -247,6 +259,35 @@ class LiveFuzzScenario:
             known_events.update(new_events)
             known_responses.update(new_responses)
             message_events.update(new_messages)
+
+
+_INTERRUPTION_KINDS = frozenset({LiveOperationKind.RESTART_MINDROOM, LiveOperationKind.CRASH_MINDROOM})
+
+
+def _owes_reply(operation: LiveOperation) -> bool:
+    """Return whether this operation obliges the agent to answer exactly once."""
+    return operation.kind in {
+        LiveOperationKind.THREAD_MESSAGE,
+        LiveOperationKind.PLAIN_REPLY,
+    }
+
+
+def _validate_interruption_placement(batch: tuple[LiveOperation, ...]) -> None:
+    """Reject an interruption that could not possibly land inside a turn.
+
+    The trace, not the runner, is where this has to hold: an interruption the
+    generator put in a batch of its own, or after a batch that owes the agent
+    nothing, hits an idle process however carefully the runner then times it.
+    """
+    positions = [index for index, operation in enumerate(batch) if operation.kind in _INTERRUPTION_KINDS]
+    if not positions:
+        return
+    if len(positions) != 1 or positions[0] != len(batch) - 1:
+        msg = "a MindRoom restart or crash must be the last operation of exactly one batch"
+        raise ValueError(msg)
+    if not any(_owes_reply(operation) for operation in batch):
+        msg = "a MindRoom restart or crash must interrupt a batch that owes at least one reply"
+        raise ValueError(msg)
 
 
 def _normalized_log(log: str) -> str:
@@ -557,9 +598,9 @@ def _validate_live_operation(
     if not 0 <= operation.thread < thread_count:
         msg = f"invalid thread {operation.thread}"
         raise ValueError(msg)
-    if operation.kind is LiveOperationKind.RESTART_MINDROOM:
+    if operation.kind in _INTERRUPTION_KINDS:
         if operation.target is not None:
-            msg = "MindRoom restart must not have a target"
+            msg = "a MindRoom restart or crash must not have a target"
             raise ValueError(msg)
         return
     if operation.target is None:
@@ -665,6 +706,72 @@ def _update_generation_state(
             state.redacted.add(operation.target)
 
 
+def _generate_batch(
+    randomizer: random.Random,
+    state: _ScenarioGenerationState,
+    *,
+    first_operation_id: int,
+    batch_size: int,
+    thread_count: int,
+) -> list[LiveOperation]:
+    """Choose one batch of operations with at most one reply owed per thread."""
+    operations: list[LiveOperation] = []
+    reply_threads: set[int] = set()
+    for offset in range(batch_size):
+        operation = _choose_operation(
+            randomizer,
+            state,
+            operation_id=first_operation_id + offset,
+            thread_count=thread_count,
+        )
+        if _owes_reply(operation) and operation.thread in reply_threads:
+            operation = LiveOperation(
+                operation_id=operation.operation_id,
+                kind=LiveOperationKind.REACTION,
+                thread=operation.thread,
+                target=randomizer.choice(state.reaction_targets[operation.thread]),
+            )
+        operations.append(operation)
+        if _owes_reply(operation):
+            reply_threads.add(operation.thread)
+    return operations
+
+
+def _batch_interrupted_by(
+    randomizer: random.Random,
+    state: _ScenarioGenerationState,
+    operations: list[LiveOperation],
+    *,
+    kind: LiveOperationKind,
+    interruption_operation_id: int,
+) -> tuple[LiveOperation, ...]:
+    """Return this batch with an interruption appended, guaranteed to land mid-turn.
+
+    An interruption is only worth taking while a turn is owed, so the batch it
+    ends must contain at least one message the agent still has to answer. A
+    batch of nothing but reactions and edits is promoted by turning its first
+    operation into a thread message; no reply is owed yet on that thread,
+    because the batch had none at all.
+    """
+    if not any(_owes_reply(operation) for operation in operations):
+        head = operations[0]
+        operations[0] = LiveOperation(
+            operation_id=head.operation_id,
+            kind=LiveOperationKind.THREAD_MESSAGE,
+            thread=head.thread,
+            target=randomizer.choice(state.messages[head.thread]),
+        )
+    return (
+        *operations,
+        LiveOperation(
+            operation_id=interruption_operation_id,
+            kind=kind,
+            thread=0,
+            target=None,
+        ),
+    )
+
+
 def live_scenario_from_seed(
     seed: int,
     *,
@@ -684,52 +791,43 @@ def live_scenario_from_seed(
     operation_id = 0
     generated = 0
     next_restart = restart_interval
+    interruptions = 0
 
     while generated < steps:
+        batch_size = min(steps - generated, randomizer.randint(1, max_batch_size))
+        operations = _generate_batch(
+            randomizer,
+            state,
+            first_operation_id=operation_id,
+            batch_size=batch_size,
+            thread_count=thread_count,
+        )
+        operation_id += batch_size
+        generated += len(operations)
+
+        # The interruption rides along with the work rather than following it.
+        # One in a batch of its own is only ever taken after the previous
+        # batch's replies have all landed, which interrupts an idle process: it
+        # can never exercise the recovery the journal is for. Graceful restarts
+        # and hard crashes alternate because they prove different things, and a
+        # run that only ever drained cleanly has not tested the journal at all.
+        batch = tuple(operations)
         if restart_interval and generated >= next_restart:
-            batches.append(
-                (
-                    LiveOperation(
-                        operation_id=operation_id,
-                        kind=LiveOperationKind.RESTART_MINDROOM,
-                        thread=0,
-                        target=None,
-                    ),
+            batch = _batch_interrupted_by(
+                randomizer,
+                state,
+                operations,
+                kind=(
+                    LiveOperationKind.RESTART_MINDROOM if interruptions % 2 == 0 else LiveOperationKind.CRASH_MINDROOM
                 ),
+                interruption_operation_id=operation_id,
             )
+            interruptions += 1
             operation_id += 1
             next_restart += restart_interval
 
-        batch_size = min(steps - generated, randomizer.randint(1, max_batch_size))
-        operations: list[LiveOperation] = []
-        reply_threads: set[int] = set()
-        for offset in range(batch_size):
-            operation = _choose_operation(
-                randomizer,
-                state,
-                operation_id=operation_id + offset,
-                thread_count=thread_count,
-            )
-            needs_reply = operation.kind in {
-                LiveOperationKind.THREAD_MESSAGE,
-                LiveOperationKind.PLAIN_REPLY,
-            }
-            if needs_reply and operation.thread in reply_threads:
-                operation = LiveOperation(
-                    operation_id=operation.operation_id,
-                    kind=LiveOperationKind.REACTION,
-                    thread=operation.thread,
-                    target=randomizer.choice(state.reaction_targets[operation.thread]),
-                )
-                needs_reply = False
-            operations.append(operation)
-            if needs_reply:
-                reply_threads.add(operation.thread)
-        operation_id += batch_size
-
-        batches.append(tuple(operations))
-        generated += len(operations)
-        _update_generation_state(state, operations)
+        batches.append(batch)
+        _update_generation_state(state, batch)
 
     scenario = LiveFuzzScenario(thread_count=thread_count, batches=tuple(batches))
     scenario.validate()
@@ -1326,17 +1424,41 @@ class ManagedTuwunelStack:
         return environment
 
     def restart_mindroom(self) -> None:
-        """Restart only MindRoom while preserving its cache and Matrix account."""
-        self.stop_mindroom()
+        """Restart only MindRoom, refusing to hide a shutdown that went wrong.
+
+        `stop_mindroom` already decides whether the child stopped on its own
+        signal, exited cleanly, and logged that its bots came down in order.
+        Throwing that verdict away made a twenty-second hung drain followed by
+        a SIGKILL indistinguishable from a clean restart, so the run continued
+        and reported PASS on a stack that had just been shot in the head.
+        """
+        if not self.stop_mindroom():
+            msg = (
+                "MindRoom did not shut down cleanly before its restart: it either ignored SIGINT until the "
+                "harness had to kill it, exited with an unexpected status, or never logged an orderly bot "
+                f"shutdown ({ORDERLY_SHUTDOWN_MARKER!r})"
+            )
+            raise AssertionError(msg)
         self._start_mindroom()
 
     def wait_for_blocked_restart_request(self, *, timeout: float) -> bool:
         """Wait until the pre-restart generation has an exact fresh request in flight."""
         return _ModelHandler.blocked_request_started.wait(timeout=timeout)
 
-    def restart_mindroom_for_recovery(self, *, timeout: float) -> None:
-        """Hard-stop an in-flight turn and boot a distinguishable recovery generation."""
-        deadline = time.monotonic() + timeout
+    def crash_mindroom(self, *, timeout: float = 20) -> None:
+        """Kill MindRoom outright and boot a replacement over the same state.
+
+        No signal the runtime can answer, so no drain, no orderly shutdown, and
+        no chance to finish the turn that was running. Everything the journal
+        had committed and not settled is now owed to durable recovery, which is
+        the guarantee this whole subsystem exists to make and the one a
+        graceful restart never puts under any pressure.
+        """
+        self._hard_kill(timeout=timeout)
+        self._start_mindroom()
+
+    def _hard_kill(self, *, timeout: float) -> None:
+        """Stop the managed child the way a crash would, with nothing drained."""
         process = self._mindroom_process
         if process is None:
             msg = "MindRoom is not running"
@@ -1345,8 +1467,13 @@ class ManagedTuwunelStack:
             msg = "MindRoom exited before the hard-restart boundary"
             raise RuntimeError(msg)
         os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=max(0, deadline - time.monotonic()))
+        process.wait(timeout=timeout)
         self._mindroom_process = None
+
+    def restart_mindroom_for_recovery(self, *, timeout: float) -> None:
+        """Hard-stop an in-flight turn and boot a distinguishable recovery generation."""
+        deadline = time.monotonic() + timeout
+        self._hard_kill(timeout=timeout)
         self._set_model_id(RECOVERED_MODEL_ID)
         _ModelHandler.blocked_request_release.set()
         self._start_mindroom(timeout=max(0, deadline - time.monotonic()))
@@ -1377,16 +1504,11 @@ class ManagedTuwunelStack:
         return "\n".join(self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
 
     def diagnostic_counts(self) -> dict[str, int]:
-        """Count saturation signals in the complete runtime output."""
+        """Count every live diagnostic marker in the complete runtime output."""
         log = self.read_log()
         if not log:
             return {}
-        return {
-            "cache_coordinator_timeouts": _log_count(log, "thread_read_error=cache_coordinator_timeout"),
-            "degraded_thread_reads": _log_count(log, "matrix_cache_thread_read_degraded"),
-            "dispatch_read_timeouts": _log_count(log, "thread_read_error=dispatch_read_timeout"),
-            "event_loop_stalls": _log_count(log, "event_loop_stall_detected"),
-        }
+        return {name: _log_count(log, marker) for name, marker in DIAGNOSTIC_MARKERS.items()}
 
     def log_count(self, *markers: str) -> int:
         """Count lines containing every content-free lifecycle marker."""
@@ -1584,6 +1706,20 @@ class ManagedTuwunelStack:
             head_event_id=str(head[0][0]) if head else None,
             head_receipt_order=int(cast("int", head[0][1])) if head else None,
         )
+
+    def pending_journal_event_count(self) -> int:
+        """Count the events the journal owns and has not finished."""
+        return sum(depth for _room_id, depth in self.pending_lane_report().depths)
+
+    def wait_for_pending_journal_work(self, *, timeout: float) -> bool:
+        """Wait until the journal holds committed work that is not settled yet.
+
+        This is the precondition for a restart that means something. An event
+        that is durably admitted and still pending is exactly the state the
+        journal exists to survive, so a crash taken here tests recovery; a
+        crash taken with an empty journal tests only that MindRoom can boot.
+        """
+        return _wait_until(lambda: self.pending_journal_event_count() > 0, timeout=timeout)
 
     def diagnose_missing_replies(self, missing: Mapping[str, str]) -> str:
         """Explain, per missing reply, how far its source event actually got."""
@@ -2166,6 +2302,8 @@ class LiveFuzzRunner:
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.operation_count = 0
         self.restart_count = 0
+        self.crash_count = 0
+        self.interruptions_with_work_outstanding = 0
         self.executed_batches = 0
         self.slow_wait_extensions = 0
 
@@ -2787,23 +2925,19 @@ class LiveFuzzRunner:
         """Run one contiguous scenario segment against already-created roots."""
         for relative_batch_index, batch in enumerate(batches):
             batch_index = batch_index_offset + relative_batch_index
-            if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
-                self.stack.restart_mindroom()
-                self.restart_count += 1
-            else:
-                results = await asyncio.gather(*(self._apply(operation) for operation in batch))
-                for operation, event_id, payload in results:
-                    self.operation_count += 1
-                    if event_id is not None and operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
-                        self.event_ids[operation.event_ref] = event_id
-                    if payload is not None:
-                        self.sent_payloads[operation.event_ref] = payload
-                    if operation.kind in {
-                        LiveOperationKind.THREAD_MESSAGE,
-                        LiveOperationKind.PLAIN_REPLY,
-                    }:
-                        assert event_id is not None
-                        self.oracle.expect(operation.event_ref, event_id)
+            work = tuple(operation for operation in batch if operation.kind not in _INTERRUPTION_KINDS)
+            results = await asyncio.gather(*(self._apply(operation) for operation in work))
+            for operation, event_id, payload in results:
+                self.operation_count += 1
+                if event_id is not None and operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
+                    self.event_ids[operation.event_ref] = event_id
+                if payload is not None:
+                    self.sent_payloads[operation.event_ref] = payload
+                if _owes_reply(operation):
+                    assert event_id is not None
+                    self.oracle.expect(operation.event_ref, event_id)
+            if len(work) != len(batch):
+                self._interrupt_outstanding_work(batch[-1].kind, batch_index)
             try:
                 await self._await_replies()
             except AssertionError as exc:
@@ -2811,16 +2945,60 @@ class LiveFuzzRunner:
                 raise AssertionError(msg) from exc
             self.executed_batches += 1
 
+        self._require_interruptions_landed_mid_turn()
         return {
             "batches": self.executed_batches,
             "canonical_agent_replies": len(self.oracle.expected_sources),
             "operations": self.operation_count,
             "restarts": self.restart_count,
+            "crashes": self.crash_count,
+            "interruptions_with_work_outstanding": self.interruptions_with_work_outstanding,
             "roots": self.scenario.thread_count,
             "measured_turn_seconds": round(self.latency.per_turn_seconds, 3),
             "slow_wait_extensions": self.slow_wait_extensions,
             "status": "PASS",
         }
+
+    def _interrupt_outstanding_work(self, kind: LiveOperationKind, batch_index: int) -> None:
+        """Take the process down while the journal still owes the batch a turn.
+
+        The batch's writes have left the harness, so the only question is
+        whether MindRoom has committed them yet. Waiting for a pending journal
+        row before pulling the process out answers it: what dies is a runtime
+        holding durable, unfinished obligations, which is the single case the
+        journal was built for and the case the harness never used to reach.
+        """
+        interrupted = self.stack.wait_for_pending_journal_work(timeout=self.reply_timeout)
+        if kind is LiveOperationKind.CRASH_MINDROOM:
+            self.stack.crash_mindroom()
+            self.crash_count += 1
+        else:
+            self.stack.restart_mindroom()
+            self.restart_count += 1
+        self.interruptions_with_work_outstanding += int(interrupted)
+        if not interrupted:
+            print(
+                f"{kind.value} at live batch {batch_index} found no pending journal work within "
+                f"{self.reply_timeout:.0f}s and interrupted an idle runtime",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _require_interruptions_landed_mid_turn(self) -> None:
+        """Fail a run whose restarts and crashes never actually interrupted anything.
+
+        Reporting `restarts: 18` while every one of them hit an idle process is
+        the failure this whole apparatus exists to stop: a number that reads
+        like crash coverage and is not.
+        """
+        interruptions = self.restart_count + self.crash_count
+        if interruptions and self.interruptions_with_work_outstanding != interruptions:
+            missed = interruptions - self.interruptions_with_work_outstanding
+            msg = (
+                f"{missed} of {interruptions} restarts and crashes found no committed unfinished journal work to "
+                "interrupt, so the run did not exercise the recovery it reports as covered"
+            )
+            raise AssertionError(msg)
 
     def _saturation_parallel_start(self) -> int:
         """Return the first batch belonging to the parallel saturation phase."""

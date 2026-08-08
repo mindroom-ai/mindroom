@@ -26,6 +26,7 @@ from mindroom.matrix.sync_token_values import SyncCheckpoint
 from scripts.testing import fuzz_live_matrix
 from scripts.testing.fuzz_live_matrix import (
     DEFAULT_ROOT_FANOUT,
+    DIAGNOSTIC_MARKERS,
     ORDERLY_SHUTDOWN_MARKER,
     PROJECT_ROOT,
     RESTART_SHUTDOWN_FAILURE_MARKER,
@@ -327,18 +328,12 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
         max_batch_size=10,
         restart_interval=75,
     )
+    interruption_kinds = {LiveOperationKind.RESTART_MINDROOM, LiveOperationKind.CRASH_MINDROOM}
     assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
-    assert (
-        sum(
-            operation.kind is not LiveOperationKind.RESTART_MINDROOM
-            for batch in scenario.batches
-            for operation in batch
-        )
-        == 250
-    )
-    assert any(
-        operation.kind is LiveOperationKind.RESTART_MINDROOM for batch in scenario.batches for operation in batch
-    )
+    assert sum(operation.kind not in interruption_kinds for batch in scenario.batches for operation in batch) == 250
+    assert {
+        operation.kind for batch in scenario.batches for operation in batch if operation.kind in interruption_kinds
+    } == interruption_kinds
     for batch in scenario.batches:
         reply_threads = [
             operation.thread
@@ -350,6 +345,71 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
             }
         ]
         assert len(reply_threads) == len(set(reply_threads))
+
+
+def test_live_scenario_schedules_every_interruption_inside_unfinished_work() -> None:
+    """An interruption in a batch of its own can only ever hit an idle process.
+
+    The runner drains before every batch, so a singleton restart batch is
+    taken after the previous batch's replies have all landed. Scheduling the
+    interruption as the tail of a batch that owes a reply is what puts it
+    where the journal's guarantee lives, and alternating graceful restarts
+    with hard crashes is what stops a run from proving only that the drain
+    works.
+    """
+    kinds = {LiveOperationKind.RESTART_MINDROOM, LiveOperationKind.CRASH_MINDROOM}
+    scenario = live_scenario_from_seed(3, steps=200, thread_count=8, max_batch_size=6, restart_interval=25)
+    interrupted = [batch for batch in scenario.batches if any(operation.kind in kinds for operation in batch)]
+
+    assert len(interrupted) == 8
+    for batch in interrupted:
+        assert batch[-1].kind in kinds
+        assert sum(operation.kind in kinds for operation in batch) == 1
+        assert any(
+            operation.kind in {LiveOperationKind.THREAD_MESSAGE, LiveOperationKind.PLAIN_REPLY} for operation in batch
+        )
+    assert [batch[-1].kind for batch in interrupted] == [
+        LiveOperationKind.RESTART_MINDROOM,
+        LiveOperationKind.CRASH_MINDROOM,
+    ] * 4
+
+
+@pytest.mark.parametrize(
+    ("batch", "expected"),
+    [
+        pytest.param(
+            (LiveOperation(0, LiveOperationKind.RESTART_MINDROOM, 0, None),),
+            "must interrupt a batch that owes at least one reply",
+            id="alone",
+        ),
+        pytest.param(
+            (
+                LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),
+                LiveOperation(1, LiveOperationKind.RESTART_MINDROOM, 0, None),
+                LiveOperation(2, LiveOperationKind.REACTION, 0, "root:0"),
+            ),
+            "must be the last operation of exactly one batch",
+            id="not-last",
+        ),
+        pytest.param(
+            (
+                LiveOperation(0, LiveOperationKind.REACTION, 0, "root:0"),
+                LiveOperation(1, LiveOperationKind.RESTART_MINDROOM, 0, None),
+            ),
+            "must interrupt a batch that owes at least one reply",
+            id="no-reply-owed",
+        ),
+    ],
+)
+def test_live_scenario_rejects_a_restart_that_interrupts_nothing(
+    batch: tuple[LiveOperation, ...],
+    expected: str,
+) -> None:
+    """The trace has to say the restart lands mid-turn; the runner cannot rescue it."""
+    scenario = LiveFuzzScenario(thread_count=1, batches=(batch,))
+
+    with pytest.raises(ValueError, match=expected):
+        scenario.validate()
 
 
 def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
@@ -1215,18 +1275,34 @@ def test_model_handler_ignores_client_disconnect_after_latched_request(
     assert handler.close_connection
 
 
+def test_diagnostic_counters_track_live_production_markers() -> None:
+    """A counted marker no production module logs is a zero pretending to be evidence.
+
+    Three counters here outlived the module that emitted them and kept
+    reporting `0` in every result JSON, which the harness's own test could not
+    notice because it fed itself the marker text. Nothing but the real tree
+    can answer whether a marker is still live.
+    """
+    sources = [path.read_text(encoding="utf-8") for path in (PROJECT_ROOT / "src").rglob("*.py")]
+    dead = sorted(
+        f"{name}={marker}"
+        for name, marker in DIAGNOSTIC_MARKERS.items()
+        if not any(marker in source for source in sources)
+    )
+
+    assert not dead, f"diagnostic counters whose production marker no longer exists: {dead}"
+
+
 def test_diagnostic_counts_handle_colored_structlog_fields() -> None:
-    """ANSI rendering must not turn timeout counters into structural zeroes."""
+    """ANSI rendering must not turn live counters into structural zeroes."""
     stack = ManagedTuwunelStack()
     try:
         stack.log_path.write_text(
-            "thread_read_error=\x1b[35mcache_coordinator_timeout\x1b[0m\n"
-            "thread_read_error=\x1b[35mdispatch_read_timeout\x1b[0m\n",
+            "".join(f"event=\x1b[35m{marker}\x1b[0m\n" for marker in DIAGNOSTIC_MARKERS.values()),
             encoding="utf-8",
         )
 
-        assert stack.diagnostic_counts()["cache_coordinator_timeouts"] == 1
-        assert stack.diagnostic_counts()["dispatch_read_timeouts"] == 1
+        assert stack.diagnostic_counts() == dict.fromkeys(DIAGNOSTIC_MARKERS, 1)
     finally:
         stack.close()
 
@@ -1426,6 +1502,219 @@ def test_restart_shutdown_rejects_forced_process_kill(monkeypatch: pytest.Monkey
         assert signals == [(10, signal.SIGINT), (10, signal.SIGKILL)]
         assert process.wait_timeouts == [1, 10]
         assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+def test_restart_refuses_to_continue_after_an_unclean_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart that discards the shutdown verdict cannot tell SIGKILL from clean.
+
+    `stop_mindroom` already knows whether the child stopped on its own signal
+    and logged an orderly bot shutdown. Ignoring that made a hung drain
+    followed by a kill look exactly like a healthy restart, and the run went
+    on to report PASS.
+    """
+    stack = ManagedTuwunelStack()
+    started: list[int] = []
+    try:
+        monkeypatch.setattr(stack, "stop_mindroom", lambda: False)
+        monkeypatch.setattr(stack, "_start_mindroom", lambda: started.append(1))
+
+        with pytest.raises(AssertionError, match="did not shut down cleanly"):
+            stack.restart_mindroom()
+
+        assert started == []
+    finally:
+        stack.close()
+
+
+class _RestartOrderClient(_RecordingDormantClient):
+    """Record sends into the shared restart-boundary ordering."""
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self.order = order
+
+    async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        self.order.append("send")
+        return await super().send_event(event_type, txn_id, content)
+
+
+class _RestartOrderStack(ManagedTuwunelStack):
+    """Answer the interruption boundary without a live runtime or journal."""
+
+    def __init__(self, *, pending_work: bool) -> None:
+        super().__init__()
+        self.agent_id, self.router_id = "@agent:example", "@router:example"
+        self.pending_work = pending_work
+        self.order: list[str] = []
+
+    def wait_for_pending_journal_work(self, *, timeout: float) -> bool:
+        assert timeout == 1
+        self.order.append("wait-pending")
+        return self.pending_work
+
+    def restart_mindroom(self) -> None:
+        self.order.append("restart")
+
+    def crash_mindroom(self, *, timeout: float = 20) -> None:
+        del timeout
+        self.order.append("crash")
+
+
+class _RestartOrderRunner(LiveFuzzRunner):
+    """Satisfy every outstanding reply so the batch loop can complete."""
+
+    async def _await_replies(self) -> None:
+        stack = cast("_RestartOrderStack", self.stack)
+        outstanding = self.oracle.outstanding()
+        stack.order.append(f"await:{len(outstanding)}")
+        for event_id in outstanding:
+            self.oracle.response_ids[event_id].add(f"{event_id}-reply")
+
+
+def _restart_order_runner(
+    *,
+    pending_work: bool,
+    kind: LiveOperationKind = LiveOperationKind.RESTART_MINDROOM,
+) -> _RestartOrderRunner:
+    """Build one batch whose interruption must land while a reply is still owed."""
+    stack = _RestartOrderStack(pending_work=pending_work)
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        batches=(
+            (
+                LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),
+                LiveOperation(1, kind, 0, None),
+            ),
+        ),
+    )
+    scenario.validate()
+    runner = _RestartOrderRunner(
+        stack,
+        (cast("LiveMatrixClient", _RestartOrderClient(stack.order)),),
+        scenario,
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    runner.event_ids["root:0"] = "$root0"
+    return runner
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_call", "expected_counts"),
+    [
+        pytest.param(LiveOperationKind.RESTART_MINDROOM, "restart", (1, 0), id="graceful"),
+        pytest.param(LiveOperationKind.CRASH_MINDROOM, "crash", (0, 1), id="hard"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_interruption_lands_after_the_batch_is_sent_and_before_its_replies(
+    kind: LiveOperationKind,
+    expected_call: str,
+    expected_counts: tuple[int, int],
+) -> None:
+    """The interruption must happen with the batch committed and unanswered."""
+    runner = _restart_order_runner(pending_work=True, kind=kind)
+    try:
+        result = await runner._run_batches(runner.scenario.batches)
+
+        assert cast("_RestartOrderStack", runner.stack).order == ["send", "wait-pending", expected_call, "await:1"]
+        assert (result["restarts"], result["crashes"]) == expected_counts
+        assert result["interruptions_with_work_outstanding"] == 1
+    finally:
+        runner.stack.close()
+
+
+@pytest.mark.asyncio
+async def test_run_fails_when_an_interruption_found_no_work_to_interrupt() -> None:
+    """`restarts: 18` must not be reportable when every one hit an idle runtime."""
+    runner = _restart_order_runner(pending_work=False)
+    try:
+        with pytest.raises(AssertionError, match="found no committed unfinished journal work"):
+            await runner._run_batches(runner.scenario.batches)
+    finally:
+        runner.stack.close()
+
+
+def test_crash_kills_the_runtime_without_giving_it_a_chance_to_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash must not be a restart with extra steps.
+
+    SIGINT lets MindRoom finish the turn it was running, which tests the drain
+    and leaves the journal nothing to recover. Only a signal it cannot answer
+    puts committed, unfinished work in front of durable recovery.
+    """
+
+    class Process:
+        pid = 10
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 7
+            return -9
+
+    stack = ManagedTuwunelStack()
+    signals: list[tuple[int, int]] = []
+    started: list[int] = []
+    orderly_stops: list[int] = []
+    try:
+        stack._mindroom_process = cast("Any", Process())
+        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
+        monkeypatch.setattr(stack, "_start_mindroom", lambda: started.append(1))
+        monkeypatch.setattr(stack, "stop_mindroom", lambda **_kwargs: bool(orderly_stops.append(1)))
+
+        stack.crash_mindroom(timeout=7)
+
+        assert signals == [(10, signal.SIGKILL)]
+        assert started == [1]
+        assert orderly_stops == []
+        assert stack._mindroom_process is None
+    finally:
+        stack._mindroom_process = None
+        stack.close()
+
+
+def test_pending_journal_work_counts_only_unsettled_events() -> None:
+    """The interruption probe must read the production journal, not a log line.
+
+    A restart is worth taking only while the journal owes something, so what
+    the probe counts has to be the durable state MindRoom actually writes --
+    admitted and not yet settled -- and not a marker the harness invented.
+    """
+    stack = ManagedTuwunelStack()
+    try:
+        assert stack.pending_journal_event_count() == 0
+
+        stack.agent_id = "@agent:example"
+        store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
+
+        async def seed() -> None:
+            principal = store.principal(f"general@{stack.agent_id}")
+            for event_id in ("$settled", "$pending"):
+                await principal.admit(
+                    InboundEvent(
+                        event_id=event_id,
+                        room_id="!room:example",
+                        thread_id=None,
+                        kind=EventKind.MESSAGE,
+                        event_class=EventClass.ACTIONABLE,
+                        sender="@user:example",
+                        origin_server_ts=1,
+                        source={"event_id": event_id},
+                    ),
+                )
+            await principal.settle("$settled")
+
+        asyncio.run(seed())
+
+        assert stack.pending_journal_event_count() == 1
+        assert stack.wait_for_pending_journal_work(timeout=0.1)
     finally:
         stack.close()
 
