@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import quote
 
@@ -20,7 +21,6 @@ from mindroom.event_journal_open import (
     EventJournalBindingError,
     write_event_journal_binding,
 )
-from mindroom.constants import RuntimePaths
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportGroupFailure, ThreadExportRoom
@@ -33,6 +33,9 @@ from tests.thread_export_helpers import (
     write_invited_rooms,
     write_thread_export_matrix_state,
 )
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 async def _admit_as_running_bot(runtime_paths: RuntimePaths, principal_id: str, event_id: str) -> None:

@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-import nio
-
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_history_reads import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.thread_membership import (
@@ -25,6 +23,8 @@ from mindroom.matrix.thread_membership import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    import nio
 
     from mindroom.matrix.event_info import EventInfo
 
