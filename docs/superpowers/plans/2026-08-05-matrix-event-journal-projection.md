@@ -926,6 +926,18 @@ They are gates on phase 3, not on the phases before it.
   This row was wrong in the optimistic direction twice before. It is stated as holding now only because the deletion is in the diff and the number is reproducible from the command above.
 ## One-PR Implementation Sequence
 
+> **Executed.** Every checkpoint below has landed. These are records of how each cutover was done
+> and why, not instructions to follow, and the code has since moved past several of them. Read them
+> for the reasoning; read the source for the current shape.
+>
+> The divergence a reader will hit first is `ThreadReadMode`. This section describes four values
+> (`ADVISORY_FULL`, `DISPATCH_SNAPSHOT`, `DISPATCH_FULL`, `STRICT_FULL`) mapped onto two reader
+> methods, and a `mode.dispatch_safe` predicate. Those four collapsed to the two contracts they
+> always encoded -- `NONBLOCKING` and `STRICT` -- and `dispatch_safe` is gone with them, because a
+> caller either may block or may not and there was never a third answer. The dispatch tables and
+> `strict = mode in (DISPATCH_FULL, STRICT_FULL)` swaps described below are how that collapse was
+> reached, not how the read path looks now.
+
 ### 0. mindroom-nio prerequisite
 
 Land a focused mindroom-nio PR that adds recursive relation query support, parses `recursion_depth`, and enforces an optional minimum recursion depth before yielding page events.
