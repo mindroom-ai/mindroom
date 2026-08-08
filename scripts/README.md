@@ -49,6 +49,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --thread
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
 uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --reply-timeout 180
+uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --threads 200 --reply-timeout 180
 ```
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
@@ -74,11 +75,12 @@ It is reported rather than gated: a graceful restart taken mid-turn is allowed t
 The `short-stream-correctness` profile preserves the existing 13-thread hot-then-parallel stream scenario with a 180-second per-reply deadline.
 It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
 
-The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for its fixed 100-root workload.
-It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases exactly 100 managed roots concurrently, and resumes the runtime even if a send fails.
+The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for a workload that defaults to 100 roots and can be raised with `--threads`.
+With the current timeline and nio recovery limits, 1,499 roots is the largest valid recoverable trace and 1,500 is refused before the held workload rather than misreported as a runtime capacity failure.
+It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases every configured managed root concurrently, and resumes the runtime even if a send fails.
 Its single observer cursor enumerates every positioned sync interval forward through `/messages` before publication, so a limited or compacted `/sync` timeline cannot omit reply or edit evidence.
 One fixed whole-workload `--reply-timeout` covers the fault boundary, root sends, terminal replies, durable debt observation, final drain, and post-load fence without extension.
-PASS requires exact completed replies, sustained 100-stream overlap, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
+PASS requires exact completed replies, sustained overlap of every configured stream, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
 Short-stream-correctness results are not recovery-cliff acceptance evidence.
 
 #### The live gate is manual, and that is a decision rather than an omission

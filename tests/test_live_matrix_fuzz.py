@@ -765,6 +765,45 @@ def test_recovery_cliff_scenario_has_fixed_empty_trace_for_one_hundred_roots() -
     scenario.validate()
 
 
+def test_recovery_cliff_cli_keeps_its_default_root_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recovery profile must default to 100 roots when --threads is omitted."""
+    monkeypatch.setattr(sys, "argv", ["fuzz_live_matrix.py", "--profile", "recovery-cliff"])
+
+    scenario = fuzz_live_matrix._scenario_from_args(fuzz_live_matrix._parse_args())
+
+    assert scenario == LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
+
+
+def test_recovery_cliff_cli_can_raise_the_capacity_root_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A capacity run must reach 200 roots without weakening the fixed empty trace."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuzz_live_matrix.py",
+            "--profile",
+            "recovery-cliff",
+            "--threads",
+            "200",
+        ],
+    )
+
+    scenario = fuzz_live_matrix._scenario_from_args(fuzz_live_matrix._parse_args())
+
+    assert scenario == LiveFuzzScenario(thread_count=200, batches=(), profile="recovery-cliff")
+    scenario.validate()
+
+
+def test_fuzz_cli_keeps_its_default_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Making recovery capacity configurable must leave ordinary fuzz at 45 threads."""
+    monkeypatch.setattr(sys, "argv", ["fuzz_live_matrix.py"])
+
+    scenario = fuzz_live_matrix._scenario_from_args(fuzz_live_matrix._parse_args())
+
+    assert scenario.profile == "fuzz"
+    assert scenario.thread_count == 45
+
+
 def test_recovery_cliff_scenario_rejects_an_altered_trace_shape() -> None:
     """The fixed recovery runner must not silently ignore declared trace operations."""
     scenario = LiveFuzzScenario(
@@ -797,7 +836,26 @@ def test_recovery_cliff_fault_shape_exceeds_one_live_window_and_one_recovery_pum
             root_count=100,
         )
         assert shape.context_event_count + shape.root_count == 701
-        assert shape.context_event_count + shape.root_count < shape.recovery_max_events
+        recovered_event_count = shape.context_event_count + shape.root_count - shape.timeline_limit
+        assert recovered_event_count <= shape.recovery_max_events
+    finally:
+        stack.close()
+
+
+def test_recovery_cliff_fault_shape_accepts_the_recovery_cap_and_refuses_the_first_event_beyond_it() -> None:
+    """A capacity search must not misreport an over-cap trace as runtime collapse."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    try:
+        stack.config_path.write_text(
+            "matrix_sync:\n  mode: sliding\n  sliding_timeline_limit: 100\n",
+            encoding="utf-8",
+        )
+
+        shape = recovery_cliff_fault_shape(stack.config_path, root_count=1_499)
+        assert shape.context_event_count + shape.root_count - shape.timeline_limit == shape.recovery_max_events
+
+        with pytest.raises(ValueError, match="exceeds nio's configured room recovery cap"):
+            recovery_cliff_fault_shape(stack.config_path, root_count=1_500)
     finally:
         stack.close()
 
@@ -868,15 +926,15 @@ async def test_recovery_cliff_run_dispatches_before_disposable_registration(
 
 
 @pytest.mark.asyncio
-async def test_recovery_cliff_releases_exactly_one_hundred_roots_in_one_gather() -> None:
-    """A sequential root sender deadlocks before all 100 root sends are entered."""
+async def test_recovery_cliff_releases_configured_two_hundred_roots_in_one_gather() -> None:
+    """A sequential root sender deadlocks before all 200 root sends are entered."""
     stack = ManagedTuwunelStack(profile="recovery-cliff")
     stack.agent_id = "@mindroom_general:example"
-    client = _RecoveryCliffLaunchBarrierClient(expected_sends=100)
+    client = _RecoveryCliffLaunchBarrierClient(expected_sends=200)
     runner = LiveFuzzRunner(
         stack,
         (cast("LiveMatrixClient", client),),
-        recovery_cliff_scenario(),
+        recovery_cliff_scenario(root_count=200),
         reply_timeout=1,
         settle_seconds=0,
     )
@@ -889,15 +947,15 @@ async def test_recovery_cliff_releases_exactly_one_hundred_roots_in_one_gather()
             timeout=1,
         )
 
-        assert len(client.sent_payloads) == 100
-        assert len(released) == 100
+        assert len(client.sent_payloads) == 200
+        assert len(released) == 200
         root_payloads = {
             txn_id: content
             for event_type, txn_id, content in client.sent_payloads
             if event_type == "m.room.message" and content["msgtype"] == "m.text"
         }
-        assert len(root_payloads) == 100
-        for thread in range(100):
+        assert len(root_payloads) == 200
+        for thread in range(200):
             content = root_payloads[f"recovery-cliff-root-unit-run-{thread}"]
             assert f"run=unit-run thread={thread}" in content["body"]
             assert content["m.mentions"] == {"user_ids": [stack.agent_id]}

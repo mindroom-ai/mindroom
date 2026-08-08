@@ -366,8 +366,8 @@ def _reject_unknown_live_scenario_profile(scenario: LiveFuzzScenario) -> None:
 
 def _validate_fixed_profile_trace(scenario: LiveFuzzScenario) -> None:
     """Require fixed profiles to own their operations outside replayable traces."""
-    expected_thread_count = 1 if scenario.profile == "restart-regression" else 100
-    if scenario.thread_count != expected_thread_count or scenario.batches:
+    restart_count_is_invalid = scenario.profile == "restart-regression" and scenario.thread_count != 1
+    if restart_count_is_invalid or scenario.batches:
         msg = f"{scenario.profile} profile requires its fixed empty trace"
         raise ValueError(msg)
 
@@ -379,9 +379,9 @@ def restart_regression_scenario() -> LiveFuzzScenario:
     return scenario
 
 
-def recovery_cliff_scenario() -> LiveFuzzScenario:
-    """Return the fixed one-hundred-root recovery-cliff trace."""
-    scenario = LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
+def recovery_cliff_scenario(*, root_count: int = 100) -> LiveFuzzScenario:
+    """Return the fixed recovery-cliff trace for one root count."""
+    scenario = LiveFuzzScenario(thread_count=root_count, batches=(), profile="recovery-cliff")
     scenario.validate()
     return scenario
 
@@ -410,7 +410,8 @@ def recovery_cliff_fault_shape(config_path: Path, *, root_count: int) -> Recover
         raise TypeError(msg)
     client_config = matrix_client_config()
     context_event_count = client_config.backfill_max_pages * client_config.backfill_page_size + timeline_limit + 1
-    if context_event_count + root_count >= client_config.backfill_max_events:
+    recovered_event_count = context_event_count + root_count - timeline_limit
+    if recovered_event_count > client_config.backfill_max_events:
         msg = "recovery-cliff held event shape exceeds nio's configured room recovery cap"
         raise ValueError(msg)
     return RecoveryCliffFaultShape(
@@ -2952,7 +2953,7 @@ class LiveFuzzRunner:
         run_id: str,
         deadline: float,
     ) -> tuple[str, ...]:
-        """Release exactly 100 mentioned roots in one gather."""
+        """Release every configured mentioned root in one gather."""
 
         async def send_root(thread: int) -> tuple[int, str]:
             content = {
@@ -3245,7 +3246,7 @@ class LiveFuzzRunner:
         }
 
     async def _run_recovery_cliff(self) -> dict[str, float | int | str]:
-        """Exercise and evaluate the fixed 100-stream delivery recovery cliff."""
+        """Exercise and evaluate the configured delivery recovery cliff."""
         await self._authenticate_recovery_cliff_sender()
         run_id = secrets.token_hex(6)
         baseline = await self._prepare_recovery_cliff_baseline(run_id=run_id)
@@ -4212,7 +4213,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
-    parser.add_argument("--threads", type=_positive_int, default=45)
+    parser.add_argument(
+        "--threads",
+        type=_positive_int,
+        help="thread count (default: 45 for fuzz, 100 for recovery-cliff)",
+    )
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
     parser.add_argument(
@@ -4269,11 +4274,11 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     if args.profile == "restart-regression":
         return restart_regression_scenario()
     if args.profile == "recovery-cliff":
-        return recovery_cliff_scenario()
+        return recovery_cliff_scenario(root_count=args.threads or 100)
     return live_scenario_from_seed(
         args.seed,
         steps=args.steps,
-        thread_count=args.threads,
+        thread_count=args.threads or 45,
         max_batch_size=args.max_batch_size,
         restart_interval=args.restart_interval,
     )
