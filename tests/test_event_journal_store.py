@@ -46,6 +46,7 @@ from mindroom.event_journal.schema import (
     render,
     schema_statements,
 )
+from mindroom.event_journal.sqlite_backend import SqliteBackend
 from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
@@ -82,6 +83,15 @@ _WORKER_WAIT_SECONDS = 5.0
 # The pause an operation leaves between the statements it holds a connection
 # with. Short next to anything it is racing, long enough to cost no core.
 _STATEMENT_GAP_SECONDS = 0.001
+# How long every write outstanding at a close is given to be answered once that
+# close has returned. Reached only when one was abandoned, so it bounds a
+# failure rather than waiting one out.
+_SETTLEMENT_WAIT_SECONDS = 5.0
+# More writes at once than the writer queue used to be bounded at, because the
+# bound is what decided how many a close could reach. A close that answers only
+# what it dequeues wakes one parked producer per entry, so any count at or
+# below the old bound of 512 passes against the bug that stranded the rest.
+_WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND = 1_100
 
 # A statement against a real table, so the connection a test's operation holds
 # is genuinely in use rather than merely borrowed.
@@ -106,6 +116,29 @@ def _hold_the_connection(
     running.set()
     while not release.wait(_STATEMENT_GAP_SECONDS):
         transaction.fetchall("SELECT 1 AS one")
+
+
+async def _release_writes_the_store_abandoned(
+    backend: SqliteBackend,
+    abandoned: set[asyncio.Task[object]],
+) -> None:
+    """End writes a close left waiting, so a failure reads as one.
+
+    Empty on a healthy close, and reached only when the test using it is
+    already failing. It exists because an abandoned write cannot be cancelled
+    out of the way: ``settled`` deliberately re-enters its wait rather than
+    unwinding while the future it holds is still outstanding, so cancelling the
+    task does nothing and the only thing that ends it is settling that future.
+    Left alone, one stranded producer turns a clear assertion into a session
+    that hangs until the suite timeout fires.
+    """
+    for task in abandoned:
+        task.cancel()
+    while any(not task.done() for task in abandoned):
+        queue = backend._queue
+        while queue is not None and not queue.empty():
+            queue.get_nowait().future.cancel()
+        await asyncio.sleep(0)
 
 
 async def _finished_within_grace(work: asyncio.Task[object]) -> bool:
@@ -2920,6 +2953,71 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         assert await following == "second landed"
         assert await _membership_principals(journal_store) == ["agent@bob"], (
             "the failed write's rows survived, or the successful write's rows did not"
+        )
+
+
+class TestClosingAnswersEveryWriteItWillNotRun:
+    """A write is run or refused, never abandoned -- however many are in flight.
+
+    SQLite-only because the enqueue is: the PostgreSQL backend serializes on a
+    lock, whose waiters are all woken by the releases that follow it, and has
+    no queue for a producer to be stranded outside of. The rule holds on both
+    backends; only one of them can be asked this question.
+    """
+
+    async def test_no_write_is_left_waiting_when_the_store_closes_under_load(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Every write outstanding at a close is answered by that close.
+
+        Closing is routine -- a bot closes its store on every config reload --
+        so this is an ordinary edit landing while the journal is busy. The
+        writer queue was bounded, and ``close()`` freed one slot per entry it
+        drained: producers parked in ``put`` woke afterwards, enqueued onto a
+        queue whose consumer had already been cancelled, and waited on a future
+        nothing would ever settle. Producers past the bound were never woken at
+        all, so re-checking the closed flag after the ``put`` would not have
+        reached them either. Both outcomes are a reload the bot never returns
+        from, holding a turn that Matrix has already been told was accepted.
+        """
+        backend = SqliteBackend.open(tmp_path / "closing.db")
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            transaction.execute(_INSERT_MEMBERSHIP, ("agent@alice", ROOM, 1))
+            _hold_the_connection(transaction, running, release)
+            return "landed"
+
+        def queued(transaction: Transaction) -> str:
+            transaction.fetchall("SELECT 1 AS one")
+            return "landed"
+
+        held = asyncio.create_task(backend.write(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        outstanding = [
+            asyncio.create_task(backend.write(queued)) for _ in range(_WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND)
+        ]
+        # One pass of the loop, so every producer has reached the point where
+        # it is either queued or parked before the close starts.
+        await asyncio.sleep(0)
+
+        closing = asyncio.create_task(backend.close())
+        await _finished_within_grace(closing)
+        release.set()
+        await closing
+        answered, abandoned = await asyncio.wait(outstanding, timeout=_SETTLEMENT_WAIT_SECONDS)
+        # Read eagerly rather than inside the assertion below, which stops at
+        # the first answer it dislikes and would leave the rest reported as
+        # exceptions nobody retrieved.
+        refusals = [task.exception() for task in answered]
+        await _release_writes_the_store_abandoned(backend, abandoned)
+
+        assert not abandoned, f"{len(abandoned)} writes were left waiting on a store that had closed"
+        assert await held == "landed"
+        assert all(isinstance(refusal, RuntimeError) for refusal in refusals), (
+            "a write the closed store never ran reported something other than a refusal"
         )
 
 

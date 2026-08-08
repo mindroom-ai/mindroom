@@ -1,9 +1,9 @@
-"""SQLite backend: one writer task behind a bounded queue, readers in WAL.
+"""SQLite backend: one writer task behind a queue, readers in WAL.
 
 Concurrent writers are what produce ``database is locked`` under load, so
-there is exactly one. Every write is submitted to a bounded queue drained by a
-single task, which means serialization is a property of the structure rather
-than of a timeout being long enough.
+there is exactly one. Every write is submitted to a queue drained by a single
+task, which means serialization is a property of the structure rather than of
+a timeout being long enough.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
-_WRITE_QUEUE_SIZE = 512
+_CLOSED_MESSAGE = "The event-journal store is closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +67,11 @@ class SqliteBackend:
     database_path: Path
     _writer: sqlite3.Connection = field(init=False, repr=False)
     _readers: threading.local = field(init=False, repr=False)
-    _queue: asyncio.Queue[_QueuedWrite] = field(init=False, repr=False)
+    # Absent until the first write, because the queue belongs to the loop that
+    # drains it and `open()` runs before there is one. Typed as such rather
+    # than declared non-optional and probed for, which is the same fiction with
+    # the type checker on the wrong side of it.
+    _queue: asyncio.Queue[_QueuedWrite] | None = field(default=None, init=False, repr=False)
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
@@ -90,13 +94,18 @@ class SqliteBackend:
 
     def _ensure_writer_task(self) -> asyncio.Queue[_QueuedWrite]:
         """Start the single writer task on the loop that first writes."""
-        if self._writer_task is None or self._writer_task.done():
-            self._queue = asyncio.Queue(maxsize=_WRITE_QUEUE_SIZE)
+        queue = self._queue
+        if queue is None or self._writer_task is None or self._writer_task.done():
+            queue = asyncio.Queue()
+            self._queue = queue
             self._writer_task = asyncio.create_task(
-                self._drain_writes(),
+                # Handed the queue it drains rather than reading the field,
+                # so a task can only ever settle writes that were admitted to
+                # its own queue.
+                self._drain_writes(queue),
                 name=f"event_journal_sqlite_writer_{self.database_path.name}",
             )
-        return self._queue
+        return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
         # The writer runs on whichever pool thread `asyncio.to_thread` picks, so
@@ -131,13 +140,13 @@ class SqliteBackend:
                 self._open_readers.append(connection)
         return connection
 
-    async def _drain_writes(self) -> None:
+    async def _drain_writes(self, queue: asyncio.Queue[_QueuedWrite]) -> None:
         while True:
-            queued = await self._queue.get()
+            queued = await queue.get()
             try:
                 await self._settle(queued)
             finally:
-                self._queue.task_done()
+                queue.task_done()
 
     async def _settle(self, queued: _QueuedWrite) -> None:
         """Run one queued write and hand its caller what the statement did.
@@ -166,13 +175,31 @@ class SqliteBackend:
         return result
 
     async def write[T](self, operation: Operation[T]) -> T:
-        """Queue one operation for the writer task and await its commit."""
+        """Queue one operation for the writer task and await its commit.
+
+        Admission is decided once, here, and the decision cannot go stale:
+        nothing suspends between reading ``_closed`` and enqueuing, so a write
+        this accepted is in the queue before any ``close()`` can begin, and
+        ``close()`` therefore sees every write it will ever have to refuse.
+
+        That is what the queue being unbounded buys. A bounded one parked the
+        producer in ``put`` instead, and ``close()`` frees a slot per entry it
+        drains: parked producers woke afterwards, enqueued onto a queue whose
+        consumer was already cancelled, and waited on it forever -- and any
+        producer past the queue's size was never woken at all. Re-checking
+        ``_closed`` after the ``put`` narrows that window without closing it,
+        because it cannot reach a producer that is still parked.
+
+        The bound was not paying for itself either. Every caller awaits its own
+        write, so an entry exists only while a caller is suspended on it, and
+        suspending that caller one await earlier holds the same operation in
+        memory plus the machinery to park it.
+        """
         if self._closed:
-            msg = "The event-journal store is closed"
-            raise RuntimeError(msg)
+            raise RuntimeError(_CLOSED_MESSAGE)
         queue = self._ensure_writer_task()
         future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
-        await queue.put(_QueuedWrite(operation=operation, future=future))
+        queue.put_nowait(_QueuedWrite(operation=operation, future=future))
         # Cancelling this await must not report an outcome the writer has not
         # reached yet: the statement runs on a thread regardless, so the caller
         # learns how it ended before its cancellation propagates.
@@ -181,8 +208,7 @@ class SqliteBackend:
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one read on a WAL reader, concurrently with the writer."""
         if self._closed:
-            msg = "The event-journal store is closed"
-            raise RuntimeError(msg)
+            raise RuntimeError(_CLOSED_MESSAGE)
 
         def apply() -> T:
             return self._apply_read(operation)
@@ -204,6 +230,11 @@ class SqliteBackend:
 
         Reads are not the writer task's to finish, so they are drained
         separately before the connections they run on are closed.
+
+        Draining the queue once is enough because ``_closed`` is raised before
+        it and ``write`` enqueues without suspending: every write that will
+        ever be admitted is already in the queue by the time this reaches it,
+        and every write after is refused where it starts.
         """
         if self._closed:
             return
@@ -216,11 +247,11 @@ class SqliteBackend:
                 await writer_task
             except asyncio.CancelledError:
                 pass
-        queue = getattr(self, "_queue", None)
+        queue = self._queue
         while queue is not None and not queue.empty():
             queued = queue.get_nowait()
             if not queued.future.done():
-                queued.future.set_exception(RuntimeError("The event-journal store is closed"))
+                queued.future.set_exception(RuntimeError(_CLOSED_MESSAGE))
             queue.task_done()
         await self._offload.drain()
         await asyncio.to_thread(self._writer.close)
