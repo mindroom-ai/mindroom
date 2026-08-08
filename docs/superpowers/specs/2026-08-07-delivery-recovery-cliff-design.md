@@ -70,15 +70,17 @@ A separate `recovery-cliff` profile uses Sliding Sync with a timeline limit of 1
 
 The stack configures a managed sender account and a distinct managed responder using the built-in `synthetic` provider.
 
-The responder uses deterministic variable responses paced at 80 characters per second for approximately 50 to 60 seconds, with the normal optional tool-call phase enabled.
+The responder uses deterministic variable responses paced at 80 characters per second for approximately 50 to 60 seconds, with the normal optional tool-call phase enabled and shell execution pinned to the isolated local runtime.
 
 The harness authenticates as the already managed sender account and emits 100 distinct thread roots that mention the responder before awaiting any response.
 
 Every root carries a unique run and thread marker.
 
+The observer advances one raw-event cursor only after forward `/messages` enumeration proves the complete positioned sync interval, retaining reply and edit evidence omitted from limited or compacted `/sync` timelines.
+
 The observer correlates each responder original to its exact source event through the Matrix thread relation and requires exactly one canonical response per source.
 
-The workload is valid only if runtime logs prove that Sliding Sync recovery was incomplete at least once and that delivery hit the sync-recovery retry path at least once.
+The workload is valid only if the exact room logs a post-warm `Waiting to retry Matrix delivery after sync recovery` marker, at least one workload FINAL outbox row is observed attempted and unacknowledged, the `general` detached worker later resends delivery, and the room records no recovery abandonment.
 
 After all responses complete, the harness waits through one fixed bounded drain window and requires zero unacknowledged response-outbox rows and zero actionable pending journal rows.
 

@@ -71,7 +71,7 @@ from scripts.testing.fuzz_live_matrix import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 
 class _RecordingDormantClient:
@@ -102,6 +102,7 @@ class _RecoveryCliffBoundaryClient:
         self.calls: list[str] = []
         self.seen_events: dict[str, dict[str, Any]] = {}
         self.sync_calls = 0
+        self.complete_sync_calls = 0
 
     async def register(self) -> None:
         self.calls.append("register")
@@ -118,6 +119,10 @@ class _RecoveryCliffBoundaryClient:
     async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
         del timeout_ms, allow_limited
         self.sync_calls += 1
+
+    async def sync_incremental_complete(self, *, timeout_ms: int) -> None:
+        del timeout_ms
+        self.complete_sync_calls += 1
 
 
 class _RecoveryCliffLaunchBarrierClient:
@@ -322,6 +327,227 @@ async def test_restart_room_exposes_prejoin_history(monkeypatch: pytest.MonkeyPa
                 ],
             },
         )
+    finally:
+        await client.close()
+
+
+def _observer_event(event_id: str, status: str = "streaming") -> dict[str, Any]:
+    """Build one raw event retained by the recovery-cliff observer."""
+    return {
+        "event_id": event_id,
+        "origin_server_ts": 1,
+        "sender": "@mindroom_general:example",
+        "type": "m.room.message",
+        "content": {"body": event_id, "io.mindroom.stream_status": status},
+    }
+
+
+@pytest.mark.asyncio
+async def test_recovery_observer_enumerates_the_complete_positioned_sync_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward messages, not a limited sync window, authoritatively retain every raw event."""
+    client = LiveMatrixClient("http://matrix.invalid", "!recovery:example")
+    client.next_batch = "s-before"
+    client.seen_events = {"$known": _observer_event("$known", "completed")}
+    omitted_original = _recovery_original("$omitted-original", "$source", 1_000, "streaming")
+    compacted_edit = _recovery_edit(
+        "$compacted-edit",
+        "$omitted-original",
+        48_000,
+        "completed",
+        outer_status="streaming",
+    )
+    requests: list[tuple[str, str, dict[str, str | int]]] = []
+    pages = iter(
+        (
+            {
+                "start": "s-before",
+                "end": "p-one",
+                "chunk": [omitted_original],
+            },
+            {
+                "start": "p-one",
+                "end": "p-two",
+                "chunk": [],
+            },
+            {
+                "start": "p-two",
+                "end": "p-three",
+                "chunk": [
+                    compacted_edit,
+                    _observer_event("$newest"),
+                ],
+            },
+            {"start": "p-three", "chunk": []},
+        ),
+    )
+
+    async def limited_sync(since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert since == "s-before"
+        assert timeout_ms == 250
+        return {
+            "next_batch": "s-after",
+            "rooms": {
+                "join": {
+                    client.room_id: {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "p-newest",
+                            "events": [_observer_event("$newest")],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_request(
+        method: str,
+        path: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        params: Mapping[str, str | int] | None = None,
+    ) -> dict[str, Any]:
+        assert json_body is None
+        assert params is not None
+        requests.append((method, path, dict(params)))
+        return next(pages)
+
+    monkeypatch.setattr(client, "sync", limited_sync)
+    monkeypatch.setattr(client, "_request", messages_request)
+    try:
+        await client.sync_incremental_complete(timeout_ms=250)
+
+        assert client.next_batch == "s-after"
+        assert set(client.seen_events) == {
+            "$known",
+            "$compacted-edit",
+            "$omitted-original",
+            "$newest",
+        }
+        assert client.seen_events["$compacted-edit"] == compacted_edit
+        audit = audit_recovery_cliff_events(
+            (
+                client.seen_events["$omitted-original"],
+                client.seen_events["$compacted-edit"],
+            ),
+            responder_id="@mindroom_general:example",
+            expected_source_ids=("$source",),
+        )
+        assert audit.canonical_responses == (("$source", "$omitted-original"),)
+        assert audit.noncompleted_sources == ()
+        assert requests == [
+            (
+                "GET",
+                "/_matrix/client/v3/rooms/%21recovery%3Aexample/messages",
+                {"dir": "f", "from": "s-before", "to": "s-after", "limit": 500},
+            ),
+            (
+                "GET",
+                "/_matrix/client/v3/rooms/%21recovery%3Aexample/messages",
+                {"dir": "f", "from": "p-one", "to": "s-after", "limit": 500},
+            ),
+            (
+                "GET",
+                "/_matrix/client/v3/rooms/%21recovery%3Aexample/messages",
+                {"dir": "f", "from": "p-two", "to": "s-after", "limit": 500},
+            ),
+            (
+                "GET",
+                "/_matrix/client/v3/rooms/%21recovery%3Aexample/messages",
+                {"dir": "f", "from": "p-three", "to": "s-after", "limit": 500},
+            ),
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pages", "failure"),
+    [
+        (
+            ({"start": "s-before", "end": "s-before", "chunk": []},),
+            "did not advance",
+        ),
+        (
+            (
+                {"start": "s-before", "end": "p-next", "chunk": [_observer_event("$new")]},
+                {"start": "p-next", "end": "s-before", "chunk": []},
+            ),
+            "cycled",
+        ),
+        (
+            ({"start": "s-before", "end": 7, "chunk": [_observer_event("$new")]},),
+            "end cursor",
+        ),
+        (
+            ({"start": "wrong-position", "chunk": []},),
+            "start cursor",
+        ),
+        (
+            ({"start": "s-before", "chunk": [_observer_event("$new")]},),
+            "ended before proving",
+        ),
+        (
+            (
+                {"start": "s-before", "end": "s-after", "chunk": [_observer_event("$new")]},
+                {"start": "s-after", "chunk": [_observer_event("$omitted")]},
+            ),
+            "ended before proving",
+        ),
+    ],
+)
+async def test_recovery_observer_rejects_stalled_or_cyclic_history_without_mutating_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+    pages: tuple[dict[str, Any], ...],
+    failure: str,
+) -> None:
+    """A bad interval cannot partially publish staged raw events or the sync cursor."""
+    client = LiveMatrixClient("http://matrix.invalid", "!recovery:example")
+    client.next_batch = "s-before"
+    known = _observer_event("$known", "completed")
+    client.seen_events = {"$known": known}
+    scripted_pages = iter(pages)
+
+    async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms == 250
+        return {
+            "next_batch": "s-after",
+            "rooms": {
+                "join": {
+                    client.room_id: {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "p-newest",
+                            "events": [_observer_event("$newest")],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_request(
+        _method: str,
+        _path: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        params: Mapping[str, str | int] | None = None,
+    ) -> dict[str, Any]:
+        assert json_body is None
+        assert params is not None
+        assert params["dir"] == "f"
+        assert params["to"] == "s-after"
+        return next(scripted_pages)
+
+    monkeypatch.setattr(client, "sync", limited_sync)
+    monkeypatch.setattr(client, "_request", messages_request)
+    try:
+        with pytest.raises(AssertionError, match=failure):
+            await client.sync_incremental_complete(timeout_ms=250)
+
+        assert client.next_batch == "s-before"
+        assert client.seen_events == {"$known": known}
     finally:
         await client.close()
 
@@ -807,6 +1033,109 @@ async def test_recovery_cliff_health_and_sync_poll_cannot_overrun_the_fixed_sla(
 
 
 @pytest.mark.asyncio
+async def test_recovery_cliff_observer_step_uses_the_complete_incremental_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving the observer back to strict no-backfill sync must reintroduce this failure."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
+    monkeypatch.setattr(
+        stack,
+        "recovery_health_sample",
+        lambda: RecoveryCliffHealthSample(True, datetime(2026, 8, 7, tzinfo=UTC)),
+    )
+    try:
+        await runner._recovery_cliff_observer_step(
+            deadline=time.monotonic() + 1,
+            health_samples=[],
+        )
+
+        assert client.complete_sync_calls == 1
+        assert client.sync_calls == 0
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_limited_backfill_cannot_overrun_the_fixed_sla(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `/messages` page remains causally bounded by the workload deadline."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = LiveMatrixClient("http://matrix.invalid", "!recovery:example")
+    client.next_batch = "s-before"
+    client.seen_events = {"$known": _observer_event("$known", "completed")}
+    runner = LiveFuzzRunner(
+        stack,
+        (client,),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    page_release = asyncio.Event()
+
+    async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms <= 250
+        return {
+            "next_batch": "s-after",
+            "rooms": {
+                "join": {
+                    client.room_id: {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "p-start",
+                            "events": [_observer_event("$newest")],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def blocked_messages(
+        _method: str,
+        _path: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        params: Mapping[str, str | int] | None = None,
+    ) -> dict[str, Any]:
+        assert json_body is None
+        assert params == {"dir": "f", "from": "s-before", "to": "s-after", "limit": 500}
+        await page_release.wait()
+        return {"start": "p-start", "end": "p-next", "chunk": []}
+
+    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
+    monkeypatch.setattr(
+        stack,
+        "recovery_health_sample",
+        lambda: RecoveryCliffHealthSample(True, datetime(2026, 8, 7, tzinfo=UTC)),
+    )
+    monkeypatch.setattr(client, "sync", limited_sync)
+    monkeypatch.setattr(client, "_request", blocked_messages)
+    asyncio.get_running_loop().call_later(0.2, page_release.set)
+    try:
+        with pytest.raises(TimeoutError):
+            await runner._recovery_cliff_observer_step(
+                deadline=time.monotonic() + 0.075,
+                health_samples=[],
+            )
+
+        assert client.next_batch == "s-before"
+        assert set(client.seen_events) == {"$known"}
+    finally:
+        page_release.set()
+        await client.close()
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_cliff_samples_post_fence_health_after_exact_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -991,8 +1320,6 @@ async def test_recovery_cliff_warm_completion_precedes_event_and_log_baselines(
     def log_count(*markers: str) -> int:
         assert warm_completed
         log_queries.append(markers)
-        if "matrix_sync_recovery_incomplete" in markers:
-            return 2
         if "Waiting to retry Matrix delivery after sync recovery" in markers:
             return 3
         if "Resent unacknowledged deliveries" in markers:
@@ -1019,16 +1346,9 @@ async def test_recovery_cliff_warm_completion_precedes_event_and_log_baselines(
         )
 
         assert "$warm-response" in baseline.event_ids
-        assert baseline.log_counts.recovery_incomplete_markers == 2
         assert baseline.log_counts.delivery_retry_markers == 3
         assert baseline.log_counts.delivery_worker_markers == 4
         assert log_queries == [
-            (
-                "matrix_sync_recovery_incomplete",
-                "agent=general",
-                "transport=sliding",
-                client.room_id,
-            ),
             (
                 "Waiting to retry Matrix delivery after sync recovery",
                 f"room_id={client.room_id}",
@@ -1054,7 +1374,6 @@ def _valid_recovery_cliff_observation() -> RecoveryCliffObservation:
     return RecoveryCliffObservation(
         root_count=2,
         terminal_audit=audit,
-        recovery_incomplete_markers=1,
         delivery_retry_markers=1,
         peak_unacknowledged_final_outbox_rows=1,
         delivery_worker_markers=1,
@@ -1111,6 +1430,7 @@ def test_recovery_cliff_pass_payload_surfaces_fault_and_worker_debt_evidence() -
         assert result["peak_unacknowledged_final_outbox_rows"] == 1
         assert result["delivery_worker_markers"] == 1
         assert result["recovery_abandonment_markers"] == 0
+        assert "recovery_incomplete_markers" not in result
     finally:
         stack.close()
 
@@ -1255,7 +1575,6 @@ def test_recovery_cliff_evaluator_rejects_unexercised_or_unsettled_completion() 
     before = valid.pre_fence_last_sync
     assert before is not None
     bad_observations = (
-        (replace(valid, recovery_incomplete_markers=0), "recovery_incomplete"),
         (replace(valid, delivery_retry_markers=0), "delivery_retry"),
         (replace(valid, peak_unacknowledged_final_outbox_rows=0), "peak_unacknowledged_final_outbox_rows"),
         (replace(valid, delivery_worker_markers=0), "delivery_worker"),
@@ -2093,6 +2412,7 @@ def test_recovery_cliff_managed_config_uses_synthetic_responder_and_sliding_sync
         }
         assert config["agents"]["general"]["model"] == "synthetic"
         assert config["agents"]["general"]["tools"] == ["shell"]
+        assert config["agents"]["general"]["worker_tools"] == []
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
         parsed = Config.model_validate(config)
         assert parsed.models["synthetic"].id == "lorem-ipsum"

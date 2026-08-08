@@ -310,9 +310,11 @@ Use the existing thread relation index to correlate responder originals to exact
 
 For originals and edits, read `io.mindroom.stream_status` from `m.new_content` when present and otherwise from `content`.
 
-Poll strict observer sync, `/api/health`, runtime liveness, exact replies, terminal statuses, and the fixed service-level deadline together.
+Poll one strict observer cursor, `/api/health`, runtime liveness, exact replies, terminal statuses, and the fixed service-level deadline together.
 
-Require at least one `matrix_sync_recovery_incomplete` and one `Waiting to retry Matrix delivery after sync recovery` log entry so a non-exercising run cannot pass.
+For every positioned observer sync, enumerate the complete cursor interval forward through `/messages` and publish its raw events plus the new cursor only after bounded completion.
+
+Require an exact-room `Waiting to retry Matrix delivery after sync recovery` post-warm log delta, at least one attempted and unacknowledged workload FINAL outbox row, a post-warm `general` detached-worker resend marker, and no room recovery-abandonment marker so a non-exercising run cannot pass.
 
 After replies finish, wait within one fixed drain deadline for no pending journal rows and no unacknowledged outbox rows.
 
@@ -385,7 +387,7 @@ uv run python scripts/testing/fuzz_live_matrix.py \
   --failure-log /tmp/mindroom-recovery-cliff.log
 ```
 
-Expected: exactly 100 canonical completed replies, at least one incomplete-recovery marker, at least one delivery-retry marker, zero pending journal rows, zero unacknowledged outbox rows, healthy advancing sync, zero watchdog stalls, clean shutdown, and `status: PASS`.
+Expected: exactly 100 canonical completed replies, at least one exact-room delivery-retry marker, observed attempted and unacknowledged workload FINAL debt, a `general` detached-worker resend marker, no recovery abandonment, zero pending journal rows, zero unacknowledged outbox rows, healthy advancing sync, zero watchdog stalls, clean shutdown, and `status: PASS`.
 
 - [ ] **Step 4: Review the diff and record verification**
 

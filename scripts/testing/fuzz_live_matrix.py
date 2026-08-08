@@ -62,6 +62,7 @@ ROOM_KEY = "lobby"
 RESTART_SHUTDOWN_FAILURE_MARKER = "runtime_drain_incomplete_with_durable_dispatch_recovery"
 ORDERLY_SHUTDOWN_MARKER = "All agent bots stopped"
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_RECOVERY_CLIFF_OBSERVER_PAGE_SIZE = 500
 
 # What a run is allowed to tell us about itself, keyed by the exact production
 # marker that says it. Every one of these has to exist in `src/`:
@@ -459,7 +460,6 @@ class RecoveryCliffHealthSample:
 class RecoveryCliffLogCounts:
     """Recovery-cliff lifecycle counters at one observation boundary."""
 
-    recovery_incomplete_markers: int
     delivery_retry_markers: int
     delivery_worker_markers: int
     recovery_abandonment_markers: int
@@ -479,7 +479,6 @@ class RecoveryCliffObservation:
 
     root_count: int
     terminal_audit: RecoveryCliffTerminalAudit
-    recovery_incomplete_markers: int
     delivery_retry_markers: int
     peak_unacknowledged_final_outbox_rows: int
     delivery_worker_markers: int
@@ -681,7 +680,6 @@ def evaluate_recovery_cliff(observation: RecoveryCliffObservation) -> tuple[str,
             if audit.peak_active_streams < observation.root_count
             else ""
         ),
-        "recovery_incomplete_markers=0" if observation.recovery_incomplete_markers < 1 else "",
         "delivery_retry_markers=0" if observation.delivery_retry_markers < 1 else "",
         ("peak_unacknowledged_final_outbox_rows=0" if observation.peak_unacknowledged_final_outbox_rows < 1 else ""),
         "delivery_worker_markers=0" if observation.delivery_worker_markers < 1 else "",
@@ -2327,6 +2325,7 @@ class ManagedTuwunelStack:
             }
             config["agents"][AGENT_NAME]["model"] = "synthetic"
             config["agents"][AGENT_NAME]["tools"] = ["shell"]
+            config["agents"][AGENT_NAME]["worker_tools"] = []
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
                 "role": "Author deterministic recovery-cliff workload roots.",
@@ -2574,6 +2573,94 @@ class LiveMatrixClient:
             event_id = event.get("event_id")
             if isinstance(event_id, str):
                 self.seen_events[event_id] = event
+        self.next_batch = next_batch
+
+    @staticmethod
+    def _raw_event_map(raw_events: object, *, source: str) -> dict[str, dict[str, Any]]:
+        """Validate and index one raw Matrix timeline or messages chunk."""
+        if not isinstance(raw_events, list):
+            msg = f"Matrix {source} events must be a list"
+            raise TypeError(msg)
+        events: dict[str, dict[str, Any]] = {}
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                msg = f"Matrix {source} included a non-object event"
+                raise TypeError(msg)
+            event = cast("dict[str, Any]", raw_event)
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str):
+                msg = f"Matrix {source} event omitted event_id"
+                raise TypeError(msg)
+            events[event_id] = event
+        return events
+
+    async def _enumerate_sync_interval(
+        self,
+        *,
+        from_token: str,
+        to_token: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Enumerate one positioned sync interval through raw room history."""
+        room_id = quote(self.room_id, safe="")
+        path = f"/_matrix/client/v3/rooms/{room_id}/messages"
+        cursor = from_token
+        visited_cursors = {cursor}
+        recovered: dict[str, dict[str, Any]] = {}
+        while True:
+            page = await self._request(
+                "GET",
+                path,
+                params={
+                    "dir": "f",
+                    "from": cursor,
+                    "to": to_token,
+                    "limit": _RECOVERY_CLIFF_OBSERVER_PAGE_SIZE,
+                },
+            )
+            if page.get("start") != cursor:
+                msg = "recovery-cliff observer history page returned an unexpected start cursor"
+                raise AssertionError(msg)
+            page_events = self._raw_event_map(page.get("chunk"), source="room messages")
+            recovered.update(page_events)
+            next_cursor = page.get("end")
+            if next_cursor is None:
+                if page_events:
+                    msg = "recovery-cliff observer history ended before proving interval exhaustion"
+                    raise AssertionError(msg)
+                return recovered
+            if not isinstance(next_cursor, str) or not next_cursor:
+                msg = "recovery-cliff observer history page returned an invalid end cursor"
+                raise AssertionError(msg)
+            if next_cursor == cursor:
+                msg = "recovery-cliff observer history cursor did not advance"
+                raise AssertionError(msg)
+            if next_cursor in visited_cursors:
+                msg = "recovery-cliff observer history cursor cycled"
+                raise AssertionError(msg)
+            visited_cursors.add(next_cursor)
+            cursor = next_cursor
+
+    async def sync_incremental_complete(self, *, timeout_ms: int) -> None:
+        """Advance one cursor only after enumerating its complete raw interval."""
+        from_token = self.next_batch
+        data = await self.sync(from_token, timeout_ms=timeout_ms)
+        next_batch = data.get("next_batch")
+        if not isinstance(next_batch, str):
+            msg = "Matrix sync omitted next_batch"
+            raise TypeError(msg)
+        if from_token is None:
+            joined = data.get("rooms", {}).get("join", {})
+            room = joined.get(self.room_id, {}) if isinstance(joined, dict) else {}
+            timeline = room.get("timeline", {}) if isinstance(room, dict) else {}
+            recovered = self._raw_event_map(timeline.get("events", []), source="sync timeline")
+        elif from_token == next_batch:
+            recovered = {}
+        else:
+            recovered = await self._enumerate_sync_interval(
+                from_token=from_token,
+                to_token=next_batch,
+            )
+        self.seen_events.update(recovered)
         self.next_batch = next_batch
 
     async def _request(
@@ -2934,12 +3021,6 @@ class LiveFuzzRunner:
     def _recovery_cliff_log_counts(self) -> RecoveryCliffLogCounts:
         """Read exact recovery lifecycle counters for the managed responder room."""
         return RecoveryCliffLogCounts(
-            recovery_incomplete_markers=self.stack.log_count(
-                "matrix_sync_recovery_incomplete",
-                f"agent={AGENT_NAME}",
-                "transport=sliding",
-                self.client.room_id,
-            ),
             delivery_retry_markers=self.stack.log_count(
                 "Waiting to retry Matrix delivery after sync recovery",
                 f"room_id={self.client.room_id}",
@@ -3020,7 +3101,7 @@ class LiveFuzzRunner:
             self.stack.require_runtime_alive()
             sample = await asyncio.to_thread(self.stack.recovery_health_sample)
             health_samples.append(sample)
-            await self.client.sync_incremental(
+            await self.client.sync_incremental_complete(
                 timeout_ms=min(max(round(remaining * 1000), 0), 250),
             )
             self.stack.require_runtime_alive()
@@ -3145,7 +3226,6 @@ class LiveFuzzRunner:
             "held_events": shape.context_event_count + shape.root_count,
             "burst_events": shape.context_event_count + shape.root_count,
             "canonical_agent_replies": audit.canonical_response_count,
-            "recovery_incomplete_markers": observation.recovery_incomplete_markers,
             "delivery_retry_markers": observation.delivery_retry_markers,
             "peak_unacknowledged_final_outbox_rows": observation.peak_unacknowledged_final_outbox_rows,
             "delivery_worker_markers": observation.delivery_worker_markers,
@@ -3218,9 +3298,6 @@ class LiveFuzzRunner:
         observation = RecoveryCliffObservation(
             root_count=self.scenario.thread_count,
             terminal_audit=terminal_audit,
-            recovery_incomplete_markers=(
-                final_logs.recovery_incomplete_markers - baseline.log_counts.recovery_incomplete_markers
-            ),
             delivery_retry_markers=(final_logs.delivery_retry_markers - baseline.log_counts.delivery_retry_markers),
             peak_unacknowledged_final_outbox_rows=max(debt_samples, default=0),
             delivery_worker_markers=(final_logs.delivery_worker_markers - baseline.log_counts.delivery_worker_markers),

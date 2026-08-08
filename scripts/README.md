@@ -76,6 +76,7 @@ It proves exact short streamed-reply correctness and is not a capacity benchmark
 
 The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for its fixed 100-root workload.
 It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases exactly 100 managed roots concurrently, and resumes the runtime even if a send fails.
+Its single observer cursor enumerates every positioned sync interval forward through `/messages` before publication, so a limited or compacted `/sync` timeline cannot omit reply or edit evidence.
 One fixed whole-workload `--reply-timeout` covers the fault boundary, root sends, terminal replies, durable debt observation, final drain, and post-load fence without extension.
 PASS requires exact completed replies, sustained 100-stream overlap, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
 Short-stream-correctness results are not recovery-cliff acceptance evidence.
