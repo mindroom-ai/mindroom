@@ -2546,8 +2546,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.thread_room_scan"
 depends_on = [
+    "mindroom.logging_config",
     "mindroom.matrix.room_history_reads",
-    "mindroom.matrix.event_info",
     "mindroom.matrix.thread_membership",
 ]
 

@@ -14,9 +14,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 import nio
-from nio.responses import RoomGetEventError
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.logging_config import get_logger
 from mindroom.matrix.room_history_reads import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -27,7 +26,9 @@ from mindroom.matrix.thread_membership import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-type _EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
+    from mindroom.matrix.event_info import EventInfo
+
+logger = get_logger(__name__)
 
 
 class RoomScanRelations(Protocol):
@@ -53,38 +54,34 @@ async def _scan_thread_event_sources(
     return scan_result.event_sources, True
 
 
-def _event_info_from_lookup_response(
-    response: _EventLookupResult,
-    *,
-    event_id: str,
-    strict: bool,
-) -> EventInfo | None:
-    """Normalize one room-get-event style response into EventInfo when available."""
-    if isinstance(response, nio.RoomGetEventResponse):
-        return EventInfo.from_event(response.event.source)
-    if not strict:
-        return None
-    if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
-        return None
-    detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
-    msg = f"Failed to resolve Matrix event {event_id}: {detail}"
-    raise RuntimeError(msg)
-
-
-async def fetch_event_info_for_client(
-    client: nio.AsyncClient,
+async def _degradable_event_info(
+    relations: RoomScanRelations,
     room_id: str,
     event_id: str,
-    *,
-    strict: bool,
 ) -> EventInfo | None:
-    """Fetch one event directly from Matrix and parse its relation metadata."""
-    response = await client.room_get_event(room_id, event_id)
-    return _event_info_from_lookup_response(
-        response,
-        event_id=event_id,
-        strict=strict,
-    )
+    """Return one event's relations, or nothing when the lookup could not say.
+
+    ``relations`` owns this read and memoizes it for the turn, so one turn
+    resolving the same event from several places pays for one round trip. What
+    it will not do is guess: it raises when it cannot tell a deleted event from
+    one the homeserver refused to serve, because a caller resolving a reply
+    target would otherwise attach the turn to the wrong conversation.
+
+    Normalizing a thread ID is not that caller. It has a local answer for an
+    event the homeserver cannot describe, so a failed lookup degrades to that
+    rather than taking the tool down -- but it is logged, because the fallback
+    can produce a plausible wrong thread rather than an obvious failure.
+    """
+    try:
+        return await relations.event_info(room_id, event_id)
+    except Exception:
+        logger.warning(
+            "Failed to resolve an event's relations for a room scan; falling back to local state",
+            room_id=room_id,
+            event_id=event_id,
+            exc_info=True,
+        )
+        return None
 
 
 def room_scan_membership_access_for_client(
@@ -132,12 +129,7 @@ async def resolve_thread_root_event_id_for_client(
     if not normalized_event_id:
         return None
 
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
+    event_info = await _degradable_event_info(relations, room_id, normalized_event_id)
     if event_info is None:
         # Local state only. The homeserver was just asked for this exact
         # event and could not answer; asking it again resolves nothing.
@@ -151,11 +143,10 @@ async def resolve_thread_root_event_id_for_client(
         access=room_scan_membership_access_for_client(
             client,
             relations=relations,
-            fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(
-                client,
+            fetch_event_info=lambda lookup_room_id, lookup_event_id: _degradable_event_info(
+                relations,
                 lookup_room_id,
                 lookup_event_id,
-                strict=False,
             ),
         ),
     )
@@ -164,7 +155,6 @@ async def resolve_thread_root_event_id_for_client(
 
 __all__ = [
     "RoomScanRelations",
-    "fetch_event_info_for_client",
     "resolve_thread_root_event_id_for_client",
     "room_scan_membership_access_for_client",
 ]
