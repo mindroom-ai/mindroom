@@ -3,10 +3,11 @@
 Every test here runs on SQLite and on PostgreSQL. A rule that holds on only one
 backend is a rule MindRoom does not actually have.
 
-The one exception is the acknowledgement race, which asks what two connections
-do to the same row. SQLite has no second connection to ask it of -- the backend
-is one process behind one writer -- so running it there would prove only that
-the fixture took turns. It is marked as PostgreSQL-only where it is defined.
+The exceptions are the two contention tests, which ask what two connections do
+to the same row. SQLite has no second connection to ask that of -- the backend
+is one process behind one writer -- so running them there would prove only that
+the fixture took turns. Both take the PostgreSQL-only ``rival_stores`` fixture,
+which is where that is spelled out.
 """
 
 from __future__ import annotations
@@ -1687,7 +1688,7 @@ async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores,
     be mistaken for a racer it is supposed to be observing.
     """
     database_url = postgres_journal_schema_url(postgres_journal_url)
-    application_name = f"mindroom-acknowledgement-race-{uuid.uuid4().hex}"
+    application_name = f"mindroom-journal-race-{uuid.uuid4().hex}"
     racer_url = f"{database_url}&application_name={application_name}"
     first = EventJournalStore.open_postgres(racer_url)
     second = EventJournalStore.open_postgres(racer_url)
@@ -1754,6 +1755,116 @@ def _watch_queued_racers(database_url: str, application_name: str, expected: int
                 msg = f"only {queued} of {expected} racers queued on the held outbox row"
                 raise AssertionError(msg)
             time.sleep(_QUEUE_POLL_SECONDS)
+
+
+def _watch_until_queued_or_finished(
+    database_url: str,
+    application_name: str,
+    finished: threading.Event,
+) -> None:
+    """Block until the other writer is parked on a lock, or got past without one.
+
+    Either answer is the interleaving this is opening a window for, which is
+    why both end the wait. A writer that queued was ordered behind the row this
+    transaction holds; a writer that finished was not ordered at all, and the
+    caller resuming here is precisely the one whose rows then outlive it. The
+    wait exists so neither outcome depends on which thread the scheduler
+    happens to run first.
+    """
+    import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
+
+    deadline = time.monotonic() + _QUEUE_TIMEOUT_SECONDS
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        while not finished.is_set():
+            row = connection.execute(_QUEUED_RACERS, (application_name,)).fetchone()
+            if row is not None and int(row[0]) > 0:
+                return
+            if time.monotonic() > deadline:
+                msg = "the second writer neither queued behind the first nor ran to completion"
+                raise AssertionError(msg)
+            time.sleep(_QUEUE_POLL_SECONDS)
+
+
+class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
+    """What a hydrating writer and a fencing writer do to one PostgreSQL database.
+
+    PostgreSQL only, for the reason the acknowledgement race is: SQLite holds a
+    write lock across the whole transaction, so a second store over the same
+    file is a second queue onto the same serialized write and there is no
+    interleaving left to produce.
+    """
+
+    async def test_a_walk_that_read_the_epoch_first_cannot_outlive_the_fence(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A hydration's epoch decision has to be a claim, not an observation.
+
+        `test_hydration_racing_a_rejoin_installs_nothing` proves the other half
+        of this rule and cannot reach this one: by the time it installs, the
+        fence has already committed, so the epoch it reads is the new one and
+        any implementation declines. This half is what happens when the fence
+        has not committed yet.
+
+        Two writers on one database is the deployed shape, not a contrivance:
+        `mindroom threads export` opens the running install's journal in its own
+        process and runs its own `ConversationHydrator` against it, so the store
+        lock that serializes writes inside one process orders nothing between
+        them. Under ``READ COMMITTED`` the walk's plain epoch ``SELECT`` saw the
+        membership it expected, the fence then deleted every row committed at
+        that instant, and the walk's rows landed behind it -- a conversation
+        from a membership the bot has left, projected under an epoch no reader
+        of `visible_messages` filters on, and served into every prompt from then
+        on. Nothing takes them back out: the walk that runs under the new
+        membership projects over them with `ON CONFLICT DO NOTHING`, so the two
+        memberships end up merged into one conversation.
+
+        Modelled with two stores over one database rather than two operating
+        system processes: what makes the race possible is two writer connections
+        with no lock between them, which is exactly what two stores are. The
+        window is opened by pausing the walk after its first statement -- the
+        real transaction, the real SQL, only held open -- and the fence is a
+        real `fence_departure` on the second store.
+        """
+        principal_id = "agent@alice"
+        reader = rival_stores.first.principal(principal_id)
+        fencing = rival_stores.second.principal(principal_id)
+        inside_the_walk = threading.Event()
+        fence_finished = threading.Event()
+
+        def hold_the_walk_open() -> None:
+            inside_the_walk.set()
+            _watch_until_queued_or_finished(
+                rival_stores.database_url,
+                rival_stores.racer_application_name,
+                fence_finished,
+            )
+
+        hydrating = EventJournalStore(
+            backend=_PausingBackend(rival_stores.first.backend, hold_the_walk_open),
+        ).principal(principal_id)
+        epoch = await reader.membership_epoch(ROOM)
+
+        walk = asyncio.create_task(
+            hydrating.install_hydrated_conversation(
+                room_id=ROOM,
+                thread_id=None,
+                events=(message("$resurrected")[1],),
+                complete=True,
+                expected_membership_epoch=epoch,
+            ),
+        )
+        await asyncio.to_thread(inside_the_walk.wait, _WORKER_WAIT_SECONDS)
+        assert inside_the_walk.is_set(), "the walk never reached its epoch decision"
+        fence = asyncio.create_task(fencing.fence_departure(ROOM, source=DepartureSource.REPORTED))
+        fence.add_done_callback(lambda _: fence_finished.set())
+        installed, outcome = await asyncio.gather(walk, fence)
+
+        assert installed, "the walk declined on its own, so nothing raced the fence"
+        assert outcome.observation is DepartureObservation.FENCED
+        assert outcome.membership_epoch == epoch + 1
+        assert await bodies(reader) == [], "the walk's messages survived the departure that was supposed to erase them"
+        assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
 class TestOutbox:

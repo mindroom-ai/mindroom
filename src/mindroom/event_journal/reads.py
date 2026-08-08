@@ -390,15 +390,46 @@ def mark_conversation_hydrated(
     A later epoch is a different room membership and clears both. They are
     monotonic within an epoch and only within one, which is why each carry
     forward is conditioned on the stored epoch rather than applied outright.
+
+    The epoch is claimed with a write rather than read with a ``SELECT``, and
+    that is the whole of what keeps a rejoin from being overtaken. This decision
+    and the projected rows it authorizes are separate statements of one
+    transaction, so on PostgreSQL -- where ``READ COMMITTED`` lets a second
+    writer commit in between, and a second writer exists the moment `mindroom
+    threads export` runs its own hydrator beside the bot -- a plain read saw an
+    epoch, a concurrent `fence_departure` deleted every row committed at that
+    moment, and the rows written afterwards outlived the fence that was supposed
+    to erase them. Nothing collects them later: no read of `visible_messages`
+    carries an epoch predicate, and the walk that runs under the new membership
+    projects over them with `ON CONFLICT DO NOTHING`. So the two memberships
+    merge into one conversation, which is the exact outcome dropping the
+    projection alongside the marker exists to prevent.
+    Self-assigning the epoch takes the same row lock the fence takes, so the two
+    can only run in an order: this transaction's rows are either deleted by a
+    fence that ran after it, or this returns the fence's new epoch and installs
+    nothing.
+
+    Inserting a zero row when none exists is the other half. A room the bot has
+    never left has no ``room_membership`` row at all, and a lock on a row that
+    does not exist orders nothing -- which would leave the first departure of
+    every room, the most likely one there is, racing exactly as before. A row
+    holding epoch zero says precisely what its absence said, so materializing it
+    changes no answer; it only gives the first fence something to queue behind.
     """
     row = transaction.fetchone(
         """
-        SELECT COALESCE(membership_epoch, 0) AS epoch FROM room_membership
-        WHERE principal_id = ? AND room_id = ?
+        INSERT INTO room_membership (principal_id, room_id, membership_epoch)
+        VALUES (?, ?, 0)
+        ON CONFLICT (principal_id, room_id) DO UPDATE
+            SET membership_epoch = room_membership.membership_epoch
+        RETURNING membership_epoch AS epoch
         """,
         (principal_id, room_id),
     )
-    current_epoch = 0 if row is None else int(row["epoch"])
+    if row is None:
+        msg = f"Room membership for {room_id!r} is missing immediately after it was claimed"
+        raise RuntimeError(msg)
+    current_epoch = int(row["epoch"])
     if current_epoch != expected_membership_epoch:
         return False
     transaction.execute(
