@@ -1248,6 +1248,20 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     lifecycle_lock = coordinator._lifecycle_coordinator._response_lifecycle_lock(response_target)
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
+    # Both handoffs this test observes are causal, not timed: the turn is known
+    # to be blocked on the lock because its own acquire said so, and the
+    # lifecycle is known to have started because it said so. A wall-clock bound
+    # on either would only re-add the race, since the work between the release
+    # and the first placeholder is real and its duration is the machine's to
+    # decide.
+    lock_wait_started = asyncio.Event()
+    acquire_lifecycle_lock = lifecycle_lock.acquire
+
+    async def announce_lock_wait() -> bool:
+        lock_wait_started.set()
+        return await acquire_lifecycle_lock()
+
+    lifecycle_lock.acquire = announce_lock_wait  # type: ignore[method-assign]
 
     async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> str:
         lifecycle_started.set()
@@ -1292,11 +1306,11 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                     ),
                 ),
             )
-            await asyncio.sleep(0.05)
+            await lock_wait_started.wait()
             mock_run_cancellable_response.assert_not_awaited()
 
             lifecycle_lock.release()
-            await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
+            await lifecycle_started.wait()
             resolution = await task
             assert resolution == "$response"
     finally:

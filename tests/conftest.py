@@ -2226,6 +2226,25 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `mindroom run` from shelling out to a real frontend build.
+
+    `ensure_frontend_dist_dir` builds `frontend/dist` with `bun install`, `tsc`
+    and `vite build` whenever a source checkout has no dashboard assets, and
+    every CLI test that invokes `run` reaches it because only
+    `orchestrator.main` is mocked. In a checkout without `frontend/dist` the
+    first such test in each xdist worker therefore starts a real multi-minute
+    build and blows the suite's 60 s per-test timeout, while the rest of the
+    workers race it into the same directory.
+
+    The flag is production's own opt-out, and `RuntimePaths.env_value` reads
+    only a captured `process_env`, so tests that pass their own snapshot --
+    including the ones that cover the auto-build itself -- are unaffected.
+    """
+    monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
+
+
+@pytest.fixture(autouse=True)
 def _reset_runtime_paths() -> Generator[None, None, None]:
     """Restore process env and bound test runtime mappings after each test."""
     original_env = os.environ.copy()
