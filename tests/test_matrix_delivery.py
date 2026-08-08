@@ -104,6 +104,102 @@ def test_edit_fallback_preserves_replacement_message_type() -> None:
     assert content["msgtype"] == "m.notice"
     assert content["m.new_content"]["msgtype"] == "m.notice"
     assert content["m.mentions"] == {"user_ids": ["@user:localhost"]}
+    # The fallback body carries the replacement text too, not just its msgtype:
+    # a client that does not understand m.replace renders this and nothing else.
+    assert content["body"] == "* Streaming answer"
+
+
+def test_edit_fallback_body_is_the_new_text_behind_the_edit_marker() -> None:
+    """The outer body is what a client that ignores ``m.replace`` renders.
+
+    Two layers carry the replacement: ``m.new_content`` for clients that
+    understand edits, and the outer ``body`` for every client that does not.
+    Only the second is ever seen by the second group, so a stale, empty, or
+    unmarked one is a wrong message on screen rather than a formatting detail.
+    Asserted by equality because each way of getting it wrong -- keeping the
+    superseded text, blanking it, dropping the ``"* "`` marker -- produces a
+    different string, and only equality rejects all three.
+    """
+    content = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={"body": "the corrected answer", "msgtype": "m.text"},
+        new_text="the corrected answer",
+    )
+
+    assert content["body"] == "* the corrected answer"
+    assert content["m.new_content"]["body"] == "the corrected answer"
+
+
+def test_edit_fallback_body_follows_the_new_text_not_the_replacement_body() -> None:
+    """The marked body is built from ``new_text``, which is not the replacement body.
+
+    The two differ in every edit that mentions somebody: the replacement body
+    is the mention-resolved text built by ``format_message_with_mentions``,
+    while ``new_text`` is the text it was built from. Distinct strings here so
+    the assertion identifies which one the fallback tracks instead of passing
+    on a value both would produce.
+    """
+    content = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={"body": "hello @mindroom_code:localhost", "msgtype": "m.text"},
+        new_text="hello @code",
+    )
+
+    assert content["body"] == "* hello @code"
+    assert content["m.new_content"]["body"] == "hello @mindroom_code:localhost"
+
+
+def test_edit_fallback_formatted_body_is_the_new_html_without_the_marker() -> None:
+    """Only the plain-text fallback is marked; the HTML one deliberately is not.
+
+    The envelope declares ``org.matrix.custom.html`` at top level, so a client
+    that renders the fallback rich shows ``formatted_body``. Ours is the new
+    HTML verbatim -- the replacement's when it has one, the raw new text when
+    it does not -- and never gains the ``"* "`` the plain body gets. Pinned
+    because the asymmetry is invisible from either half alone.
+    """
+    with_html = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={
+            "body": "the corrected answer",
+            "msgtype": "m.text",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>the corrected answer</p>",
+        },
+        new_text="the corrected answer",
+    )
+
+    assert with_html["format"] == "org.matrix.custom.html"
+    assert with_html["formatted_body"] == "<p>the corrected answer</p>"
+    assert with_html["body"] == "* the corrected answer"
+
+    without_html = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={"body": "the corrected answer", "msgtype": "m.text"},
+        new_text="the corrected answer",
+    )
+
+    assert without_html["format"] == "org.matrix.custom.html"
+    assert without_html["formatted_body"] == "the corrected answer"
+
+
+def test_edit_fallback_body_survives_extra_content_metadata() -> None:
+    """Custom metadata is merged over the envelope, and merges can overwrite.
+
+    ``extra_content`` is applied to the finished envelope after the fallback is
+    installed, so anything it carries wins. Pinned so a future caller adding a
+    key cannot silently replace the only text a non-edit-aware client shows.
+    """
+    content = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={"body": "the corrected answer", "msgtype": "m.text"},
+        new_text="the corrected answer",
+        extra_content={"io.mindroom.stream_status": "complete"},
+    )
+
+    assert content["body"] == "* the corrected answer"
+    assert content["io.mindroom.stream_status"] == "complete"
+    assert content["m.new_content"]["io.mindroom.stream_status"] == "complete"
 
 
 def test_edit_envelope_discards_thread_relation() -> None:

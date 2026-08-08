@@ -11,13 +11,7 @@ import nio
 import pytest
 import yaml
 
-from mindroom.matrix.cache import thread_history_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-)
 from mindroom.thread_export import ThreadExportTarget
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
@@ -45,7 +39,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
     from mindroom.thread_export import ThreadExportStats
 
 
@@ -54,19 +47,17 @@ async def _export_threads_for_client(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache,
     rooms: Sequence[_ThreadExportRoom],
     output_dir: Path,
     max_thread_roots: int = 2000,
-    prefer_cache: bool = False,
     required_member_user_id: str | None = None,
 ) -> ThreadExportStats:
     """Adapt the multi-target execution seam for single-target test cases."""
     accumulators = await _export_threads_for_targets_for_client(
         client=client,
+        reader=Mock(),
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=event_cache,
         rooms=rooms,
         targets=(
             ThreadExportTarget(
@@ -75,7 +66,6 @@ async def _export_threads_for_client(
             ),
         ),
         max_thread_roots=max_thread_roots,
-        prefer_cache=prefer_cache,
     )
     return accumulators[0].stats()
 
@@ -98,7 +88,6 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
         body="Revised follow-up details",
         timestamp=1_700_000_002_000,
         latest_event_id="$reply-edit:localhost",
-        thread_id="$thread/root:localhost",
         content={"body": "Revised follow-up details", "msgtype": "m.text"},
     )
     fetch_result = [
@@ -118,7 +107,7 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             new=AsyncMock(return_value=(["$thread/root:localhost"], False)),
         ) as enumerate_threads,
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=fetch_result),
         ) as fetch_thread,
     ):
@@ -126,7 +115,6 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -136,8 +124,8 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
     assert stats.failures == 0
     enumerate_threads.assert_awaited_once()
     fetch_thread.assert_awaited_once()
-    assert fetch_thread.await_args.kwargs["allow_stale_fallback"] is False
-    assert fetch_thread.await_args.kwargs["caller_label"] == "thread_export"
+    assert fetch_thread.await_args.kwargs["room_id"] == "!lobby:localhost"
+    assert fetch_thread.await_args.kwargs["thread_id"] == "$thread/root:localhost"
 
     exported_files = list((tmp_path / "exports" / "lobby").glob("*.yaml"))
     assert len(exported_files) == 1
@@ -171,107 +159,6 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             "body": "Revised follow-up details",
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path) -> None:
-    """prefer_cache should read thread history through the cache-first fetch path."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    _write_matrix_state(tmp_path)
-
-    history = [
-        ResolvedVisibleMessage.synthetic(
-            sender="@alice:localhost",
-            body="Cached thread",
-            event_id="$cached:localhost",
-        ),
-    ]
-
-    with (
-        patch(
-            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-            new=AsyncMock(return_value=(["$cached:localhost"], False)),
-        ),
-        patch(
-            "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
-        ) as cache_fetch,
-        patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(),
-        ) as source_fetch,
-    ):
-        stats = await _export_threads_for_client(
-            client=Mock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            event_cache=Mock(),
-            output_dir=tmp_path / "exports",
-            rooms=_export_rooms(runtime_paths, "lobby"),
-            prefer_cache=True,
-        )
-
-    assert stats.threads_exported == 1
-    assert stats.failures == 0
-    source_fetch.assert_not_awaited()
-    cache_fetch.assert_awaited_once()
-    assert cache_fetch.await_args.kwargs["caller_label"] == "thread_export"
-    assert len(list((tmp_path / "exports" / "lobby").glob("*.yaml"))) == 1
-
-
-@pytest.mark.asyncio
-async def test_export_refuses_a_stale_cached_read_that_reports_itself_complete(tmp_path: Path) -> None:
-    """Completeness and freshness are independent, and export needs both.
-
-    A stale fallback reports ``is_full_history=True`` whenever its sidecars hydrated, so an export
-    checking only completeness writes rows out as authoritative that the homeserver has already
-    moved past. Asserted through the real export so it fails if that check is dropped:
-    the earlier version of this test only rebuilt two diagnostic helpers and compared them to what
-    it had just constructed, which no change to export could have broken.
-    """
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    _write_matrix_state(tmp_path)
-
-    stale_but_untruncated = thread_history_result(
-        [
-            ResolvedVisibleMessage.synthetic(
-                sender="@alice:localhost",
-                body="Stale thread",
-                event_id="$cached:localhost",
-            ),
-        ],
-        is_full_history=True,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-        },
-    )
-
-    with (
-        patch(
-            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-            new=AsyncMock(return_value=(["$cached:localhost"], False)),
-        ),
-        patch(
-            "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=stale_but_untruncated),
-        ),
-    ):
-        stats = await _export_threads_for_client(
-            client=Mock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            event_cache=Mock(),
-            output_dir=tmp_path / "exports",
-            rooms=_export_rooms(runtime_paths, "lobby"),
-            prefer_cache=True,
-        )
-
-    assert stats.threads_exported == 0
-    assert stats.failures == 1
-    assert list((tmp_path / "exports").rglob("*.yaml")) == [], "a stale read must not be written out"
 
 
 @pytest.mark.asyncio
@@ -322,8 +209,8 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
         ],
     }
 
-    async def fetch_side_effect(*args: object, **_kwargs: object) -> list[ResolvedVisibleMessage]:
-        return histories[str(args[2])]
+    async def fetch_side_effect(*_args: object, thread_id: str, **_kwargs: object) -> list[ResolvedVisibleMessage]:
+        return histories[thread_id]
 
     with (
         patch(
@@ -331,7 +218,7 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
             new=AsyncMock(return_value=(list(histories), False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_side_effect),
         ),
     ):
@@ -339,7 +226,6 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -387,15 +273,14 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
             new=AsyncMock(return_value=(["$stable:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         await _export_threads_for_client(
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -409,7 +294,6 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=tmp_path / "exports",
                 rooms=_export_rooms(runtime_paths, "lobby"),
             )
@@ -445,8 +329,8 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
         ],
     }
 
-    async def fetch_history(*args: object, **_kwargs: object) -> object:
-        return histories[str(args[2])]
+    async def fetch_history(*_args: object, thread_id: str, **_kwargs: object) -> object:
+        return histories[thread_id]
 
     with (
         patch(
@@ -454,7 +338,7 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             new=AsyncMock(return_value=([retained_thread_id, removed_thread_id], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_history),
         ),
     ):
@@ -462,7 +346,6 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=output_dir,
             rooms=rooms,
         )
@@ -479,7 +362,7 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             new=AsyncMock(return_value=([retained_thread_id], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=histories[retained_thread_id]),
         ),
     ):
@@ -487,7 +370,6 @@ async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(t
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=output_dir,
             rooms=rooms,
         )
@@ -518,15 +400,14 @@ async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Pat
             new=AsyncMock(return_value=(["$stable:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         first_stats = await _export_threads_for_client(
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -536,7 +417,6 @@ async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Pat
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -575,26 +455,24 @@ async def test_export_threads_rewrites_when_content_changed(tmp_path: Path) -> N
         new=AsyncMock(return_value=(["$original:localhost"], False)),
     ):
         with patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=first_history),
         ):
             await _export_threads_for_client(
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=tmp_path / "exports",
                 rooms=_export_rooms(runtime_paths, "lobby"),
             )
         with patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(return_value=second_history),
         ):
             stats = await _export_threads_for_client(
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=tmp_path / "exports",
                 rooms=_export_rooms(runtime_paths, "lobby"),
             )
@@ -630,15 +508,14 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
             new=AsyncMock(return_value=(["$fresh:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         stats = await _export_threads_for_client(
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -673,15 +550,14 @@ async def test_export_threads_rewrites_existing_file_with_invalid_utf8(tmp_path:
             new=AsyncMock(return_value=(["$fresh:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         stats = await _export_threads_for_client(
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -712,13 +588,13 @@ async def test_multi_target_export_fetches_each_thread_once(tmp_path: Path) -> N
 
     with (
         patch("mindroom.thread_export.execution.enumerate_room_thread_root_ids", new=enumerate_threads),
-        patch("mindroom.thread_export.execution.refresh_thread_history_from_source", new=fetch_thread),
+        patch("mindroom.thread_export.execution.fetch_projected_thread_history", new=fetch_thread),
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=Mock(),
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             rooms=_export_rooms(runtime_paths, "lobby"),
             targets=targets,
         )
@@ -745,17 +621,11 @@ async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -
         ],
     }
 
-    async def fetch_history(
-        _client: object,
-        _room_id: str,
-        thread_id: str,
-        *_args: object,
-        **_kwargs: object,
-    ) -> object:
+    async def fetch_history(*_args: object, thread_id: str, **_kwargs: object) -> object:
         return histories[thread_id]
 
     with patch(
-        "mindroom.thread_export.execution.refresh_thread_history_from_source",
+        "mindroom.thread_export.execution.fetch_projected_thread_history",
         new=AsyncMock(side_effect=fetch_history),
     ):
         with patch(
@@ -766,7 +636,6 @@ async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=tmp_path / "exports",
                 rooms=room,
             )
@@ -778,7 +647,6 @@ async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=tmp_path / "exports",
                 rooms=room,
             )
@@ -811,15 +679,14 @@ async def test_empty_complete_enumeration_preserves_existing_thread_exports(tmp_
             new=AsyncMock(return_value=(["$existing:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         await _export_threads_for_client(
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=output_dir,
             rooms=room,
         )
@@ -838,7 +705,6 @@ async def test_empty_complete_enumeration_preserves_existing_thread_exports(tmp_
                 client=Mock(),
                 config=config,
                 runtime_paths=runtime_paths,
-                event_cache=Mock(),
                 output_dir=output_dir,
                 rooms=room,
             )
@@ -911,7 +777,6 @@ async def test_empty_complete_enumeration_repairs_index_after_committed_yaml_add
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=output_dir,
             rooms=rooms,
         )
@@ -965,15 +830,14 @@ async def test_definitive_non_member_on_non_aliased_target_removes_room_export(
             new=AsyncMock(return_value=(["$member:localhost"], False)),
         ) as enumerate_threads,
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(return_value=history),
         ),
     ):
         stats = await _export_threads_for_client(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, None),
             required_member_user_id="@alice:localhost",
@@ -1018,9 +882,9 @@ async def test_admitted_empty_root_handles_retraction_and_zero_thread_export_wit
     ) as enumerate_threads:
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             rooms=rooms,
             targets=(
                 ThreadExportTarget(
@@ -1086,9 +950,9 @@ async def test_room_removal_failure_is_scoped_to_the_rejected_target(
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             rooms=(room,),
             targets=(rejected_target, healthy_target),
         )
@@ -1164,9 +1028,9 @@ async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_
     ):
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             rooms=rooms,
             targets=targets,
         )
@@ -1198,9 +1062,9 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
     ) as enumerate_threads:
         accumulators = await _export_threads_for_targets_for_client(
             client=client,
+            reader=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             rooms=_export_rooms(runtime_paths, None),
             targets=(
                 ThreadExportTarget(
@@ -1228,8 +1092,7 @@ async def test_export_threads_continues_after_one_thread_failure(tmp_path: Path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
 
-    async def fetch_side_effect(*args: object, **_kwargs: object) -> list[ResolvedVisibleMessage]:
-        thread_id = args[2]
+    async def fetch_side_effect(*_args: object, thread_id: str, **_kwargs: object) -> list[ResolvedVisibleMessage]:
         if thread_id == "$bad:localhost":
             msg = "fetch failed"
             raise RuntimeError(msg)
@@ -1247,7 +1110,7 @@ async def test_export_threads_continues_after_one_thread_failure(tmp_path: Path)
             new=AsyncMock(return_value=(["$bad:localhost", "$good:localhost"], False)),
         ),
         patch(
-            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
             new=AsyncMock(side_effect=fetch_side_effect),
         ),
     ):
@@ -1255,7 +1118,6 @@ async def test_export_threads_continues_after_one_thread_failure(tmp_path: Path)
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, "lobby"),
         )
@@ -1287,7 +1149,6 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
             client=Mock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=Mock(),
             output_dir=tmp_path / "exports",
             rooms=_export_rooms(runtime_paths, None),
         )
@@ -1295,103 +1156,3 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
     assert stats.rooms_exported == 1
     assert stats.failures == 1
     assert stats.failed_items[0].room_key == "lobby"
-
-
-@pytest.mark.asyncio
-async def test_prefer_cache_bulk_backfills_threads_needing_refill(tmp_path: Path) -> None:
-    """Many threads needing a refill should trigger one bulk warm-up and fail scan-proven-missing roots."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    _write_matrix_state(tmp_path)
-    thread_ids = [f"$t{index}:localhost" for index in range(11)] + ["$missing:localhost"]
-    history = [
-        ResolvedVisibleMessage.synthetic(
-            sender="@alice:localhost",
-            body="cached",
-            event_id="$t0:localhost",
-        ),
-    ]
-    bulk_stats = Mock(missing_root_ids=frozenset({"$missing:localhost"}))
-
-    with (
-        patch(
-            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-            new=AsyncMock(return_value=(thread_ids, False)),
-        ),
-        patch(
-            "mindroom.thread_export.execution.thread_ids_needing_refill",
-            new=AsyncMock(return_value=tuple(thread_ids)),
-        ),
-        patch(
-            "mindroom.thread_export.execution.bulk_refresh_room_thread_histories",
-            new=AsyncMock(return_value=bulk_stats),
-        ) as bulk_refresh,
-        patch(
-            "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
-        ) as cache_fetch,
-    ):
-        stats = await _export_threads_for_client(
-            client=Mock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            event_cache=Mock(),
-            rooms=_export_rooms(runtime_paths, "lobby"),
-            output_dir=tmp_path / "exports",
-            prefer_cache=True,
-        )
-
-    bulk_refresh.assert_awaited_once()
-    assert set(bulk_refresh.await_args.kwargs["thread_root_ids"]) == set(thread_ids)
-    assert cache_fetch.await_count == 11
-    assert stats.failures == 1
-    assert stats.failed_items[0].thread_id == "$missing:localhost"
-    assert "bulk room scan" in stats.failed_items[0].error
-
-
-@pytest.mark.asyncio
-async def test_prefer_cache_skips_bulk_when_cache_is_trusted(tmp_path: Path) -> None:
-    """Rooms whose threads would all serve from cache should not pay for a bulk room scan."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    _write_matrix_state(tmp_path)
-    thread_ids = ["$t0:localhost", "$t1:localhost", "$t2:localhost"]
-    history = [
-        ResolvedVisibleMessage.synthetic(
-            sender="@alice:localhost",
-            body="cached",
-            event_id="$t0:localhost",
-        ),
-    ]
-
-    with (
-        patch(
-            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
-            new=AsyncMock(return_value=(thread_ids, False)),
-        ),
-        patch(
-            "mindroom.thread_export.execution.thread_ids_needing_refill",
-            new=AsyncMock(return_value=()),
-        ),
-        patch(
-            "mindroom.thread_export.execution.bulk_refresh_room_thread_histories",
-            new=AsyncMock(),
-        ) as bulk_refresh,
-        patch(
-            "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
-        ) as cache_fetch,
-    ):
-        stats = await _export_threads_for_client(
-            client=Mock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            event_cache=Mock(),
-            rooms=_export_rooms(runtime_paths, "lobby"),
-            output_dir=tmp_path / "exports",
-            prefer_cache=True,
-        )
-
-    bulk_refresh.assert_not_awaited()
-    assert cache_fetch.await_count == 3
-    assert stats.failures == 0

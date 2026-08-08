@@ -76,7 +76,12 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
+from tests.conftest import (
+    FakeCredentialsManager,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    requires_linux,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -2841,8 +2846,8 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -2938,8 +2943,8 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -3048,8 +3053,8 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
             models={},
         ),
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with tool_runtime_context(runtime_context):
@@ -4364,8 +4369,8 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
@@ -4417,8 +4422,8 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
     proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.setattr(
@@ -4509,8 +4514,8 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         storage_path=request_storage_path,
     )
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
@@ -4700,8 +4705,8 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (
@@ -5420,8 +5425,8 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
         client=object(),
         config=runtime_config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
     with (

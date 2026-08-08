@@ -355,7 +355,7 @@ async def _blocked_before_plan(
         and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
     )
     if prepared.replay_guard.degraded:
-        skips_turn = await controller._has_newer_unresponded_cached_thread_event(
+        skips_turn = await controller._has_newer_unresponded_journal_thread_event(
             room_id=room.room_id,
             event=prepared.event,
             requester_user_id=requester_user_id,
@@ -433,7 +433,7 @@ async def _apply_turn_plan(
         if plan.ignore_reason == "router":
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
-                controller.deps.turn_store.record_responded_turn(router_outcome)
+                await controller.deps.turn_store.record_responded_turn(router_outcome)
             else:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
@@ -455,21 +455,6 @@ async def _apply_turn_plan(
         if plan.response_action.kind in {"individual", "team"}
         else None
     )
-    handled_turn = controller.deps.turn_store.attach_response_context(
-        prepared.handled_turn,
-        history_scope=response_history_scope,
-        conversation_target=prepared.dispatch.target,
-    )
-    pending_turn = await asyncio.to_thread(
-        controller.deps.turn_store.record_pending_turn,
-        handled_turn,
-    )
-    if pending_turn is None or pending_turn.completed:
-        return
-    if pending_turn.redacted_source_event_ids:
-        await visible_responses.settle_source_events_ignored(pending_turn)
-        return
-    handled_turn = pending_turn
 
     payload_inputs = DispatchPayloadInputs(
         message_attachment_ids=tuple(message_attachment_ids),
@@ -482,6 +467,18 @@ async def _apply_turn_plan(
             prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
         ),
     )
+    handled_turn = controller.deps.turn_store.attach_response_context(
+        prepared.handled_turn,
+        history_scope=response_history_scope,
+        conversation_target=prepared.dispatch.target,
+    )
+    pending_turn = await controller.deps.turn_store.record_pending_turn(handled_turn)
+    if pending_turn is None or pending_turn.completed:
+        return
+    if pending_turn.redacted_source_event_ids:
+        await visible_responses.settle_source_events_ignored(pending_turn)
+        return
+    handled_turn = pending_turn
 
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.

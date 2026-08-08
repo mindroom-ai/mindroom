@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
 logger = get_logger(__name__)
@@ -174,7 +174,7 @@ async def _claim_and_execute_trigger(
             payload=payload,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=cast("ConversationCacheProtocol", runtime.conversation_cache),
+            conversation_reader=cast("ConversationReader", runtime.conversation_reader),
         )
     except Exception:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)

@@ -50,8 +50,8 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.cache import ThreadHistoryResult
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.conversation_reads import DeliveredResponse
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import _response_outcome_label
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
@@ -68,11 +68,9 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.bot_helpers import (
     AgentBotTestBase,
-    _empty_full_thread_history,
     _handled_response_event_id,
     _hook_envelope,
     _hook_plugin,
-    _install_runtime_cache_support,
     _make_matrix_client_mock,
     _noop_typing_indicator,
     _outcome,
@@ -162,7 +160,6 @@ class TestAgentBot(AgentBotTestBase):
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
@@ -219,7 +216,6 @@ class TestAgentBot(AgentBotTestBase):
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
@@ -501,7 +497,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -862,7 +857,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_ai = AsyncMock(return_value="Handled")
@@ -903,7 +897,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         running_task = asyncio.create_task(asyncio.sleep(60))
@@ -981,7 +974,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
@@ -1589,7 +1581,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -1656,7 +1647,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$response")
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
@@ -1854,7 +1844,6 @@ class TestAgentBot(AgentBotTestBase):
         config.timezone = "America/Los_Angeles"
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
 
         bob_time = datetime(2026, 3, 10, 8, 10, tzinfo=ZoneInfo("America/Los_Angeles"))
         alice_time = datetime(2026, 3, 10, 8, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -1980,7 +1969,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
 
         with (
             patch.object(
@@ -2078,15 +2066,11 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
 
         async def cached_history_refresh(
             _room_id: str,
             _thread_id: str,
-            *,
-            caller_label: str,
         ) -> ThreadHistoryResult:
-            assert caller_label == "dispatch_post_lock_refresh"
             return ThreadHistoryResult(fresh_history, is_full_history=True)
 
         with (
@@ -2111,10 +2095,10 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(
-                bot._conversation_cache,
-                "get_strict_thread_history",
+                bot._conversation_resolver,
+                "fetch_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
-            ) as mock_get_thread_history,
+            ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 prepare_memory_and_model_context=passthrough_prepare_context,
@@ -2122,7 +2106,7 @@ class TestAgentBot(AgentBotTestBase):
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
-            async with bot._conversation_resolver.turn_thread_cache_scope():
+            async with bot._conversation_resolver.turn_lookup_scope():
                 resolution = await bot._response_runner.generate_response(
                     ResponseRequest(
                         prompt="Continue",
@@ -2140,10 +2124,9 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
-        mock_get_thread_history.assert_awaited_once_with(
+        mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
-            caller_label="dispatch_post_lock_refresh",
         )
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
@@ -2185,7 +2168,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             target=MessageTarget.resolve(
@@ -2227,10 +2209,6 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                new=AsyncMock(return_value="$latest:localhost"),
             ),
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
         ):
@@ -2286,7 +2264,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
         thread_history = [
             _visible_message(
@@ -2314,7 +2291,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._conversation_resolver,
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
-            ) as mock_get_thread_history,
+            ) as mock_fetch_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
@@ -2346,9 +2323,10 @@ class TestAgentBot(AgentBotTestBase):
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert mock_get_thread_history.await_count >= 1
+        assert mock_fetch_thread_history.await_count >= 1
         assert all(
-            await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
+            await_args.args == ("!test:localhost", "$thread")
+            for await_args in mock_fetch_thread_history.await_args_list
         )
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,
@@ -2356,7 +2334,10 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread",
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
+            conversation_reader=bot._conversation_reader,
+            # The answer that queued this pass, which the projection cannot
+            # hold until sync echoes it back.
+            delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
@@ -2406,7 +2387,6 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.thread_summary_first_threshold = 1
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
         root_event_id = "$root_event"
         resolved_target = MessageTarget.resolve(
@@ -2470,7 +2450,8 @@ class TestAgentBot(AgentBotTestBase):
             thread_id=root_event_id,
             config=config,
             runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
+            conversation_reader=bot._conversation_reader,
+            delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
@@ -2502,7 +2483,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         with patch_response_runner_module(
@@ -2556,7 +2536,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        _install_runtime_cache_support(bot)
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         with (
@@ -2611,8 +2590,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        _install_runtime_cache_support(bot)
-        history = _empty_full_thread_history()
 
         with (
             patch.object(
@@ -2636,7 +2613,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",
                 new=AsyncMock(side_effect=fake_post_effects),

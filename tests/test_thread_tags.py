@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
-from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
+from mindroom.matrix.room_history_reads import RoomThreadsPageError, enumerate_room_thread_root_ids
+from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
@@ -27,6 +27,7 @@ from mindroom.thread_tags import (
     set_thread_tag,
     set_thread_tags_if_empty,
 )
+from tests.conftest import make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -1692,7 +1693,7 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1716,7 +1717,7 @@ async def test_enumerate_room_thread_root_ids_skips_blank_event_ids() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             return_value=(
                 [_thread_root_event(""), _thread_root_event("$root:localhost")],
@@ -1736,7 +1737,7 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([], "next_token_1"),
@@ -1758,7 +1759,7 @@ async def test_enumerate_room_thread_root_ids_does_not_follow_consecutive_empty_
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([], "empty-1"),
@@ -1788,7 +1789,7 @@ async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop()
         assert page_count <= 110
         return [], f"token-{page_count}"
 
-    with patch("mindroom.matrix.client_thread_history.get_room_threads_page", new=get_empty_page):
+    with patch("mindroom.matrix.room_history_reads.get_room_threads_page", new=get_empty_page):
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
 
     assert thread_root_ids == []
@@ -1802,7 +1803,7 @@ async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_tru
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
@@ -1836,7 +1837,7 @@ async def test_enumerate_room_thread_root_ids_truncates_at_cap() -> None:
         pages.append((roots, f"token-{page_index}"))
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(side_effect=pages),
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
@@ -1854,7 +1855,7 @@ async def test_enumerate_room_thread_root_ids_repeated_token_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1874,7 +1875,7 @@ async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost")], "A"),
@@ -1894,7 +1895,7 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
         new=AsyncMock(
             side_effect=[
                 ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
@@ -1917,7 +1918,7 @@ async def test_list_tagged_threads_include_untagged_propagates_room_threads_page
 
     with (
         patch(
-            "mindroom.matrix.client_thread_history.get_room_threads_page",
+            "mindroom.matrix.room_history_reads.get_room_threads_page",
             new=AsyncMock(side_effect=error),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,
@@ -2309,6 +2310,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_root_for_root_eve
         client,
         "!room:localhost",
         "$thread-root:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2346,6 +2348,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_unproven
         client,
         "!room:localhost",
         "$thread-root:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2375,6 +2378,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_t
         client,
         "!room:localhost",
         "$thread-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2391,6 +2395,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_blank_in
         client,
         "!room:localhost",
         event_id,
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2429,6 +2434,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_p
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2458,6 +2464,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_missing_
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2502,6 +2509,7 @@ async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_thr
         client,
         "!room:localhost",
         "$plain-reply-2:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2573,6 +2581,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_p
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2624,6 +2633,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_re
         client,
         "!room:localhost",
         "$plain-reply:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2675,6 +2685,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_re
         client,
         "!room:localhost",
         "$reply-two:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None
@@ -2693,67 +2704,87 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_when_lookup_
         client,
         "!room:localhost",
         "$reply-one:localhost",
+        relations=make_relation_lookup(client=client),
     )
     assert normalized is None
     client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-one:localhost")
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_lookup_misses() -> None:
-    """Cache-backed normalization should still work when the homeserver lookup misses."""
+async def test_resolve_thread_root_event_id_for_client_uses_the_journal_when_the_lookup_misses() -> None:
+    """A homeserver that cannot parse the event falls back to what the journal admitted."""
     client = AsyncMock()
     client.room_get_event = AsyncMock(return_value=object())
-    conversation_cache = MagicMock()
-    conversation_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
+    relations = make_relation_lookup(
+        threads={"$fresh-local-reply:localhost": "$thread-root:localhost"},
+        client=client,
+    )
 
     normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$fresh-local-reply:localhost",
-        conversation_cache=conversation_cache,
+        relations=relations,
     )
 
     assert normalized == "$thread-root:localhost"
-    conversation_cache.get_thread_id_for_event.assert_awaited_once_with(
-        "!room:localhost",
-        "$fresh-local-reply:localhost",
-    )
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_original_event() -> None:
-    """Thread edits should normalize directly from explicit thread metadata."""
+async def test_resolve_thread_root_event_id_for_client_ignores_the_thread_an_edit_names() -> None:
+    """Thread edits normalize through the message they edit, not the thread they name.
+
+    Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring every
+    ``m.relates_to`` written there, so a thread named inside an edit is whatever its author typed.
+    Normalizing from it would let an edit retag a message into a thread of the editor's choosing,
+    so the extra point lookup for the original is the price of getting the right answer.
+    """
     client = AsyncMock()
     client.room_get_event = AsyncMock(
-        return_value=_message_event_response(
-            "$edit:localhost",
-            content={
-                "body": "* edited",
-                "msgtype": "m.text",
-                "m.new_content": {
-                    "body": "edited",
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                content={
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "edited",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$claimed-root:localhost",
+                        },
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-reply:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
                     "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread-root:localhost",
                     },
                 },
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$thread-reply:localhost",
-                },
-            },
-        ),
+            ),
+        ],
     )
 
     normalized = await resolve_thread_root_event_id_for_client(
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
 
 
 @pytest.mark.asyncio
@@ -2797,6 +2828,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_reply_edi
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2853,6 +2885,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2927,6 +2960,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_thread_root_edit
         client,
         "!room:localhost",
         "$edit:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized == "$thread-root:localhost"
@@ -2967,6 +3001,7 @@ async def test_resolve_thread_root_event_id_for_client_returns_none_for_cyclic_e
         client,
         "!room:localhost",
         "$edit-a:localhost",
+        relations=make_relation_lookup(client=client),
     )
 
     assert normalized is None

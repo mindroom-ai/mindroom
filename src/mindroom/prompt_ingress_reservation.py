@@ -42,7 +42,6 @@ class PromptIngressReservationOwner:
         *,
         source_event_id: str | None,
         source_kind: str,
-        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
     ) -> None:
@@ -58,7 +57,6 @@ class PromptIngressReservationOwner:
                 ready_task=ready_task,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
-                callback_source_kind=callback_source_kind,
             )
             metadata_transferred = True
         except BaseException:
@@ -95,3 +93,13 @@ class PromptIngressReservationOwner:
             await self._cancel_ready_task()
         finally:
             self.gate.release_lane_slot(self.slot)
+
+    def reenter_lane(self) -> None:
+        """Take a fresh receipt-order position after a released wait.
+
+        Ingress that released its slot to wait for a competing owner has lost
+        its place in the burst it arrived in, and that burst is long over by
+        the time the wait returns. It re-enters at the back of the lane rather
+        than reusing a released slot, which no worker would ever deliver.
+        """
+        self.slot = self.gate.enter_lane(room_id=self.slot.room_id, sender_id=self.slot.sender_id)

@@ -1766,8 +1766,6 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-    startup_thread_prewarm: true
 
     # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)
     worker_tools: [shell, file]
@@ -1823,7 +1821,6 @@ agents:
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
-| `startup_thread_prewarm` | bool | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
@@ -1846,8 +1843,6 @@ Use `memory_backend: none` for stateless agents that should skip prompt memory l
 Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
 Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
@@ -2867,8 +2862,6 @@ teams:
     # Model for team coordination (default: "default")
     model: sonnet
 
-    # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-    startup_thread_prewarm: true
 
     # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
@@ -2894,7 +2887,6 @@ teams:
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
 | `model` | No | `default` | Model used for team coordination and synthesis |
-| `startup_thread_prewarm` | No | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
 | `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
@@ -2929,8 +2921,6 @@ If you set `compaction.model`, that summary model must also define its own `cont
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Compaction uses an in-room lifecycle notice that is edited in place.
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## When to Use Each Mode
 
@@ -3034,19 +3024,14 @@ router:
   # Accept authorized room invites and preserve them across restarts (default: true)
   accept_invites: true
 
-  # Participate in room-level startup prewarm for rooms already joined at first sync (default: true)
-  startup_thread_prewarm: true
 ```
 
-The router has three configuration options:
+The router has two configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
 | `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
-| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
-
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
 ## How Routing Works
 
@@ -7494,6 +7479,9 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - thread-reply: Same threading behavior as `reply`, kept as a separate action name for agent convenience.
 - react: React to `target` with `message` as the emoji, defaulting to thumbs-up when `message` is empty.
 - read: Read recent messages from the current thread when one is active, otherwise from the room timeline.
+  An edited message is reported once, at its newest revision, with `event_id` naming the original and `latest_event_id` naming the revision on screen.
+  A room-timeline read still asks the homeserver for `limit` raw events, so a heavily edited stretch of the room returns fewer than `limit` messages.
+  A room-timeline read whose window holds a revision but not the message it revises cannot tell where that message lives, and reports `thread_id_unknown` instead of a thread.
 - room-threads: List thread roots in a room with pagination support via `page_token`.
 - thread-list: List messages in a thread and include edit options keyed by event ID.
   It uses the current thread when one is active, otherwise you must pass `thread_id`.
@@ -12643,7 +12631,7 @@ Every hook context includes these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
-| `runtime_started_at` | `float \| None` | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
+| `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
 | `state_root` | `Path` | Plugin state directory (property) |
 
 Every hook context also exposes the following helpers:
@@ -12670,10 +12658,10 @@ When both the current bot and the router can query room state, MindRoom tries th
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
 **`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
-Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
-The helper automatically applies `ctx.runtime_started_at` so room-level reads ignore visible cache rows from before the current bot runtime.
-It returns `None` when no reader is bound, when the advisory cache is disabled or missing usable rows, or when the sender has no cached message in that scope.
-It raises `AgentMessageSnapshotUnavailable` when a thread snapshot exists but fails the cache freshness contract, such as a stale or invalidated thread cache row.
+Returns the latest visible `m.room.message` from `sender` in the given room or thread scope, read from the conversation projection.
+`thread_id=None` means the unthreaded room conversation, so a threaded reply never answers a room-scope question.
+The read never blocks on the homeserver and is bounded to the 50 most recent messages in that scope.
+It returns `None` when no reader is bound, when the sender has no visible message inside that window, or when the sender's newest message is awaiting a server refetch because its visible revision was redacted.
 
 **`await ctx.put_room_state(room_id, event_type, state_key, content)`**
 Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
@@ -16093,6 +16081,8 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
+- [Matrix Event-Journal Security](https://docs.mindroom.chat/architecture/matrix-event-journal-security/) - Which decrypted plaintext is durable, who owns it, and what removes it
+- [Matrix Event-Journal Contracts](https://docs.mindroom.chat/dev/matrix-event-journal-contracts/) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Key Internal Modules
 
@@ -16111,8 +16101,10 @@ MindRoom's architecture consists of several key components working together.
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
-| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -16146,7 +16138,7 @@ MindRoom's architecture consists of several key components working together.
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and `bot.py` hands it through `dispatch_obligations/` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
@@ -16247,19 +16239,23 @@ Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on h
 Sliding positions remain connection-scoped, while callback admission uses mindroom-nio's persisted per-event provenance.
 Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
 Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
-This provenance remains attached across recovery, restart, and decryption independently of event-cache checkpoint persistence.
-Historical admission writes each event through the room-ordered sync cache mutation path before nio marks it recovered, and a cache failure leaves the event pending for retry.
-The cache remains advisory for live processing, but historical recovery is deliberately fail-closed because accepting recovered events without caching them would permanently lose thread context.
-For a limited newly joined world-readable room, MindRoom walks backward from the response cursor and caches the newest readable pre-join window within nio's configured page and event budgets because nio treats the bot's own join as a recovery boundary.
-Reaching either budget is successful bounded hydration, while transport and cache failures remain retryable and keep the durable join fence closed.
+This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
+`matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
+Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
+Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
-Events are processed in background tasks:
-1. Sync receives event via long-polling
-2. Event callback triggered (`_on_message`, `_on_invite`, etc.)
-3. Background task created for async processing
-4. Agent responds in thread
+An event reaches an agent through durable admission, never straight from the sync callback:
+
+1. Sync receives the event via long-polling, and nio states its provenance once.
+2. `JournalIngress._admit` runs first, as nio's event-admission callback, and commits the event and its projection row in one transaction before nio treats the event as delivered.
+3. Only after every admission callback succeeds do the ordinary event callbacks run, and they load already-persisted work rather than the parsed event they were handed.
+4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
+5. `TurnController` owns the turn and the agent responds in thread.
+
+Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
 
 ### Streaming Responses
 
@@ -16315,9 +16311,18 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 
 ## Response Tracking
 
-MindRoom prevents duplicate responses using a `ResponseTracker` that records which events have already been processed.
-When a sync reconnection or retry delivers the same event twice, the tracker suppresses the duplicate so only one agent response is sent per triggering message.
-Tracking state is persisted under `mindroom_data/tracking/` and survives restarts.
+Duplicate responses are prevented at two durable layers, both in `tracking/event_journal.db` under `mindroom_data/`.
+
+`journal_events` is keyed `(principal_id, event_id)`, so a Matrix event redelivered by a sync reconnection or a `/messages` walk is recognised as already admitted rather than admitted twice.
+A settled row is retained for exactly that reason, with only its replay payload cleared.
+
+`TurnStore` owns the answer to "has this turn finished?", through the handled-turn ledger in `handled_turns.py`.
+It shares the journal's database, so a terminal turn record and the settlement of the journal sources it answers commit in one transaction instead of two substrates approximately agreeing.
+Its scope is the agent rather than the sync principal, because the proof that a message was already answered stays true across a re-login.
+
+Delivery itself is owned by the `response_outbox` table, keyed `(principal_id, turn_id, stage)` over an `INITIAL` placeholder and a `FINAL` answer.
+A row's payload is claimed before the first send attempt and its Matrix transaction ID is deterministic, so a crash between sending and recording resolves by resending the same row rather than by generating a second, different answer.
+The claim also stores the sending device, because a transaction ID is only idempotent for the device that used it and a re-login would otherwise let a resend post a duplicate.
 
 ## Room Cleanup
 
@@ -16381,12 +16386,11 @@ Enabling encryption on a Matrix room is irreversible; MindRoom never disables it
 When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
 All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
 After a live room join, decryption-failure callbacks for that exact unfinished join stay fenced across restarts until a trusted sync response confirms joined membership.
-Incomplete cache certification keeps that join fence closed; after cache availability is repaired, the next trusted response atomically advances continuity and clears the fence.
-The room fence runs before durable dispatch persistence, but fenced failures still log diagnostics, update E2EE statistics, and request missing keys without claiming the visible-notice ledger.
-The cold-history fence rejects `HISTORY` callbacks before durable dispatch persistence unless the exact event and callback kind were already pending.
-`LIVE` callbacks remain admissible independently of response-level sync positions, recovery gaps, and cache-certification state.
-Each rejected callback emits concise `matrix_dispatch_source_fenced` telemetry with its room, event, callback kind, and fence reason.
-Neither fence compares federated event timestamps with the local wall clock.
+A rejected sync certification keeps that join fence closed; once admission succeeds again, the next trusted response atomically advances continuity and clears the fence.
+The fence suppresses only the user-visible notice, so a fenced failure still logs diagnostics, updates E2EE statistics, and requests missing keys without claiming the visible-notice ledger.
+Cold history is admitted rather than rejected: nio's `HISTORY` provenance classes an event context-only, so it joins the conversation the projection serves but can never start a turn.
+`LIVE` and recovered events are admitted as actionable independently of response-level sync positions, recovery gaps, and sync-certification state.
+The join fence does not compare federated event timestamps with the local wall clock.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 
 Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents.
@@ -16394,7 +16398,7 @@ Each agent bootstraps a self-managed cross-signing identity at login (master and
 When the homeserver no longer has the uploaded identity (for example after a dev-server reset that kept `encryption_keys/`), the bootstrap detects the divergence and re-uploads the persisted keys instead of wedging.
 
 If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity, and re-signs the new device with the persisted cross-signing keys; `mindroom doctor` reports missing stores.
-Messages encrypted only to the lost device stay undecryptable, but the durable event cache preserves the agent's conversational context.
+Messages encrypted only to the lost device stay undecryptable, but the durable visible-message projection preserves the agent's conversational context.
 
 ## Configuration
 
@@ -16552,7 +16556,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 1. Skip own messages (except voice transcriptions from router)
 2. Check sender authorization and handle edits
-3. Check if already responded (`ResponseTracker`)
+3. Check if already responded (`TurnStore.is_handled`)
 4. Router handles commands exclusively
 5. Extract message context (mentions, thread history, non-agent mention detection)
 6. Skip messages from other agents (unless mentioned)
@@ -16562,7 +16566,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
-Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
+Edits from other agents are ignored, and the feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio).
 Downloads and decrypts media data, then processes it through the selected responder.
@@ -16583,7 +16587,7 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
-- `ResponseTracker` prevents duplicate replies
+- `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
 
 ### Graceful Shutdown
@@ -18898,6 +18902,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     Matrix E2EE.                                                       │
 │ avatars             Generate and sync managed avatar assets.                           │
 │ threads             Export Matrix threads to local files.                              │
+│ journal             Inspect and rebind the durable event journal.                      │
 │ service             Install and manage MindRoom as a background user service.          │
 │ trigger             Send signed external triggers.                                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -19421,7 +19426,9 @@ Adopt such a root by creating `.mindroom-thread-exports` inside it containing ex
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
-With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
+Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
+A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
+Building it also writes it, into the same journal the bot is writing, from the export's own process, so a first pass over a thread competes with live admission for that database's one write lock while a later pass over the same thread does not.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -19456,12 +19463,6 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 │ --max-thread-roots                            INTEGER  Maximum thread roots to         │
 │                                                        enumerate per room.             │
 │                                                        [default: 2000]                 │
-│ --prefer-cache                                         Serve thread bodies from the    │
-│                                                        durable event cache and only    │
-│                                                        fetch from the homeserver on    │
-│                                                        miss or invalidation. Use       │
-│                                                        alongside a running MindRoom    │
-│                                                        that keeps the cache fresh.     │
 │ --invited-rooms         --no-invited-rooms             Include rooms joined through    │
 │                                                        authorized invites              │
 │                                                        (user-created rooms).           │
@@ -19478,7 +19479,139 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
-mindroom threads export --storage-path mindroom_data --prefer-cache
+```
+
+## journal
+
+Inspect and rebind the durable event journal.
+
+The event journal is the database that holds turn deduplication, delivery ownership, and recovery ownership.
+Every install is bound to exactly one, and MindRoom refuses to start against any other one, because using a stranger's journal does not fail — it answers every question confidently and about somebody else's history.
+
+An install is bound the first time it opens a journal.
+The database mints a generation when it is first used and never rewrites it, so the generation names the database rather than the process, and the binding recorded in `<storage>/tracking/event_journal_binding.json` names that generation.
+A later start reads the configured database's generation before it opens the store and refuses when the two do not match.
+Refusal happens before anything is created, so a database that gets refused is left exactly as it was found.
+
+Each refusal is a different problem and says so:
+
+| Message | What happened | What to do |
+| --- | --- | --- |
+| `has never been used by this install` | The configured database carries no generation at all. | Usually a connection pointing somewhere new. Point `event_journal` back, or adopt deliberately. |
+| `is a different journal from the one this install is bound to` | The configured database carries someone else's generation. | Usually a connection pointing at another install. Point `event_journal` back, or adopt deliberately. |
+| `could not be read` | The binding file itself is corrupt or truncated. | Repair or delete `<storage>/tracking/event_journal_binding.json`, then adopt. |
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["journal", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root journal [OPTIONS] COMMAND [ARGS]...
+
+ Inspect and rebind the durable event journal.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ adopt   Bind this install to the configured event-journal database.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## journal adopt
+
+Bind this install to the event-journal database that is configured right now.
+
+This is the deliberate override of the startup refusal, and the only repair for an install whose binding has been lost.
+Adopting gives up the deduplication, delivery, and recovery history held in the previously bound journal, so it asks for confirmation unless `--yes` is passed.
+
+Stop MindRoom before adopting.
+A running MindRoom keeps writing to the database it opened at startup, so adopting under it does not move the running install — it splits the install's history across two databases, and nothing will ever read the older one again.
+A process that has the journal open holds an advisory claim on `<storage>/tracking/event_journal_store.lock` for as long as it has it open, and adoption refuses while that claim is held.
+The claim ends when the store is closed, and the operating system withdraws it if the process dies, so a crashed MindRoom leaves nothing to clean up.
+`--force` adopts anyway, for the case where the claim cannot be trusted: it is advisory, and it does not travel between hosts sharing one storage root over a network filesystem.
+
+Adoption keeps the old binding until the new one is ready.
+If the candidate cannot be opened — an unreachable server, a bad DSN, a full disk — the command fails with the previous binding still in place, and the install starts exactly as it did before.
+
+### Moving a journal safely
+
+Copying a database the supported way carries its generation with it, so a copy is accepted by the same binding and needs no adoption.
+That cuts both ways: a stale clone taken weeks ago carries the same generation as the live database and will be accepted without complaint, even though every turn since the clone was taken is missing from it.
+The generation proves the database is the same lineage, not that it is up to date, and nothing else checks.
+
+For a quiesced migration:
+
+1. Stop MindRoom, and any `mindroom threads export --watch` running against the same storage root.
+2. Copy or dump-and-restore the database in full.
+3. Point `event_journal` at the new location.
+4. Start MindRoom. No adoption is needed, because the generation travelled with the data.
+
+Adopt instead of copying only when you accept beginning the journal's history fresh.
+
+### Recovering from a failure
+
+An install refuses to start and you did not move anything.
+Check `event_journal` and the environment variable named by `event_journal.database_url_env` before adopting: a DSN that has drifted to a fresh database is the common cause, and adopting would throw the real journal's history away rather than find it.
+
+An install refuses to start with `could not be read`.
+The binding file is corrupt. Delete it and run `mindroom journal adopt` against the database you actually want; there is nothing recoverable inside it that the database does not already know.
+
+Adoption refuses because the journal is in use.
+Stop MindRoom and try again. Use `--force` only when you are certain nothing is running, for example after a host has been rebooted with a stale storage root on a network filesystem.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["journal", "adopt", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root journal adopt [OPTIONS]
+
+ Bind this install to the configured event-journal database.
+
+ MindRoom refuses to start against a journal it is not bound to, because
+ using a different one loses turn deduplication, delivery ownership, and
+ recovery ownership without any error. This is how you say the change was
+ deliberate.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --config        -c      PATH  Use this config file path.                               │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data.             │
+│ --yes           -y            Adopt without confirming, even when another journal is   │
+│                               already bound.                                           │
+│ --force                       Adopt even though another process still has this         │
+│                               install's journal open.                                  │
+│ --help          -h            Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+```bash
+mindroom journal adopt --storage-path mindroom_data
+mindroom journal adopt --storage-path mindroom_data --yes
 ```
 
 ## service

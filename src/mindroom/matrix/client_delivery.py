@@ -22,7 +22,6 @@ from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 logger = get_logger(__name__)
@@ -145,7 +144,11 @@ async def _send_prepared_room_message(
                 room_id,
                 message_type,
                 content_sent,
-                uuid4(),
+                # A deterministic ID is the only thing that makes a resend
+                # collapse onto the event the homeserver already accepted. A
+                # fresh UUID here would turn every outbox retry on an
+                # uncached room into a second visible message.
+                transaction_id if transaction_id is not None else uuid4(),
             )
             return await client._send(
                 nio.RoomSendResponse,
@@ -312,6 +315,7 @@ async def send_message_result(
     *,
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -365,6 +369,7 @@ async def send_message_result(
         cache_bypass=cache_bypass,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
     if response is None:
         emit_timing_event(
@@ -552,7 +557,6 @@ async def send_file_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload a file and send it with the appropriate Matrix message type."""
     resolved_path = Path(file_path).expanduser().resolve()
@@ -590,12 +594,6 @@ async def send_file_message(
         content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content)
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 
@@ -607,7 +605,6 @@ async def send_runtime_encrypted_media_message(
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Send an existing encrypted MXC object without writing or uploading plaintext bytes."""
     msgtype = _msgtype_for_mimetype(attachment.mime_type)
@@ -629,12 +626,6 @@ async def send_runtime_encrypted_media_message(
         content,
         operation="send_runtime_encrypted_media_message",
     )
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 
@@ -650,7 +641,6 @@ async def send_audio_message(
     waveform: Sequence[int] | None = None,
     thread_id: str | None = None,
     latest_thread_event_id: str | None = None,
-    conversation_cache: ConversationCacheProtocol | None = None,
 ) -> str | None:
     """Upload an in-memory audio payload and send it as a Matrix voice message."""
     if not _can_send_to_encrypted_room(client, room_id, operation="send_audio_message"):
@@ -694,12 +684,6 @@ async def send_audio_message(
         content["m.relates_to"] = thread_relation
 
     delivered = await send_message_result(client, room_id, content)
-    if delivered is not None and conversation_cache is not None:
-        conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
     return delivered.event_id if delivered is not None else None
 
 
@@ -740,6 +724,7 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
     edit_content = build_edit_event_content(
@@ -755,6 +740,7 @@ async def edit_message_result(
         edit_content,
         operation="edit_message",
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
 
 

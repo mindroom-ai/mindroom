@@ -1,4 +1,4 @@
-"""End-to-end threading integration tests (see test_thread_* and test_bot_sync_event_cache for split concerns)."""
+"""End-to-end threading integration tests (see test_thread_* for split concerns)."""
 
 from __future__ import annotations
 
@@ -19,17 +19,17 @@ from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
     install_generate_response_mock,
+    install_relation_lookup,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _install_runtime_write_coordinator,
     _make_client_mock,
     _matrix_room,
     _runtime_bound_config,
-    _runtime_event_cache,
+    seed_hydrated_conversation,
     thread_history_result,
 )
 
@@ -74,9 +74,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize the bot (to set up components it needs)
 
@@ -151,9 +148,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking
 
@@ -162,28 +156,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                AsyncMock(return_value="latest_thread_event"),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
             patch.object(
                 resolver,
                 "fetch_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
-            patch.object(
-                bot._conversation_cache,
-                "get_strict_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
         ):
@@ -240,8 +215,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         # Initialize components that depend on client
 
@@ -284,19 +257,19 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
             )
 
-            with (
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-                ),
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-                ),
-            ):
-                # Process the command
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            # The reply target is a plain message with no thread under it, and
+            # a hydrated conversation is what makes that a fact rather than an
+            # absence. An unhydrated one leaves the root unproven, and unproven
+            # roots answer at room level instead of opening a thread.
+            await seed_hydrated_conversation(
+                bot,
+                room_id=room.room_id,
+                thread_id="$some_other_msg:localhost",
+            )
+
+            # Process the command
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # The bot should send an error message about needing threads
             bot.client.room_send.assert_called_once()
@@ -347,8 +320,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         # Initialize components that depend on client
 
@@ -399,23 +370,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
             )
 
-            with (
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-                ),
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-                ),
-                patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-                ),
-            ):
-                # Process the command
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            # Process the command
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # The bot should respond
             bot.client.room_send.assert_called_once()
@@ -467,8 +424,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -495,26 +450,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_id_for_event",
-                AsyncMock(return_value="$thread_root:localhost"),
-            ),
-        ):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        install_relation_lookup(bot, threads={"$thread_msg:localhost": "$thread_root:localhost"})
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         bot.client.room_send.assert_called_once()
         content = bot.client.room_send.call_args.kwargs["content"]
@@ -559,8 +497,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
         room = _matrix_room(name="Test Room")
 
@@ -598,10 +534,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         with (
             patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="general")),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
-                AsyncMock(return_value="$latest:localhost"),
-            ),
             patch(
                 "mindroom.delivery_gateway.send_message_result",
                 AsyncMock(
@@ -666,9 +598,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache.get_thread_events.return_value = None
-        _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking
 
@@ -677,18 +606,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         install_generate_response_mock(bot, generate_response)
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-            ),
         ):
             # Process the message
             await bot._on_message(room, event)

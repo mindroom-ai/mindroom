@@ -18,7 +18,7 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
-from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
+from tests.conftest import orchestrator_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -30,7 +30,6 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
     bot = MagicMock(spec=AgentBot)
     bot.config = config
     bot.client = None
-    bot._conversation_cache = object()
     bot.enable_streaming = enable_streaming
     bot.running = True
     bot._runtime_view = BotRuntimeState(
@@ -39,8 +38,6 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
         runtime_paths=orchestrator_runtime_paths(Path(tempfile.mkdtemp())),
         enable_streaming=enable_streaming,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
     return bot
 

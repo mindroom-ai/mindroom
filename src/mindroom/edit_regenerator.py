@@ -115,7 +115,6 @@ class EditRegenerator:
         thread_history = await self.deps.resolver.fetch_thread_history(
             room.room_id,
             conversation_target.resolved_thread_id,
-            caller_label="edit_regeneration_context",
         )
         return MessageContext(
             am_i_mentioned=context.am_i_mentioned,
@@ -131,7 +130,7 @@ class EditRegenerator:
     async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
     ) -> None:
@@ -146,19 +145,25 @@ class EditRegenerator:
         context = await self.deps.resolver.extract_message_context(
             room,
             event,
-            caller_label="edit_regeneration_context",
         )
-        turn_record = self.deps.turn_store.load_turn(
+        # A search hint, and only that. The thread an edit names inside its ``m.new_content`` is
+        # ignored on application, so it places nothing - here it merely points the recovery read at
+        # one more conversation session to probe, on top of the room session it always probes. The
+        # record that comes back still has to name this event as a source authored by this
+        # requester, and every durable or visible decision below is taken from that record's own
+        # conversation target rather than from the claim that found it.
+        turn_lookup_thread_id = context.thread_id or event_info.thread_id_from_edit
+        turn_record = await self.deps.turn_store.load_turn(
             room=room,
-            thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=turn_lookup_thread_id,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
         if turn_record is None:
             await self.deps.wait_for_turn_settled((original_event_id,))
-            turn_record = self.deps.turn_store.load_turn(
+            turn_record = await self.deps.turn_store.load_turn(
                 room=room,
-                thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+                thread_id=turn_lookup_thread_id,
                 original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             )
@@ -240,13 +245,13 @@ class EditRegenerator:
             if mailbox.participants == 0 and self._mailboxes.get(key) is mailbox:
                 self._mailboxes.pop(key)
 
-    def _build_request(  # noqa: C901
+    async def _build_request(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         mailbox: _Mailbox,
     ) -> tuple[ResponseRequest | None, TurnRecord | None, dict[str, SourceEventRevision]]:
         latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
-        record = self.deps.turn_store.load_turn(
+        record = await self.deps.turn_store.load_turn(
             room=room,
             thread_id=latest.context.thread_id,
             original_event_id=latest.original_event_id,
@@ -289,7 +294,7 @@ class EditRegenerator:
                     source_event_revisions=revisions,
                     suppressed_source_event_revisions=suppressed_revisions,
                 )
-                self.deps.turn_store.record_turn(record)
+                await self.deps.turn_store.record_turn(record)
             return None, None, applied
 
         driving_edit = max(active.values(), key=lambda edit: edit.revision)
@@ -330,11 +335,12 @@ class EditRegenerator:
             ),
         )
 
-        def record_interrupted_turn() -> None:
-            # The interrupted revision must stay uncommitted so the replacement
-            # runtime's recovery re-drives it instead of treating it as applied.
-            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
-                applied.clear()
+        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._settlement_callbacks(
+            room,
+            record=record,
+            driving_edit=driving_edit,
+            applied=applied,
+        )
 
         return (
             ResponseRequest(
@@ -361,29 +367,55 @@ class EditRegenerator:
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
-                on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_responded_turn(
-                        canonicalize_turn_record(record, response_event_id=response_event_id),
-                    )
-                    if applied
-                    else None
-                ),
-                on_user_stop_handled=lambda response_event_id, stop_receipt_order: (
-                    self.deps.turn_store.record_turn_durably(
-                        with_user_stop(
-                            record,
-                            response_event_id,
-                            stop_receipt_order,
-                            delivery_settled=True,
-                        ),
-                    )
-                    if applied
-                    else None
-                ),
+                on_deferred_outcome_handled=record_deferred_outcome,
+                on_user_stop_handled=record_user_stop,
             ),
             record,
             applied,
         )
+
+    def _settlement_callbacks(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        record: TurnRecord,
+        driving_edit: _Edit,
+        applied: dict[str, SourceEventRevision],
+    ) -> tuple[
+        Callable[[], None],
+        Callable[[str], Awaitable[None]],
+        Callable[[str, int], Awaitable[None]],
+    ]:
+        """Build the interrupted-turn and terminal-outcome callbacks for one regeneration.
+
+        Both outcome callbacks read ``applied`` when they fire rather than when
+        the request is built, because ``record_interrupted_turn`` can empty it
+        in between: an interrupted revision must stay uncommitted so the
+        replacement runtime re-drives it instead of treating it as applied.
+        """
+
+        def record_interrupted_turn() -> None:
+            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
+                applied.clear()
+
+        async def record_deferred_outcome(response_event_id: str) -> None:
+            if applied:
+                await self.deps.turn_store.record_responded_turn(
+                    canonicalize_turn_record(record, response_event_id=response_event_id),
+                )
+
+        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
+            if applied:
+                await self.deps.turn_store.record_turn(
+                    with_user_stop(
+                        record,
+                        response_event_id,
+                        stop_receipt_order,
+                        delivery_settled=True,
+                    ),
+                )
+
+        return record_interrupted_turn, record_deferred_outcome, record_user_stop
 
     @staticmethod
     def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:
@@ -419,7 +451,7 @@ class EditRegenerator:
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
         while mailbox.pending:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
-            request, record, applied = self._build_request(room, mailbox)
+            request, record, applied = await self._build_request(room, mailbox)
             if request is None or record is None:
                 self._discard(mailbox, applied)
                 if not applied:
@@ -429,7 +461,7 @@ class EditRegenerator:
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(record, response_event_id=regenerated_event_id),
                 )
                 self._discard(mailbox, applied)

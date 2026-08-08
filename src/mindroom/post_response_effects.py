@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
+from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -61,7 +62,7 @@ class PostResponseEffectsDeps:
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
-    queue_thread_summary: Callable[[str, str, str | None], None] | None = None
+    queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ class PostResponseEffectsSupport:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway
-    conversation_cache: ConversationCacheProtocol
+    conversation_reader: ConversationReader
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client for interactive follow-up effects."""
@@ -137,6 +138,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         thread_id: str,
         entity_name: str | None,
+        delivered_response: DeliveredResponse,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
         summary_coro = maybe_generate_thread_summary(
@@ -145,7 +147,8 @@ class PostResponseEffectsSupport:
             thread_id=thread_id,
             config=self.runtime.config,
             runtime_paths=self.runtime_paths,
-            conversation_cache=self.conversation_cache,
+            conversation_reader=self.conversation_reader,
+            delivered_response=delivered_response,
             entity_name=entity_name,
         )
         create_background_task(
@@ -276,4 +279,12 @@ async def apply_post_response_effects(
             outcome.thread_summary_room_id,
             outcome.thread_summary_thread_id,
             outcome.thread_summary_entity_name,
+            # Nothing has echoed this event back yet, so the projection the
+            # summary reads stops one message before the answer it is being
+            # queued for. The gate just above already counted that answer;
+            # handing the fact over is what makes the pass agree with it.
+            DeliveredResponse(
+                event_id=response_event_id,
+                body=final_delivery_outcome.final_visible_body or "",
+            ),
         )

@@ -13,13 +13,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     replace_edit_regenerator_deps,
     runtime_paths_for,
@@ -74,12 +74,8 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = _make_matrix_client_mock()
-    install_runtime_cache_support(bot)
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    install_runtime_journal_support(bot)
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -164,7 +160,7 @@ class TestStreamingEdits:
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
-        bot._turn_store.record_turn(
+        await bot._turn_store.record_turn(
             TurnRecord.create(["$initial123"], response_event_id="$response123"),
         )
 
@@ -255,7 +251,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
+        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

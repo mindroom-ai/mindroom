@@ -40,7 +40,7 @@ from tests.conftest import (
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
-    return install_runtime_cache_support(
+    return install_runtime_journal_support(
         AgentBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -1656,40 +1656,3 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
         await drain_coalescing(bot)
 
     assert dispatches == []
-
-
-@pytest.mark.asyncio
-async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallback(mock_home_bot: AgentBot) -> None:
-    """Cache append failures before canonical admission should not dispatch guessed audio."""
-    bot = mock_home_bot
-    room = _threaded_room()
-    voice_event = _make_threaded_voice_event(event_id="$cache-append-fails")
-    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        handled_turn: TurnRecord | None = None,
-        **_metadata: object,
-    ) -> None:
-        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
-
-    prepare_voice_event = AsyncMock()
-    with (
-        patch.object(
-            bot._turn_controller.deps.conversation_cache,
-            "append_live_event",
-            new=AsyncMock(side_effect=RuntimeError("cache append failed")),
-        ),
-        patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=prepare_voice_event),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-    ):
-        with pytest.raises(RuntimeError, match="cache append failed"):
-            await bot._on_media_message(room, voice_event)
-        await drain_coalescing(bot)
-
-    assert dispatches == []
-    prepare_voice_event.assert_not_awaited()

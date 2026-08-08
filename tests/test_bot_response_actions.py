@@ -25,10 +25,9 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import (
     MessageEnvelope,
 )
-from mindroom.matrix.cache import ThreadHistoryResult
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
@@ -37,7 +36,6 @@ from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_envelope,
-    _install_runtime_cache_support,
     _matrix_room,
     _policy_dispatch,
     _runtime_bound_config,
@@ -1420,7 +1418,6 @@ class TestAgentBot(AgentBotTestBase):
             password=TEST_PASSWORD,
         )
         bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        _install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1435,7 +1432,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
         event.source = {"content": {"body": "continue"}}
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=ThreadHistoryResult(
                 [
                     ResolvedVisibleMessage(

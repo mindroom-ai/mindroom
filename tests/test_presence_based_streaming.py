@@ -17,7 +17,7 @@ from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     request_envelope,
     runtime_paths_for,
@@ -300,7 +300,7 @@ class TestBotIntegration:
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         expected_config = config
 
         async def mock_send_message_result(
@@ -392,7 +392,7 @@ class TestBotIntegration:
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         # Simulate a message from a user
         await bot._response_runner.generate_response(

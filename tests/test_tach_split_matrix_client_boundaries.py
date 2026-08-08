@@ -19,7 +19,6 @@ SPLIT_MATRIX_CLIENT_MODULES = {
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
-    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
 }
 RUNTIME_PROTOCOL_MODULE = "mindroom.runtime_protocols"
@@ -44,15 +43,12 @@ RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
+    "mindroom.matrix.conversation_hydration",
     "mindroom.post_response_effects",
     "mindroom.turn_policy",
 }
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
-    "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.thread_write_cache_ops",
-    "mindroom.matrix.conversation_cache",
-    "mindroom.matrix.thread_bookkeeping",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",

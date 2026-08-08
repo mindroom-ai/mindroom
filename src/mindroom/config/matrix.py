@@ -8,13 +8,10 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from mindroom.config.validation import duplicate_items
-from mindroom.constants import resolve_config_relative_path, runtime_mindroom_namespace
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
@@ -220,41 +217,26 @@ class MatrixRoomAccessConfig(BaseModel):
         return "public" if self.publish_to_room_directory else "private"
 
 
-class CacheConfig(BaseModel):
-    """Startup configuration for the always-on Matrix event cache."""
+class EventJournalConfig(BaseModel):
+    """Where this runtime's durable event journal lives."""
 
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["sqlite", "postgres"] = Field(
         default="sqlite",
-        description="Storage backend for the always-on Matrix event cache.",
-    )
-    db_path: str | None = Field(
-        default=None,
-        description=(
-            "SQLite database path for the always-on Matrix event cache. "
-            "Defaults to <storage>/event_cache.db when omitted. "
-            "Changing this path requires a restart because hot reload intentionally keeps the active cache file."
-        ),
+        description="Storage backend for the durable Matrix event journal.",
     )
     database_url: str | None = Field(
         default=None,
         description=(
-            "PostgreSQL connection URL for the always-on Matrix event cache. Prefer database_url_env for secrets."
+            "PostgreSQL connection URL for the durable Matrix event journal. Prefer database_url_env for secrets."
         ),
     )
     database_url_env: str = Field(
         default="MINDROOM_EVENT_CACHE_DATABASE_URL",
         description=(
-            "Runtime env var that contains the PostgreSQL event-cache connection URL. "
+            "Runtime env var that contains the PostgreSQL event-journal connection URL. "
             "Must be DATABASE_URL or end with _DATABASE_URL so runtime secret filters withhold it."
-        ),
-    )
-    namespace: str | None = Field(
-        default=None,
-        description=(
-            "Logical namespace for PostgreSQL event-cache rows. "
-            "Defaults to MINDROOM_NAMESPACE when set, otherwise 'default'."
         ),
     )
 
@@ -264,15 +246,9 @@ class CacheConfig(BaseModel):
         """Require custom DSN env names to match runtime secret-filter conventions."""
         normalized = env_name.strip()
         if normalized and not is_runtime_database_url_env_name(normalized):
-            msg = "cache.database_url_env must be DATABASE_URL or end with _DATABASE_URL"
+            msg = "event_journal.database_url_env must be DATABASE_URL or end with _DATABASE_URL"
             raise ValueError(msg)
         return normalized
-
-    def resolve_db_path(self, runtime_paths: RuntimePaths) -> Path:
-        """Resolve the configured database path for the active runtime startup."""
-        if self.db_path is None:
-            return runtime_paths.storage_root / "event_cache.db"
-        return resolve_config_relative_path(self.db_path, runtime_paths)
 
     def resolve_postgres_database_url(self, runtime_paths: RuntimePaths) -> str:
         """Resolve the configured PostgreSQL connection URL for the active runtime."""
@@ -285,16 +261,7 @@ class CacheConfig(BaseModel):
             if env_url:
                 return env_url
         msg = (
-            f"PostgreSQL event cache requires cache.database_url or {self.database_url_env} in the runtime environment"
+            "PostgreSQL event journal requires event_journal.database_url or "
+            f"{self.database_url_env} in the runtime environment"
         )
         raise ValueError(msg)
-
-    def resolve_namespace(self, runtime_paths: RuntimePaths) -> str:
-        """Resolve the logical cache namespace for shared PostgreSQL databases."""
-        configured_namespace = (self.namespace or "").strip()
-        if configured_namespace:
-            return configured_namespace
-        runtime_namespace = runtime_mindroom_namespace(runtime_paths)
-        if runtime_namespace is not None:
-            return runtime_namespace
-        return "default"

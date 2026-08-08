@@ -18,7 +18,7 @@ from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     replace_turn_controller_deps,
     wrap_extracted_collaborators,
 )
@@ -77,7 +77,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Mock the client
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
 
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -164,7 +164,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -248,7 +248,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@router:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -346,7 +346,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the client and dependencies
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = "@test_agent:example.com"
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
 

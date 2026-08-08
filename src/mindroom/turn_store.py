@@ -6,7 +6,6 @@ import asyncio
 import math
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
@@ -29,11 +28,13 @@ from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
+    from pathlib import Path
 
     import nio
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
+    from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -55,11 +56,18 @@ class TurnStoreDeps:
     """Collaborators needed to read and write durable turn state."""
 
     agent_name: str
-    tracking_base_path: Path | str
+    # Where "has this turn finished?" is stored. Agent-scoped rather than
+    # principal-scoped: the answer stays true across a re-login, and a bot that
+    # lost it would answer every outstanding message a second time.
+    turn_records: TurnRecordStore
+    # The JSON ledger this agent used before its records moved into the
+    # database, imported once on first load. An installation that has been
+    # answering messages keeps all of its terminal truth there, and a runtime
+    # that ignored it would re-answer the entire backlog on upgrade.
+    legacy_responses_file: Path | None
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
-    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,34 +100,36 @@ class TurnStore:
         """Construct the private handled-turn ledger for this runtime entity."""
         self._ledger = HandledTurnLedger(
             self.deps.agent_name,
-            base_path=Path(self.deps.tracking_base_path),
+            records=self.deps.turn_records,
+            legacy_responses_file=self.deps.legacy_responses_file,
         )
 
-    def warm(self) -> None:
+    async def warm(self) -> None:
         """Load the ledger without pruning truth needed by startup recovery."""
-        self._ledger.load()
+        await self._ledger.load()
 
-    def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
+    async def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
         """Compact terminal history after startup recovery identifies live sources."""
-        self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
+        await self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
-    def record_turn(self, turn_record: TurnRecord) -> None:
+    async def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
-        self._record_terminal_turn(turn_record, wait_for_persist=False)
+        await self._record_terminal_turn(turn_record)
 
-    def record_responded_turn(self, turn_record: TurnRecord) -> None:
+    async def record_responded_turn(self, turn_record: TurnRecord) -> None:
         """Persist a terminal turn that owns a visible Matrix response."""
         if not turn_record.response_event_id:
             msg = "A responded turn requires a visible Matrix response event ID"
             raise RuntimeError(msg)
-        self.record_turn(turn_record)
+        await self.record_turn(turn_record)
 
-    def record_turn_durably(self, turn_record: TurnRecord) -> None:
-        """Persist one terminal turn and wait until its exact ledger write lands."""
-        self._record_terminal_turn(turn_record, wait_for_persist=True)
+    async def _record_terminal_turn(self, turn_record: TurnRecord) -> None:
+        """Apply the canonical terminal merge, durable once it returns.
 
-    def _record_terminal_turn(self, turn_record: TurnRecord, *, wait_for_persist: bool) -> None:
-        """Apply the canonical terminal merge with optional exact durability."""
+        There is no longer a fast path that records into memory and persists
+        behind the caller. Every terminal write is awaited, so the distinction
+        ``record_turn_durably`` used to draw is gone along with it.
+        """
         turn_record = canonicalize_turn_record(turn_record)
         if not turn_record.source_event_ids:
             return
@@ -158,26 +168,88 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        self._ledger.update_handled_turn(
-            turn_record.indexed_event_ids,
-            terminal_record,
-            wait_for_persist=wait_for_persist,
-            on_persisted=self._notify_terminal_turn_persisted,
-        )
+        await self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
+
+    def terminal_turn_record(self, turn_id: str, response_event_id: str) -> TurnRecord | None:
+        """Return the record a FINAL acknowledgement should commit alongside it.
+
+        The acknowledgement is the durable proof that an answer is visible and
+        what its event ID is, and until the record is told, an edit of that
+        message has nothing to edit. Committing the two together is what closes
+        that window; a startup pass used to rejoin them afterwards.
+
+        Nothing is returned when there is nothing to bind: no record for this
+        turn, or one that already names a response event. A record that already
+        names one is left alone deliberately -- it may name a later, better
+        answer than the first thing ever sent, and overwriting it would undo
+        that.
+
+        Pure by design. The in-memory map is not touched here, because this is
+        called *before* the transaction and the transaction may lose the
+        acknowledgement race. The caller that actually binds the row settles
+        both halves afterwards, through ``publish_committed_response``.
+
+        Returns the domain record rather than the journal's write type, so this
+        module stays on its own side of the store boundary; the delivery layer,
+        which already owns that boundary, turns it into a row.
+        """
+        record = self._ledger.get_turn_record(turn_id)
+        if record is None or record.response_event_id is not None:
+            return None
+        bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
+        return None if bound.anchor_event_id is None else bound
+
+    async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
+        """Re-assert the record an acknowledgement committed, through the ordinary lock.
+
+        Bringing only memory level here looked sufficient -- the transaction
+        had already stored the record -- and it loses the answer's event ID for
+        good. Every other terminal write publishes to memory and enqueues its
+        row while holding the ledger's write lock, so the database sees writes
+        in the order memory did. A record committed outside that lock sits
+        outside that order: a mutation that derived before this call, and
+        reaches the database after the transaction, overwrites the row with a
+        record that never heard of the answer. Memory keeps the event ID,
+        storage does not, and the next start finds a delivered turn that cannot
+        name the message it produced -- so a later edit of that message is
+        dropped for having nothing to edit.
+
+        A live turn survived that because it records its terminal turn again
+        right after delivery. Recovery has no such write behind it, and nothing
+        reads an acknowledged event back into a record, which is what made the
+        loss permanent rather than momentary.
+
+        Going back through ``update_handled_turn`` puts the fact inside the
+        ordering that protects every other one: whichever of the two writes
+        lands last derives from a memory that already holds the other's, so the
+        stored row ends up carrying both. Re-deriving cannot invent a different
+        answer, because the event ID is passed in rather than looked up, and an
+        answer the record already names is kept -- it may be a later one than
+        the first thing ever sent.
+        """
+        if self._ledger.get_turn_record(turn_id) is None:
+            return
+
+        def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing = existing_records[turn_id]
+            return canonicalize_turn_record(
+                existing,
+                response_event_id=existing.response_event_id or response_event_id,
+                completed=True,
+                timestamp=0.0,
+            )
+
+        await self._ledger.update_handled_turn((turn_id,), committed_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
 
-    def is_durably_handled(self, event_id: str) -> bool:
-        """Return terminal truth only after its handled-turn ledger write completes."""
-        return self._ledger.has_durably_responded(event_id)
-
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
         return self._ledger.get_visible_echo_event_id(source_event_id)
 
-    def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+    async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Track a visible echo without changing an existing completion outcome."""
 
         def visible_echo_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
@@ -188,9 +260,9 @@ class TurnStore:
             )
             return canonicalize_turn_record(turn_record, visible_echo_event_id=echo_event_id)
 
-        self._ledger.update_handled_turn((source_event_id,), visible_echo_record)
+        await self._ledger.update_handled_turn((source_event_id,), visible_echo_record)
 
-    def record_finalized_visible_echo(
+    async def record_finalized_visible_echo(
         self,
         source_event_id: str,
         echo_event_id: str,
@@ -215,7 +287,7 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        self._ledger.update_handled_turn((source_event_id,), finalized_visible_echo_record)
+        await self._ledger.update_handled_turn((source_event_id,), finalized_visible_echo_record)
 
     def finalized_visible_echo(self, source_event_id: str) -> _FinalizedVisibleEcho | None:
         """Return named terminal state for one tracked visible echo."""
@@ -243,12 +315,10 @@ class TurnStore:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
 
-    def _update_response_turn(
+    async def _update_response_turn(
         self,
         response_event_id: str,
         update: Callable[[TurnRecord], TurnRecord],
-        *,
-        notify_terminal: bool = False,
     ) -> TurnRecord | None:
         """Durably update the sole turn that owns one visible response."""
         turn_record = self.turn_record_for_response_event_id(response_event_id)
@@ -266,14 +336,12 @@ class TurnStore:
                 raise RuntimeError(msg)
             return update(next(iter(matching_records.values())))
 
-        return self._ledger.update_handled_turn(
+        return await self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
             updated_record,
-            wait_for_persist=True,
-            on_persisted=self._notify_terminal_turn_persisted if notify_terminal else None,
         )
 
-    def record_user_stopped_response(
+    async def record_user_stopped_response(
         self,
         response_event_id: str,
         stop_receipt_order: int,
@@ -296,11 +364,7 @@ class TurnStore:
                 delivery_settled=delivery_settled,
             )
 
-        return self._update_response_turn(
-            response_event_id,
-            stopped_record,
-            notify_terminal=not turn_record.completed,
-        )
+        return await self._update_response_turn(response_event_id, stopped_record)
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""
@@ -312,7 +376,7 @@ class TurnStore:
             for source_event_id in source_event_ids
         )
 
-    def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
+    async def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
         if not turn_record.source_event_ids:
             return None
@@ -353,16 +417,10 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        return self._ledger.update_handled_turn(
+        return await self._ledger.update_handled_turn(
             pending_record.indexed_event_ids,
             merge_pending,
-            wait_for_persist=True,
         )
-
-    def _notify_terminal_turn_persisted(self, turn_record: TurnRecord) -> None:
-        callback = self.deps.on_terminal_turn_persisted
-        if callback is not None:
-            callback(turn_record.indexed_event_ids)
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
@@ -389,6 +447,18 @@ class TurnStore:
             claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
         claim_changed.set()
 
+    def has_live_turn_claim(self, event_id: str) -> bool:
+        """Return whether some unsettled turn still holds this source or alias.
+
+        The non-blocking form of the test ``wait_for_turn_settled`` waits on.
+        A claim is taken before its turn is handed off and dropped in the
+        ``finally`` that ends the turn however it ends, so its presence is the
+        one in-process fact that distinguishes "a turn owns this" from "a turn
+        owned this and is gone".
+        """
+        with self._pending_claim_lock:
+            return any(event_id in claim.indexed_event_ids for claim in self._pending_turn_claims)
+
     async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
         """Wait until every claim indexed by a source or alias settles."""
         event_id_set = set(event_ids)
@@ -399,7 +469,7 @@ class TurnStore:
                 claim_changed = self._pending_claim_changed
             await claim_changed.wait()
 
-    def mark_source_redacted(
+    async def mark_source_redacted(
         self,
         source_event_id: str,
     ) -> TurnRecord | None:
@@ -421,10 +491,9 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        return self._ledger.update_handled_turn(
+        return await self._ledger.update_handled_turn(
             (source_event_id,),
             redacted_record,
-            wait_for_persist=True,
         )
 
     def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
@@ -438,7 +507,7 @@ class TurnStore:
             for source_event_id in source_event_ids
         )
 
-    def _prepare_response_for_redactions(
+    async def _prepare_response_for_redactions(
         self,
         *,
         target: MessageTarget,
@@ -452,21 +521,24 @@ class TurnStore:
             recorded_target = turn_record.conversation_target
             recorded_requester_user_id = turn_record.requester_id
             if not _has_redaction_cleanup_context(turn_record):
-                self._clear_pending_redaction_cleanup(redacted_event_id)
+                await self._clear_pending_redaction_cleanup(redacted_event_id)
                 continue
             assert recorded_target is not None
             assert recorded_requester_user_id is not None
             if recorded_target.session_id != target.session_id:
                 continue
-            self._remove_redacted_event_from_recorded_scopes(
+            # Session storage is synchronous and can walk a whole conversation,
+            # so it stays off the loop. Only the ledger write above is awaited.
+            await asyncio.to_thread(
+                self._remove_redacted_event_from_recorded_scopes,
                 target=recorded_target,
                 requester_user_id=recorded_requester_user_id,
                 redacted_event_id=redacted_event_id,
             )
-            self._clear_pending_redaction_cleanup(redacted_event_id)
+            await self._clear_pending_redaction_cleanup(redacted_event_id)
         return self._any_source_redacted(source_event_ids)
 
-    def prepare_pending_response_source(
+    async def prepare_pending_response_source(
         self,
         *,
         target: MessageTarget,
@@ -474,12 +546,12 @@ class TurnStore:
         terminal_source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish cleanup, then suppress a pending response whose source became terminal."""
-        return self._prepare_response_for_redactions(
+        return await self._prepare_response_for_redactions(
             target=target,
             source_event_ids=source_event_ids,
         ) or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
 
-    def prepare_edit_response_source(
+    async def prepare_edit_response_source(
         self,
         *,
         target: MessageTarget,
@@ -491,7 +563,7 @@ class TurnStore:
         if isinstance(edit_receipt_order, bool) or edit_receipt_order <= 0:
             msg = "Edit receipt order must be positive"
             raise ValueError(msg)
-        if self._prepare_response_for_redactions(target=target, source_event_ids=source_event_ids):
+        if await self._prepare_response_for_redactions(target=target, source_event_ids=source_event_ids):
             return True
         if response_event_id is None:
             return False
@@ -514,7 +586,7 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        prepared = self._update_response_turn(response_event_id, prepared_record)
+        prepared = await self._update_response_turn(response_event_id, prepared_record)
         return prepared is None or (
             prepared.user_stop_receipt_order is not None and edit_receipt_order <= prepared.user_stop_receipt_order
         )
@@ -573,7 +645,7 @@ class TurnStore:
         metadata = TurnRecordCodec.to_run_metadata(projected_record)
         return dict(metadata) if metadata else None
 
-    def load_turn(
+    async def load_turn(
         self,
         *,
         room: nio.MatrixRoom,
@@ -608,7 +680,7 @@ class TurnStore:
                 else recovery_record
             )
 
-        return self._ledger.update_handled_turn(
+        return await self._ledger.update_handled_turn(
             (original_event_id, *recovery_record.indexed_event_ids),
             repaired_record,
         )
@@ -673,7 +745,7 @@ class TurnStore:
             removed_any = removed or removed_any
         return removed_any
 
-    def _clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
+    async def _clear_pending_redaction_cleanup(self, redacted_event_id: str) -> None:
         """Acknowledge one cleanup intent after its conversation has been cleaned."""
 
         def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
@@ -690,7 +762,7 @@ class TurnStore:
 
         if self._ledger.get_turn_record(redacted_event_id) is None:
             return
-        self._ledger.update_handled_turn((redacted_event_id,), cleared_record)
+        await self._ledger.update_handled_turn((redacted_event_id,), cleared_record)
 
     def _remove_redacted_event_from_scope(
         self,

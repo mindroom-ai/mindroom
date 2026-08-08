@@ -11,10 +11,10 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
@@ -23,7 +23,7 @@ from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -283,7 +283,7 @@ class TestDMIntegration:
             runtime_paths=runtime_paths_for(config),
             rooms=[],
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
 
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id

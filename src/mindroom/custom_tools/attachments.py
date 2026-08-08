@@ -324,14 +324,20 @@ async def send_resolved_attachments(
     room_id: str,
     thread_id: str | None,
     attachments: list[_ResolvedSendAttachment],
+    known_latest_thread_event_id: str | None = None,
 ) -> tuple[list[str], str | None]:
-    """Send local files or already-encrypted Matrix media while preserving order."""
+    """Send local files or already-encrypted Matrix media while preserving order.
+
+    ``known_latest_thread_event_id`` is for a caller that already sent into this
+    thread in this same execution. Each attachment after the first chains from
+    the send response of the one before it; this is the same fact for the first,
+    which the projection cannot supply until the earlier send echoes back.
+    """
     attachment_event_ids: list[str] = []
-    assert context.conversation_cache is not None
-    latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-        room_id,
-        thread_id,
-        caller_label="attachment_tool_send",
+    latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+        room_id=room_id,
+        thread_id=thread_id,
+        known_latest_thread_event_id=known_latest_thread_event_id,
     )
     for attachment in attachments:
         if isinstance(attachment, Path):
@@ -341,7 +347,6 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                conversation_cache=context.conversation_cache,
             )
             attachment_label = str(attachment)
         else:
@@ -351,7 +356,6 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
-                conversation_cache=context.conversation_cache,
             )
             attachment_label = attachment.attachment_id
         if attachment_event_id is None:
@@ -371,6 +375,7 @@ async def send_context_attachments(
     require_joined_room: bool = True,
     inherit_context_thread: bool = True,
     workspace_root: Path | None = None,
+    known_latest_thread_event_id: str | None = None,
 ) -> tuple[_AttachmentSendResult | None, str | None]:
     """Resolve and send context-scoped attachments to Matrix."""
     attachments, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = resolve_send_attachments(
@@ -406,6 +411,7 @@ async def send_context_attachments(
         room_id=effective_room_id,
         thread_id=effective_thread_id,
         attachments=attachments,
+        known_latest_thread_event_id=known_latest_thread_event_id,
     )
     result = _AttachmentSendResult(
         room_id=effective_room_id,

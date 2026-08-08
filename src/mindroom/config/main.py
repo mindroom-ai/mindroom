@@ -37,7 +37,7 @@ from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
-    CacheConfig,
+    EventJournalConfig,
     MatrixRoomAccessConfig,
     MatrixSpaceConfig,
     MatrixSyncConfig,
@@ -425,7 +425,10 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
-    cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
+    event_journal: EventJournalConfig = Field(
+        default_factory=EventJournalConfig,
+        description="Durable Matrix event-journal store",
+    )
     matrix_sync: MatrixSyncConfig = Field(
         default_factory=MatrixSyncConfig,
         description="Matrix event sync transport configuration",

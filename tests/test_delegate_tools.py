@@ -23,7 +23,12 @@ from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -558,8 +563,8 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=make_event_cache_mock(),
-            conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
             correlation_id="corr-parent",
             tool_function_filter=tool_function_filter,
         )
@@ -647,8 +652,8 @@ class TestDelegateKnowledge:
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=make_event_cache_mock(),
-            conversation_cache=make_conversation_cache_mock(),
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
             active_model_name="default",
         )
 

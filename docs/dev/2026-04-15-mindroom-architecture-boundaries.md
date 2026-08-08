@@ -12,7 +12,7 @@ It is allowed to change as we learn more about the codebase.
 
 It is not a frozen contract and it is not a promise that the current code already matches the target state.
 
-The immediate enforcement plan is intentionally narrower than the full architecture described here.
+Enforcement has since caught up with it: `tach.toml` now declares the whole runtime rather than one pilot slice.
 
 ## Purpose
 
@@ -46,7 +46,7 @@ The core MindRoom runtime is best understood as several cooperating domains.
 
 This domain owns process boot, bot lifecycle, shared runtime resources, response execution, and top-level flow control.
 
-Representative modules include `orchestrator.py`, `bot.py`, `runtime_support.py`, `response_runner.py`, and `turn_controller.py`.
+Representative modules include `orchestrator.py`, `bot.py`, `bot_runtime_view.py`, `response_runner.py`, and `turn_controller.py`.
 
 This domain is responsible for bringing the system up, holding long-lived runtime state, and coordinating agent execution.
 
@@ -54,7 +54,7 @@ This domain is responsible for bringing the system up, holding long-lived runtim
 
 This domain owns Matrix event storage, conversation lookup, thread semantics, room-facing event handling, and message history behavior.
 
-Representative modules include `matrix/client.py`, `matrix/conversation_cache.py`, `matrix/cache/*`, `matrix/thread_membership.py`, and related thread bookkeeping helpers.
+Representative modules include `matrix/client.py`, `matrix/journal_ingress.py`, `matrix/conversation_reads.py`, `matrix/thread_membership.py`, and the `event_journal/` package that owns the durable event record and its conversation projection.
 
 This domain is responsible for durable event knowledge and conversation semantics, not for broader orchestration policy.
 
@@ -114,11 +114,11 @@ It should not quietly redefine lower-level domain policy.
 
 ### Matrix conversation domain
 
-The conversation-facing public seams should be the conversation-level cache and related conversation contracts.
+The conversation-facing public seams should be the journal's read views and the conversation-read contracts built on them.
 
-Low-level cache internals should remain internal to the cache package unless there is a deliberately exported package-level boundary.
+Storage internals should remain internal to the `event_journal` package unless there is a deliberately exported package-level boundary.
 
-Callers above the cache package should not need to know how storage is decomposed into runtime, event, thread, or write-policy internals.
+Callers above the journal should not need to know how storage is decomposed into backend, projection, outbox, or membership internals.
 
 Thread and conversation policy should have a small number of named decision points.
 
@@ -152,7 +152,7 @@ See [tach.toml](../../tach.toml) for the enforced surface and its source of trut
 
 This domain should talk to runtime, conversation, and tool contracts.
 
-It should not own low-level cache policy or storage semantics.
+It should not own low-level storage policy or persistence semantics.
 
 Commands, API routes, and scheduling flows should be consumers of domain contracts, not alternate implementations of them.
 
@@ -168,7 +168,7 @@ The current architecture is stronger than it was before the recent refactor wave
 
 The runtime and dispatch area now has clearer explicit contracts than it had before.
 
-The thread and cache areas have clearer ownership than before, but the cache package in particular still has a relatively high conceptual surface area.
+The thread and storage areas have clearer ownership than before, but the `event_journal` package in particular still has a relatively high conceptual surface area.
 
 Some private concrete types still leak into runtime wiring and many tests.
 
@@ -184,7 +184,7 @@ Higher-level code should mostly depend on stable facades, protocols, and package
 
 Low-level implementation modules should be free to change without becoming hidden APIs that other domains depend on directly.
 
-The conversation domain should present one obvious public boundary for conversation semantics and a limited public boundary for durable cache behavior.
+The conversation domain should present one obvious public boundary for conversation semantics and a limited public boundary for durable event storage.
 
 The runtime domain should construct internal implementations where necessary, but that construction should not muddy the preferred interfaces for the rest of the system.
 
@@ -202,9 +202,9 @@ Target state: orchestration constructs internal services while the rest of the c
 
 ### Matrix conversation domain
 
-Current state: the conversation and cache story is more explicit than before, but the cache package still needs a calmer public versus internal boundary.
+Current state: the conversation and storage story is more explicit than before, but the `event_journal` package still needs a calmer public versus internal boundary.
 
-Target state: callers above the cache package use conversation-level and package-level seams without depending on internal module layout.
+Target state: callers above the journal use conversation-level and package-level seams without depending on internal module layout.
 
 ### Tool execution and dispatch
 
@@ -220,7 +220,7 @@ Target state: agent and team behavior depends on clean contracts from runtime, c
 
 ### Memory and knowledge
 
-Current state: useful and broad, but not yet part of any narrow enforcement boundary.
+Current state: the memory facade is enforced and the knowledge modules carry dependency rules, but both still admit private helper imports across domain lines.
 
 Target state: clear service boundaries and fewer private helper imports across domain lines.
 
@@ -236,7 +236,7 @@ Higher-level modules should prefer package-level or protocol-level boundaries ov
 
 Private implementation modules and private implementation types should not become accidental public APIs through repeated cross-domain imports.
 
-When a stable conversation-facing boundary exists, code above the cache layer should prefer that boundary over direct dependency on low-level cache implementation details.
+When a stable conversation-facing boundary exists, code above the storage layer should prefer that boundary over direct dependency on low-level journal implementation details.
 
 Runtime composition roots may construct concrete implementations, but those construction sites should not define the preferred public interface for unrelated consumers.
 
@@ -250,49 +250,33 @@ Broader integration tests should increasingly prefer public seams.
 
 ## Enforcement strategy
 
-The architecture described here is broader than what we should enforce immediately.
+Enforcement started as a deliberately narrow pilot and has since grown to cover the runtime.
 
-The first enforcement slice should be narrow and high value.
+`tach.toml` is now the source of truth for enforced module boundaries, and it declares explicit `depends_on` rules for the whole `src/mindroom` tree rather than one slice of it.
 
-The initial Tach pilot should focus only on the Matrix cache and conversation boundary cluster.
+That includes the durable conversation domain: `mindroom.event_journal`, `mindroom.matrix.journal_ingress`, and `mindroom.matrix.conversation_reads` each carry their own dependency rules.
 
-That first slice should cover:
+`uv run tach check --dependencies --interfaces` is the command that proves the declared architecture and the real import graph still agree.
 
-- `mindroom.matrix.cache`
-- `mindroom.matrix.conversation_cache`
-- `mindroom.runtime_support`
+A PR that changes runtime module dependencies or public import surfaces updates `tach.toml` in the same PR.
 
-The purpose of the first slice is to make one important boundary real instead of generating a large repo-wide violation list.
+Enforcement is not the same as convergence.
 
-Everything else should remain effectively unchecked or advisory at first.
+Tach can only refuse imports that the declared rules forbid, so a boundary that is declared loosely is still enforced loosely, and tightening a rule is the work this document exists to guide.
 
-The existing privacy script can remain in place during the initial Tach rollout.
+## Where enforcement is still loose
 
-The goal of the first enforcement phase is not to solve all architecture debt.
+The rules describe the import graph as it is, which means some of them record debt rather than intent.
 
-The goal is to prove that a small, explicit boundary can be described, enforced, and kept green.
+Areas still worth tightening:
 
-## Why the first enforcement slice is narrow
-
-The recent refactor wave made this boundary the most immediately valuable target.
-
-It is also the place where accidental public surfaces and internal-layout leakage are easiest to reason about right now.
-
-A narrow pilot reduces rollout noise and makes the resulting CI signal meaningful.
-
-A broad first rollout would turn Tach into another large source of generic findings rather than a tool that protects a real architectural seam.
-
-## Possible future enforcement phases
-
-If the narrow cache and conversation pilot succeeds, later phases may include:
-
-- broader runtime contract enforcement
+- broader runtime contract enforcement, so callers depend on contracts rather than on lifecycle shells
 - thread-domain policy boundaries
 - knowledge boundary cleanup
 - broader memory tightening beyond the current facade slice
 - selected private-helper import rules in other domains
 
-Those later phases should only be added once the earlier slice is stable and useful.
+Tightening one of these means narrowing a `depends_on` list or adding an interface, then fixing the imports the change rejects.
 
 ## Non-goals
 
@@ -308,8 +292,8 @@ It does not require fewer files as an end in itself.
 
 It is a guide for converging on clearer ownership and clearer public seams over time.
 
-## Immediate next step
+## How to use this document
 
-The immediate next step after this document is a narrow Tach adoption plan for the Matrix cache and conversation boundary cluster.
+Read this for the intended ownership story and read `tach.toml` for what is actually enforced today.
 
-That plan should be evaluated against this architecture document rather than treated as a replacement for it.
+When the two disagree, one of them is wrong, and saying which is the useful outcome of noticing.

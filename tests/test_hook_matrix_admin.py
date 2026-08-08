@@ -19,7 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import AgentMessageSnapshot
+from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -27,7 +27,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -123,7 +123,6 @@ async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_pa
         room_id="!room:localhost",
         thread_id="$thread_root",
         sender="@agent:localhost",
-        runtime_started_at=1234.0,
     )
 
 
@@ -333,7 +332,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         runtime_paths=runtime_paths,
         rooms=[],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     left_room_ids: list[str] = []
 

@@ -33,7 +33,7 @@ from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_N
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -77,7 +77,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True
     bot.orchestrator = None
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )
@@ -171,18 +171,20 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            target = envelope["m.relates_to"]["event_id"]
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append((target, body))
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.send_message_result",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -533,13 +535,14 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,  # noqa: ARG001
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append(text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append(body)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         error_messages = [
             "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
@@ -555,17 +558,22 @@ class TestAIErrorDisplay:
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.delivery_gateway.edit_message_result",
+                    "mindroom.delivery_gateway.send_message_result",
                     new=AsyncMock(side_effect=mock_gateway_edit_message),
                 ),
             ):
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
+                # Each iteration is a separate turn, so it needs a separate
+                # causing event. Sharing one would make the outbox treat the
+                # later answers as resends of the first and replay it.
+                index = error_messages.index(error_msg)
                 await bot._response_runner._process_and_respond(
                     _response_request(
                         prompt="Help me",
-                        existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                        reply_to_event_id=f"$user_msg_{index}",
+                        existing_event_id=f"$thinking_{index}",
                     ),
                 )
 

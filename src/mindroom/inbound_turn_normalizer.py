@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""
 
-    event: nio.RoomMessageText | PreparedTextEvent
+    event: nio.RoomMessageFormatted | PreparedTextEvent
 
 
 @dataclass(frozen=True)
@@ -253,7 +253,7 @@ class InboundTurnNormalizer:
         *,
         room_id: str,
         thread_id: str | None,
-        event: nio.RoomMessageText | PreparedTextEvent | MediaDispatchEvent,
+        event: nio.RoomMessageFormatted | PreparedTextEvent | MediaDispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
         if not is_matrix_media_dispatch_event(event):

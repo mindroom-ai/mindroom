@@ -119,7 +119,7 @@ async def handle_tool_approval_action(
 async def maybe_handle_tool_approval_reply(
     *,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageText,
+    event: nio.RoomMessageFormatted,
     config: Config,
     runtime_paths: RuntimePaths,
     orchestrator: OrchestratorRuntime | None,

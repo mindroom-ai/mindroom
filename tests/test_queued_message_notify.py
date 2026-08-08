@@ -61,8 +61,9 @@ from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
@@ -86,14 +87,15 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
+    install_runtime_journal_support,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_turn_context,
     message_origin,
     prepared_dispatch_result,
     request_envelope,
     runtime_paths_for,
+    serve_conversation_reader,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -157,7 +159,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
 
@@ -833,23 +835,21 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
     deps = support.build_deps(
         room_id="!room:localhost",
@@ -864,7 +864,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
-    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -902,27 +902,32 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
-        "!room:localhost",
-        "$thread",
-        caller_label="thread_summary_background",
+    conversation_reader.read_strict.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
     )
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="default",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    # Nothing has echoed the response back, so the projection this pass reads
+    # stops one message short of the thread. It summarizes the projected
+    # messages plus the answer it was queued for, and counts that answer -- the
+    # same number the pre-queue gate above already used.
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "default",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
         "$thread",
         "Summary",
-        5,
+        6,
         "default",
-        conversation_cache,
+        conversation_reader,
         initial_enrichment_complete=None,
     )
 
@@ -934,23 +939,21 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
     )
-    conversation_cache = MagicMock()
+    conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
         delivery_gateway=MagicMock(),
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
     )
     deps = support.build_deps(
         room_id="!adhoc:localhost",
@@ -965,7 +968,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
-    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
+    serve_conversation_reader(conversation_reader, thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -1004,14 +1007,15 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_generate.assert_awaited_once_with(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name="qwen",
-        tag_vocabulary=None,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-    )
+    generated_history = mock_generate.await_args.args[0]
+    assert list(generated_history[:-1]) == thread_history
+    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
+    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
+    assert mock_generate.await_args.kwargs == {
+        "model_name": "qwen",
+        "tag_vocabulary": None,
+        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
+    }
 
 
 @pytest.mark.asyncio
@@ -1251,6 +1255,20 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     lifecycle_lock = coordinator._lifecycle_coordinator._response_lifecycle_lock(response_target)
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
+    # Both handoffs this test observes are causal, not timed: the turn is known
+    # to be blocked on the lock because its own acquire said so, and the
+    # lifecycle is known to have started because it said so. A wall-clock bound
+    # on either would only re-add the race, since the work between the release
+    # and the first placeholder is real and its duration is the machine's to
+    # decide.
+    lock_wait_started = asyncio.Event()
+    acquire_lifecycle_lock = lifecycle_lock.acquire
+
+    async def announce_lock_wait() -> bool:
+        lock_wait_started.set()
+        return await acquire_lifecycle_lock()
+
+    lifecycle_lock.acquire = announce_lock_wait  # type: ignore[method-assign]
 
     async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> str:
         lifecycle_started.set()
@@ -1295,11 +1313,11 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                     ),
                 ),
             )
-            await asyncio.sleep(0.05)
+            await lock_wait_started.wait()
             mock_run_cancellable_response.assert_not_awaited()
 
             lifecycle_lock.release()
-            await asyncio.wait_for(lifecycle_started.wait(), timeout=0.2)
+            await lifecycle_started.wait()
             resolution = await task
             assert resolution == "$response"
     finally:
@@ -1348,7 +1366,6 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     mock_fetch_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
-        caller_label="dispatch_post_lock_refresh",
     )
     assert request.thread_history == fresh_history
 

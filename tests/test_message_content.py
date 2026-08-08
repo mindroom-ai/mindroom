@@ -13,21 +13,17 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.cache.event_cache_events import event_mxc_urls
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
     resolve_visible_event_source,
     thread_root_body_preview,
 )
-from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import (
-    SidecarHydrationBatch,
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
-    prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -78,8 +74,8 @@ def _make_client() -> AsyncMock:
 class TestResolvedMessageExtraction:
     """Tests for coherent visible message extraction."""
 
-    def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
-        """Hydration and reference tracking must choose the same valid MXC URL."""
+    def test_sidecar_url_validation_prefers_the_encrypted_file_url(self) -> None:
+        """Hydration must pick the MXC URL, not the plain HTTP one beside it."""
         content = {
             "body": "Preview body",
             "msgtype": "m.file",
@@ -92,11 +88,10 @@ class TestResolvedMessageExtraction:
         }
 
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
-        assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
 
     @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
     def test_sidecar_url_validation_rejects_incomplete_mxc_uris(self, malformed_url: str) -> None:
-        """Incomplete content URIs must not enter hydration or ownership indexes."""
+        """Incomplete content URIs must not enter hydration."""
         metadata = {
             "version": 2,
             "encoding": "matrix_event_content_json",
@@ -112,8 +107,6 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
-        assert event_mxc_urls({"content": direct_content}) == frozenset()
-        assert event_mxc_urls({"content": encrypted_content}) == frozenset()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -143,20 +136,10 @@ class TestResolvedMessageExtraction:
                 body=json.dumps(original_content).encode("utf-8"),
             ),
         )
-        event_cache = AsyncMock()
-
-        resolved = await extract_and_resolve_message(
-            event,
-            client,
-            event_cache=event_cache,
-            room_id="!room:localhost",
-        )
+        resolved = await extract_and_resolve_message(event, client)
 
         assert resolved["body"] == "Full response body"
         assert resolved["content"] == original_content
-        event_cache.store_event.assert_not_awaited()
-        event_cache.get_mxc_text.assert_not_awaited()
-        event_cache.store_mxc_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_edit_wrapper(self) -> None:
@@ -353,6 +336,93 @@ class TestResolvedMessageExtraction:
         )
 
         assert event_source["content"] == canonical_content
+
+    @pytest.mark.asyncio
+    async def test_hydration_keeps_the_relation_the_event_carries(self) -> None:
+        """A sidecar payload supplies text, never the event's place in the relation graph.
+
+        The metadata naming the sidecar sits inside ``m.new_content``, so a payload that restated
+        ``m.relates_to`` would erase the ``m.replace`` and hand whoever uploaded the file the choice
+        of which conversation the message joins - a thread nothing about the event agrees with.
+        """
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "msgtype": "m.text",
+                        "body": "Full text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed"},
+                    },
+                ).encode("utf-8"),
+            ),
+        )
+
+        event_source = await resolve_event_source_content(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "* Preview edit",
+                    "m.new_content": {
+                        "msgtype": "m.file",
+                        "body": "Preview edit",
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://server/crafted-edit-sidecar",
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                },
+            },
+            client,
+        )
+
+        # The text is hydrated, so this pins preservation rather than a skipped download.
+        assert event_source["content"]["body"] == "Full text"
+        event_info = EventInfo.from_event(event_source)
+        assert event_info.is_edit is True
+        assert event_info.original_event_id == "$original"
+        assert event_info.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_hydration_cannot_give_a_relation_free_event_a_relation(self) -> None:
+        """An event that relates to nothing still relates to nothing once its text arrives."""
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "msgtype": "m.text",
+                        "body": "Full text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed"},
+                    },
+                ).encode("utf-8"),
+            ),
+        )
+
+        event_source = await resolve_event_source_content(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "Preview",
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": "mxc://server/crafted-plain-sidecar",
+                },
+            },
+            client,
+        )
+
+        assert event_source["content"]["body"] == "Full text"
+        assert "m.relates_to" not in event_source["content"]
+        assert EventInfo.from_event(event_source).thread_id is None
 
     def test_visible_body_from_event_source_prefers_visible_edit_content(self) -> None:
         """Visible-body extraction should use m.new_content when present."""
@@ -757,8 +827,6 @@ class TestResolvedMessageExtraction:
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
             trusted_sender_ids=trusted_sender_ids,
         )
         mock_resolve.assert_awaited_once_with(
@@ -767,115 +835,12 @@ class TestResolvedMessageExtraction:
             fallback_body="Original root",
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
             trusted_sender_ids=trusted_sender_ids,
         )
 
     def test_message_preview_compacts_whitespace_and_truncates(self) -> None:
         """Shared preview compaction should live in the Matrix visible-message layer."""
         assert message_preview("  alpha   beta  \n gamma  ", max_length=12) == "alpha bet..."
-
-
-class TestSidecarHydrationBatch:
-    """Tests for request-scoped batched sidecar hydration."""
-
-    @pytest.mark.asyncio
-    async def test_batch_reference_miss_skips_redundant_point_read(self) -> None:
-        """A reference covered by the batch may download directly after a proven cache miss."""
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"fresh"
-        client.download.return_value = response
-        event_cache = AsyncMock()
-        event_cache.get_mxc_text.return_value = "stale"
-        reference = ("$event", "mxc://server/covered")
-        hydration_batch = SidecarHydrationBatch(
-            cached_texts={},
-            references=frozenset({reference}),
-            owner_event_ids=frozenset({"$event"}),
-        )
-
-        assert (
-            await _download_mxc_text(
-                client,
-                reference[1],
-                event_cache=event_cache,
-                room_id="!room:localhost",
-                event_id=reference[0],
-                expected_membership_epoch=1,
-                hydration_batch=hydration_batch,
-            )
-            == "fresh"
-        )
-        event_cache.get_mxc_text.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_reference_outside_batch_keeps_point_read_fallback(self) -> None:
-        """An uncovered bundled event must retain the exact point-cache lookup."""
-        client = AsyncMock()
-        client.download.side_effect = AssertionError("point-cache hit must not download")
-        event_cache = AsyncMock()
-        event_cache.get_mxc_text.return_value = "cached"
-        hydration_batch = SidecarHydrationBatch(
-            cached_texts={},
-            references=frozenset({("$other", "mxc://server/other")}),
-            owner_event_ids=frozenset({"$other"}),
-        )
-
-        assert (
-            await _download_mxc_text(
-                client,
-                "mxc://server/uncovered",
-                event_cache=event_cache,
-                room_id="!room:localhost",
-                event_id="$event",
-                expected_membership_epoch=1,
-                hydration_batch=hydration_batch,
-            )
-            == "cached"
-        )
-        event_cache.get_mxc_text.assert_awaited_once_with(
-            "!room:localhost",
-            "$event",
-            "mxc://server/uncovered",
-        )
-
-
-@pytest.mark.asyncio
-async def test_sidecar_batch_only_skips_registration_for_verified_owners() -> None:
-    """A read-only batch must not claim ownership for plaintext cache misses."""
-    hit_reference = ("$hit", "mxc://server/hit")
-    miss_reference = ("$miss", "mxc://server/miss")
-    sources = [
-        {
-            "event_id": event_id,
-            "content": {
-                "msgtype": "m.file",
-                "body": "preview",
-                "url": mxc_url,
-                "io.mindroom.long_text": {
-                    "version": 2,
-                    "encoding": "matrix_event_content_json",
-                },
-            },
-        }
-        for event_id, mxc_url in (hit_reference, miss_reference)
-    ]
-    event_cache = AsyncMock()
-    event_cache.get_mxc_texts.return_value = {hit_reference: "cached"}
-
-    hydration_batch = await prepare_sidecar_hydration_batch(
-        sources,
-        event_cache=event_cache,
-        room_id="!room:localhost",
-        expected_membership_epoch=1,
-        register_owners=False,
-    )
-
-    assert hydration_batch is not None
-    assert hydration_batch.references == frozenset({hit_reference, miss_reference})
-    assert hydration_batch.owner_event_ids == frozenset({"$hit"})
 
 
 class TestDownloadMxcText:
@@ -904,23 +869,10 @@ class TestDownloadMxcText:
         response.body = b"Downloaded text content"
         client.download.return_value = response
 
-        result = await _download_mxc_text(
-            client,
-            "mxc://server/media123",
-            room_id="!room:localhost",
-            event_id="$event",
-        )
+        result = await _download_mxc_text(client, "mxc://server/media123")
         assert result == "Downloaded text content"
         client.download.assert_called_once_with(mxc="mxc://server/media123")
-        assert (
-            await _download_mxc_text(
-                client,
-                "mxc://server/media123",
-                room_id="!room:localhost",
-                event_id="$event",
-            )
-            == "Downloaded text content"
-        )
+        assert await _download_mxc_text(client, "mxc://server/media123") == "Downloaded text content"
         assert client.download.await_count == 2
 
     @pytest.mark.asyncio
@@ -936,8 +888,14 @@ class TestDownloadMxcText:
         assert await _download_mxc_text(client, "mxc://server/encrypted", file_info) == plaintext.decode()
 
     @pytest.mark.asyncio
-    async def test_hydration_without_durable_cache_does_not_reuse_plaintext(self) -> None:
-        """Hydration without room and event identity returns text without retaining it."""
+    async def test_hydration_does_not_reuse_plaintext_across_calls(self) -> None:
+        """Sidecar resolution keeps no durable memory of what it resolved.
+
+        The resolved text belongs to the visible revision it is the body of,
+        and the projection stores it there. A second copy here would need its
+        own invalidation, and one that missed a redaction would serve deleted
+        content.
+        """
         client = AsyncMock()
         client.user_id = "@alice:localhost"
         first_response = MagicMock(spec=nio.DownloadResponse)
@@ -951,217 +909,6 @@ class TestDownloadMxcText:
         assert client.download.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_download_returns_text_without_caching_when_durable_store_fails(self) -> None:
-        """A cache outage must not suppress freshly downloaded visible content."""
-        client = AsyncMock()
-        client.user_id = "@alice:localhost"
-        first_response = MagicMock(spec=nio.DownloadResponse)
-        first_response.body = b"first"
-        second_response = MagicMock(spec=nio.DownloadResponse)
-        second_response.body = b"second"
-        client.download.side_effect = [first_response, second_response]
-        event_cache = AsyncMock()
-        event_cache.principal_id = "@alice:localhost"
-        event_cache.get_mxc_text.return_value = None
-        event_cache.store_mxc_text.side_effect = RuntimeError("cache unavailable")
-        kwargs = {
-            "event_cache": event_cache,
-            "room_id": "!room:localhost",
-            "event_id": "$event",
-        }
-
-        assert await _download_mxc_text(client, "mxc://server/outage", **kwargs) == "first"
-        assert await _download_mxc_text(client, "mxc://server/outage", **kwargs) == "second"
-        assert client.download.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_download_returns_fresh_text_without_disabled_advisory_cache(self) -> None:
-        """A permanent cache disable must not suppress authenticated fresh content."""
-        principal_id = "@alice:localhost"
-        room_id = "!room:localhost"
-        event_id = "$event"
-        mxc_url = "mxc://server/cache-disabled"
-        client = AsyncMock()
-        client.user_id = principal_id
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"fresh plaintext"
-        client.download.return_value = response
-        event_cache = AsyncMock()
-        event_cache.principal_id = principal_id
-        event_cache.durable_writes_available = False
-        event_cache.get_mxc_text.return_value = None
-        event_cache.store_mxc_text.return_value = False
-
-        assert (
-            await _download_mxc_text(
-                client,
-                mxc_url,
-                event_cache=event_cache,
-                room_id=room_id,
-                event_id=event_id,
-            )
-            == "fresh plaintext"
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("membership_epoch", [None, UNCERTIFIED_MEMBERSHIP_EPOCH])
-    async def test_uncertified_refill_bypasses_durable_plaintext_cache(self, membership_epoch: int | None) -> None:
-        """Missing durable membership proof must use fresh plaintext without caching it."""
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"fresh plaintext"
-        client.download.return_value = response
-        event_cache = AsyncMock()
-        event_cache.get_mxc_text.return_value = "stale plaintext"
-
-        assert (
-            await _download_mxc_text(
-                client,
-                "mxc://server/uncertified",
-                event_cache=event_cache,
-                room_id="!room:localhost",
-                event_id="$event",
-                expected_membership_epoch=membership_epoch,
-            )
-            == "fresh plaintext"
-        )
-        event_cache.get_mxc_text.assert_not_awaited()
-        event_cache.store_mxc_text.assert_not_awaited()
-        client.download.assert_awaited_once_with(mxc="mxc://server/uncertified")
-
-    @pytest.mark.asyncio
-    async def test_departed_room_fence_rejects_late_sidecar_until_rejoin(self, tmp_path: Path) -> None:
-        """Late hydration cannot repopulate plaintext after leave, while a real rejoin can."""
-        principal_id = "@alice:localhost"
-        room_id = "!left:localhost"
-        event_id = "$sidecar"
-        mxc_url = "mxc://server/departed"
-        event = {
-            "event_id": event_id,
-            "sender": principal_id,
-            "origin_server_ts": 1,
-            "type": "m.room.message",
-            "content": {
-                "body": "preview",
-                "msgtype": "m.file",
-                "url": mxc_url,
-                "io.mindroom.long_text": {
-                    "version": 2,
-                    "encoding": "matrix_event_content_json",
-                },
-            },
-        }
-        root = SqliteEventCache(tmp_path / "event-cache.db")
-        await root.initialize()
-        cache = root.for_principal(principal_id)
-        await cache.store_event(event_id, room_id, event)
-        initial_membership_epoch = await cache.room_membership_epoch(room_id)
-        assert initial_membership_epoch is not None
-        await cache.purge_room(room_id)
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"departed plaintext"
-        client.download.return_value = response
-        try:
-            assert (
-                await _download_mxc_text(
-                    client,
-                    mxc_url,
-                    event_cache=cache,
-                    room_id=room_id,
-                    event_id=event_id,
-                    expected_membership_epoch=initial_membership_epoch,
-                )
-                is None
-            )
-            assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
-
-            await cache.mark_room_joined(
-                room_id,
-                expected_departure_epoch=cache.room_departure_epoch(room_id),
-            )
-            await cache.store_event(event_id, room_id, event)
-            rejoined_membership_epoch = await cache.room_membership_epoch(room_id)
-            assert rejoined_membership_epoch is not None
-
-            assert (
-                await _download_mxc_text(
-                    client,
-                    mxc_url,
-                    event_cache=cache,
-                    room_id=room_id,
-                    event_id=event_id,
-                    expected_membership_epoch=rejoined_membership_epoch,
-                )
-                == "departed plaintext"
-            )
-        finally:
-            await root.close()
-
-    @pytest.mark.asyncio
-    async def test_durable_hit_returns_authorized_plaintext_without_rewriting(self) -> None:
-        """A durable ownership-joined cache hit needs no second authorization write."""
-        principal_id = "@alice:localhost"
-        room_id = "!room:localhost"
-        event_id = "$event"
-        mxc_url = "mxc://server/redacted-during-read"
-        client = AsyncMock()
-        client.user_id = principal_id
-        event_cache = AsyncMock()
-        event_cache.principal_id = principal_id
-
-        event_cache.get_mxc_text.return_value = "cached plaintext"
-
-        assert (
-            await _download_mxc_text(
-                client,
-                mxc_url,
-                event_cache=event_cache,
-                room_id=room_id,
-                event_id=event_id,
-                expected_membership_epoch=7,
-            )
-            == "cached plaintext"
-        )
-        event_cache.store_mxc_text.assert_not_awaited()
-        client.download.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_active_event_cache_without_event_identity_does_not_suppress_download(self) -> None:
-        """An incomplete owner may hydrate for this call but cannot populate either cache."""
-        client = AsyncMock()
-        client.user_id = "@alice:localhost"
-        first_response = MagicMock(spec=nio.DownloadResponse)
-        first_response.body = b"first"
-        second_response = MagicMock(spec=nio.DownloadResponse)
-        second_response.body = b"second"
-        client.download.side_effect = [first_response, second_response]
-        event_cache = AsyncMock()
-        event_cache.principal_id = "@alice:localhost"
-
-        assert (
-            await _download_mxc_text(
-                client,
-                "mxc://server/incomplete-owner",
-                event_cache=event_cache,
-                room_id="!room:localhost",
-            )
-            == "first"
-        )
-        assert (
-            await _download_mxc_text(
-                client,
-                "mxc://server/incomplete-owner",
-                event_cache=event_cache,
-                room_id="!room:localhost",
-            )
-            == "second"
-        )
-        event_cache.get_mxc_text.assert_not_awaited()
-        event_cache.store_mxc_text.assert_not_awaited()
-        assert client.download.await_count == 2
-
-    @pytest.mark.asyncio
     async def test_download_failure(self) -> None:
         """Test handling of download failure."""
         client = AsyncMock()
@@ -1172,26 +919,14 @@ class TestDownloadMxcText:
 
     @pytest.mark.asyncio
     async def test_download_rejects_plaintext_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Oversized sidecar bytes should not be decoded, cached, or persisted."""
+        """Oversized sidecar bytes should not be decoded."""
         monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
         client = AsyncMock()
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = b"123456"
         client.download.return_value = response
-        event_cache = AsyncMock()
-        event_cache.principal_id = "@alice:localhost"
-        event_cache.get_mxc_text.return_value = None
 
-        result = await _download_mxc_text(
-            client,
-            "mxc://server/oversized",
-            event_cache=event_cache,
-            room_id="!room:server",
-            event_id="$oversized",
-        )
-
-        assert result is None
-        event_cache.store_mxc_text.assert_not_awaited()
+        assert await _download_mxc_text(client, "mxc://server/oversized") is None
 
     @pytest.mark.asyncio
     async def test_download_rejects_encrypted_sidecar_over_byte_limit_before_decrypt(
@@ -1221,19 +956,9 @@ class TestDownloadMxcText:
         response.body = b"small"
         client.download.return_value = response
         file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
-        event_cache = AsyncMock()
-        event_cache.principal_id = "@alice:localhost"
-        event_cache.get_mxc_text.return_value = None
 
         with patch("mindroom.matrix.message_content.crypto.attachments.decrypt_attachment", return_value=b"123456"):
-            result = await _download_mxc_text(
-                client,
-                "mxc://server/decrypted-oversized",
-                file_info,
-                event_cache=event_cache,
-                room_id="!room:server",
-                event_id="$decrypted-oversized",
-            )
+            result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
 
         assert result is None
 

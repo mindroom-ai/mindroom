@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
-from mindroom.hooks.sender import send_and_track_message
+from mindroom.hooks.sender import send_matrix_message
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.external_triggers.models import ExternalTriggerPayload
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 _EXTERNAL_TRIGGER_ID_KEY = "io.mindroom.external_trigger.id"
 _EXTERNAL_TRIGGER_KIND_KEY = "io.mindroom.external_trigger.kind"
@@ -50,17 +50,16 @@ async def execute_external_trigger(
     payload: ExternalTriggerPayload,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol,
+    conversation_reader: ConversationReader,
 ) -> str | None:
     """Post one authenticated external trigger payload to its configured Matrix target."""
     room_id = snapshot.resolved_room_id
     thread_event_id = None if snapshot.target.new_thread else snapshot.target.thread_id
     latest_thread_event_id = None
     if thread_event_id is not None:
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_event_id,
-            caller_label="external_trigger",
+        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_event_id,
         )
 
     plain_target, mentioned_user_ids, markdown_target = format_entity_mention(
@@ -78,7 +77,7 @@ async def execute_external_trigger(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=_external_trigger_content_metadata(snapshot, payload),
     )
-    delivered = await send_and_track_message(client, room_id, content, conversation_cache)
+    delivered = await send_matrix_message(client, room_id, content)
     if delivered is None:
         return None
     return delivered.event_id

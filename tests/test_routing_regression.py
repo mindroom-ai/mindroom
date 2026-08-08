@@ -25,13 +25,14 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncTrustState
+from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
@@ -45,7 +46,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     make_visible_message,
     message_origin,
@@ -150,7 +151,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    return install_runtime_cache_support(bot)
+    return install_runtime_journal_support(bot)
 
 
 def _router_readiness_runtime(
@@ -482,62 +483,56 @@ class TestRoutingRegression:
             room_id=room_id,
         )
         mock_suggest_responder.return_value = "healthy"
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            live=False,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(event.event_id)
 
         blocked_event = _router_readiness_event("$blocked-recovery")
         mock_suggest_responder.reset_mock(return_value=True)
         mock_suggest_responder.return_value = "stuck"
         router_bot.client.room_send.reset_mock()
-        await router_bot._dispatch_obligation_runner.persist(
+        await router_bot._journal_dispatcher.admit_out_of_band(
             room,
             blocked_event,
-            DispatchCallbackKind.MESSAGE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            live=False,
         )
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
-        assert not router_bot._dispatch_obligation_runner._retry_keys
+        assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
         stuck_bot._first_sync_done = True
         router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
             {"event_id": "$stuck-router-response"},
             room_id=room_id,
         )
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
         assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        await router_bot.recover_pending_turn_journal_events()
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
-            blocked_event.event_id,
-            DispatchCallbackKind.MESSAGE,
-        )
+        assert not await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
     @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
@@ -624,10 +619,10 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-        router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
+        router_bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
+        router_bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
+        assert router_bot._sync_checkpoint_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(
