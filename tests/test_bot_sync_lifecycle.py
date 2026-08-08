@@ -62,6 +62,33 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert bot.client is None
 
     @pytest.mark.asyncio
+    async def test_a_login_as_another_user_keeps_the_journal_this_bot_already_opened(self, bot: AgentBot) -> None:
+        """A re-login under a different Matrix ID moves the principal, not the database.
+
+        This bot was built without a store handed to it, so it opened its own,
+        and the rebuild that follows an identity change runs that same
+        constructor step a second time. One database holds every principal, so
+        the new identity's view comes from the store that is already open --
+        and turn records are deliberately not principal-scoped precisely so
+        that a re-login keeps reading the same database. Opening a second store
+        would abandon the first with nobody left to close it: ``stop`` closes
+        the handle the bot is holding, which would be the replacement.
+        """
+        store_before_login = bot._journal_store
+        identity_before_login = bot.matrix_id
+
+        bot.agent_user.user_id = "@mindroom_general_2:localhost"
+        bot._rebuild_runtime_components_after_login_if_identity_changed(identity_before_login)
+
+        assert bot._journal_principal_id == "general@@mindroom_general_2:localhost"
+        assert bot._journal_store is store_before_login
+
+        await bot.stop()
+
+        with pytest.raises(RuntimeError, match="The event-journal store is closed"):
+            await store_before_login.existing_generation()
+
+    @pytest.mark.asyncio
     async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
         """Successful restored-token catch-up should save the new checkpoint token."""
         _save_certified_sync_token(bot, "s_before_complete")

@@ -520,7 +520,13 @@ class AgentBot:
         if borrowed is not None:
             self._journal_store = borrowed
         else:
-            self._own_journal = self._open_own_journal()
+            # Reached a second time when a login authenticates as a different
+            # Matrix user. The principal changes with the identity, but the
+            # database does not: one database holds every principal, so the new
+            # principal's view comes from the store this bot already opened.
+            # Opening a second would abandon the first without ever closing it.
+            if self._own_journal is None:
+                self._own_journal = self._open_own_journal()
             self._journal_store = self._own_journal.store
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
