@@ -32,13 +32,14 @@ from mindroom.matrix.client_visible_messages import (
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
     bundled_replacement_candidates,
+    is_visible_room_message,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_history_reads import bundled_replacement_source
-from tests.threading_helpers import _emote_event, _text_event
+from tests.threading_helpers import _emote_event, _image_event, _text_event
 
 if TYPE_CHECKING:
-    import nio
+    from mindroom.matrix.message_content import VisibleRoomMessage
 
 _AUTHOR = "@author:localhost"
 _IMPOSTOR = "@impostor:localhost"
@@ -58,7 +59,13 @@ def _original_message(*, sender: str = _AUTHOR, body: str = "original") -> Resol
     )
 
 
-def _record(candidates: ThreadEditCandidates, event: nio.RoomMessageFormatted) -> None:
+def _record(candidates: ThreadEditCandidates, event: VisibleRoomMessage) -> None:
+    # The pool gate is asserted rather than assumed. `record` itself type-checks
+    # nothing, so every caller in production decides membership first with
+    # `is_visible_room_message`; a fixture that skipped that would be able to
+    # rank a replacement no read would ever offer, and these tests would keep
+    # passing for a msgtype the reads had dropped.
+    assert is_visible_room_message(event), "a replacement a read would not admit cannot be ranked here"
     candidates.record(event, event_info=EventInfo.from_event(event.source))
 
 
@@ -486,20 +493,24 @@ class TestReplacementWinnerSelection:
         assert messages[_ORIGINAL_ID].latest_event_id == _ORIGINAL_ID
 
 
-class TestEveryTextualMsgtypeRanksTogether:
-    """An `m.emote` replacement is ranked against `m.text` ones, not below them.
+class TestEveryMsgtypeWithABodyRanksTogether:
+    """An `m.emote` or `m.image` replacement is ranked against `m.text` ones, not below them.
 
-    The candidate pool was `(RoomMessageText, RoomMessageNotice)`, so an emote
-    replacement was not a candidate at all. That is not a tie broken one way: a
-    replacement nobody ranks cannot win, so the collapsed read showed whichever
-    older revision happened to be a text event -- or the unedited original when
-    every replacement was an emote. The projection applies `m.replace` off the
+    The candidate pool was `(RoomMessageText, RoomMessageNotice)`, then
+    `RoomMessageFormatted`, so first an emote and then an image replacement was
+    not a candidate at all. That is not a tie broken one way: a replacement
+    nobody ranks cannot win, so the collapsed read showed whichever older
+    revision happened to be in the pool -- or the unedited original when every
+    replacement was outside it. The projection applies `m.replace` off the
     relation alone and never looks at the msgtype, so the two disagreed.
 
-    Widening the pool changes ranking in exactly one direction. The order is
-    still `(server_timestamp, event_id)` and emotes carry no privilege in it, so
-    the only outcomes that move are the ones where an unrankable replacement was
-    being passed over.
+    Widening the pool changes ranking in exactly one direction, and the
+    argument is the same for media as it was for emotes. The order is still
+    `(server_timestamp, event_id)` and no msgtype carries a privilege in it, so
+    the only outcomes that move are the ones where an unrankable replacement
+    was being passed over. `_edit_payload_rank` is untouched and fires only on
+    equal event IDs, which is one event observed twice and therefore the same
+    msgtype in both copies.
     """
 
     @pytest.mark.asyncio
@@ -572,6 +583,82 @@ class TestEveryTextualMsgtypeRanksTogether:
 
         assert messages[_ORIGINAL_ID].body == "the final word"
         assert messages[_ORIGINAL_ID].latest_event_id == "$edit-text"
+
+    @pytest.mark.asyncio
+    async def test_the_newest_replacement_wins_even_when_it_is_a_picture(self) -> None:
+        """The stale text edit used to win because the newer caption edit was invisible."""
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit-text",
+                body="* superseded",
+                new_body="superseded",
+                sender=_AUTHOR,
+                server_timestamp=4_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        _record(
+            candidates,
+            _image_event(
+                event_id="$edit-image",
+                body="* the corrected caption",
+                new_body="the corrected caption",
+                sender=_AUTHOR,
+                server_timestamp=5_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages = {_ORIGINAL_ID: _original_message()}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].body == "the corrected caption"
+        assert messages[_ORIGINAL_ID].latest_event_id == "$edit-image"
+        # The media the caption belongs to comes with it. A collapsed read that
+        # kept the new words and dropped `url` would describe a picture nobody
+        # can see.
+        assert messages[_ORIGINAL_ID].content["url"] == "mxc://localhost/picture"
+
+    @pytest.mark.asyncio
+    async def test_an_older_picture_replacement_does_not_outrank_a_newer_text_one(self) -> None:
+        """Admitting media to the pool must not promote it within the pool.
+
+        This is the half of the widening that has to change nothing. If it did,
+        every already-collapsed conversation containing one caption edit would
+        start reading at an older revision than it does today.
+        """
+        candidates = ThreadEditCandidates()
+        _record(
+            candidates,
+            _image_event(
+                event_id="$edit-image",
+                body="* an early caption",
+                new_body="an early caption",
+                sender=_AUTHOR,
+                server_timestamp=4_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        _record(
+            candidates,
+            _text_event(
+                event_id="$edit-text",
+                body="* the final word",
+                new_body="the final word",
+                sender=_AUTHOR,
+                server_timestamp=5_000,
+                replacement_of=_ORIGINAL_ID,
+            ),
+        )
+        messages = {_ORIGINAL_ID: _original_message()}
+
+        await _apply(candidates, messages)
+
+        assert messages[_ORIGINAL_ID].body == "the final word"
+        assert messages[_ORIGINAL_ID].latest_event_id == "$edit-text"
+        assert "url" not in messages[_ORIGINAL_ID].content, "the losing revision's media must not survive it"
 
 
 class TestBundledReplacementPrecedence:

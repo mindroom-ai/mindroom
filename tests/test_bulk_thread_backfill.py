@@ -10,6 +10,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.event_journal import replacement_target
 from mindroom.matrix.room_history_reads import (
     _MAX_APPROVAL_CARD_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
@@ -54,8 +55,9 @@ def _message_event(
     is_falling_back: bool = False,
     sender: str = "@alice:localhost",
     msgtype: str = "m.text",
+    extra_content: dict[str, object] | None = None,
 ) -> nio.RoomMessage:
-    content: dict[str, object] = {"body": body, "msgtype": msgtype}
+    content: dict[str, object] = {"body": body, "msgtype": msgtype, **(extra_content or {})}
     if thread_root_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
     if reply_to_event_id is not None:
@@ -85,7 +87,12 @@ def _edit_event(
     sender: str = "@alice:localhost",
     new_body: str = "edited reply",
     msgtype: str = "m.text",
+    extra_content: dict[str, object] | None = None,
 ) -> nio.RoomMessage:
+    # `extra_content` lands on both halves, because a replacement is a whole
+    # event content: a client editing an image caption resends `url` and `info`
+    # alongside the fallback body, and nio refuses to type an `m.image` without
+    # them.
     return _parsed_room_message(
         {
             "event_id": event_id,
@@ -96,10 +103,12 @@ def _edit_event(
             "content": {
                 "body": f"* {new_body}",
                 "msgtype": msgtype,
+                **(extra_content or {}),
                 "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
                 "m.new_content": {
                     "body": new_body,
                     "msgtype": msgtype,
+                    **(extra_content or {}),
                     "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
                 },
             },
@@ -383,7 +392,7 @@ async def test_thread_messages_from_source_resolves_edits_without_touching_a_sto
     assert not [name for name in parameters if "cache" in name or "store" in name]
 
 
-def _emote_thread_client(chunk: list[nio.Event]) -> AsyncMock:
+def _one_page_thread_client(chunk: list[nio.Event]) -> AsyncMock:
     """Return a client serving one page of room history and nothing else."""
     client = AsyncMock()
     client.room_messages = AsyncMock(side_effect=[_messages_response(chunk, end=None)])
@@ -401,7 +410,7 @@ async def test_a_rebuilt_thread_contains_the_emote_the_projection_kept() -> None
     """
     root_id = "$root:localhost"
     emote_id = "$emote:localhost"
-    client = _emote_thread_client(
+    client = _one_page_thread_client(
         [
             _message_event(
                 emote_id,
@@ -436,7 +445,7 @@ async def test_a_rebuilt_thread_applies_an_emote_replacement() -> None:
     """
     root_id = "$root:localhost"
     emote_id = "$emote:localhost"
-    client = _emote_thread_client(
+    client = _one_page_thread_client(
         [
             _edit_event(
                 "$emote-edit:localhost",
@@ -475,7 +484,7 @@ async def test_a_rebuilt_thread_collapses_to_the_newest_revision_across_msgtypes
     """
     root_id = "$root:localhost"
     reply_id = "$reply:localhost"
-    client = _emote_thread_client(
+    client = _one_page_thread_client(
         [
             _edit_event(
                 "$edit-emote:localhost",
@@ -508,10 +517,10 @@ async def test_a_rebuilt_thread_collapses_to_the_newest_revision_across_msgtypes
 async def test_a_msgtype_nio_cannot_type_stays_out_of_the_replacement_pool() -> None:
     """`RoomMessageUnknown` carries no body, which is why it is not widened in.
 
-    It is the boundary of the widening and the same line admission draws: the
-    conversation still contains the event, but nothing treats it as a textual
-    message. A pool defined by `RoomMessage` instead of `RoomMessageFormatted`
-    would reach `.body` on a class that has none.
+    It is the one exclusion the pool names, and the same line admission draws:
+    the conversation still contains the event, but nothing treats it as a
+    visible message. A pool that said `RoomMessage` and stopped would reach
+    `.body` on a class that has none.
     """
     root_id = "$root:localhost"
     reply_id = "$reply:localhost"
@@ -524,7 +533,7 @@ async def test_a_msgtype_nio_cannot_type_stays_out_of_the_replacement_pool() -> 
         msgtype="m.location",
     )
     assert isinstance(location_edit, nio.RoomMessageUnknown), "fixture must reach nio's unknown-msgtype class"
-    client = _emote_thread_client(
+    client = _one_page_thread_client(
         [
             location_edit,
             _message_event(reply_id, "first draft", timestamp=3000, thread_root_id=root_id),
@@ -537,6 +546,192 @@ async def test_a_msgtype_nio_cannot_type_stays_out_of_the_replacement_pool() -> 
     unedited = next(message for message in messages if message.event_id == reply_id)
     assert unedited.body == "first draft"
     assert unedited.latest_event_id == reply_id
+
+
+_PICTURE = {"url": "mxc://localhost/picture", "info": {"mimetype": "image/png", "w": 8, "h": 8}}
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_applies_an_image_caption_edit() -> None:
+    """The projection applies a media replacement, so a rebuilt read has to as well.
+
+    `event_journal.projection.project` decides an event is an edit from
+    `replacement_target(content)` alone and never looks at a msgtype, so a
+    watched conversation shows the corrected caption. This read matched the
+    candidate pool on textual msgtypes, so it dropped the replacement -- and a
+    replacement excluded from the pool is also skipped as a message, so the
+    correction vanished entirely and the read answered with the caption the
+    sender had already fixed.
+    """
+    root_id = "$root:localhost"
+    image_id = "$image:localhost"
+    caption_edit = _edit_event(
+        "$caption-edit:localhost",
+        image_id,
+        timestamp=4000,
+        thread_root_id=root_id,
+        new_body="the corrected caption",
+        msgtype="m.image",
+        extra_content=dict(_PICTURE),
+    )
+    # The live side's own rule, asserted here rather than assumed: this content
+    # is an edit to the projection, which is exactly why the read may not
+    # disagree about it.
+    assert replacement_target(caption_edit.source["content"]) == image_id
+    client = _one_page_thread_client(
+        [
+            caption_edit,
+            _message_event(
+                image_id,
+                "the original caption",
+                timestamp=3000,
+                thread_root_id=root_id,
+                msgtype="m.image",
+                extra_content=dict(_PICTURE),
+            ),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    edited = next(message for message in messages if message.event_id == image_id)
+    assert edited.body == "the corrected caption"
+    assert edited.latest_event_id == "$caption-edit:localhost"
+    # Still the picture it was. A caption edit corrects the words attached to
+    # the media, so losing `url` here would turn an edited image into text.
+    assert edited.content["url"] == _PICTURE["url"]
+    assert edited.to_dict()["msgtype"] == "m.image"
+    assert [message.event_id for message in messages] == [root_id, image_id]
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_collapses_a_text_message_edited_into_an_image() -> None:
+    """A replacement may change the msgtype, and the newest one wins whatever it is.
+
+    Matrix places no constraint that a replacement keep its original's msgtype,
+    and the projection applies whichever arrives newest. While media
+    replacements were unrankable this read answered with the older text
+    revision.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    client = _one_page_thread_client(
+        [
+            _edit_event(
+                "$edit-image:localhost",
+                reply_id,
+                timestamp=5000,
+                thread_root_id=root_id,
+                new_body="a picture instead",
+                msgtype="m.image",
+                extra_content=dict(_PICTURE),
+            ),
+            _edit_event(
+                "$edit-text:localhost",
+                reply_id,
+                timestamp=4000,
+                thread_root_id=root_id,
+                new_body="superseded correction",
+            ),
+            _message_event(reply_id, "first draft", timestamp=3000, thread_root_id=root_id),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    collapsed = next(message for message in messages if message.event_id == reply_id)
+    assert collapsed.body == "a picture instead"
+    assert collapsed.latest_event_id == "$edit-image:localhost"
+    assert collapsed.to_dict()["msgtype"] == "m.image"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_thread_collapses_an_image_edited_into_text() -> None:
+    """The other direction, which this read already got right.
+
+    A thread scan kept media originals all along -- only replacements were
+    filtered by msgtype -- so an image corrected into text always collapsed
+    here. Pinned rather than dropped because it is the half of the widening
+    that has to change nothing: media originals now resolve through the same
+    extraction as every other visible message, and this is what says that swap
+    kept the placement, the ordering timestamp, and the body it used to
+    produce. The room read had no such luck, and
+    `test_matrix_message_read_room_folds_a_text_edit_onto_the_picture_it_corrects`
+    covers the direction that was broken there.
+    """
+    root_id = "$root:localhost"
+    image_id = "$image:localhost"
+    client = _one_page_thread_client(
+        [
+            _edit_event(
+                "$edit-text:localhost",
+                image_id,
+                timestamp=5000,
+                thread_root_id=root_id,
+                new_body="words instead",
+            ),
+            _message_event(
+                image_id,
+                "the original caption",
+                timestamp=3000,
+                thread_root_id=root_id,
+                msgtype="m.image",
+                extra_content=dict(_PICTURE),
+            ),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    collapsed = next(message for message in messages if message.event_id == image_id)
+    assert collapsed.body == "words instead"
+    assert collapsed.latest_event_id == "$edit-text:localhost"
+    assert collapsed.thread_id == root_id, "the original was read, so its placement is a fact rather than a guess"
+
+
+@pytest.mark.asyncio
+async def test_a_picture_that_is_not_an_edit_shows_the_body_the_room_published() -> None:
+    """`m.new_content` on an event that replaces nothing is not a body.
+
+    Media used to be resolved by a fallback path built for events nobody could
+    type, and that path reads the visible layer as "`m.new_content` if there is
+    one". Applied to an event with no `m.replace` relation, that let any sender
+    ship a second body inside a message that revises nothing and have the read
+    show it -- while `content` went on carrying the body the room actually
+    displays, so a model was handed a message disagreeing with itself. Textual
+    messages never had the hole, because they were already resolved by the
+    extraction that only honours `m.new_content` for a trusted sender's real
+    replacement.
+    """
+    root_id = "$root:localhost"
+    image_id = "$image:localhost"
+    client = _one_page_thread_client(
+        [
+            _message_event(
+                image_id,
+                "the caption the room shows",
+                timestamp=3000,
+                thread_root_id=root_id,
+                sender="@impostor:localhost",
+                msgtype="m.image",
+                extra_content={
+                    **_PICTURE,
+                    "m.new_content": {"msgtype": "m.image", "body": "a body nothing published", **_PICTURE},
+                },
+            ),
+            _message_event(root_id, "the question", timestamp=1000),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    picture = next(message for message in messages if message.event_id == image_id)
+    assert picture.body == "the caption the room shows"
+    assert picture.body == picture.content["body"], "the read may not disagree with the content it returns"
+    assert picture.latest_event_id == image_id, "nothing was replaced, so nothing is a later revision"
 
 
 def _injected_edit_scan_client(root_id: str, reply_id: str) -> AsyncMock:

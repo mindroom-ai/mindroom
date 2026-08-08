@@ -262,16 +262,19 @@ def _formatted_event_source(
     replacement_of: str | None,
     new_body: str | None,
     new_thread_id: str | None,
+    extra_content: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Return one `m.room.message` source for a msgtype that carries a body."""
     content: dict[str, object] = {
         "body": body,
         "msgtype": msgtype,
+        **(extra_content or {}),
     }
     if replacement_of is not None:
         new_content: dict[str, object] = {
             "body": new_body or body.removeprefix("* ").strip() or body,
             "msgtype": msgtype,
+            **(extra_content or {}),
         }
         if new_thread_id is not None:
             new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": new_thread_id}
@@ -356,6 +359,50 @@ def _emote_event(
             ),
         ),
     )
+
+
+_TEST_PICTURE: dict[str, object] = {
+    "url": "mxc://localhost/picture",
+    "info": {"mimetype": "image/png", "w": 8, "h": 8},
+}
+
+
+def _image_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+    replacement_of: str | None = None,
+    new_body: str | None = None,
+    new_thread_id: str | None = None,
+) -> nio.RoomMessageImage:
+    """Build the same event as `_text_event`, sent as a captioned picture.
+
+    Parsed through nio's own msgtype dispatch rather than a named class, so a
+    fixture cannot claim a parse the production reader would not get -- an
+    `m.image` without a top-level `url` is a `BadEvent` to nio, and that is a
+    real property of media replacements rather than a detail to fixture away.
+    """
+    event = nio.RoomMessage.parse_event(
+        _formatted_event_source(
+            msgtype="m.image",
+            event_id=event_id,
+            body=body,
+            sender=sender,
+            server_timestamp=server_timestamp,
+            room_id=room_id,
+            thread_id=thread_id,
+            replacement_of=replacement_of,
+            new_body=new_body,
+            new_thread_id=new_thread_id,
+            extra_content=dict(_TEST_PICTURE),
+        ),
+    )
+    assert isinstance(event, nio.RoomMessageImage)
+    return event
 
 
 async def _event_iter(events: Sequence[nio.Event]) -> AsyncGenerator[nio.Event, None]:

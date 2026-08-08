@@ -2490,19 +2490,49 @@ async def test_matrix_message_read_room_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_message_read_room_includes_every_msgtype_that_carries_a_body() -> None:
-    """A room read keeps text, notices, and emotes: one rule, not a curated list.
+    """A room read keeps text, notices, emotes, and media: one rule, not a curated list.
 
     The emote was missing, because this read kept its own copy of the visible
-    msgtype list and that copy said text and notice. The journal projection
-    admits `m.room.message` at the base class, so an agent reading the room
-    saw a conversation with a `/me` cut out of it while the same conversation
-    watched live still had it.
+    msgtype list and that copy said text and notice. Sharing one rule with the
+    thread read fixed that and left the picture missing for the same reason,
+    one msgtype further out. The journal projection holds every
+    `m.room.message` it admits, whether admission called it a message or media,
+    so an agent reading the room saw a conversation with a `/me` and an image
+    cut out of it while the same conversation watched live still had both.
     """
     tool = MatrixMessageTools()
     ctx = _make_context(thread_id=None)
     response = nio.RoomMessagesResponse.from_dict(
         {
             "chunk": [
+                {
+                    "type": "m.room.message",
+                    "event_id": "$image",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 4,
+                    "content": {
+                        "msgtype": "m.image",
+                        "body": "the original caption",
+                        "url": "mxc://localhost/picture",
+                    },
+                },
+                {
+                    "type": "m.room.message",
+                    "event_id": "$caption-edit",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 5,
+                    "content": {
+                        "msgtype": "m.image",
+                        "body": "* the corrected caption",
+                        "url": "mxc://localhost/picture",
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$image"},
+                        "m.new_content": {
+                            "msgtype": "m.image",
+                            "body": "the corrected caption",
+                            "url": "mxc://localhost/picture",
+                        },
+                    },
+                },
                 {
                     "type": "m.room.message",
                     "event_id": "$emote",
@@ -2540,7 +2570,74 @@ async def test_matrix_message_read_room_includes_every_msgtype_that_carries_a_bo
         ("$text", "hello", None),
         ("$notice", "Compacted 12 messages", "m.notice"),
         ("$emote", "waves at the bot", "m.emote"),
+        # One row, carrying the caption its sender corrected. The picture is
+        # folded like any other edited message: the read is ordered by the
+        # original's timestamp and reports the revision that is current.
+        ("$image", "the corrected caption", "m.image"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_read_room_folds_a_text_edit_onto_the_picture_it_corrects() -> None:
+    """A replacement may change the msgtype, and dropping the original invented a message.
+
+    This is the failure the other direction produced here, and it is worse than
+    an absence. The image was filtered out of the read while the text edit that
+    replaced it was not, so the fold found a replacement whose original it had
+    never seen and reconstructed one from the replacement alone: a message with
+    the edit's timestamp for a position it never had, and its placement
+    reported as unknown. A model reading the room was handed a message the room
+    does not contain, in place of the picture it does.
+    """
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+    response = nio.RoomMessagesResponse.from_dict(
+        {
+            "chunk": [
+                {
+                    "type": "m.room.message",
+                    "event_id": "$edit",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 2,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "* words instead",
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$image"},
+                        "m.new_content": {"msgtype": "m.text", "body": "words instead"},
+                    },
+                },
+                {
+                    "type": "m.room.message",
+                    "event_id": "$image",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 1,
+                    "content": {
+                        "msgtype": "m.image",
+                        "body": "the original caption",
+                        "url": "mxc://localhost/picture",
+                    },
+                },
+            ],
+            "start": "s",
+            "end": "e",
+        },
+        ctx.room_id,
+    )
+    ctx.client.room_messages.return_value = response
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_message(action="read", limit=5))
+
+    assert payload["status"] == "ok"
+    assert len(payload["messages"]) == 1
+    message = payload["messages"][0]
+    assert message["event_id"] == "$image"
+    assert message["body"] == "words instead"
+    assert message["latest_event_id"] == "$edit"
+    # The original's own position, and a placement that is a fact rather than a
+    # reconstruction. Both were lost when the picture was filtered away.
+    assert message["timestamp"] == 1
+    assert "thread_id_unknown" not in message
 
 
 @pytest.mark.asyncio

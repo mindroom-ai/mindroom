@@ -4075,13 +4075,13 @@ from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [
-    "TEXTUAL_MESSAGE_EVENT_TYPE",
     "ResolvedVisibleMessage",
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "is_visible_room_message",
     "message_preview",
     "room_message_fallback_body",
     "replace_visible_message",

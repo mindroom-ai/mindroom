@@ -30,6 +30,19 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Every `m.room.message` nio could type, which is exactly every one carrying a
+# `body`. `RoomMessageFormatted`, `RoomMessageMedia`, and `RoomEncryptedMedia`
+# are the three direct children of `nio.RoomMessage` that declare one, and
+# `RoomMessageUnknown` is the fourth and declares none.
+#
+# Written as a union only because nio gives encrypted and unencrypted media two
+# sibling bases instead of one, so no single class spans them. The rule that
+# decides membership at runtime is deliberately not this list:
+# `client_visible_messages.is_visible_room_message` asks the base class and
+# names the one exclusion, because four separate curated lists of `RoomMessage`
+# children have now each dropped a msgtype after shipping.
+type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
+
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -187,7 +200,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
 
 
 async def extract_and_resolve_message(
-    event: nio.RoomMessageFormatted,
+    event: VisibleRoomMessage,
     client: nio.AsyncClient | None = None,
     *,
     trusted_sender_ids: Collection[str] = (),

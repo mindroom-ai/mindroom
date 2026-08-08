@@ -30,7 +30,7 @@ from mindroom.event_journal import (
 )
 from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
-from mindroom.matrix.client_visible_messages import TEXTUAL_MESSAGE_EVENT_TYPE
+from mindroom.matrix.client_visible_messages import is_visible_room_message
 from mindroom.matrix.conversation_hydration import _projected_from_event
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
@@ -2953,30 +2953,40 @@ class TestAdmittedWorkReachesItsCallback:
         )
 
     @pytest.mark.parametrize(("msgtype", "extra_content"), _ROOM_MESSAGE_MSGTYPES)
-    async def test_a_server_paginated_read_sees_the_same_textual_messages(
+    async def test_a_server_paginated_read_sees_every_message_the_projection_keeps(
         self,
         msgtype: str,
         extra_content: dict[str, str],
     ) -> None:
-        """The third rule in this family, compared against the first two.
+        """The third rule in this family, compared against what the projection holds.
 
         `matrix.client_visible_messages` decides which parsed events a
-        server-paginated read treats as textual messages -- which edits it
-        collapses, and which bodies it resolves in full. It was a list of two
-        siblings while admission had already generalized to the base class, so
-        an emote was a message when watched and not one when the same thread
-        was rebuilt from `/messages`.
+        server-paginated read treats as visible messages -- which edits it
+        collapses, and which bodies it resolves in full. It has to agree with
+        the projection rather than with the narrower question of what may start
+        a turn, because the projection is what a watched conversation contains.
 
-        The two rules coincide exactly: a textual message is an
-        `m.room.message` that is not media and not the class nio uses for a
-        msgtype it cannot type. Parametrizing over nio's own parse branches
-        means the next msgtype either side stops agreeing on fails here.
+        Admission splits `m.room.message` into `EventKind.MESSAGE` and
+        `EventKind.MEDIA` because those become different work, but both
+        project, and `project()` applies `m.replace` from the relation alone
+        without ever consulting a msgtype. So a watched conversation holds an
+        image and the caption edit that corrects it. This rule was `MESSAGE`
+        alone twice over -- first as a list of two textual siblings, which lost
+        emotes, and then as `RoomMessageFormatted`, which still lost media --
+        and each time the same conversation read one way live and another way
+        rebuilt from `/messages`.
+
+        The two rules coincide exactly: a visible message is an `m.room.message`
+        that the projection keeps and that carries a `body`, which excludes only
+        the class nio uses for a msgtype it cannot type. Parametrizing over
+        nio's own parse branches means the next msgtype either side stops
+        agreeing on fails here.
         """
         event = message_event(f"$read-{msgtype}", msgtype, extra_content=extra_content)
-        admitted_as_message = _event_kind(event) is EventKind.MESSAGE
+        projected_as_a_message = _event_kind(event) in {EventKind.MESSAGE, EventKind.MEDIA}
         has_a_body = not isinstance(event, nio.RoomMessageUnknown)
 
-        assert isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) == (admitted_as_message and has_a_body), (
+        assert is_visible_room_message(event) == (projected_as_a_message and has_a_body), (
             f"{msgtype} is a message to one layer and not the other, so one conversation reads two ways"
         )
 

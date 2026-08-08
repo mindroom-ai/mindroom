@@ -27,7 +27,7 @@ from mindroom.interactive import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_visible_messages import (
-    TEXTUAL_MESSAGE_EVENT_TYPE,
+    is_visible_room_message,
     message_preview,
     resolve_latest_visible_messages,
     thread_root_body_preview,
@@ -413,7 +413,7 @@ class MatrixMessageOperations:
         # ones. Ordered by the original's timestamp, because an edit corrects a
         # message rather than moving it to the end of the room.
         resolved = await resolve_latest_visible_messages(
-            [event for event in reversed(response.chunk) if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE)],
+            [event for event in reversed(response.chunk) if is_visible_room_message(event)],
             context.client,
             trusted_sender_ids=trusted_visible_sender_ids(context.config, context.runtime_paths),
         )

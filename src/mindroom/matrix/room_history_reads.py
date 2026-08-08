@@ -21,11 +21,11 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
-    TEXTUAL_MESSAGE_EVENT_TYPE,
     ResolvedVisibleMessage,
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
     bundled_replacement_candidates,
+    is_visible_room_message,
     room_message_fallback_body,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
@@ -37,7 +37,11 @@ from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
 )
-from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    VisibleRoomMessage,
+    extract_and_resolve_message,
+    resolve_event_source_content,
+)
 from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,
@@ -157,7 +161,7 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and edit_candidates.record(
+    if is_visible_room_message(event) and edit_candidates.record(
         event,
         event_info=event_info,
     ):
@@ -701,7 +705,7 @@ def bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any
     preview needs and is why the two cannot simply share a single function.
     """
     for candidate in bundled_replacement_candidates(event_source):
-        if _parse_visible_textual_message_event(candidate) is not None:
+        if _parse_visible_room_message_event(candidate) is not None:
             return candidate
     return None
 
@@ -738,13 +742,13 @@ async def fetch_thread_messages_from_source(
         event_info = EventInfo.from_event(event.source)
         replacement_source = bundled_replacement_source(event.source)
         if replacement_source is not None:
-            bundled_replacement = nio.Event.parse_event(replacement_source)
-            if isinstance(bundled_replacement, TEXTUAL_MESSAGE_EVENT_TYPE):
+            bundled_replacement = parse_room_message_event(replacement_source)
+            if is_visible_room_message(bundled_replacement):
                 edit_candidates.record(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
                 )
-        if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and edit_candidates.record(
+        if is_visible_room_message(event) and edit_candidates.record(
             event,
             event_info=event_info,
         ):
@@ -775,7 +779,7 @@ async def _resolve_message_from_source(
     trusted_sender_ids: Collection[str],
 ) -> ResolvedVisibleMessage:
     """Resolve one scanned event into the normalized thread-history shape."""
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE):
+    if is_visible_room_message(event):
         message_data = await extract_and_resolve_message(event, client, trusted_sender_ids=trusted_sender_ids)
         return ResolvedVisibleMessage.from_message_data(
             message_data,
@@ -805,9 +809,9 @@ async def _resolve_message_from_source(
     return message
 
 
-def _parse_visible_textual_message_event(
+def _parse_visible_room_message_event(
     event_source: dict[str, Any],
-) -> nio.RoomMessageFormatted | None:
-    """Parse one event dict into a visible textual message when possible."""
+) -> VisibleRoomMessage | None:
+    """Parse one event dict into a visible room message when possible."""
     parsed_event = parse_room_message_event(event_source)
-    return parsed_event if isinstance(parsed_event, TEXTUAL_MESSAGE_EVENT_TYPE) else None
+    return parsed_event if is_visible_room_message(parsed_event) else None

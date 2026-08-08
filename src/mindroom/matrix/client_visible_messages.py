@@ -8,33 +8,52 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import nio
+from typing_extensions import TypeIs
 
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
-from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    VisibleRoomMessage,
+    extract_and_resolve_message,
+    extract_edit_body,
+    resolve_event_source_content,
+)
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-# What an `m.room.message` must have parsed to before a server-paginated read
-# treats it as a visible message: nio's base for every msgtype carrying a
-# textual body, which is `m.text`, `m.emote`, and `m.notice`. Everything else an
-# `m.room.message` can become is either media or a `RoomMessageUnknown`, which
-# has no `body` at all.
-#
-# Deliberately the same class, spelled the same way, that
-# `matrix.journal_ingress` binds work to. The two answer one question from
-# opposite sides: a conversation the journal projected while it was watched and
-# the same conversation rebuilt from `/messages` have to contain the same
-# messages, and a read that skips a msgtype the projection keeps is that
-# divergence. This was a pair of enumerated siblings until an emote read one way
-# live and another way here, which is the third time a curated list of
-# `RoomMessage` subclasses dropped a msgtype after shipping. A base class is
-# self-maintaining; a list of its children is not.
-TEXTUAL_MESSAGE_EVENT_TYPE = nio.RoomMessageFormatted
+
+def is_visible_room_message(event: object) -> TypeIs[VisibleRoomMessage]:
+    """Return whether a server-paginated read treats one parsed event as a visible message.
+
+    Stated as the base class minus its one exclusion, rather than as a list of
+    the children that qualify. That is the whole point of the shape: four
+    curated lists of `RoomMessage` subclasses have now each dropped a msgtype
+    after shipping -- notices, then emotes at admission, then emotes here, then
+    media here -- and a rule that names `nio.RoomMessage` cannot drop the next
+    one.
+
+    The exclusion is `RoomMessageUnknown`, the class nio uses for a msgtype it
+    cannot type. It carries no `body`, so there is nothing for a read to show
+    and nothing for an edit of it to install; letting one in would reach
+    ``.body`` on a class that has none and let an untypeable payload rewrite a
+    message. Demoting that class is not the same mistake as enumerating
+    msgtypes, because the set it describes stays correct as Matrix grows.
+
+    What the read must contain is decided by what the projection keeps, not by
+    what can start a turn. `matrix.journal_ingress` splits `m.room.message` into
+    `EventKind.MESSAGE` and `EventKind.MEDIA` because those become different
+    work, but both project, and ``event_journal.projection.project`` applies
+    ``m.replace`` from the relation alone without ever consulting a msgtype. So
+    a conversation watched live holds media and media caption edits, and a read
+    that skipped either would make that conversation read one way watched and
+    another way rebuilt from ``/messages`` -- which is the divergence the
+    projection exists to remove.
+    """
+    return isinstance(event, nio.RoomMessage) and not isinstance(event, nio.RoomMessageUnknown)
 
 
 @dataclass(slots=True)
@@ -198,7 +217,7 @@ def _resolved_trusted_sender_ids(
 
 
 async def extract_visible_message(
-    event: nio.RoomMessageFormatted,
+    event: VisibleRoomMessage,
     client: nio.AsyncClient | None = None,
     *,
     config: Config,
@@ -321,7 +340,7 @@ async def bundled_replacement_body(
 
 def room_message_fallback_body(event: nio.Event) -> str:
     """Return one best-effort Matrix body for a room message event."""
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE):
+    if is_visible_room_message(event):
         return event.body
     event_source = event.source if isinstance(event.source, dict) else {}
     content = event_source.get("content")
@@ -397,8 +416,8 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
 
 
 def _edit_candidate_is_newer(
-    candidate: nio.RoomMessageFormatted,
-    current: nio.RoomMessageFormatted,
+    candidate: VisibleRoomMessage,
+    current: VisibleRoomMessage,
 ) -> bool:
     """Return whether one replacement candidate outranks another from the same sender.
 
@@ -428,7 +447,7 @@ def _edit_candidate_is_newer(
     return _edit_payload_rank(candidate) > _edit_payload_rank(current)
 
 
-def _edit_payload_rank(event: nio.RoomMessageFormatted) -> tuple[bool, int, str]:
+def _edit_payload_rank(event: VisibleRoomMessage) -> tuple[bool, int, str]:
     """Return the content-derived tiebreak for two payloads claiming one event ID."""
     content = event.source.get("content") if isinstance(event.source, dict) else None
     normalized_content = content if isinstance(content, dict) else {}
@@ -452,13 +471,13 @@ class ThreadEditCandidates:
     would let one foreign edit hide the newest legitimate one.
     """
 
-    _by_original_and_sender: dict[str, dict[str, nio.RoomMessageFormatted]] = field(
+    _by_original_and_sender: dict[str, dict[str, VisibleRoomMessage]] = field(
         default_factory=dict,
     )
 
     def record(
         self,
-        event: nio.RoomMessageFormatted,
+        event: VisibleRoomMessage,
         *,
         event_info: EventInfo,
     ) -> bool:
@@ -487,7 +506,7 @@ class ThreadEditCandidates:
         original_event_id: str,
         *,
         sender: str | None,
-    ) -> nio.RoomMessageFormatted | None:
+    ) -> VisibleRoomMessage | None:
         """Return the newest legitimate replacement for one original.
 
         ``sender`` is the original's sender, or ``None`` when the original was never seen. An
@@ -580,7 +599,7 @@ async def apply_latest_edits_to_messages(
 
 
 async def resolve_latest_visible_messages(
-    events: Sequence[nio.RoomMessageFormatted],
+    events: Sequence[VisibleRoomMessage],
     client: nio.AsyncClient,
     *,
     sender: str | None = None,
@@ -622,7 +641,6 @@ async def resolve_latest_visible_messages(
 
 
 __all__ = [
-    "TEXTUAL_MESSAGE_EVENT_TYPE",
     "ResolvedVisibleMessage",
     "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
@@ -630,6 +648,7 @@ __all__ = [
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "is_visible_room_message",
     "message_preview",
     "replace_visible_message",
     "resolve_latest_visible_messages",
