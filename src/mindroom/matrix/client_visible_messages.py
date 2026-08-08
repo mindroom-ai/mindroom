@@ -412,6 +412,16 @@ def _edit_candidate_is_newer(
     Serialization is deferred into that tie because streaming emits tens to hundreds of
     replacements per response and each is compared against its bucket's running winner; doing it
     eagerly would put a JSON dump of every edit payload on the event loop.
+
+    Deliberately not shared with ``event_journal.projection.is_newer_revision``, which orders the
+    live projection and hydration on the same ``(origin_server_ts, event_id)`` key and stops there.
+    The extra terms are not an improvement that rule is missing; they answer a question only this
+    reader is asked. Two payloads for one event ID is one event observed both bundled under
+    ``unsigned`` and standalone in the same page, and this scan is the only thing that merges those
+    two sources. Admission conflicts on the ``(principal_id, event_id)`` primary key and returns
+    before the projection is touched, and both hydration walks read standalone events from server
+    pagination, so no writer on that side can present the pair. Giving that rule these terms would
+    buy nothing and would put the serialization above on the admission path instead.
     """
     if (candidate.server_timestamp, candidate.event_id) != (current.server_timestamp, current.event_id):
         return (candidate.server_timestamp, candidate.event_id) > (current.server_timestamp, current.event_id)

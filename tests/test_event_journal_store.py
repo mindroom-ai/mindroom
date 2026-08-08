@@ -319,6 +319,42 @@ class TestAdmission:
 
         assert [event.event_id for event in await alice.pending()] == ["$one"]
 
+    async def test_a_second_disagreeing_payload_for_one_event_id_never_projects(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """One event ID reaches the projection at most once, whatever it carries.
+
+        This is why the projection needs no tiebreak for two payloads claiming
+        one event ID, and the visible-message scan does. That scan merges a
+        replacement bundled under `unsigned` with the standalone copy of the
+        same event from the same page, so it genuinely holds two payloads for
+        one ID and has to order them by content rather than by arrival.
+
+        Nothing writing here can produce that pair. Admission conflicts on the
+        `(principal_id, event_id)` primary key and returns before `project()`
+        is called at all, so the losing payload is not ranked against the
+        stored revision -- it never reaches the comparison. Unifying the two
+        rules would move a JSON dump of every replacement onto this path, which
+        streaming walks tens to hundreds of times per response, to decide a
+        case it cannot observe.
+
+        The second payload is given a later timestamp deliberately. A real
+        second copy of one event carries the server's own `origin_server_ts`
+        and would tie, and a tie is refused by the ordering rule as well as by
+        the key -- so a tied payload would prove only that one of the two
+        defences held. A payload that would win on the ordering rule isolates
+        the key as the thing that stops it.
+        """
+        await admit(alice, "$original")
+        first = await admit(alice, "$edit", ts=2_000, content=edit("$original", "first payload"))
+        assert first is AdmissionResult.ADMITTED
+
+        second = await admit(alice, "$edit", ts=3_000, content=edit("$original", "second payload"))
+
+        assert second is AdmissionResult.DUPLICATE
+        assert await bodies(alice) == ["first payload"]
+
     async def test_pending_replays_in_receipt_order(self, alice: PrincipalStore) -> None:
         """Replay order is admission order, not the senders' clocks."""
         await admit(alice, "$late-clock", ts=9_000)
