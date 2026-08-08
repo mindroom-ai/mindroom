@@ -41,6 +41,7 @@ from aioresponses import aioresponses
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
+import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.handled_turns as handled_turns_module
 from mindroom.agent_storage import get_agent_session, get_team_session
@@ -2455,6 +2456,24 @@ def _reset_handled_turn_ledger_state(
         monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
     yield
     _reset_handled_turn_ledger_runtime()
+
+
+@pytest.fixture(autouse=True)
+def _reset_approval_manager_runtime() -> Generator[None, None, None]:
+    """Give every test a cold approval manager.
+
+    The manager is module-global and outlives the test that initialized it. It
+    holds Matrix transport hooks, including the approval-card store every
+    inbound message consults to recover a click on a card this process has
+    forgotten. A test that builds a bot without an orchestrator never sets
+    those hooks, so it inherits whichever ones the previous test on this
+    worker left behind -- and awaiting a previous test's mock raises inside a
+    message callback nothing is watching, which surfaces as an unrelated test
+    hanging until its timeout rather than as a failure here.
+    """
+    approval_manager_module._MANAGER = None
+    yield
+    approval_manager_module._MANAGER = None
 
 
 @pytest.fixture(autouse=True)

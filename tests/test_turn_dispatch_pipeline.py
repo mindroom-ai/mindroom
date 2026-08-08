@@ -102,7 +102,7 @@ from tests.identity_helpers import entity_ids
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Sequence
     from pathlib import Path
 
 
@@ -110,6 +110,27 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+async def _first_of(signal: Awaitable[object], handler: asyncio.Task[None]) -> None:
+    """Wait for an ingress signal, or re-raise the handler that will never send it.
+
+    A stub deep in the dispatch path sets an event to say it was reached. If
+    something before it raises instead, the handler task finishes and the event
+    never fires, so waiting on the event alone hangs until the suite-wide
+    timeout kills the test -- naming neither the error nor its cause.
+    """
+    signal_task = asyncio.ensure_future(signal)
+    try:
+        await asyncio.wait({signal_task, handler}, return_when=asyncio.FIRST_COMPLETED)
+        if signal_task.done():
+            return
+        # Only the handler finished, so it did not reach the stub. Surface why.
+        handler.result()
+        msg = "dispatch returned before ingress was reached"
+        raise AssertionError(msg)
+    finally:
+        signal_task.cancel()
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -1439,7 +1460,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
             task = asyncio.create_task(bot._on_message(room, event))
-            await ingress_started.wait()
+            await _first_of(ingress_started.wait(), task)
             competing_claim = TurnRecord.create([event.event_id], completed=False)
             assert bot._turn_store.try_claim_turn(competing_claim) is False
             release_ingress.set()
@@ -1477,7 +1498,11 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
             task = asyncio.create_task(bot._on_message(room, event))
-            await ingress_started.wait()
+            # Not a bare ``await ingress_started.wait()``. The event is set by
+            # the ingress stub, so anything that raises before ingress leaves
+            # this waiting forever on a task that already finished, and the
+            # real error is never read. Racing the two surfaces it instead.
+            await _first_of(ingress_started.wait(), task)
             wait_started = asyncio.Event()
 
             async def wait_for_alias() -> None:
