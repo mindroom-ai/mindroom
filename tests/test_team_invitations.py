@@ -101,7 +101,7 @@ class TestTeamRoomMembership:
             _room_id: str,
             _config: Config,
             _runtime_paths: object,
-            _event_cache: object,
+            _conversation_reader: object,
         ) -> int:
             return 0
 

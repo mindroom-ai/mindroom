@@ -798,33 +798,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert context is None
 
-    def test_build_tool_runtime_context_does_not_require_an_event_cache(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Tools run without the event cache, so its absence must not withhold their context."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot._runtime_view.event_cache = None
-
-        target = MessageTarget.resolve(room_id="!test:localhost", thread_id="$thread", reply_to_event_id="$event")
-        context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
-
-        assert context is not None
-        assert context.client is bot.client
-
     def test_build_tool_runtime_context_sets_attachment_scope_and_thread_root(
         self,
         mock_agent_user: AgentMatrixUser,

@@ -1941,16 +1941,6 @@ class TestStreamingBehavior:
         async def response_stream() -> AsyncIterator[str]:
             yield "Hello from the original thread"
 
-        async def no_latest_thread_event(
-            _client: object,
-            _room_id: str,
-            _thread_id: str | None,
-            _reply_to_event_id: str | None,
-            _existing_event_id: str | None = None,
-            event_cache: object | None = None,
-        ) -> None:
-            _ = event_cache
-
         sent_contents: list[dict[str, object]] = []
         config = self.config
         bot = AgentBot(

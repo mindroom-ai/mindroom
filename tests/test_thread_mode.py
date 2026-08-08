@@ -1689,17 +1689,16 @@ class TestExtractedModuleLoggerRebinding:
         assert observed_limits == [HYDRATED_PROMPT_WINDOW_MESSAGES]
 
 
-class TestConversationCacheArchitecture:
-    """Architecture guards for the explicit conversation-cache seam."""
+class TestConversationReadArchitecture:
+    """Architecture guards for the explicit conversation-read seam."""
 
     def test_hot_path_modules_do_not_call_raw_matrix_history_apis(self) -> None:
-        """Hot-path conversation modules should use the explicit conversation-cache layer."""
+        """Hot-path conversation modules should read history through the conversation-read layer."""
         repo_root = Path(__file__).resolve().parents[1]
         banned_calls = (
             "room_get_event(",
             "room_get_event_relations(",
             "room_messages(",
-            "cached_room_get_event(",
         )
         for relative_path in (
             "src/mindroom/conversation_resolver.py",
@@ -1709,19 +1708,3 @@ class TestConversationCacheArchitecture:
             file_text = (repo_root / relative_path).read_text()
             for banned_call in banned_calls:
                 assert banned_call not in file_text, f"{relative_path} should not call {banned_call}"
-
-    def test_hot_path_modules_do_not_reference_event_cache_directly(self) -> None:
-        """Hot-path conversation modules should not bypass the conversation-cache layer for cache state."""
-        repo_root = Path(__file__).resolve().parents[1]
-        banned_tokens = (
-            "SqliteEventCache(",
-            "event_cache.",
-        )
-        for relative_path in (
-            "src/mindroom/conversation_resolver.py",
-            "src/mindroom/turn_policy.py",
-            "src/mindroom/response_runner.py",
-        ):
-            file_text = (repo_root / relative_path).read_text()
-            for banned_token in banned_tokens:
-                assert banned_token not in file_text, f"{relative_path} should not reference {banned_token}"
