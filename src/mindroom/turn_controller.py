@@ -942,9 +942,9 @@ class TurnController:
                     "I could not run that command yet: the conversation it targets "
                     "is still being resolved. Please resend it in a moment."
                 ),
+                # One notice, then the turn is terminal, so this send satisfies
+                # the outbox's once-per-(turn, stage) rule.
                 recovered_response_event_id=response_event_id,
-                # One notice, then the turn is terminal.
-                through_outbox=True,
             )
             await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(pending_turn, response_event_id=response_event_id),
@@ -1345,7 +1345,6 @@ class TurnController:
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
             recovered_response_event_id=ack_event_id,
-            through_outbox=True,
             # This acknowledgement is the placeholder the selection's answer
             # then edits, which is what `existing_event_is_placeholder` below
             # says, so it is the turn's initial delivery and not its answer.
@@ -1872,9 +1871,9 @@ class TurnController:
                     handled_turn,
                     target=dispatch.target,
                     response_text=action.rejection_message,
+                    # One rejection, then the turn is terminal, so this send
+                    # satisfies the outbox's once-per-(turn, stage) rule.
                     recovered_response_event_id=response_event_id,
-                    # One rejection, then the turn is terminal.
-                    through_outbox=True,
                 )
                 await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(handled_turn, response_event_id=response_event_id),

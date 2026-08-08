@@ -114,33 +114,12 @@ class TestAReplyWithATurnBehindItIsDurable:
             target=_target(),  # type: ignore[arg-type]
             response_text="the command result",
             recovered_response_event_id=None,
-            through_outbox=True,
         )
 
         assert len(gateway.requests) == 1
         assert gateway.requests[0].delivery_turn_id == handled_turn.anchor_event_id
         assert gateway.requests[0].delivery_turn_id is not None
         assert gateway.requests[0].delivery_stage is DeliveryStage.FINAL
-
-    async def test_a_reply_with_no_turn_still_takes_the_direct_path(self) -> None:
-        """The mirror: a send that is genuinely not a turn must not grow a row.
-
-        A voice echo or a reconciliation notice has no identity a restart can
-        resolve, and a synthetic one would put a row in the outbox that
-        recovery can never decide about.
-        """
-        gateway = _RecordingGateway()
-
-        await _reconciler(gateway).deliver_recoverable_text(
-            TurnRecord.create([SOURCE]),
-            target=_target(),  # type: ignore[arg-type]
-            response_text="an echo",
-            recovered_response_event_id=None,
-            through_outbox=False,
-        )
-
-        assert len(gateway.requests) == 1
-        assert gateway.requests[0].delivery_turn_id is None
 
     async def test_an_answer_recovery_already_found_is_never_sent_again(self) -> None:
         """Adoption still wins over the outbox, and must not enqueue anything.
@@ -156,7 +135,6 @@ class TestAReplyWithATurnBehindItIsDurable:
             target=_target(),  # type: ignore[arg-type]
             response_text="the command result",
             recovered_response_event_id="$already-there",
-            through_outbox=True,
         )
 
         assert adopted == "$already-there"
@@ -184,7 +162,6 @@ class TestAReplyWithATurnBehindItIsDurable:
             target=_target(),  # type: ignore[arg-type]
             response_text="Processing your response...",
             recovered_response_event_id=None,
-            through_outbox=True,
             as_placeholder=True,
         )
 

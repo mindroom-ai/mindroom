@@ -143,21 +143,21 @@ class VisibleResponseReconciler:
         response_text: str,
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
-        through_outbox: bool,
         as_placeholder: bool = False,
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
-        ``through_outbox`` puts the send behind the same claim-before-send row a
-        model answer uses, which is what a reply with a turn behind it should
-        always have had. Two things follow from it, and both are the point.
+        Every reply here has a turn behind it, so every one goes through the
+        same claim-before-send row a model answer uses. Two things follow from
+        that, and both are the point.
 
         The journal sources this turn answers settle inside the enqueue, so the
         answer becoming durably owed and the turn stopping being the journal's
-        work are one commit. Without it the terminal record lands in the
-        handled-turn ledger first and the journal settles afterwards, leaving a
-        window where a pending row describes finished work -- the window the
-        degraded replay guard has to consult two records to survive.
+        work are one commit. On the direct path the terminal record would land
+        in the handled-turn ledger first and the journal would settle
+        afterwards, leaving a window where a pending row describes finished
+        work -- the window the degraded replay guard has to consult two records
+        to survive.
 
         And a crashed send is recovered by resending the frozen row rather than
         by scanning the room for what might already be there. The scan still
@@ -165,7 +165,7 @@ class VisibleResponseReconciler:
         is gone and its answer is not, but it stops being the only thing
         standing between a crash and a lost reply.
 
-        Only callers that send exactly once per ``(turn, stage)`` may pass it.
+        Only callers that send exactly once per ``(turn, stage)`` may use this.
         The outbox freezes a row at its first attempt, so a second send under
         the same pair would be refused and its text would never reach the room.
         A caller that sends a placeholder and then an answer has two stages
@@ -179,10 +179,10 @@ class VisibleResponseReconciler:
         before the model finished with nothing pending to replay and
         "Thinking..." in the room for good.
 
-        It has no default on purpose. The safe-looking value is the wrong one
-        for almost every caller here, and a default would let a new reply pick
-        the direct path by saying nothing at all -- which is exactly how these
-        five sends came to be the last visible deliveries outside the outbox.
+        A send that genuinely is not a turn -- a voice echo, a reconciliation
+        notice -- has no identity a restart can resolve and does not belong
+        here at all; it builds its own ``SendTextRequest`` and the gateway
+        gives it the direct path.
         """
         if recovered_response_event_id is not None:
             return recovered_response_event_id
@@ -191,7 +191,7 @@ class VisibleResponseReconciler:
                 target=target,
                 response_text=response_text,
                 skip_mentions=skip_mentions,
-                delivery_turn_id=handled_turn.anchor_event_id if through_outbox else None,
+                delivery_turn_id=handled_turn.anchor_event_id,
                 delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,
             ),
         )

@@ -120,9 +120,6 @@ class CommandTurnExecutor:
                 response_text=response_text,
                 recovered_response_event_id=recovered_response_event_id,
                 skip_mentions=skip_mentions,
-                # A command replies once: the confirmation-preview branch
-                # returns before the shared tail can send again.
-                through_outbox=True,
             )
 
         async def record_command_result(response_text: str) -> None:
@@ -230,14 +227,13 @@ class CommandTurnExecutor:
             command_turn,
             target=target,
             response_text=response_text,
-            recovered_response_event_id=recovered_response_event_id,
-            skip_mentions=True,
             # The same turn as the live send above, deliberately. A resumed
             # command reaches the room through whichever of the two paths runs
-            # first, and routing only one of them would leave the other sending
-            # directly while an unacknowledged row for the same answer waited
-            # for recovery to send it again.
-            through_outbox=True,
+            # first, so both must key the same outbox row: whichever loses the
+            # race finds the answer already acknowledged instead of sending it
+            # a second time.
+            recovered_response_event_id=recovered_response_event_id,
+            skip_mentions=True,
         )
         await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
