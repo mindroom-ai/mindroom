@@ -52,6 +52,8 @@ from scripts.testing.fuzz_live_matrix import (
     RecoveryCliffObservation,
     RestartRegressionObservation,
     SlowWaitNotice,
+    SustainedStreamCapacityObservation,
+    SustainedStreamCapacitySourceAudit,
     TurnLatencyMonitor,
     WaitBudget,
     _log_count,
@@ -63,11 +65,13 @@ from scripts.testing.fuzz_live_matrix import (
     collect_host_load_report,
     evaluate_recovery_cliff,
     evaluate_restart_regression,
+    evaluate_sustained_stream_capacity,
     live_scenario_from_seed,
     recovery_cliff_fault_shape,
     recovery_cliff_scenario,
     restart_regression_scenario,
     short_stream_correctness_scenario,
+    sustained_stream_capacity_scenario,
 )
 
 if TYPE_CHECKING:
@@ -763,6 +767,26 @@ def test_recovery_cliff_scenario_has_fixed_empty_trace_for_one_hundred_roots() -
 
     assert scenario == LiveFuzzScenario(thread_count=100, batches=(), profile="recovery-cliff")
     scenario.validate()
+
+
+def test_sustained_stream_capacity_defaults_to_two_hundred_roots() -> None:
+    """Ordinary capacity owns a fixed 200-root workload outside the trace."""
+    assert sustained_stream_capacity_scenario() == LiveFuzzScenario(
+        thread_count=200,
+        batches=(),
+        profile="sustained-stream-capacity",
+    )
+
+
+def test_cli_threads_override_sustained_stream_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can raise the fixed capacity workload without changing its trace."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["fuzz_live_matrix.py", "--profile", "sustained-stream-capacity", "--threads", "400"],
+    )
+
+    assert fuzz_live_matrix._scenario_from_args(fuzz_live_matrix._parse_args()).thread_count == 400
 
 
 def test_recovery_cliff_cli_keeps_its_default_root_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1464,6 +1488,106 @@ def test_recovery_cliff_event_audit_accepts_exact_completed_streams() -> None:
     assert observation.terminal_audit.max_active_stream_seconds == pytest.approx(47.0)
     assert observation.terminal_audit.peak_active_streams == 2
     assert evaluate_recovery_cliff(observation) == ()
+
+
+def _valid_sustained_stream_capacity_observation() -> SustainedStreamCapacityObservation:
+    """Build settled no-fault capacity evidence from hand-checked root sources."""
+    recovery_observation = _valid_recovery_cliff_observation()
+    source_ids = ("$source-0", "$source-1")
+    return SustainedStreamCapacityObservation(
+        root_count=2,
+        source_audit=SustainedStreamCapacitySourceAudit(
+            expected_source_ids=source_ids,
+            observed_source_ids=source_ids,
+            missing_source_ids=(),
+            duplicate_source_ids=(),
+            unexpected_source_ids=(),
+            invalid_source_ids=(),
+        ),
+        terminal_audit=recovery_observation.terminal_audit,
+        health_samples=recovery_observation.health_samples,
+        durable_drain=recovery_observation.drain,
+        recovery_abandonment_markers=0,
+        watchdog_stalls=0,
+        durable_drain_failure_markers=0,
+        reaction_settled=True,
+        pre_fence_last_sync=recovery_observation.pre_fence_last_sync,
+        post_fence_last_sync=recovery_observation.post_fence_last_sync,
+        clean_shutdown=True,
+        phase_durations=(("root_release", 1.0), ("terminal_settlement", 47.0), ("shutdown", 1.0)),
+    )
+
+
+def test_sustained_stream_capacity_evaluator_accepts_complete_no_fault_evidence() -> None:
+    """A capacity PASS requires only ordinary completion and health evidence."""
+    assert evaluate_sustained_stream_capacity(_valid_sustained_stream_capacity_observation()) == ()
+
+
+def test_sustained_stream_capacity_evaluator_rejects_terminal_corruption() -> None:
+    """One wrong canonical terminal direction cannot become a capacity PASS."""
+    valid = _valid_sustained_stream_capacity_observation()
+    terminal_audit = valid.terminal_audit
+    cases = (
+        (replace(terminal_audit, missing_sources=("$source-1",)), "missing_sources"),
+        (replace(terminal_audit, duplicate_sources=(("$source-1", ("$one", "$two")),)), "duplicate_sources"),
+        (replace(terminal_audit, unexpected_sources=("$unknown",)), "unknown_sources"),
+        (replace(terminal_audit, invalid_relations=(("$reply", "$thread", "$source"),)), "invalid_relations"),
+        (replace(terminal_audit, noncompleted_sources=(("$source-1", "streaming"),)), "noncompleted_sources"),
+        (replace(terminal_audit, min_active_stream_seconds=44.999), "active_stream_duration_too_short"),
+        (replace(terminal_audit, peak_active_streams=1), "peak_active_streams"),
+    )
+
+    for audit, marker in cases:
+        failures = evaluate_sustained_stream_capacity(replace(valid, terminal_audit=audit))
+        assert any(marker in failure for failure in failures), marker
+
+
+def test_sustained_stream_capacity_evaluator_rejects_unsettled_or_incomplete_evidence() -> None:
+    """No-fault capacity still fails closed on every required lifecycle observation."""
+    valid = _valid_sustained_stream_capacity_observation()
+    before = valid.pre_fence_last_sync
+    assert before is not None
+    cases = (
+        (
+            replace(
+                valid,
+                health_samples=(RecoveryCliffHealthSample(healthy=False, last_sync_time=before),),
+            ),
+            "health_samples_unhealthy",
+        ),
+        (replace(valid, health_samples=()), "health_samples_unhealthy"),
+        (replace(valid, recovery_abandonment_markers=1), "recovery_abandonment_markers"),
+        (replace(valid, watchdog_stalls=1), "watchdog_stalls"),
+        (
+            replace(
+                valid,
+                durable_drain=replace(valid.durable_drain, pending_journal_rows=1),
+            ),
+            "pending_journal_rows",
+        ),
+        (
+            replace(
+                valid,
+                durable_drain=replace(valid.durable_drain, unacknowledged_outbox_rows=1),
+            ),
+            "unacknowledged_outbox_rows",
+        ),
+        (replace(valid, reaction_settled=False), "reaction_not_settled"),
+        (replace(valid, post_fence_last_sync=before), "sync_progress_absent_after_fence"),
+        (
+            replace(
+                valid,
+                source_audit=replace(valid.source_audit, observed_source_ids=("$source-0",)),
+            ),
+            "root_source_audit_incomplete",
+        ),
+        (replace(valid, clean_shutdown=False), "shutdown_not_clean"),
+        (replace(valid, durable_drain_failure_markers=1), "durable_drain_failure_markers"),
+    )
+
+    for observation, marker in cases:
+        failures = evaluate_sustained_stream_capacity(observation)
+        assert any(marker in failure for failure in failures), marker
 
 
 def test_recovery_cliff_pass_payload_surfaces_fault_and_worker_debt_evidence() -> None:

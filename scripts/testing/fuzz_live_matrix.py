@@ -225,7 +225,7 @@ class LiveFuzzScenario:
             msg = "live Matrix fuzz trace must contain at least one thread"
             raise ValueError(msg)
         _reject_unknown_live_scenario_profile(self)
-        if self.profile in {"restart-regression", "recovery-cliff"}:
+        if self.profile in {"restart-regression", "recovery-cliff", "sustained-stream-capacity"}:
             _validate_fixed_profile_trace(self)
             return
         known_events = {f"root:{thread}" for thread in range(self.thread_count)}
@@ -359,7 +359,13 @@ def _process_group_states(process_group_id: int) -> dict[int, str]:
 
 def _reject_unknown_live_scenario_profile(scenario: LiveFuzzScenario) -> None:
     """Reject profiles without a runner implementation."""
-    if scenario.profile not in {"fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"}:
+    if scenario.profile not in {
+        "fuzz",
+        "restart-regression",
+        "short-stream-correctness",
+        "recovery-cliff",
+        "sustained-stream-capacity",
+    }:
         msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
         raise ValueError(msg)
 
@@ -382,6 +388,13 @@ def restart_regression_scenario() -> LiveFuzzScenario:
 def recovery_cliff_scenario(*, root_count: int = 100) -> LiveFuzzScenario:
     """Return the fixed recovery-cliff trace for one root count."""
     scenario = LiveFuzzScenario(thread_count=root_count, batches=(), profile="recovery-cliff")
+    scenario.validate()
+    return scenario
+
+
+def sustained_stream_capacity_scenario(*, root_count: int = 200) -> LiveFuzzScenario:
+    """Return the fixed no-fault sustained-stream capacity trace."""
+    scenario = LiveFuzzScenario(thread_count=root_count, batches=(), profile="sustained-stream-capacity")
     scenario.validate()
     return scenario
 
@@ -491,6 +504,37 @@ class RecoveryCliffObservation:
     pre_fence_last_sync: datetime | None
     post_fence_last_sync: datetime | None
     clean_shutdown: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SustainedStreamCapacitySourceAudit:
+    """Exact root-source evidence for the no-fault capacity workload."""
+
+    expected_source_ids: tuple[str, ...]
+    observed_source_ids: tuple[str, ...]
+    missing_source_ids: tuple[str, ...]
+    duplicate_source_ids: tuple[str, ...]
+    unexpected_source_ids: tuple[str, ...]
+    invalid_source_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SustainedStreamCapacityObservation:
+    """Frozen evidence evaluated before a sustained-stream capacity PASS."""
+
+    root_count: int
+    source_audit: SustainedStreamCapacitySourceAudit
+    terminal_audit: RecoveryCliffTerminalAudit
+    health_samples: tuple[RecoveryCliffHealthSample, ...]
+    durable_drain: RecoveryCliffDrainCounts | None
+    recovery_abandonment_markers: int
+    watchdog_stalls: int
+    durable_drain_failure_markers: int
+    reaction_settled: bool
+    pre_fence_last_sync: datetime | None
+    post_fence_last_sync: datetime | None
+    clean_shutdown: bool
+    phase_durations: tuple[tuple[str, float], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,6 +750,83 @@ def evaluate_recovery_cliff(observation: RecoveryCliffObservation) -> tuple[str,
             else ""
         ),
         f"watchdog_stalls={observation.watchdog_stalls}" if observation.watchdog_stalls else "",
+        "reaction_not_settled" if not observation.reaction_settled else "",
+        "sync_progress_absent_after_fence" if before is None or after is None or after <= before else "",
+        "shutdown_not_clean" if not observation.clean_shutdown else "",
+    )
+    return tuple(failure for failure in failures if failure)
+
+
+def evaluate_sustained_stream_capacity(observation: SustainedStreamCapacityObservation) -> tuple[str, ...]:
+    """Return every ordinary-capacity acceptance failure in one settled observation."""
+    source_audit = observation.source_audit
+    terminal_audit = observation.terminal_audit
+    before, after = observation.pre_fence_last_sync, observation.post_fence_last_sync
+    failures = (
+        (
+            f"root_source_count expected={observation.root_count} observed={len(source_audit.expected_source_ids)}"
+            if observation.root_count != len(source_audit.expected_source_ids)
+            else ""
+        ),
+        (
+            "root_source_audit_incomplete "
+            f"expected={source_audit.expected_source_ids} observed={source_audit.observed_source_ids}"
+            if frozenset(source_audit.observed_source_ids) != frozenset(source_audit.expected_source_ids)
+            else ""
+        ),
+        f"missing_root_sources={source_audit.missing_source_ids}" if source_audit.missing_source_ids else "",
+        f"duplicate_root_sources={source_audit.duplicate_source_ids}" if source_audit.duplicate_source_ids else "",
+        f"unknown_root_sources={source_audit.unexpected_source_ids}" if source_audit.unexpected_source_ids else "",
+        f"invalid_root_sources={source_audit.invalid_source_ids}" if source_audit.invalid_source_ids else "",
+        (
+            "root_source_terminal_mismatch "
+            f"sources={source_audit.expected_source_ids} terminals={terminal_audit.expected_sources}"
+            if frozenset(source_audit.expected_source_ids) != frozenset(terminal_audit.expected_sources)
+            else ""
+        ),
+        f"missing_sources={terminal_audit.missing_sources}" if terminal_audit.missing_sources else "",
+        f"duplicate_sources={terminal_audit.duplicate_sources}" if terminal_audit.duplicate_sources else "",
+        f"unknown_sources={terminal_audit.unexpected_sources}" if terminal_audit.unexpected_sources else "",
+        f"invalid_relations={terminal_audit.invalid_relations}" if terminal_audit.invalid_relations else "",
+        f"noncompleted_sources={terminal_audit.noncompleted_sources}" if terminal_audit.noncompleted_sources else "",
+        (
+            f"active_stream_duration_too_short={terminal_audit.min_active_stream_seconds:.3f} "
+            f"minimum={RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS:.3f}"
+            if terminal_audit.min_active_stream_seconds < RECOVERY_CLIFF_MIN_ACTIVE_STREAM_SECONDS
+            else ""
+        ),
+        (
+            f"peak_active_streams={terminal_audit.peak_active_streams} expected={observation.root_count}"
+            if terminal_audit.peak_active_streams < observation.root_count
+            else ""
+        ),
+        (
+            "health_samples_unhealthy"
+            if not observation.health_samples
+            or any(not sample.healthy or sample.last_sync_time is None for sample in observation.health_samples)
+            else ""
+        ),
+        (
+            f"pending_journal_rows={observation.durable_drain.pending_journal_rows}"
+            if observation.durable_drain is not None and observation.durable_drain.pending_journal_rows
+            else ""
+        ),
+        (
+            f"unacknowledged_outbox_rows={observation.durable_drain.unacknowledged_outbox_rows}"
+            if observation.durable_drain is not None and observation.durable_drain.unacknowledged_outbox_rows
+            else ""
+        ),
+        (
+            f"recovery_abandonment_markers={observation.recovery_abandonment_markers}"
+            if observation.recovery_abandonment_markers
+            else ""
+        ),
+        f"watchdog_stalls={observation.watchdog_stalls}" if observation.watchdog_stalls else "",
+        (
+            f"durable_drain_failure_markers={observation.durable_drain_failure_markers}"
+            if observation.durable_drain_failure_markers
+            else ""
+        ),
         "reaction_not_settled" if not observation.reaction_settled else "",
         "sync_progress_absent_after_fence" if before is None or after is None or after <= before else "",
         "shutdown_not_clean" if not observation.clean_shutdown else "",
@@ -1726,7 +1847,13 @@ class ManagedTuwunelStack:
         stream_delay: float = 0.001,
         model_latch_timeout: float = 60.0,
     ) -> None:
-        if profile not in {"fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"}:
+        if profile not in {
+            "fuzz",
+            "restart-regression",
+            "short-stream-correctness",
+            "recovery-cliff",
+            "sustained-stream-capacity",
+        }:
             msg = f"unsupported live Matrix fuzz profile {profile!r}"
             raise ValueError(msg)
         token = secrets.token_hex(4)
@@ -4208,7 +4335,13 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--profile",
-        choices=("fuzz", "restart-regression", "short-stream-correctness", "recovery-cliff"),
+        choices=(
+            "fuzz",
+            "restart-regression",
+            "short-stream-correctness",
+            "recovery-cliff",
+            "sustained-stream-capacity",
+        ),
         default="fuzz",
     )
     parser.add_argument("--seed", type=int, default=1)
@@ -4216,7 +4349,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threads",
         type=_positive_int,
-        help="thread count (default: 45 for fuzz, 100 for recovery-cliff)",
+        help="thread count (default: 45 for fuzz, 100 for recovery-cliff, 200 for sustained-stream-capacity)",
     )
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
@@ -4231,8 +4364,9 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         help=(
             "adaptive per-turn floor for fuzz, restart-regression, and short-stream-correctness; "
-            "one fixed whole-workload non-extending SLA for recovery-cliff "
-            "(default: 60s fuzz and restart-regression; 180s short-stream-correctness and recovery-cliff)"
+            "one fixed whole-workload non-extending SLA for recovery-cliff and sustained-stream-capacity "
+            "(default: 60s fuzz and restart-regression; 180s short-stream-correctness, recovery-cliff, "
+            "and sustained-stream-capacity)"
         ),
     )
     parser.add_argument("--settle-seconds", type=float, default=0.75)
@@ -4275,6 +4409,8 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
         return restart_regression_scenario()
     if args.profile == "recovery-cliff":
         return recovery_cliff_scenario(root_count=args.threads or 100)
+    if args.profile == "sustained-stream-capacity":
+        return sustained_stream_capacity_scenario(root_count=args.threads or 200)
     return live_scenario_from_seed(
         args.seed,
         steps=args.steps,
@@ -4292,7 +4428,11 @@ def main() -> None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
     reply_timeout = args.reply_timeout
     if reply_timeout is None:
-        reply_timeout = 180 if scenario.profile in {"short-stream-correctness", "recovery-cliff"} else 60
+        reply_timeout = (
+            180
+            if scenario.profile in {"short-stream-correctness", "recovery-cliff", "sustained-stream-capacity"}
+            else 60
+        )
     host_load = collect_host_load_report()
     print(host_load.render(), file=sys.stderr, flush=True)
 
