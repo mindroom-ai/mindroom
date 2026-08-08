@@ -2938,11 +2938,6 @@ class TestHotQueriesAreIndexCovered:
             "ORDER BY created_at_ns, transaction_id LIMIT 50"
         ),
         "approval card point lookup": ("SELECT * FROM approval_cards WHERE principal_id=? AND card_event_id=?"),
-        "delivered-answer repair scan": (
-            "SELECT turn_id, acknowledged_event_id, created_at_ns FROM response_outbox "
-            "WHERE principal_id=? AND stage='final' AND acknowledged_event_id IS NOT NULL "
-            "ORDER BY created_at_ns, turn_id LIMIT 50"
-        ),
     }
 
     async def test_no_hot_query_falls_back_to_a_scan_or_a_temporary_sort(self, tmp_path: Path) -> None:

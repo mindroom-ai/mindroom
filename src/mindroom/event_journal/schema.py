@@ -329,13 +329,6 @@ _INDEXES = (
     ON approval_cards (principal_id, card_event_id)
     WHERE card_event_id IS NOT NULL
     """,
-    """
-    -- The startup repair's scan: delivered answers, oldest first. Its predicate
-    -- is the complement of the recovery scan's, so neither index serves both.
-    CREATE INDEX IF NOT EXISTS response_outbox_delivered_scan
-    ON response_outbox (principal_id, created_at_ns, turn_id/*bytes*/)
-    WHERE stage = 'final' AND acknowledged_event_id IS NOT NULL
-    """,
 )
 
 
@@ -344,6 +337,10 @@ _INDEXES = (
 # and its predecessor dropped -- otherwise every existing database keeps paying
 # to maintain an index nothing can use for its ordering.
 _DROPPED_INDEXES = (
+    # Never served a query. Its predicate -- a final stage with an
+    # acknowledged event -- appears in no statement in this repository, so
+    # every write to `response_outbox` was maintaining it for nobody.
+    "DROP INDEX IF EXISTS response_outbox_delivered_scan",
     "DROP INDEX IF EXISTS response_outbox_unacknowledged",
     "DROP INDEX IF EXISTS approval_cards_room",
     "DROP INDEX IF EXISTS approval_cards_room_scan",
