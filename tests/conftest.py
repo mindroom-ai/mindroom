@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import warnings
@@ -133,7 +134,7 @@ _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 # three must agree. An Alpine image cannot show a disagreement: every musl
 # locale sorts like C, so a missing `COLLATE "C"` looks correct there and
 # breaks against a glibc server. The journal's server is therefore glibc.
-_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
+_POSTGRES_JOURNAL_RUN_ID_STASH_KEY = pytest.StashKey[str]()
 _POSTGRES_JOURNAL_CONTAINER_PREFIX = "mindroom-postgres-journal-test-"
 _POSTGRES_JOURNAL_IMAGE = "postgres:16"
 _POSTGRES_JOURNAL_LOCALE = "en_US.utf8"
@@ -161,6 +162,101 @@ _POSTGRES_JOURNAL_DATA_DIR = "/var/lib/postgresql/data"
 # Docker's default of half of host RAM is left behind on purpose -- an uncapped
 # runaway on a shared machine is the same class of failure as the disk leak.
 _POSTGRES_JOURNAL_TMPFS_SIZE = "2g"
+
+# A killed run reaches no teardown, so its container outlives it forever. The
+# tmpfs above means such a container no longer strands storage, but it still
+# holds memory and a published port, and nothing ever collects it.
+#
+# Nothing outside the run may collect it either. Up to seventeen worktrees run
+# this suite at once on this host, so a sweeper that matched on the name prefix,
+# the image, or the label would destroy a live run's server. Recording the
+# owning PID does not fix that -- PIDs are recycled -- and a lifetime cap just
+# picks a different run to kill. Every one of those needs a guess about whether
+# an owner is alive, and a wrong guess kills someone's suite.
+#
+# So the container watches its owner instead, and no guess is needed. The owner
+# holds the write end of a FIFO open for the whole session and never sends
+# anything through it. The kernel closes that end when the owning process dies,
+# however it dies, and the container's read then returns EOF. The container
+# shuts itself down, which is also the only exit path `--rm` collects, so a
+# killed run's container removes itself with no sweeper in sight.
+#
+# Ordering is what makes the fact exact. The owner opens its end *before*
+# `docker run`, so from the container's first instant "no writer" can only mean
+# a dead owner, never one that has not arrived yet. That is why the watcher
+# opens with O_NONBLOCK, which on a FIFO succeeds whether or not a writer is
+# present, and only then reads blocking: an owner that died during container
+# startup reports EOF immediately instead of blocking the open forever.
+_POSTGRES_OWNER_MOUNT_DIR = "/mindroom-run-owner"
+_POSTGRES_OWNER_PIPE_NAME = "alive"
+# A watcher that cannot open the pipe exits without signalling anything, so its
+# `&&` never fires. Losing the reaper leaks one container; signalling on
+# anything other than the owner's death would kill a live server, and that is
+# the outcome worth spending a leak to avoid.
+_POSTGRES_OWNER_WATCH_COMMAND = (
+    "perl -e '"
+    "use Fcntl;"
+    " sysopen(my $pipe, $ARGV[0], O_RDONLY | O_NONBLOCK) or exit 1;"
+    " fcntl($pipe, F_SETFL, 0) or exit 1;"
+    " 1 while sysread($pipe, my $ignored, 4096) > 0;"
+    f"' {_POSTGRES_OWNER_MOUNT_DIR}/{_POSTGRES_OWNER_PIPE_NAME}"
+)
+# The server deliberately does not run as PID 1, and that is the whole point of
+# this shell. Orphaned processes are reparented to PID 1, so a postmaster in
+# that slot ends up reaping this watcher -- and `CleanupBackend` reads any child
+# exiting with a status other than 0 or 1 as a crashed backend. Measured against
+# `postgres:16`: an unrelated child exiting 2 produced "server process (PID 7)
+# exited with exit code 2", then "terminating any other active server processes"
+# and "all server processes terminated; reinitializing". Every live connection
+# died. A watcher SIGKILLed under memory pressure would do that to a healthy
+# run, which is exactly the harm this whole mechanism exists to prevent. Keeping
+# a shell at PID 1 puts the watcher outside the postmaster's sight completely.
+#
+# The shell waits only on the server, so a server that exits on its own still
+# ends the container exactly as it did before.
+#
+# SIGINT alone is not enough, and this was measured rather than reasoned about.
+# Once the postmaster is serving, SIGINT is its fast shutdown and the image's
+# own STOPSIGNAL, and the container exits within a second of the owner dying.
+# During bootstrap the signal goes to `docker-entrypoint.sh` instead, which is
+# running `initdb` and a temporary server, and it survives: an owner killed in
+# that window left the container running, still up ninety seconds later and
+# serving happily, which is precisely the leak this mechanism exists to stop.
+# A pytest run killed in its first couple of seconds is not a rare shape.
+#
+# So the watcher escalates. SIGINT first, so a live cluster still gets its
+# clean fast shutdown, then SIGKILL if the process is still there. SIGKILL
+# cannot be refused by any bootstrap phase, `wait` then returns, PID 1 exits,
+# and `--rm` collects the container. Losing a fast shutdown costs nothing here:
+# the data directory is a throwaway tmpfs that the container is about to drop.
+_POSTGRES_OWNER_SHUTDOWN_GRACE_SECONDS = 5
+
+# One shared server serves every xdist worker, and `postgres:16` ships
+# `max_connections = 100`. `PostgresBackend.open` takes five connections per
+# store -- one serialized writer plus a four-connection reader pool -- so the
+# default is exhausted by twenty concurrent stores. `-n auto` on this host is
+# thirty-two workers, which is a hundred and sixty.
+#
+# Measured, with only `-n` differing over the same 348 tests: `-n 32` produced
+# 137 errors and 1 failure, every one `FATAL: sorry, too many clients already`,
+# and `-n 16` produced none. That is a property of the worker count and not of
+# any test, which is why it has been read as flakiness so many times.
+#
+# The cap is a slot count, not an allocation: an unused slot costs a few hundred
+# bytes of shared memory, while a backend process only exists once something
+# connects. Five hundred leaves room for a bigger `-n auto` and for several
+# stores per worker without ever being the reason a run goes red.
+_POSTGRES_JOURNAL_MAX_CONNECTIONS = 500
+_POSTGRES_JOURNAL_ENTRYPOINT_SCRIPT = f"""\
+docker-entrypoint.sh postgres -c max_connections={_POSTGRES_JOURNAL_MAX_CONNECTIONS} &
+server=$!
+({_POSTGRES_OWNER_WATCH_COMMAND} && {{
+    kill -INT "$server" 2>/dev/null
+    sleep {_POSTGRES_OWNER_SHUTDOWN_GRACE_SECONDS}
+    kill -KILL "$server" 2>/dev/null
+}}) &
+wait "$server"
+"""
 
 
 def _configure_quiet_structlog() -> None:
@@ -557,6 +653,30 @@ def _postgres_container_name(run_id: str, prefix: str) -> str:
     return f"{prefix}{run_id}"
 
 
+def _owner_pipe_dir(run_id: str) -> Path:
+    """Return the host directory holding one run's owner pipe."""
+    return Path(tempfile.gettempdir()) / f"mindroom-pytest-owner-{run_id}"
+
+
+def _hold_owner_pipe(run_id: str) -> None:
+    """Open this run's owner pipe for writing, for as long as this process lives.
+
+    The descriptor is deliberately never closed. The kernel closing it when this
+    process dies -- including under the SIGKILL that leaves no teardown to run,
+    which is the whole case being fixed -- is the signal the container waits on,
+    so an explicit close would only add a way to send it early.
+
+    Opening read-write is what keeps this from blocking: opening a FIFO
+    write-only waits for a reader, and the reader is a container that cannot be
+    started until this returns.
+    """
+    directory = _owner_pipe_dir(run_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    pipe = directory / _POSTGRES_OWNER_PIPE_NAME
+    os.mkfifo(pipe)
+    os.open(pipe, os.O_RDWR)
+
+
 def _postgres_run_command(docker: str, container_name: str, run_id: str) -> list[str]:
     """Return the argv that starts one disposable Postgres journal server."""
     return [
@@ -565,13 +685,18 @@ def _postgres_run_command(docker: str, container_name: str, run_id: str) -> list
         "--label", f"mindroom.pytest.run={run_id}",
         # Keeps the image's declared anonymous volume from ever existing.
         "--tmpfs", f"{_POSTGRES_JOURNAL_DATA_DIR}:size={_POSTGRES_JOURNAL_TMPFS_SIZE}",
+        # Read-only: the container only ever reads the owner pipe, and the run
+        # that owns it is the only thing allowed to say when it ends.
+        "-v", f"{_owner_pipe_dir(run_id)}:{_POSTGRES_OWNER_MOUNT_DIR}:ro",
         "-e", "POSTGRES_USER=cache",
         "-e", "POSTGRES_PASSWORD=test",
         "-e", "POSTGRES_DB=mindroom",
         "-e", f"LANG={_POSTGRES_JOURNAL_LOCALE}",
         "-e", f"POSTGRES_INITDB_ARGS=--locale={_POSTGRES_JOURNAL_LOCALE}",
         "-p", "127.0.0.1::5432",
+        "--entrypoint", "bash",
         _POSTGRES_JOURNAL_IMAGE,
+        "-c", _POSTGRES_JOURNAL_ENTRYPOINT_SCRIPT,
     ]  # fmt: skip
 
 
@@ -594,29 +719,42 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
 
 
 def pytest_configure_node(node: "WorkerController") -> None:
-    """Remember the shared Postgres container name in the xdist controller."""
+    """Own the shared Postgres server's run from the xdist controller.
+
+    The controller holds the owner pipe rather than a worker because it is the
+    only participant that outlives all of them: a worker that runs out of work
+    shuts down while the others are still querying the server, and the worker
+    that happened to create the container is not special in that respect.
+
+    Nodes are configured before they run tests, so the pipe exists before any
+    worker can start the container -- the ordering the watcher depends on.
+    """
+    if _POSTGRES_JOURNAL_RUN_ID_STASH_KEY in node.config.stash:
+        return
     run_id = node.workerinput["testrunuid"]
-    node.config.stash[_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
-        run_id,
-        _POSTGRES_JOURNAL_CONTAINER_PREFIX,
-    )
+    node.config.stash[_POSTGRES_JOURNAL_RUN_ID_STASH_KEY] = run_id
+    _hold_owner_pipe(run_id)
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Remove the shared Postgres container after every xdist worker has finished."""
+    """Release the shared Postgres server once every xdist worker has finished."""
     if hasattr(session.config, "workerinput"):
         return
+    run_id = session.config.stash.get(_POSTGRES_JOURNAL_RUN_ID_STASH_KEY, None)
+    if run_id is None:
+        return
+    shutil.rmtree(_owner_pipe_dir(run_id), ignore_errors=True)
     docker = shutil.which("docker")
     if docker is None:
-        return
-    container_name = session.config.stash.get(_POSTGRES_JOURNAL_CONTAINER_NAME_STASH_KEY, None)
-    if container_name is None:
         return
     if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
         # The fixture skipped on this same condition, so nothing was ever created.
         return
     try:
-        _remove_postgres_container(docker, container_name)
+        _remove_postgres_container(
+            docker,
+            _postgres_container_name(run_id, _POSTGRES_JOURNAL_CONTAINER_PREFIX),
+        )
     except RuntimeError as exc:
         warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
@@ -640,6 +778,10 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
     shared_across_workers = worker_id != "master"
     run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
     container_name = _postgres_container_name(run_id, _POSTGRES_JOURNAL_CONTAINER_PREFIX)
+    if not shared_across_workers:
+        # This process is the whole run, so it is its own owner. Under xdist the
+        # controller has already done this, before any worker got to run.
+        _hold_owner_pipe(run_id)
     run_result = subprocess.run(
         _postgres_run_command(docker, container_name, run_id),
         check=False,
@@ -663,9 +805,11 @@ def postgres_journal_url(worker_id: str, testrun_uid: str) -> Iterator[str]:
             database_url = _create_postgres_worker_database(database_url, worker_id)
         yield database_url
     finally:
-        # Only the run that created the container may destroy it.
-        if created_container and not shared_across_workers:
-            _remove_postgres_container(docker, container_name)
+        if not shared_across_workers:
+            # Only the run that created the container may destroy it.
+            if created_container:
+                _remove_postgres_container(docker, container_name)
+            shutil.rmtree(_owner_pipe_dir(run_id), ignore_errors=True)
 
 
 def postgres_journal_schema_url(database_url: str) -> str:
