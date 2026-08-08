@@ -4089,3 +4089,50 @@ async def test_prepare_for_sync_shutdown_passes_cancel_source_to_inbox_drain(tmp
         cancel_after_seconds=5.0,
         shutdown_intent=SYNC_RESTART_SHUTDOWN,
     )
+
+
+class TestAPreviousRecordVersionSaysWhatItCosts:
+    """A record from an earlier version is an upgrade, not damage, and says so."""
+
+    @staticmethod
+    def _write_record(tmp_path: Path, payload: dict[str, Any]) -> SyncContinuityStore:
+        path = tmp_path / "sync_continuity" / "code.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return SyncContinuityStore(tmp_path, "code")
+
+    def test_a_previous_version_record_names_the_messages_it_cannot_answer(self, tmp_path: Path) -> None:
+        """Refusing a v2 record must say the downtime window goes unanswered.
+
+        The refusal is correct -- that checkpoint certifies a store this build
+        does not have. What must not happen is refusing silently, or in wording
+        that reads like a corrupt file, because the operator's only remedy is
+        knowing the window exists before they upgrade.
+        """
+        store = self._write_record(
+            tmp_path,
+            {
+                "version": "mindroom-sync-continuity-v2",
+                "revision": 3,
+                "checkpoint": {"token": "s123", "cache_generation": "gen-1"},
+                "pending_join_decrypt_fences": [],
+            },
+        )
+
+        with capture_logs() as logs, pytest.raises(RuntimeError, match="unsupported version"):
+            store.load()
+
+        upgraded = [entry for entry in logs if entry["event"] == "matrix_sync_continuity_record_upgraded"]
+        assert len(upgraded) == 1
+        assert upgraded[0]["found_version"] == "mindroom-sync-continuity-v2"
+        assert "never" in upgraded[0]["consequence"]
+        assert "answered" in upgraded[0]["consequence"]
+
+    def test_a_record_that_is_merely_damaged_does_not_claim_an_upgrade(self, tmp_path: Path) -> None:
+        """An unrecognised version is not a previous one, and must not be described as one."""
+        store = self._write_record(tmp_path, {"version": "not-a-mindroom-record", "revision": 0})
+
+        with capture_logs() as logs, pytest.raises(RuntimeError, match="unsupported version"):
+            store.load()
+
+        assert [entry for entry in logs if entry["event"] == "matrix_sync_continuity_record_upgraded"] == []

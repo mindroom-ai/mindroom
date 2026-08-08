@@ -8,13 +8,30 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_token_values import SyncCheckpoint, normalize_sync_token
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
+logger = get_logger(__name__)
+
 _RECORD_VERSION = "mindroom-sync-continuity-v3"
+
+# Versions this file used to be written in. A record in one of them is an
+# upgrade rather than damage, and it is refused for the same reason either way:
+# the checkpoint it holds certifies a store this build does not have, so
+# resuming from it would claim the journal contains events it never admitted.
+#
+# Refusing is right and the consequence is not free, so it is said out loud
+# rather than left to a line that reads like a corrupt file. The next sync is
+# tokenless, nio classifies every event an initial sync returns as history, and
+# admission takes history as context rather than as work -- so a message sent
+# while this install was stopped is present in the conversation and is never
+# answered. One boot only: the record is rewritten in the current version
+# immediately, and every later restart resumes normally.
+_PREVIOUS_RECORD_VERSIONS = frozenset({"mindroom-sync-continuity-v2"})
 
 
 @dataclass(frozen=True)
@@ -129,6 +146,7 @@ class SyncContinuityStore:
         except json.JSONDecodeError as exc:
             raise _format_error(self._path, "invalid JSON") from exc
         if not isinstance(payload, dict) or payload.get("version") != _RECORD_VERSION:
+            _warn_when_written_by_a_previous_version(self._path, payload)
             raise _format_error(self._path, "unsupported version")
 
         revision = payload.get("revision")
@@ -200,6 +218,28 @@ def _normalize_room_id(room_id: str) -> str:
         msg = "Pending join decrypt fences require a non-empty room ID"
         raise ValueError(msg)
     return room_id
+
+
+def _warn_when_written_by_a_previous_version(path: Path, payload: object) -> None:
+    """Say what refusing an earlier version's record costs, when that is what happened."""
+    if not isinstance(payload, dict):
+        return
+    # JSON object keys are strings by construction; the narrowed type is not.
+    found_version = cast("dict[str, object]", payload).get("version")
+    if found_version not in _PREVIOUS_RECORD_VERSIONS:
+        return
+    logger.warning(
+        "matrix_sync_continuity_record_upgraded",
+        path=str(path),
+        found_version=found_version,
+        record_version=_RECORD_VERSION,
+        consequence=(
+            "This install's Matrix sync position was written by an earlier version and cannot be "
+            "resumed from. The next sync starts without a token, so any message sent while this "
+            "install was stopped stays in the conversation but is never answered. This affects "
+            "this startup only."
+        ),
+    )
 
 
 def _format_error(path: Path, detail: str) -> RuntimeError:
