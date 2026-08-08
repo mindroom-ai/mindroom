@@ -103,6 +103,30 @@ def redaction(event_id: str, redacts: str, *, ts: int = 1_000, sender: str = ALI
     }
 
 
+def encrypted(event_id: str, *, sender: str = ALICE, ts: int = 1_000) -> dict[str, Any]:
+    """Return one raw Matrix event the way it sits on the wire in an encrypted room.
+
+    nio parses this into a ``MegolmEvent``, whose ``source`` type is
+    ``m.room.encrypted`` rather than ``m.room.message``, so it projects to
+    nothing until something decrypts it. That is what every relation in an
+    encrypted room looks like to a hydrator, because nio's ``receive_response``
+    has no branch for a relations response and so never decrypts one.
+    """
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": ts,
+        "type": "m.room.encrypted",
+        "content": {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": f"ciphertext-of-{event_id}",
+            "sender_key": "sender-key",
+            "session_id": "session",
+            "device_id": "DEVICE",
+        },
+    }
+
+
 def parse(source: dict[str, Any]) -> nio.Event:
     """Return the parsed nio event for one raw source."""
     event = nio.Event.parse_event(source)
@@ -142,6 +166,27 @@ class FakeClient:
     # count of how many times each was actually fetched.
     sidecars: dict[str, str] = field(default_factory=dict)
     downloads: list[str] = field(default_factory=list)
+    # Whether this device has crypto set up at all. nio only attempts
+    # decryption when it does, so neither does anything reading through it.
+    olm: object | None = None
+    # The cleartext each encrypted event stands for, by event ID. An encrypted
+    # event missing from here is one whose room key never reached this device,
+    # which is the ordinary way decryption fails against a real homeserver.
+    room_keys: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def decrypt_event(self, event: nio.MegolmEvent) -> nio.Event:
+        """Decrypt one event, or refuse the way nio refuses.
+
+        Only the relation walk ever reaches this. The other reads a hydrator
+        makes come back decrypted already, which is modelled by the fixtures
+        storing cleartext for them rather than by decrypting here -- that is
+        what nio's own ``receive_response`` has done by the time those return.
+        """
+        cleartext = self.room_keys.get(event.event_id)
+        if cleartext is None:
+            msg = f"no megolm session for {event.event_id}"
+            raise nio.EncryptionError(msg)
+        return parse(cleartext)
 
     async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
         """Return one stored attachment."""
@@ -1688,6 +1733,156 @@ class TestPointRefetch:
         )
         assert await bodies(alice) == []
         assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+
+
+class TestEncryptedRelations:
+    """What a walk of an encrypted room may claim about what it read.
+
+    nio decrypts the responses ``receive_response`` recognizes -- a
+    ``/messages`` chunk, a context response, a single fetched event -- and its
+    chain has no branch for a relations response. So relations come back
+    encrypted no matter how many keys this device holds, and the fixtures here
+    model exactly that asymmetry: cleartext for the reads nio has already
+    decrypted by the time they return, ciphertext for the relation walk.
+    """
+
+    @staticmethod
+    def _thread_of_encrypted_replies(*, readable: bool) -> FakeClient:
+        """Return a thread whose root is readable and whose replies are encrypted."""
+        replies = [encrypted("$reply1", ts=2_000), encrypted("$reply2", ts=3_000)]
+        return FakeClient(
+            events={"$root": raw("$root", "root", ts=1_000)},
+            relations={"$root": replies},
+            olm=object(),
+            room_keys=(
+                {
+                    "$reply1": raw("$reply1", "first reply", ts=2_000, thread_id="$root"),
+                    "$reply2": raw("$reply2", "second reply", ts=3_000, thread_id="$root"),
+                }
+                if readable
+                else {}
+            ),
+        )
+
+    async def test_a_thread_whose_replies_could_not_be_read_is_not_complete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A walk that dropped every reply unread must not call the thread whole.
+
+        This is the difference between a degraded answer and a silently wrong
+        one. Hydration runs once per membership, so a thread installed as
+        complete here is never walked again for the life of that membership,
+        and a strict export accepts root-only as the conversation -- forever,
+        without anything ever having failed.
+        """
+        client = self._thread_of_encrypted_replies(readable=False)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root"]
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_relations_this_device_holds_keys_for_are_decrypted(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The replies are read, not merely reported missing.
+
+        Marking the walk incomplete keeps a wrong answer from being cached, but
+        on its own it would leave every encrypted thread permanently root-only.
+        Decrypting is what makes the conversation actually arrive.
+        """
+        client = self._thread_of_encrypted_replies(readable=True)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_refresh_does_not_reinstall_a_body_whose_edits_it_could_not_read(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An unread relation tree is not an empty one.
+
+        An empty relation list is a real answer -- it is how a server that
+        already reclaimed the superseded edits says the original is current --
+        so reducing over relations that were dropped unread silently reinstalls
+        the pre-edit body under the same shape, and clears the refresh token
+        that would have brought anyone back to fix it.
+        """
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={"$m": [encrypted("$e2", ts=4_000)]},
+            olm=object(),
+        )
+
+        assert not await hydrator(alice, client).refresh(
+            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+        )
+        assert await bodies(alice) == []
+        assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+
+    async def test_a_message_that_could_not_be_decrypted_is_not_treated_as_deleted(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Unreadable is not gone, and the two arrive here in the same shape.
+
+        A message the server no longer has projects to nothing, and so does one
+        this device has no key for. Reading the second as the first drops a row
+        for a message every other client in the room can still see.
+        """
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
+
+        assert not await hydrator(alice, client).refresh(
+            (await alice.pending_refreshes(room_id=ROOM, thread_id=None))[0],
+        )
+        assert len(await alice.pending_refreshes(room_id=ROOM, thread_id=None)) == 1
+
+    async def test_a_thread_whose_root_could_not_be_read_is_not_complete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Readable replies do not make up for a root nobody could read.
+
+        The root is the one event a thread walk refuses to spend its window on,
+        because a thread that starts at its first reply is missing the message
+        the whole thread is about. Losing it to a missing key loses exactly as
+        much as losing it to a bound.
+        """
+        client = FakeClient(
+            events={"$root": encrypted("$root", ts=1_000)},
+            relations={"$root": [raw("$reply", "a reply", ts=2_000, thread_id="$root")]},
+            olm=object(),
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["a reply"]
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_room_walk_that_could_not_read_a_page_is_not_complete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Nio decrypts `/messages`, so reaching this means decryption was tried and failed.
+
+        Running out of history is only completeness if the walk could read what
+        it ran through.
+        """
+        client = FakeClient(
+            history=[raw("$m1", "readable", ts=1_000), encrypted("$m2", ts=2_000)],
+            olm=object(),
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert await bodies(alice) == ["readable"]
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
 class TestReplyFallback:

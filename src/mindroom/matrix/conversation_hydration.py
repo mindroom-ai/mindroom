@@ -164,6 +164,42 @@ def _redaction_target(event: nio.Event) -> str | None:
     return event.event_id if _is_redacted(event.source) else None
 
 
+def _readable_event(client: nio.AsyncClient, event: nio.Event) -> nio.Event | None:
+    """Return one fetched event in the clear, or nothing if it stayed unreadable.
+
+    ``room_get_event_relations`` is why this exists. nio decrypts what
+    ``receive_response`` recognizes -- a ``/messages`` chunk, a context
+    response, a single fetched event -- but that chain has no branch for a
+    relations response, so nio yields those events exactly as they came off the
+    wire. In an encrypted room every relation therefore arrives as a
+    ``MegolmEvent`` no matter how many keys this device holds, and a
+    ``MegolmEvent`` projects to nothing: its ``source`` type is
+    ``m.room.encrypted``, not ``m.room.message``.
+
+    The reads nio already decrypts are run through this too. It returns them
+    untouched, and the boundary stays one rule instead of a list of which
+    responses nio happens to handle -- a list that is only correct until nio's
+    chain changes.
+
+    Decrypting can still fail after being attempted, because a key for a
+    session this device never received is not going to appear. So the answer is
+    "readable or not" rather than "decrypted or not": a caller needs to know an
+    event was dropped unread, and none of them can do anything about why.
+    """
+    if not isinstance(event, nio.MegolmEvent):
+        return event
+    if client.olm is None:
+        return None
+    try:
+        decrypted = client.decrypt_event(event)
+    except nio.EncryptionError:
+        return None
+    # A payload that decrypted into something malformed comes back as a
+    # `BadEvent`, which nio deliberately does not make an `Event`. Unreadable is
+    # the honest answer for it as well.
+    return decrypted if isinstance(decrypted, nio.Event) else None
+
+
 def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
     """Return the projection view of one fetched event, or nothing.
 
@@ -247,12 +283,26 @@ class _Walk:
     Coverage is deliberately not measured from it, because ``origin_server_ts``
     is the sending server's clock and a skewed event at the tip would otherwise
     prove a depth the walk never reached.
+
+    ``unreadable`` says the walk fetched at least one event it could not read,
+    which is a different failure from either bound and has to be kept apart
+    from both. A walk that stopped at a ceiling knows exactly what it skipped
+    and could fetch it by paying more; a walk that could not decrypt an event
+    has already paid and still does not know what it holds.
+
+    It forces ``complete`` down, because a conversation missing an event nobody
+    could read is not whole. It is kept as its own field anyway, because
+    "stopped early" and "read everything and understood some of it" call for
+    opposite responses from a point refetch: the first still found the newest
+    revision, since relations arrive newest first, and the second may have
+    dropped exactly the edit it was sent to fetch.
     """
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
     reached_ts: int | None = None
     saw_anchor: bool = False
+    unreadable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,7 +665,12 @@ class ConversationHydrator:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        root_projected = _projected_from_event(room_id, root.event, self_sender=self.self_sender)
+        readable_root = _readable_event(self._client(), root.event)
+        root_projected = (
+            None
+            if readable_root is None
+            else _projected_from_event(room_id, readable_root, self_sender=self.self_sender)
+        )
         if root_projected is not None:
             events.append(root_projected)
         relations = await self._fetch_relations(
@@ -623,7 +678,16 @@ class ConversationHydrator:
             thread_id,
             window_messages=self.prompt_window_messages,
         )
-        return _Walk(events=(*events, *relations.events), complete=relations.complete)
+        # A thread whose root could not be read is missing the message the whole
+        # thread is about, which is the one event this walk refuses to spend its
+        # window on precisely because a thread without it is not the thread.
+        # The relation walk has already accounted for its own unread events in
+        # both fields, so the root is all there is left to add here.
+        return _Walk(
+            events=(*events, *relations.events),
+            complete=relations.complete and readable_root is not None,
+            unreadable=relations.unreadable or readable_root is None,
+        )
 
     async def _fetch_relations(
         self,
@@ -661,7 +725,9 @@ class ConversationHydrator:
         admitted = 0
         fetched = 0
         complete = True
-        relations = self._client().room_get_event_relations(
+        unreadable = False
+        client = self._client()
+        relations = client.room_get_event_relations(
             room_id=room_id,
             event_id=event_id,
             direction=nio.MessageDirection.back,
@@ -675,14 +741,35 @@ class ConversationHydrator:
             async with contextlib.aclosing(relations):
                 async for event in relations:
                     fetched += 1
-                    projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
-                    if projected is not None:
-                        events.append(projected)
-                        if _is_logical_message(projected):
-                            admitted += 1
-                            if window_messages is not None and admitted >= window_messages:
-                                complete = False
-                                break
+                    readable = _readable_event(client, event)
+                    if readable is None:
+                        # nio hands relations over exactly as they arrived, so
+                        # in an encrypted room this is every one of them until
+                        # the decryption above succeeds -- and it still is for
+                        # any session whose key never reached this device.
+                        #
+                        # Saying so is what separates a short answer from a
+                        # wrong one. Every other reason an event projects to
+                        # nothing is a decision this walk made: a reaction, a
+                        # state event, this bot's own streaming frames. Those
+                        # are events the conversation does not want. An event
+                        # that could not be read is one the conversation may
+                        # well want, dropped without knowing, and a walk that
+                        # kept `complete` through it would install a thread
+                        # holding only its root, mark it whole for the entire
+                        # membership epoch, and hand that to an export as the
+                        # conversation.
+                        unreadable = True
+                        complete = False
+                    else:
+                        projected = _projected_from_event(room_id, readable, self_sender=self.self_sender)
+                        if projected is not None:
+                            events.append(projected)
+                            if _is_logical_message(projected):
+                                admitted += 1
+                                if window_messages is not None and admitted >= window_messages:
+                                    complete = False
+                                    break
                     if fetched >= self.max_fetched_events:
                         complete = False
                         # Said out loud for the same reason the room walk says
@@ -705,7 +792,7 @@ class ConversationHydrator:
                 f"conversation would be missing indirectly related events"
             )
             raise _HydrationError(msg) from error
-        return _Walk(events=tuple(events), complete=complete)
+        return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
 
     async def _fetch_room(self, room_id: str, *, owed_through_event_id: str | None = None) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
@@ -748,9 +835,11 @@ class ConversationHydrator:
         pages = 0
         reached: int | None = None
         saw_anchor = False
+        unreadable = False
         start: str | None = None
+        client = self._client()
         while True:
-            response = await self._client().room_messages(
+            response = await client.room_messages(
                 room_id,
                 start=start,
                 direction=nio.MessageDirection.back,
@@ -765,7 +854,15 @@ class ConversationHydrator:
                 reached = event.server_timestamp if reached is None else min(reached, event.server_timestamp)
                 # Before projection, so a redacted anchor still counts as seen.
                 saw_anchor = saw_anchor or event.event_id == owed_through_event_id
-                projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
+                # nio decrypts a `/messages` chunk on the way through
+                # `receive_response`, so unlike the relation walk this is only
+                # reached when decryption was tried and failed. The walk still
+                # cannot say it read the room.
+                readable = _readable_event(client, event)
+                unreadable = unreadable or readable is None
+                projected = (
+                    None if readable is None else _projected_from_event(room_id, readable, self_sender=self.self_sender)
+                )
                 if projected is None:
                     continue
                 events.append(projected)
@@ -773,7 +870,13 @@ class ConversationHydrator:
                     logical += 1
             covered = owed_through_event_id is None or saw_anchor
             if logical >= self.prompt_window_messages and covered:
-                return _Walk(events=tuple(events), complete=False, reached_ts=reached, saw_anchor=saw_anchor)
+                return _Walk(
+                    events=tuple(events),
+                    complete=False,
+                    reached_ts=reached,
+                    saw_anchor=saw_anchor,
+                    unreadable=unreadable,
+                )
             # An empty page is not exhaustion. The server may filter a page down
             # to nothing and still hand back a continuation token, and the room
             # can hold visible history behind it; only the absent token means
@@ -781,7 +884,15 @@ class ConversationHydrator:
             # progress, which is the one shape that could spin forever, because
             # an empty page does not advance the event count either.
             if not response.end:
-                return _Walk(events=tuple(events), complete=True, reached_ts=reached, saw_anchor=saw_anchor)
+                return _Walk(
+                    events=tuple(events),
+                    # Running out of history is only completeness if the walk
+                    # could read what it ran through.
+                    complete=not unreadable,
+                    reached_ts=reached,
+                    saw_anchor=saw_anchor,
+                    unreadable=unreadable,
+                )
             if response.end == start:
                 # Neither server MindRoom runs signals exhaustion this way.
                 # Tuwunel derives `end` from the last event it returned and so
@@ -809,7 +920,13 @@ class ConversationHydrator:
                     logical_messages=logical,
                     prompt_window_messages=self.prompt_window_messages,
                 )
-                return _Walk(events=tuple(events), complete=False, reached_ts=reached, saw_anchor=saw_anchor)
+                return _Walk(
+                    events=tuple(events),
+                    complete=False,
+                    reached_ts=reached,
+                    saw_anchor=saw_anchor,
+                    unreadable=unreadable,
+                )
             start = response.end
 
     async def refresh(self, request: RefreshRequest) -> bool:
@@ -827,7 +944,22 @@ class ConversationHydrator:
                 logical_event_id=request.logical_event_id,
             )
             return False
-        projected = _projected_from_event(request.room_id, original.event, self_sender=self.self_sender)
+        readable_original = _readable_event(self._client(), original.event)
+        if readable_original is None:
+            # Unreadable is not deleted, and the branch below would treat it as
+            # deleted: an event that projects to nothing is how "the server no
+            # longer has this message" arrives here, so an undecryptable one
+            # would drop a message that exists and that every other client in
+            # the room can still read. Keeping the token instead leaves the
+            # message hidden and retries on the next strict read, which is what
+            # every other unreachable-server case here already does.
+            logger.info(
+                "conversation_refresh_unreadable",
+                room_id=request.room_id,
+                logical_event_id=request.logical_event_id,
+            )
+            return False
+        projected = _projected_from_event(request.room_id, readable_original, self_sender=self.self_sender)
         if projected is None or projected.redacts_event_id is not None:
             # The whole logical message is gone, not just the revision that was
             # on screen, so there is no revision left to reduce to. Dropping the
@@ -836,6 +968,20 @@ class ConversationHydrator:
             # projecting the redaction would bypass.
             return await self.store.drop_refetched_message(request)
         relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
+        if relations.unreadable:
+            # An empty relation list is a real answer -- it is how a server that
+            # already reclaimed the superseded edits reports the original as
+            # current -- so reducing over relations that were dropped unread
+            # cannot be told apart from it, and reinstalls the pre-edit body as
+            # though the server had said so. The walk's own ceiling is not this
+            # case: relations arrive newest first, so a ceiling drops older
+            # relations that could never have won.
+            logger.info(
+                "conversation_refresh_unreadable",
+                room_id=request.room_id,
+                logical_event_id=request.logical_event_id,
+            )
+            return False
         revision = _reduce_current_revision(projected, relations.events)
         content = await self._resolved_content(revision.event_id, revision.content)
         if content is None:
