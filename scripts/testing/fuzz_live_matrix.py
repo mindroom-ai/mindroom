@@ -541,6 +541,32 @@ class SustainedStreamCapacityObservation:
     phase_durations: tuple[tuple[str, float], ...]
 
 
+@dataclass(slots=True)
+class _ManagedRootLaunchBarrier:
+    """Hold every configured root send until an observer has begun."""
+
+    expected_roots: int
+    all_entered: asyncio.Event
+    release_sends: asyncio.Event
+    entered_roots: int = 0
+
+    @classmethod
+    def create(cls, expected_roots: int) -> _ManagedRootLaunchBarrier:
+        """Create one event-loop-local two-way launch barrier."""
+        return cls(
+            expected_roots=expected_roots,
+            all_entered=asyncio.Event(),
+            release_sends=asyncio.Event(),
+        )
+
+    async def wait_for_release(self) -> None:
+        """Record one entered root and wait for the health-side release."""
+        self.entered_roots += 1
+        if self.entered_roots == self.expected_roots:
+            self.all_entered.set()
+        await self.release_sends.wait()
+
+
 def audit_sustained_stream_capacity_sources(
     events: Collection[Mapping[str, Any]],
     *,
@@ -641,8 +667,14 @@ def _recovery_replacement_status(event: Mapping[str, Any]) -> str | None:
     new_content = content.get("m.new_content")
     if not isinstance(new_content, dict):
         return None
+    body = new_content.get("body")
+    msgtype = new_content.get("msgtype")
     status = new_content.get("io.mindroom.stream_status")
-    return status if isinstance(status, str) else None
+    if not isinstance(body, str) or not isinstance(msgtype, str) or not isinstance(status, str):
+        return None
+    if status == "completed" and msgtype != "m.text":
+        return None
+    return status
 
 
 def _recovery_event_order(event: Mapping[str, Any]) -> tuple[int, str]:
@@ -3300,10 +3332,13 @@ class LiveFuzzRunner:
         deadline: float,
         transaction_prefix: str,
         body_prefix: str,
+        launch_barrier: _ManagedRootLaunchBarrier | None = None,
     ) -> tuple[str, ...]:
         """Release every configured mentioned root in one gather."""
 
         async def send_root(thread: int) -> tuple[int, str]:
+            if launch_barrier is not None:
+                await launch_barrier.wait_for_release()
             content = {
                 "msgtype": "m.text",
                 "body": f"{body_prefix} run={run_id} thread={thread} {self.stack.agent_id}",
@@ -3367,21 +3402,32 @@ class LiveFuzzRunner:
         health_samples: list[RecoveryCliffHealthSample],
     ) -> tuple[str, ...]:
         """Release no-fault roots while proving the managed runtime stays live."""
-        initial_health_task = asyncio.create_task(
-            self._recovery_cliff_observer_step(
-                deadline=deadline,
-                health_samples=health_samples,
-            ),
-        )
+        launch_barrier = _ManagedRootLaunchBarrier.create(self.scenario.thread_count)
         release_task = asyncio.create_task(
             self._release_managed_roots(
                 run_id=run_id,
                 deadline=deadline,
                 transaction_prefix="sustained-stream-capacity-root",
                 body_prefix="Sustained stream capacity",
+                launch_barrier=launch_barrier,
             ),
         )
+        health_observation_started = asyncio.Event()
+
+        async def observe_initial_health() -> RecoveryCliffHealthSample:
+            health_observation_started.set()
+            return await self._recovery_cliff_observer_step(
+                deadline=deadline,
+                health_samples=health_samples,
+            )
+
+        initial_health_task: asyncio.Task[RecoveryCliffHealthSample] | None = None
         try:
+            async with asyncio.timeout(self._recovery_cliff_remaining(deadline)):
+                await launch_barrier.all_entered.wait()
+            initial_health_task = asyncio.create_task(observe_initial_health())
+            await health_observation_started.wait()
+            launch_barrier.release_sends.set()
             await initial_health_task
             while not release_task.done():
                 await self._recovery_cliff_observer_step(
@@ -3390,10 +3436,11 @@ class LiveFuzzRunner:
                 )
             return await release_task
         finally:
+            launch_barrier.release_sends.set()
             if not release_task.done():
                 release_task.cancel()
                 await asyncio.gather(release_task, return_exceptions=True)
-            if not initial_health_task.done():
+            if initial_health_task is not None and not initial_health_task.done():
                 initial_health_task.cancel()
                 await asyncio.gather(initial_health_task, return_exceptions=True)
 

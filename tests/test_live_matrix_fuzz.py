@@ -1088,9 +1088,18 @@ async def test_sustained_stream_capacity_samples_liveness_while_root_gather_is_o
 async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurrent_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A gather completing on its first turn must retain one paired health sample."""
+    """Every root must enter before health begins, and no send may finish before health starts."""
     stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _RecoveryCliffBoundaryClient()
+    stack.agent_id = "@mindroom_general:example"
+    order: list[str] = []
+
+    class FastClient(_RecoveryCliffBoundaryClient):
+        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+            del event_type, content
+            order.append(f"send:{txn_id}")
+            return f"${txn_id}"
+
+    client = FastClient()
     runner = LiveFuzzRunner(
         stack,
         (cast("LiveMatrixClient", client),),
@@ -1100,15 +1109,21 @@ async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurre
     )
     health_samples: list[RecoveryCliffHealthSample] = []
 
-    async def release_roots(**_kwargs: object) -> tuple[str, ...]:
-        return "$source-0", "$source-1"
-
     async def observer_step(**kwargs: object) -> RecoveryCliffHealthSample:
+        order.append("health:started")
         sample = RecoveryCliffHealthSample(True, datetime(2026, 8, 8, tzinfo=UTC))
         cast("list[RecoveryCliffHealthSample]", kwargs["health_samples"]).append(sample)
+        await asyncio.sleep(0)
         return sample
 
-    monkeypatch.setattr(runner, "_release_managed_roots", release_roots)
+    barrier_type = fuzz_live_matrix._ManagedRootLaunchBarrier
+    wait_for_release = barrier_type.wait_for_release
+
+    async def record_root_entry(barrier: object) -> None:
+        order.append("root:entered")
+        await wait_for_release(barrier)
+
+    monkeypatch.setattr(barrier_type, "wait_for_release", record_root_entry)
     monkeypatch.setattr(runner, "_recovery_cliff_observer_step", observer_step)
     try:
         released = await runner._release_sustained_stream_capacity_roots(
@@ -1117,8 +1132,18 @@ async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurre
             health_samples=health_samples,
         )
 
-        assert released == ("$source-0", "$source-1")
-        assert len(health_samples) == 1
+        assert released == (
+            "$sustained-stream-capacity-root-unit-run-0",
+            "$sustained-stream-capacity-root-unit-run-1",
+        )
+        assert health_samples
+        assert order[:5] == [
+            "root:entered",
+            "root:entered",
+            "health:started",
+            "send:sustained-stream-capacity-root-unit-run-0",
+            "send:sustained-stream-capacity-root-unit-run-1",
+        ]
     finally:
         stack.close()
 
@@ -1514,14 +1539,18 @@ def _recovery_edit(
     *,
     sender: str = "@mindroom_general:example",
     outer_status: str | None = None,
+    msgtype: str | None = None,
 ) -> dict[str, Any]:
     """Build one literal Matrix replacement with optional new-content precedence."""
+    resolved_msgtype = msgtype or ("m.text" if status == "completed" else "m.notice")
     content: dict[str, Any] = {
         "body": status,
+        "msgtype": resolved_msgtype,
         "io.mindroom.stream_status": outer_status or status,
         "m.relates_to": {"rel_type": "m.replace", "event_id": response_id},
         "m.new_content": {
             "body": status,
+            "msgtype": resolved_msgtype,
             "io.mindroom.stream_status": status,
         },
     }
@@ -1683,6 +1712,34 @@ def test_recovery_cliff_event_audit_rejects_every_invalid_terminal_replacement()
         **valid[1],
         "content": {key: value for key, value in valid[1]["content"].items() if key != "m.new_content"},
     }
+    status_only_new_content = {
+        **valid[1],
+        "content": {
+            **valid[1]["content"],
+            "m.new_content": {"io.mindroom.stream_status": "completed"},
+        },
+    }
+    malformed_message_envelope = {
+        **valid[1],
+        "content": {
+            **valid[1]["content"],
+            "m.new_content": {
+                "body": 7,
+                "msgtype": ["m.text"],
+                "io.mindroom.stream_status": "completed",
+            },
+        },
+    }
+    completed_notice = {
+        **valid[1],
+        "content": {
+            **valid[1]["content"],
+            "m.new_content": {
+                **valid[1]["content"]["m.new_content"],
+                "msgtype": "m.notice",
+            },
+        },
+    }
     mutations = (
         (
             (*valid, _recovery_edit("$orphan", "$missing-response", 50_000, "streaming", outer_status="pending")),
@@ -1690,6 +1747,9 @@ def test_recovery_cliff_event_audit_rejects_every_invalid_terminal_replacement()
         ),
         ((valid[0], missing_new_content, valid[2], valid[3]), "invalid_replacements"),
         ((valid[0], malformed, valid[2], valid[3]), "invalid_replacements"),
+        ((valid[0], status_only_new_content, valid[2], valid[3]), "invalid_replacements"),
+        ((valid[0], malformed_message_envelope, valid[2], valid[3]), "invalid_replacements"),
+        ((valid[0], completed_notice, valid[2], valid[3]), "invalid_replacements"),
         (
             (
                 *valid,
