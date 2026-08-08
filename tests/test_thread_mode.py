@@ -1012,7 +1012,6 @@ class TestExtractMessageContextRoomMode:
             context_result = await bot._conversation_resolver.extract_dispatch_context(
                 room,
                 event,
-                caller_label="dispatch_hydration",
             )
             context = context_result.context
 
@@ -1597,7 +1596,6 @@ class TestExtractedModuleLoggerRebinding:
             event.event_id,
             EventInfo.from_event(event.source),
             mode=ThreadReadMode.NONBLOCKING,
-            caller_label="thread_mode_test",
         )
 
         assert thread_lookup.thread_id == "$threadroot"

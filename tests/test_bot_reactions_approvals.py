@@ -1912,7 +1912,6 @@ class TestAgentBot(AgentBotTestBase):
         resolve_related_event_thread_id.assert_awaited_once_with(
             room.room_id,
             "$plain-reply",
-            caller_label="reaction_hook_context",
         )
         assert seen == [("$plain-reply", "$thread-root")]
 

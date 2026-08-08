@@ -196,7 +196,6 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     context = await bot._conversation_resolver.extract_message_context(
         room,
         event_with_skip,
-        caller_label="skip_mentions_test",
     )
 
     # Verify mentions were ignored
@@ -227,7 +226,6 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
         context = await bot._conversation_resolver.extract_message_context(
             room,
             event_without_skip,
-            caller_label="skip_mentions_test",
         )
 
         # Verify mentions were detected
@@ -266,7 +264,6 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
     context = await bot._conversation_resolver.extract_message_context(
         room,
         event,
-        caller_label="skip_mentions_test",
     )
 
     assert context.am_i_mentioned is True

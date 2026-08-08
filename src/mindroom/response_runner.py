@@ -1087,7 +1087,6 @@ class ResponseRunner:
             refreshed_history = await self.deps.resolver.fetch_thread_history(
                 request.room_id,
                 request.thread_id,
-                caller_label="dispatch_post_lock_refresh",
             )
         except Exception as exc:
             if request.requires_model_history_refresh:

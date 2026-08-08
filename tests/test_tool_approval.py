@@ -1875,7 +1875,6 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     code_bot.latest_thread_event_id_if_needed.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
-        caller_label="approval_transport_thread_relation",
     )
     router_bot.latest_thread_event_id_if_needed.assert_not_awaited()
 

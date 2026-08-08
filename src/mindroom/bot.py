@@ -926,11 +926,8 @@ class AgentBot:
         self,
         room_id: str,
         thread_id: str,
-        *,
-        caller_label: str = "agent_bot_latest_thread_event_lookup",
     ) -> str | None:
-        """Return the latest event id for one Matrix thread when the cache knows it."""
-        del caller_label
+        """Return the latest event id for one Matrix thread when the projection knows it."""
         return await self._conversation_reader.latest_thread_event_id(room_id=room_id, thread_id=thread_id)
 
     @property
@@ -1012,7 +1009,6 @@ class AgentBot:
                     await self._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
                         room_id,
                         normalized_target_event_id,
-                        caller_label="reaction_hook_context",
                     )
                 )
             except Exception as exc:

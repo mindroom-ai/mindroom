@@ -115,7 +115,6 @@ class EditRegenerator:
         thread_history = await self.deps.resolver.fetch_thread_history(
             room.room_id,
             conversation_target.resolved_thread_id,
-            caller_label="edit_regeneration_context",
         )
         return MessageContext(
             am_i_mentioned=context.am_i_mentioned,
@@ -146,7 +145,6 @@ class EditRegenerator:
         context = await self.deps.resolver.extract_message_context(
             room,
             event,
-            caller_label="edit_regeneration_context",
         )
         # A search hint, and only that. The thread an edit names inside its ``m.new_content`` is
         # ignored on application, so it places nothing - here it merely points the recovery read at

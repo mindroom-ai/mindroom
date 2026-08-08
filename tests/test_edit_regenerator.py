@@ -1893,7 +1893,6 @@ async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) ->
     harness.resolver.fetch_thread_history.assert_awaited_once_with(
         ROOM_ID,
         THREAD_ID,
-        caller_label="edit_regeneration_context",
     )
     assert harness.generate_response.await_args.args[0].thread_history == refetched_history
 

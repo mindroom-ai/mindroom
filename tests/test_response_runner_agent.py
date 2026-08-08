@@ -2069,10 +2069,7 @@ class TestAgentBot(AgentBotTestBase):
         async def cached_history_refresh(
             _room_id: str,
             _thread_id: str,
-            *,
-            caller_label: str,
         ) -> ThreadHistoryResult:
-            assert caller_label == "dispatch_post_lock_refresh"
             return ThreadHistoryResult(fresh_history, is_full_history=True)
 
         with (
@@ -2129,7 +2126,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
-            caller_label="dispatch_post_lock_refresh",
         )
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history

@@ -755,7 +755,6 @@ class TurnController:
             thread_history = await self.deps.resolver.dispatch_thread_snapshot(
                 room.room_id,
                 thread_id,
-                caller_label="router_pre_ingress_skip",
             )
         except asyncio.CancelledError:
             raise
@@ -1109,7 +1108,6 @@ class TurnController:
                 context_event,
                 mode=ThreadReadMode.NONBLOCKING,
                 payload_metadata=payload_metadata,
-                caller_label="dispatch_command_context",
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
@@ -1306,7 +1304,6 @@ class TurnController:
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
                 selection.thread_id,
-                caller_label="interactive_selection",
             )
             if selection.thread_id
             else []

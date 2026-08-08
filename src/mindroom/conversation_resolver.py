@@ -521,7 +521,6 @@ class ConversationResolver:
             event,
             event_info,
             mode=ThreadReadMode.NONBLOCKING,
-            caller_label="coalescing_thread_id",
         )
         if resolution.state is ThreadResolutionState.INDETERMINATE and resolution.candidate_thread_root_id is not None:
             # A non-blocking read cannot prove a root in a conversation it has
@@ -537,7 +536,6 @@ class ConversationResolver:
                 event,
                 event_info,
                 mode=ThreadReadMode.STRICT,
-                caller_label="coalescing_thread_id_strict_candidate_fallback",
             )
         if resolution.state is ThreadResolutionState.THREADED:
             return resolution.thread_id
@@ -555,7 +553,6 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         mode: ThreadReadMode,
-        caller_label: str,
     ) -> ThreadResolution:
         """Resolve one event's coalescing membership under one read mode."""
         try:
@@ -565,7 +562,6 @@ class ConversationResolver:
                 event_id=event.event_id,
                 access=self._thread_membership_access(
                     mode=mode,
-                    caller_label=caller_label,
                     requires_complete_history=True,
                 ),
             )
@@ -580,12 +576,10 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         mode: ThreadReadMode,
-        caller_label: str,
     ) -> _ThreadIdLookup:
         """Resolve thread membership and identify unproven dispatch candidates."""
         access = self._thread_membership_access(
             mode=mode,
-            caller_label=caller_label,
             requires_complete_history=True,
         )
         resolution = await resolve_event_thread_membership(
@@ -613,8 +607,6 @@ class ConversationResolver:
         self,
         room_id: str,
         related_event_id: str,
-        *,
-        caller_label: str,
     ) -> str | None:
         """Return thread membership from local state without waiting on the homeserver."""
         return await resolve_related_event_thread_id_best_effort(
@@ -622,7 +614,6 @@ class ConversationResolver:
             related_event_id,
             access=self._thread_membership_access(
                 mode=ThreadReadMode.NONBLOCKING,
-                caller_label=caller_label,
                 # Reaction hook context wants the target's thread, not its
                 # conversation, so an incomplete page answers it just as well.
                 requires_complete_history=False,
@@ -633,7 +624,6 @@ class ConversationResolver:
         self,
         *,
         mode: ThreadReadMode,
-        caller_label: str,
         requires_complete_history: bool,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver.
@@ -651,7 +641,6 @@ class ConversationResolver:
                 room_id,
                 thread_id,
                 mode=mode,
-                caller_label=caller_label,
                 requires_complete_history=requires_complete_history,
             ),
         )
@@ -662,7 +651,6 @@ class ConversationResolver:
         thread_id: str,
         *,
         mode: ThreadReadMode,
-        caller_label: str,
         requires_complete_history: bool = True,
     ) -> ThreadHistoryResult:
         """Resolve one thread read against the conversation projection.
@@ -677,7 +665,6 @@ class ConversationResolver:
         above what any consumer renders -- teams cut to thirty messages -- so
         the bound removes work rather than context.
         """
-        del caller_label
         # A non-blocking read runs before the turn is accepted, so it never
         # waits on the homeserver; a strict read feeds a prompt or a root
         # proof, both of which are wrong when a message is missing, so it
@@ -728,7 +715,6 @@ class ConversationResolver:
         event_info: EventInfo,
         *,
         mode: ThreadReadMode,
-        caller_label: str,
     ) -> _ThreadContextLookup:
         """Resolve one thread context using either snapshot or full history."""
         thread_lookup = await self._explicit_thread_id_for_event(
@@ -736,7 +722,6 @@ class ConversationResolver:
             event_id,
             event_info,
             mode=mode,
-            caller_label=caller_label,
         )
         thread_id = thread_lookup.thread_id
         if thread_id is None:
@@ -753,7 +738,6 @@ class ConversationResolver:
                     event_id,
                     event_info,
                     mode=ThreadReadMode.STRICT,
-                    caller_label=f"{caller_label}_strict_candidate_fallback",
                 )
                 if strict_lookup.thread_id is not None:
                     thread_lookup = strict_lookup
@@ -785,7 +769,6 @@ class ConversationResolver:
                 room_id,
                 thread_id,
                 mode=mode,
-                caller_label=caller_label,
             )
         if mode is ThreadReadMode.NONBLOCKING and is_thread_history_degraded(thread_messages):
             # Proven threads must not plan from degraded history; wait for Matrix-backed refill.
@@ -793,7 +776,6 @@ class ConversationResolver:
                 room_id,
                 thread_id,
                 mode=ThreadReadMode.STRICT,
-                caller_label=f"{caller_label}_strict_thread_fallback",
             )
         return _ThreadContextLookup.proven_thread(
             thread_id,
@@ -807,7 +789,6 @@ class ConversationResolver:
         *,
         payload_metadata: DispatchPayloadMetadata | None = None,
         mode: ThreadReadMode = ThreadReadMode.NONBLOCKING,
-        caller_label: str = "dispatch_context",
     ) -> DispatchContextResult:
         """Extract dispatch context, escalating to a strict read when a non-blocking one degrades."""
         context, thread_context = await self._extract_message_context_parts(
@@ -816,7 +797,6 @@ class ConversationResolver:
             mode=mode,
             include_dispatch_context=True,
             payload_metadata=payload_metadata,
-            caller_label=caller_label,
         )
         return DispatchContextResult(context=context, thread_context=thread_context)
 
@@ -881,7 +861,6 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str = "message_context",
     ) -> MessageContext:
         """Extract strict message context for one inbound turn."""
         context, _thread_context = await self._extract_message_context_parts(
@@ -890,7 +869,6 @@ class ConversationResolver:
             mode=ThreadReadMode.STRICT,
             include_dispatch_context=False,
             payload_metadata=payload_metadata,
-            caller_label=caller_label,
         )
         return context
 
@@ -902,7 +880,6 @@ class ConversationResolver:
         mode: ThreadReadMode,
         include_dispatch_context: bool,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str,
     ) -> tuple[MessageContext, DispatchThreadContext | None]:
         """Resolve event metadata, mentions, stable context, and optional dispatch-local state."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
@@ -945,7 +922,6 @@ class ConversationResolver:
                 event.event_id,
                 event_info,
                 mode=mode,
-                caller_label=caller_label,
             )
             is_thread = thread_lookup.is_thread
             thread_id = thread_lookup.thread_id
@@ -1007,8 +983,6 @@ class ConversationResolver:
         self,
         room_id: str,
         thread_id: str,
-        *,
-        caller_label: str = "unknown",
     ) -> ThreadHistoryResult:
         """Read one thread without waiting for the homeserver.
 
@@ -1019,20 +993,16 @@ class ConversationResolver:
             room_id,
             thread_id,
             mode=ThreadReadMode.NONBLOCKING,
-            caller_label=caller_label,
         )
 
     async def fetch_thread_history(
         self,
         room_id: str,
         thread_id: str,
-        *,
-        caller_label: str = "unknown",
     ) -> ThreadHistoryResult:
         """Fetch complete thread history from the conversation projection."""
         return await self._read_thread_messages(
             room_id,
             thread_id,
             mode=ThreadReadMode.STRICT,
-            caller_label=caller_label,
         )

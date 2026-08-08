@@ -7488,7 +7488,6 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     snapshot.assert_awaited_once_with(
         room.room_id,
         "$thread",
-        caller_label="router_pre_ingress_skip",
     )
 
 
@@ -7527,5 +7526,4 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     snapshot.assert_awaited_once_with(
         room.room_id,
         "$maybe-root",
-        caller_label="router_pre_ingress_skip",
     )

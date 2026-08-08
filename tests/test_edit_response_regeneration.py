@@ -786,7 +786,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     mock_fetch_history.assert_awaited_once_with(
         room.room_id,
         stored_target.resolved_thread_id,
-        caller_label="edit_regeneration_context",
     )
     mock_remove_stale_runs.assert_called_once()
     request = mock_generate_response.call_args.args[0]

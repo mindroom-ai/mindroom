@@ -931,7 +931,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$incoming-edit:localhost",
             event_info,
             mode=ThreadReadMode.STRICT,
-            caller_label="threading_error_test",
         )
 
         assert thread_lookup.thread_id is None
@@ -1718,12 +1717,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert mock_access.call_args_list == [
             call(
                 mode=ThreadReadMode.NONBLOCKING,
-                caller_label="coalescing_thread_id",
                 requires_complete_history=True,
             ),
             call(
                 mode=ThreadReadMode.STRICT,
-                caller_label="coalescing_thread_id_strict_candidate_fallback",
                 requires_complete_history=True,
             ),
         ]
@@ -1795,7 +1792,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             incoming_event_id,
             event_info,
             mode=ThreadReadMode.STRICT,
-            caller_label="threading_error_test",
         )
 
         assert thread_context.is_thread is True
