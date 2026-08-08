@@ -176,7 +176,6 @@ visibility = [
 [[modules]]
 path = "mindroom.pending_event_worker"
 depends_on = [
-    "mindroom.event_journal",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.journal_dispatch"]
@@ -217,7 +216,6 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.relation_lookup"
 depends_on = [
-    "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
 ]
@@ -229,7 +227,6 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.conversation_reads"
 depends_on = [
-    "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.agent_message_snapshot",
     "mindroom.matrix.client_visible_messages",
@@ -1489,7 +1486,6 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agents",
-    "mindroom.event_journal",
     "mindroom.event_journal_open",
     "mindroom.api.main",
     "mindroom.approval_transport",
@@ -1590,8 +1586,6 @@ visibility = [
 path = "mindroom.response_attempt"
 depends_on = [
     "mindroom.cancellation",
-    "mindroom.constants",
-    "mindroom.delivery_gateway",
     "mindroom.logging_config",
     "mindroom.matrix.presence",
     "mindroom.orchestration.runtime",
@@ -1949,7 +1943,6 @@ depends_on = []
 path = "mindroom.matrix.sync_checkpoint_trust"
 depends_on = [
     "mindroom.background_tasks",
-    "mindroom.event_journal",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_recovery_escape",
     "mindroom.matrix.sync_token_values",
@@ -2539,7 +2532,6 @@ path = "mindroom.matrix.thread_mutation_impact"
 depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.thread_membership",
-    "mindroom.matrix.thread_projection",
     "mindroom.matrix.thread_room_scan",
 ]
 
