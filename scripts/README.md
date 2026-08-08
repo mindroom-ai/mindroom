@@ -48,7 +48,6 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
-uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff
 ```
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
@@ -75,7 +74,8 @@ The `short-stream-correctness` profile preserves the existing 13-thread hot-then
 It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
 
 The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for its fixed 100-root workload.
-Its live acceptance invariants are documented with the delivery-recovery work and should not be inferred from short-stream-correctness results.
+It intentionally refuses to run until the dedicated Task 3 workload and acceptance checks land, so it is not yet an executable live profile.
+Its future live acceptance results must not be inferred from short-stream-correctness results.
 
 #### The live gate is manual, and that is a decision rather than an omission
 

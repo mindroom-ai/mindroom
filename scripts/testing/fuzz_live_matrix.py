@@ -1831,6 +1831,7 @@ class ManagedTuwunelStack:
             config["matrix_sync"] = {"mode": "sliding", "sliding_timeline_limit": 100}
             config["models"]["synthetic"] = {
                 "provider": "synthetic",
+                "id": "lorem-ipsum",
                 "extra_kwargs": {
                     "seed": 1,
                     "min_response_chars": 4000,
@@ -1841,6 +1842,7 @@ class ManagedTuwunelStack:
                 },
             }
             config["agents"][AGENT_NAME]["model"] = "synthetic"
+            config["agents"][AGENT_NAME]["tools"] = ["shell"]
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
                 "role": "Author deterministic recovery-cliff workload roots.",
@@ -2344,6 +2346,9 @@ class LiveFuzzRunner:
 
     async def run(self) -> dict[str, int | str]:
         """Execute every batch and enforce the reply invariant after each."""
+        if self.scenario.profile == "recovery-cliff":
+            msg = "recovery-cliff runner is not yet implemented; Task 3 owns its live acceptance workload"
+            raise NotImplementedError(msg)
         await asyncio.gather(*(client.register() for client in self.clients))
         await asyncio.gather(*(client.join_room() for client in self.clients))
         if self.scenario.profile == "restart-regression":
@@ -2551,6 +2556,7 @@ class LiveFuzzRunner:
             "historical_events_projected_after_answer": observation.projected_after_answer_count,
             "historical_events_projected_on_room_read": observation.historical_projected_on_room_read,
             "historical_outputs": sum(observation.historical_output_counts),
+            "profile": self.scenario.profile,
             "status": "PASS",
         }
 
@@ -2827,6 +2833,7 @@ class LiveFuzzRunner:
             "operations": self.operation_count,
             "restarts": 0,
             "roots": self.scenario.thread_count,
+            "profile": self.scenario.profile,
             "status": "PASS",
         }
 
@@ -2991,6 +2998,7 @@ class LiveFuzzRunner:
             "roots": self.scenario.thread_count,
             "measured_turn_seconds": round(self.latency.per_turn_seconds, 3),
             "slow_wait_extensions": self.slow_wait_extensions,
+            "profile": self.scenario.profile,
             "status": "PASS",
         }
 

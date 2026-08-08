@@ -19,6 +19,7 @@ import httpx
 import pytest
 import yaml
 
+from mindroom.config.main import Config
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.sync_continuity import SyncContinuityStore
@@ -79,6 +80,31 @@ class _RecordingDormantClient:
     async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
         self.sent_payloads.append((event_type, txn_id, content))
         return f"${txn_id}"
+
+
+class _RecoveryCliffBoundaryClient:
+    """Fail immediately if Task 2 starts the unimplemented recovery workload."""
+
+    room_id = "!recovery:example"
+    _REGISTER_MESSAGE = "recovery-cliff must refuse before client registration"
+    _JOIN_MESSAGE = "recovery-cliff must refuse before room join"
+    _SEND_MESSAGE = "recovery-cliff must refuse before sending roots"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def register(self) -> None:
+        self.calls.append("register")
+        raise AssertionError(self._REGISTER_MESSAGE)
+
+    async def join_room(self) -> None:
+        self.calls.append("join_room")
+        raise AssertionError(self._JOIN_MESSAGE)
+
+    async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        del event_type, txn_id, content
+        self.calls.append("send_event")
+        raise AssertionError(self._SEND_MESSAGE)
 
 
 class _StaticObservationClient:
@@ -459,6 +485,45 @@ def test_recovery_cliff_scenario_rejects_an_altered_trace_shape() -> None:
 
     with pytest.raises(ValueError, match="fixed empty trace"):
         scenario.validate()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cliff_refuses_before_registering_or_sending_until_task_three() -> None:
+    """Task 2 must not let the generic fuzz runner report a recovery-cliff pass."""
+    stack = ManagedTuwunelStack(profile="recovery-cliff")
+    client = _RecoveryCliffBoundaryClient()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", client),),
+        recovery_cliff_scenario(),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    try:
+        with pytest.raises(NotImplementedError, match=r"recovery-cliff.*not yet implemented"):
+            await runner.run()
+        assert client.calls == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_machine_readable_pass_result_labels_its_profile() -> None:
+    """A passing short-stream result must state its profile instead of implying capacity."""
+    stack = ManagedTuwunelStack()
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", _RecoveryCliffBoundaryClient()),),
+        LiveFuzzScenario(thread_count=13, batches=(), profile="short-stream-correctness"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    try:
+        result = await runner._run_batches(())
+        assert result["profile"] == "short-stream-correctness"
+        assert result["status"] == "PASS"
+    finally:
+        stack.close()
 
 
 def test_live_scenario_rejects_same_batch_dependency() -> None:
@@ -1186,7 +1251,10 @@ def test_recovery_cliff_managed_config_uses_synthetic_responder_and_sliding_sync
             "tool_call_probability": 0.2,
         }
         assert config["agents"]["general"]["model"] == "synthetic"
+        assert config["agents"]["general"]["tools"] == ["shell"]
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+        parsed = Config.model_validate(config)
+        assert parsed.models["synthetic"].id == "lorem-ipsum"
     finally:
         stack.close()
 
