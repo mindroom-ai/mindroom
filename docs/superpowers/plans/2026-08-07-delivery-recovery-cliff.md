@@ -12,7 +12,9 @@ The live harness adds a fixed `recovery-cliff` profile with a managed sender, a 
 
 ## Global Constraints
 
-The worktree was rebased at the user's request onto `e4cdd2f32733f304e76ff2a4cef8a0d0b6a71495`.
+The worktree was rebased at the user's request onto current PR tip `6a994538f684fac01fa5dec26fd440a479de6aad` after the live run.
+
+The intervening PR delta changed only test isolation in `tests/conftest.py`, `tests/test_callback_manager_tool.py`, and `tests/test_turn_dispatch_pipeline.py`.
 
 The response outbox remains the only durable delivery-recovery authority.
 

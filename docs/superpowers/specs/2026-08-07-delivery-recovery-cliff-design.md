@@ -1,6 +1,6 @@
 # Delivery Recovery Cliff Design
 
-Implementation base: `e4cdd2f32733f304e76ff2a4cef8a0d0b6a71495` after the user-requested rebase.
+Implementation base: `6a994538f684fac01fa5dec26fd440a479de6aad` after the final user-requested rebase to the current PR tip.
 
 ## Purpose
 
