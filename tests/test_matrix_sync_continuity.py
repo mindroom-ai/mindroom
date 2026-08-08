@@ -2732,12 +2732,19 @@ async def test_unreadable_journal_row_does_not_hide_the_events_behind_it(
     )
 
     with capture_logs() as logs:
-        # One row to a page, so the unreadable row fills the page it sits in.
-        # Asserted at a default limit, this held only because the two rows
-        # shared a page: a read that returned whatever decoded from one query
-        # gave back an empty page here, which the worker's scan reads as the
-        # end of the backlog.
-        pending = await bot._journal_dispatcher.store.pending(limit=1)
+        # One row to a page, so the unreadable row fills the page it sits in
+        # and the event behind it lands on the next one. A page's limit counts
+        # the rows it read, so the row that decoded nothing still consumed the
+        # page -- and the empty result that comes back is explicitly not the
+        # end of the backlog, which is the whole reason a caller can page past
+        # it rather than stopping on a short page.
+        blocked = await bot._journal_dispatcher.store.pending(limit=1)
+        assert blocked == ()
+        assert not blocked.reached_end
+        pending = await bot._journal_dispatcher.store.pending(
+            limit=1,
+            after_receipt_order=blocked.resume_after,
+        )
 
     # The unreadable row is skipped rather than settled — nothing ran, so
     # nothing may claim it did — and it does not hide the events behind it.
