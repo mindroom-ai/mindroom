@@ -19413,6 +19413,7 @@ Retracting a room whose directory still holds unrelated entries removes only the
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
 A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
+Building it also writes it, into the same journal the bot is writing, from the export's own process, so a first pass over a thread competes with live admission for that database's one write lock while a later pass over the same thread does not.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

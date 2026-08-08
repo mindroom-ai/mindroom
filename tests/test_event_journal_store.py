@@ -4,10 +4,15 @@ Every test here runs on SQLite and on PostgreSQL. A rule that holds on only one
 backend is a rule MindRoom does not actually have.
 
 The exceptions are the two contention tests, which ask what two connections do
-to the same row. SQLite has no second connection to ask that of -- the backend
-is one process behind one writer -- so running them there would prove only that
-the fixture took turns. Both take the PostgreSQL-only ``rival_stores`` fixture,
-which is where that is spelled out.
+to the same row. SQLite has no second connection *in this process* to ask that
+of -- the backend is one process behind one writer -- so running them there
+would prove only that the fixture took turns. Both take the PostgreSQL-only
+``rival_stores`` fixture, which is where that is spelled out.
+
+SQLite does get a second connection, and not from a fixture: ``mindroom threads
+export`` is another process with another writer on the same file. That is the
+one thing here no object can stage, so ``TestCrossProcessWriters`` spawns a real
+interpreter to be it.
 """
 
 from __future__ import annotations
@@ -15,10 +20,11 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -50,7 +56,7 @@ from mindroom.event_journal.sqlite_backend import SqliteBackend
 from tests.conftest import postgres_journal_schema_url
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.event_journal import OutboxDelivery, PrincipalStore, TurnRecordStore
@@ -80,6 +86,9 @@ _MUST_NOT_FINISH_SECONDS = 0.25
 # How long a worker thread waits to be let go. Never reached unless the test is
 # already failing, so it only bounds the damage.
 _WORKER_WAIT_SECONDS = 5.0
+# How long a released holder process is given to exit. It is already unblocked
+# by the time this is waited on, so reaching it means that process is wedged.
+_HOLDER_EXIT_SECONDS = 30.0
 # The pause an operation leaves between the statements it holds a connection
 # with. Short next to anything it is racing, long enough to cost no core.
 _STATEMENT_GAP_SECONDS = 0.001
@@ -1788,10 +1797,14 @@ async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores,
     """Open two independently connected stores onto one database.
 
     PostgreSQL only, and deliberately not part of the backend parity sweep.
-    The SQLite backend is a single process holding a single writer, so a second
-    store over the same file is a second queue onto the same serialized write
-    -- there is no second connection to race, and forcing one would only prove
-    something about the fixture.
+    Two SQLite stores in one process are two queues onto the same serialized
+    write, so racing them here would only prove something about the fixture.
+
+    Not because SQLite has no second connection to race -- it has one whenever
+    ``mindroom threads export`` is running, which is its own process with its
+    own writer. That race is real, and it is not this fixture's to stage: it
+    needs a second interpreter rather than a second object, which is what
+    ``TestCrossProcessWriters`` spawns.
 
     Only the stores carry the application name. The connection that holds the
     row and the one that watches for waiters use the bare DSN, so neither can
@@ -3309,3 +3322,163 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         await records.forget(index_event_ids=("$a",))
 
         assert await self._stored(records) == {"$b": '{"v": 1}'}
+
+
+# Takes the journal's write lock on a database that is not yet in WAL, which is
+# the shape of a bot creating the file, and holds it until told to let go.
+# Raw ``sqlite3`` rather than a store, because a store enters WAL as it opens
+# and so cannot hold a lock in the state this is here to hold one in.
+_HOLD_FRESH_DATABASE_SOURCE = """
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+database, held, release = (Path(argument) for argument in sys.argv[1:4])
+database.parent.mkdir(parents=True, exist_ok=True)
+connection = sqlite3.connect(database, isolation_level=None)
+connection.execute("PRAGMA busy_timeout = 10000")
+connection.execute("BEGIN IMMEDIATE")
+connection.execute("CREATE TABLE IF NOT EXISTS seed (id INTEGER PRIMARY KEY)")
+held.write_text("held")
+while not release.exists():
+    time.sleep(0.01)
+connection.execute("COMMIT")
+connection.close()
+"""
+
+# Holds a real store's real write transaction open, the way an export installing
+# one large hydrated conversation holds it. Only the body of the transaction is
+# stand-in: the connection, the queue, the ``BEGIN IMMEDIATE`` and the lock it
+# takes are the production ones, and the lock is the whole subject.
+_HOLD_STORE_WRITE_SOURCE = """
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+from mindroom.event_journal import EventJournalStore
+
+database, held, release = (Path(argument) for argument in sys.argv[1:4])
+
+
+def hold(transaction):
+    transaction.execute("PRAGMA user_version = 7")
+    held.write_text("held")
+    while not release.exists():
+        time.sleep(0.01)
+
+
+async def main():
+    store = EventJournalStore.open_sqlite(database)
+    await store.backend.write(hold)
+    await store.close()
+
+
+asyncio.run(main())
+"""
+
+
+class TestCrossProcessWriters:
+    """What a second OS process writing this journal does to the one beside it.
+
+    The export is that process. It opens the bot's journal from its own
+    interpreter and hydrates through it, so the single-writer queue -- which is
+    per process -- is not between them. The busy timeout is, and these are the
+    tests that say what that buys, because until they existed the timeout was
+    load-bearing and unexercised: every other concurrency test here shares one
+    interpreter, where the queue makes the writers take turns before SQLite is
+    ever asked to.
+    """
+
+    @staticmethod
+    @asynccontextmanager
+    async def _holding_the_write_lock(source: str, tmp_path: Path) -> AsyncIterator[Path]:
+        """Run a real second process holding this journal's write lock.
+
+        Entered once that process has the lock and not before, so a body that
+        contends is contending with something. Released on the way out however
+        the body ended: a test that fails while another process is sitting on
+        the lock should report why it failed, not time out waiting for a
+        process only it can free.
+        """
+        script = tmp_path / "hold.py"
+        script.write_text(source)
+        database = tmp_path / "tracking" / "event_journal.db"
+        held = tmp_path / "held"
+        release = tmp_path / "release"
+        holder = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            str(database),
+            str(held),
+            str(release),
+        )
+        try:
+            while not held.exists():
+                assert holder.returncode is None, "the second process exited before it took the write lock"
+                await asyncio.sleep(0.01)
+            yield release
+        finally:
+            release.write_text("release")
+            async with asyncio.timeout(_HOLDER_EXIT_SECONDS):
+                await holder.wait()
+
+    async def test_opening_waits_out_a_write_lock_another_process_holds(self, tmp_path: Path) -> None:
+        """A journal being written by another process is opened, not refused.
+
+        Entering WAL is the one statement SQLite will not run the busy handler
+        for, so before this the ten-second timeout the rest of the backend
+        relies on was zero here: an export pass that started while the bot was
+        still creating the database died on the spot, in single-digit
+        milliseconds, having waited for nothing.
+
+        The wait is proven rather than timed. An open that refuses instead of
+        waiting is finished long before the grace window, so the assertion that
+        it is still running is what separates the two -- and the lock is only
+        released afterwards, which means the open can only have succeeded by
+        having waited for it.
+        """
+        database = tmp_path / "tracking" / "event_journal.db"
+        async with self._holding_the_write_lock(_HOLD_FRESH_DATABASE_SOURCE, tmp_path) as release:
+            opening = asyncio.create_task(asyncio.to_thread(EventJournalStore.open_sqlite, database))
+            if await _finished_within_grace(opening):
+                # Awaiting it is how the refusal itself gets reported, rather
+                # than a bare "this finished too early".
+                await opening
+                pytest.fail("opening the journal returned at once instead of waiting for the lock")
+            release.write_text("release")
+            store = await opening
+        try:
+            assert await admit(store.principal(ALICE), "$after") is AdmissionResult.ADMITTED
+        finally:
+            await store.close()
+
+    async def test_admission_survives_a_write_lock_another_process_holds(self, tmp_path: Path) -> None:
+        """A bot admits through an export's write, late rather than never.
+
+        The guarantee the backend actually offers two processes, stated where
+        it can be checked: contention delays an admission for as long as the
+        other process's transaction runs, and the busy timeout is what turns
+        that into a delay instead of a refusal. Past ten seconds it is a
+        refusal, which ``journal_ingress`` turns into a declined event rather
+        than an accepted one -- so what this pins is the bound, not an absence
+        of one.
+        """
+        database = tmp_path / "tracking" / "event_journal.db"
+        store = EventJournalStore.open_sqlite(database)
+        try:
+            principal = store.principal(ALICE)
+            assert await admit(principal, "$before") is AdmissionResult.ADMITTED
+
+            async with self._holding_the_write_lock(_HOLD_STORE_WRITE_SOURCE, tmp_path) as release:
+                admitting = asyncio.create_task(admit(principal, "$during"))
+                if await _finished_within_grace(admitting):
+                    await admitting
+                    pytest.fail("admission returned at once instead of waiting for the other writer")
+                release.write_text("release")
+                assert await admitting is AdmissionResult.ADMITTED
+
+            assert await bodies(principal) == ["$before", "$during"]
+        finally:
+            await store.close()

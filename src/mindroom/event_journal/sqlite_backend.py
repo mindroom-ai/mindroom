@@ -1,9 +1,26 @@
-"""SQLite backend: one writer task behind a queue, readers in WAL.
+"""SQLite backend: one writer task per process behind a queue, readers in WAL.
 
 Concurrent writers are what produce ``database is locked`` under load, so
-there is exactly one. Every write is submitted to a queue drained by a single
-task, which means serialization is a property of the structure rather than of
-a timeout being long enough.
+within a process there is exactly one. Every write is submitted to a queue
+drained by a single task, which means that serialization is a property of the
+structure rather than of a timeout being long enough.
+
+Per process, and the qualifier is the whole of it. ``mindroom threads export``
+opens this same file from its own process and hydrates through it, so a
+deployment running the documented ``--watch`` pass alongside a bot has two
+writers on one database and no shared queue to put them in. What serializes
+*those* is the busy timeout, and nothing else -- exactly the arrangement the
+queue exists to avoid, arrived at from outside where the queue cannot reach.
+
+Which is survivable, and is not free. A write blocks the other process's next
+write for as long as it runs, and an export installing one hydrated
+conversation runs for as long as that conversation is large: a few hundred
+messages is milliseconds, and the ceilings in ``thread_export`` permit far
+more than the ten seconds another process is willing to wait. Past that the
+loser is refused rather than delayed. On the bot that refusal reaches
+``journal_ingress``, which declines the event instead of accepting one it did
+not commit -- the checkpoint holds, nio redelivers, and no event is lost. The
+cost is a stalled sync round trip, not a hole in the journal.
 """
 
 from __future__ import annotations
@@ -12,6 +29,7 @@ import asyncio
 import contextlib
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +49,10 @@ logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
 _CLOSED_MESSAGE = "The event-journal store is closed"
+# How long to wait between attempts at the one statement SQLite's own busy
+# handler will not retry. Short enough that a contended open is not noticeably
+# slower than an uncontended one, long enough not to spin.
+_WAL_RETRY_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,18 +74,54 @@ class _SqliteTransaction:
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
 
 
+def _enter_wal(connection: sqlite3.Connection) -> None:
+    """Put one connection into WAL, waiting out a lock another process holds.
+
+    ``busy_timeout`` bounds every contention this file can meet except this
+    one. Entering WAL is a journal-mode change, and SQLite answers a mode
+    change it cannot lock with ``SQLITE_BUSY`` straight away rather than
+    calling the busy handler -- so the single statement here that can block on
+    another process was the single statement with no timeout at all, and it
+    failed on the spot instead of after ten seconds.
+
+    Only ever reachable across processes, and only while the database was
+    still being made: one already in WAL stays in it, and re-entering locks
+    nothing. So a second opener met this exactly once, on the first open of a
+    new journal -- an export pass starting while the bot was still creating the
+    database it meant to read.
+
+    Bounded by the same ten seconds as everything else, because a wait that
+    cannot fail is not a bound. Past it the refusal is the caller's to see, and
+    so is any refusal that was never about a lock: retrying one of those would
+    turn an unopenable database into the same error ten seconds later.
+    """
+    deadline = time.monotonic() + _BUSY_TIMEOUT_MILLISECONDS / 1000
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as error:
+            if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                raise
+            time.sleep(_WAL_RETRY_SECONDS)
+        else:
+            return
+
+
 def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
     """Open one connection onto the journal, durable as far as its role needs.
 
     ``synchronous`` is asked for rather than assumed because the writer and the
     readers do not need the same thing, and the difference is expensive in one
     direction and unsafe in the other.
+
+    ``busy_timeout`` is set before anything that can meet another process, so
+    every statement below it waits rather than failing on the spot.
     """
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
+    _enter_wal(connection)
     connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
 
 
 @dataclass
