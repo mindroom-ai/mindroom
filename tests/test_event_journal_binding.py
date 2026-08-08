@@ -30,12 +30,11 @@ from mindroom.event_journal_open import (
     EventJournalBindingError,
     adopt_event_journal,
     bind_event_journal,
-    close_event_journal_store,
     current_binding_description,
     describe_event_journal,
     event_journal_binding_path,
     event_journal_sqlite_path,
-    open_event_journal_store,
+    open_event_journal,
     pending_event_journal_restart,
     read_event_journal_binding,
     record_opened_event_journal,
@@ -100,20 +99,20 @@ def _adopt_argv(runtime_paths: RuntimePaths) -> list[str]:
 async def _open_and_bind(runtime_paths: RuntimePaths) -> str:
     """Open the configured journal and bind this install to it, as startup does."""
     config = load_config(runtime_paths)
-    store = open_event_journal_store(
+    opened = open_event_journal(
         config.event_journal,
         runtime_paths=runtime_paths,
         storage_path=runtime_paths.storage_root,
     )
     try:
         return await bind_event_journal(
-            store,
+            opened.store,
             journal_config=config.event_journal,
             runtime_paths=runtime_paths,
             storage_path=runtime_paths.storage_root,
         )
     finally:
-        await close_event_journal_store(store, storage_path=runtime_paths.storage_root)
+        await opened.close()
 
 
 class TestBindingRefusal:
@@ -468,7 +467,7 @@ class TestAdoptCommand:
         """
         runtime_paths = _runtime_paths(tmp_path)
         await _open_and_bind(runtime_paths)
-        live = open_event_journal_store(
+        live = open_event_journal(
             load_config(runtime_paths).event_journal,
             runtime_paths=runtime_paths,
             storage_path=runtime_paths.storage_root,
@@ -476,7 +475,38 @@ class TestAdoptCommand:
         try:
             result = await asyncio.to_thread(runner.invoke, app, _adopt_argv(runtime_paths))
         finally:
-            await close_event_journal_store(live, storage_path=runtime_paths.storage_root)
+            await live.close()
+
+        assert result.exit_code == 1, result.output
+        assert "still has this install's event journal open" in result.output
+
+    async def test_one_of_two_open_journals_closing_does_not_release_the_claim(self, tmp_path: Path) -> None:
+        """A bot built outside the orchestrator opens a second store beside the shared one.
+
+        The storage root stays claimed until the last of them is closed. If the
+        two shared one lease, the first close hands the root back while the
+        other store is still writing, and adopt then splits the history the
+        claim exists to keep whole.
+        """
+        runtime_paths = _runtime_paths(tmp_path)
+        await _open_and_bind(runtime_paths)
+        journal_config = load_config(runtime_paths).event_journal
+        first = open_event_journal(
+            journal_config,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
+        second = open_event_journal(
+            journal_config,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+        )
+
+        await first.close()
+        try:
+            result = await asyncio.to_thread(runner.invoke, app, _adopt_argv(runtime_paths))
+        finally:
+            await second.close()
 
         assert result.exit_code == 1, result.output
         assert "still has this install's event journal open" in result.output
@@ -485,7 +515,7 @@ class TestAdoptCommand:
         """The claim is advisory, so the operator has to be able to overrule it."""
         runtime_paths = _runtime_paths(tmp_path)
         await _open_and_bind(runtime_paths)
-        live = open_event_journal_store(
+        live = open_event_journal(
             load_config(runtime_paths).event_journal,
             runtime_paths=runtime_paths,
             storage_path=runtime_paths.storage_root,
@@ -493,7 +523,7 @@ class TestAdoptCommand:
         try:
             result = await asyncio.to_thread(runner.invoke, app, [*_adopt_argv(runtime_paths), "--force"])
         finally:
-            await close_event_journal_store(live, storage_path=runtime_paths.storage_root)
+            await live.close()
 
         assert result.exit_code == 0, result.output
         assert "Bound" in result.output

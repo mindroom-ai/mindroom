@@ -91,7 +91,7 @@ from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
-from .event_journal_open import bind_event_journal, close_event_journal_store, open_event_journal_store
+from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import configured_entity_names
@@ -232,9 +232,9 @@ class _MultiAgentOrchestrator:
     storage_path: Path = field(init=False)
     config_path: Path = field(init=False)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
-    # The one journal store every bot in this process borrows, opened on first
-    # use and closed after the last bot stops.
-    _journal_store: EventJournalStore | None = field(default=None, init=False, repr=False)
+    # The one journal every bot in this process borrows a store from, opened on
+    # first use and closed after the last bot stops.
+    _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
@@ -1908,17 +1908,17 @@ class _MultiAgentOrchestrator:
         refuses them, and on SQLite it moves write contention off an in-process
         queue and onto the file lock. Bots borrow this and do not close it.
         """
-        if self._journal_store is None:
+        if self._open_journal is None:
             config = self.config
             if config is None:
                 msg = "The orchestrator needs its config before it can open the event journal"
                 raise RuntimeError(msg)
-            self._journal_store = open_event_journal_store(
+            self._open_journal = open_event_journal(
                 config.event_journal,
                 runtime_paths=self.runtime_paths,
                 storage_path=self.storage_path,
             )
-        return self._journal_store
+        return self._open_journal.store
 
     async def stop(self) -> None:
         """Stop all agent bots."""
@@ -1955,9 +1955,9 @@ class _MultiAgentOrchestrator:
         await asyncio.gather(*stop_tasks)
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
-        if self._journal_store is not None:
-            store, self._journal_store = self._journal_store, None
-            await close_event_journal_store(store, storage_path=self.storage_path)
+        if self._open_journal is not None:
+            journal, self._open_journal = self._open_journal, None
+            await journal.close()
         logger.info("All agent bots stopped")
 
 

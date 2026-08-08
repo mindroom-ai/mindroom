@@ -1959,10 +1959,8 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot._journal_dispatcher = MagicMock(stop=AsyncMock())
     bot._journal_store = MagicMock(close=AsyncMock())
     # Owned rather than borrowed, so stop() closes it -- which is what this
-    # test's shutdown-intent assertions run through. Closing an owned store
-    # also withdraws this process's claim on the storage root, so the bot needs
-    # the same storage path a real one carries.
-    bot._borrowed_journal_store = None
+    # test's shutdown-intent assertions run through.
+    bot._own_journal = MagicMock(close=AsyncMock())
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()

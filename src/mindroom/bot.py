@@ -111,7 +111,7 @@ from .event_journal import (
     PrincipalStore,
     SemanticConsumer,
 )
-from .event_journal_open import bind_event_journal, close_event_journal_store, open_event_journal_store
+from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .journal_dispatch import (
@@ -394,6 +394,9 @@ class AgentBot:
         borrowed store is not closed here, because its owner outlives this bot.
         """
         self._borrowed_journal_store = journal_store
+        # Set when this bot opens its own, which only happens when nothing was
+        # handed to it. What this bot opened is what this bot closes.
+        self._own_journal: OpenEventJournal | None = None
         self.agent_user = agent_user
         self.storage_path = storage_path
         self.runtime_paths = runtime_paths
@@ -492,13 +495,15 @@ class AgentBot:
         """Return this bot's principal-bound store, once the journal is open."""
         return self._journal_store.principal(self._journal_principal_id)
 
-    def _open_journal_store(self) -> EventJournalStore:
+    def _open_own_journal(self) -> OpenEventJournal:
         """Open the durable store this bot's journal, projection, and outbox share.
 
         One database can hold every bot in the process; each receives only its
-        own principal-bound view.
+        own principal-bound view. Only a bot built outside the orchestrator
+        reaches this, and it owns what it opened: the returned journal is
+        closed in :meth:`stop`, where a borrowed store is not.
         """
-        return open_event_journal_store(
+        return open_event_journal(
             self.config.event_journal,
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
@@ -511,7 +516,12 @@ class AgentBot:
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
         self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
-        self._journal_store = self._borrowed_journal_store or self._open_journal_store()
+        borrowed = self._borrowed_journal_store
+        if borrowed is not None:
+            self._journal_store = borrowed
+        else:
+            self._own_journal = self._open_own_journal()
+            self._journal_store = self._own_journal.store
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -1969,12 +1979,8 @@ class AgentBot:
         # replacement opened the same database under the same principal.
         failures: list[Exception] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
-        if self._borrowed_journal_store is None:
-            await self._release(
-                "journal store",
-                close_event_journal_store(self._journal_store, storage_path=self.storage_path),
-                failures,
-            )
+        if self._own_journal is not None:
+            await self._release("journal store", self._own_journal.close(), failures)
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)

@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
-from mindroom.event_journal_open import bind_event_journal, close_event_journal_store, open_event_journal_store
+from mindroom.event_journal_open import bind_event_journal, open_event_journal
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
@@ -308,11 +308,12 @@ async def export_threads_to_targets_once(
         else:
             ready_groups.append(group)
 
-    journal_store = open_event_journal_store(
+    open_journal = open_event_journal(
         config.event_journal,
         runtime_paths=runtime_paths,
         storage_path=runtime_paths.storage_root,
     )
+    journal_store = open_journal.store
     try:
         # Its own process, so nothing has vouched for this database yet. An
         # export reading a stranger's journal reports the wrong history rather
@@ -334,7 +335,7 @@ async def export_threads_to_targets_once(
                 max_thread_roots=max_thread_roots,
             )
     finally:
-        await close_event_journal_store(journal_store, storage_path=runtime_paths.storage_root)
+        await open_journal.close()
 
     if room_filter is None:
         _reconcile_full_pass(validated_targets)

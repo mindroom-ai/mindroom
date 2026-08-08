@@ -68,25 +68,10 @@ IN_USE_LOCK_FILENAME = "event_journal_store.lock"
 _OPENED_DATABASES: dict[Path, tuple[str, str | None]] = {}
 _OPENED_DATABASES_LOCK = threading.Lock()
 
-# One shared lock per storage root, held for as long as this process has a
-# store open on it, so another process can find out that rebinding now would
-# strand a live writer. Refcounted because a bot that was built outside the
-# orchestrator opens its own store beside the shared one.
-_IN_USE_CLAIMS: dict[Path, _InUseClaim] = {}
-_IN_USE_CLAIMS_LOCK = threading.Lock()
-
 # The only connection parameters that go into a description. An allowlist that
 # is missing a field costs an operator some detail; a denylist that is missing
 # one publishes a password.
 _DESCRIBED_CONNECTION_FIELDS = ("host", "port", "dbname")
-
-
-@dataclass
-class _InUseClaim:
-    """One process's declaration that it has a journal open on one storage root."""
-
-    handle: TextIO
-    holders: int
 
 
 def event_journal_in_use_lock_path(storage_path: Path) -> Path:
@@ -94,37 +79,11 @@ def event_journal_in_use_lock_path(storage_path: Path) -> Path:
     return storage_path / "tracking" / IN_USE_LOCK_FILENAME
 
 
-def _claim_journal_in_use(storage_path: Path) -> None:
-    """Declare that this process has a store open on ``storage_path``."""
-    with _IN_USE_CLAIMS_LOCK:
-        claim = _IN_USE_CLAIMS.get(storage_path)
-        if claim is not None:
-            claim.holders += 1
-            return
-        _IN_USE_CLAIMS[storage_path] = _InUseClaim(
-            handle=acquire_shared_file_lock(event_journal_in_use_lock_path(storage_path)),
-            holders=1,
-        )
-
-
-def _drop_journal_in_use_claim(storage_path: Path) -> None:
-    """Withdraw one open-store claim, releasing the lock when the last one goes."""
-    with _IN_USE_CLAIMS_LOCK:
-        claim = _IN_USE_CLAIMS.get(storage_path)
-        if claim is None:
-            return
-        claim.holders -= 1
-        if claim.holders > 0:
-            return
-        del _IN_USE_CLAIMS[storage_path]
-    release_file_lock(claim.handle)
-
-
 def _opened_database(
     journal_config: EventJournalConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, str | None]:
-    """Return which database :func:`open_event_journal_store` would open for this config.
+    """Return which database :func:`open_event_journal` would open for this config.
 
     Only what that function reads can make two configs name different stores.
     It branches on the backend and, for PostgreSQL, on the resolved DSN; the
@@ -383,12 +342,40 @@ def _open_store(
     return store
 
 
-def open_event_journal_store(
+@dataclass(frozen=True)
+class OpenEventJournal:
+    """One open journal, and the claim that says this process is writing to it.
+
+    The claim is true for exactly as long as the store is open, so the two are
+    one object rather than two calls a caller has to pair correctly. Closing
+    used to take the storage root back as an argument, which let a caller
+    release a claim for a root it never opened; the lease it actually took is
+    the only thing that can be given back here.
+    """
+
+    store: EventJournalStore
+    _in_use_lock: TextIO
+
+    async def close(self) -> None:
+        """Close the store and withdraw this process's claim on the journal.
+
+        The claim is what stops `mindroom journal adopt` from rebinding out
+        from under a running MindRoom, so leaving it behind would make the
+        repair command refuse forever. The operating system withdraws it if
+        this process dies, so a crash needs no cleanup.
+        """
+        try:
+            await self.store.close()
+        finally:
+            release_file_lock(self._in_use_lock)
+
+
+def open_event_journal(
     journal_config: EventJournalConfig,
     *,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-) -> EventJournalStore:
+) -> OpenEventJournal:
     """Open the durable store this runtime's journal, projection, and outbox share.
 
     One database can hold every principal in the deployment; each caller
@@ -404,14 +391,20 @@ def open_event_journal_store(
     Opening is still not the same as being allowed to use it: an unbound
     install has nothing to check against yet, and gets its binding minted by
     :func:`bind_event_journal`, which every caller must await before reading or
-    writing.
+    writing. Minting is a database write, so it cannot happen here -- this is
+    the synchronous half, and that is why the two are separate.
 
     Opening is also what fixes the journal for the rest of the process, so this
     records the identity :func:`pending_event_journal_restart` compares against,
-    and claims the storage root as in use so that `mindroom journal adopt`
-    running elsewhere can see there is a live writer. Both happen after the
-    open succeeds: a store that failed to open is not one anybody is writing
-    to. Pair this with :func:`close_event_journal_store`, which ends the claim.
+    and takes a shared lease on the storage root so that `mindroom journal
+    adopt` running elsewhere can see there is a live writer. Both happen after
+    the open succeeds: a store that failed to open is not one anybody is
+    writing to.
+
+    Each open takes its own lease rather than sharing a counted one, because a
+    bot built outside the orchestrator opens a second store beside the shared
+    one. Shared advisory locks on separate descriptors coexist, and the root
+    stays claimed until the last of them is released.
     """
     binding = read_event_journal_binding(storage_path)
     if binding is not None:
@@ -421,23 +414,10 @@ def open_event_journal_store(
             description=describe_event_journal(journal_config, runtime_paths),
         )
     store = _open_store(journal_config, runtime_paths=runtime_paths, storage_path=storage_path)
-    _claim_journal_in_use(storage_path)
-    return store
-
-
-async def close_event_journal_store(store: EventJournalStore, *, storage_path: Path) -> None:
-    """Close a store this process opened, and withdraw its claim on the journal.
-
-    The claim is only true while the store is open, and it is what stops
-    `mindroom journal adopt` from rebinding out from under a running MindRoom.
-    Leaving it behind would make the repair command refuse forever; the
-    operating system withdraws it if this process dies, so a crash needs no
-    cleanup.
-    """
-    try:
-        await store.close()
-    finally:
-        _drop_journal_in_use_claim(storage_path)
+    return OpenEventJournal(
+        store=store,
+        _in_use_lock=acquire_shared_file_lock(event_journal_in_use_lock_path(storage_path)),
+    )
 
 
 async def bind_event_journal(
@@ -524,16 +504,16 @@ __all__ = [
     "IN_USE_LOCK_FILENAME",
     "EventJournalBinding",
     "EventJournalBindingError",
+    "OpenEventJournal",
     "adopt_event_journal",
     "bind_event_journal",
-    "close_event_journal_store",
     "current_binding_description",
     "describe_event_journal",
     "event_journal_binding_lock_path",
     "event_journal_binding_path",
     "event_journal_in_use_lock_path",
     "event_journal_sqlite_path",
-    "open_event_journal_store",
+    "open_event_journal",
     "pending_event_journal_restart",
     "read_event_journal_binding",
     "record_opened_event_journal",

@@ -48,7 +48,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import ConversationPage, EventClass, EventJournalStore, EventKind, VisibleMessage
 from mindroom.event_journal.store import TurnRecordStore
-from mindroom.event_journal_open import open_event_journal_store
+from mindroom.event_journal_open import open_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
 from mindroom.inbound_turn_normalizer import (
@@ -407,11 +407,11 @@ def _build_harness(
         resolver=resolver,
         hook_context=hook_context,
     )
-    journal_store = open_event_journal_store(
+    journal_store = open_event_journal(
         config.event_journal,
         runtime_paths=runtime_paths,
         storage_path=storage_path,
-    )
+    ).store
     turn_store = TurnStore(
         TurnStoreDeps(
             agent_name=agent_name,
