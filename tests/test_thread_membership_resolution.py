@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from mindroom.event_journal import thread_root
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -25,6 +26,51 @@ from tests.threading_helpers import (
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("malformed_thread_root", ["", 7])
+    async def test_malformed_thread_relation_resolves_room_level_like_the_journal(
+        self,
+        malformed_thread_root: object,
+    ) -> None:
+        """A thread relation naming no event must resolve room level, as the journal admitted it.
+
+        ``event_journal.projection.thread_root`` keeps only a non-empty string, so an
+        ``m.relates_to`` carrying ``""`` or a non-string lands in the journal as a
+        room-level row. Resolving the same event as ``THREADED`` here would split the
+        live turn away from the durable projection of the very event that admitted it.
+        """
+        room_id = "!test:localhost"
+        content = {
+            "body": "malformed thread relation",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": malformed_thread_root},
+        }
+        assert thread_root(content) is None
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+            return _ThreadRootProof.proven()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            EventInfo.from_event({"type": "m.room.message", "content": content}),
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+            event_id="$malformed:localhost",
+            allow_current_root=True,
+        )
+
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
 
     @pytest.mark.asyncio
     async def test_transitive_thread_membership_handles_long_reply_chains(

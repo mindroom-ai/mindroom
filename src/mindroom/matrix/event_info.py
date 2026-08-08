@@ -197,7 +197,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Extract basic relation information
     relation_type = relates_to.get("rel_type")
     has_relations = bool(relates_to)
-    relates_to_event_id = relates_to.get("event_id")
+    relates_to_event_id = _relation_target_event_id(relates_to)
 
     # Thread analysis
     is_thread = relation_type == "m.thread"
@@ -247,6 +247,24 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     )
 
 
+def _relation_target_event_id(relates_to: dict) -> str | None:
+    """Return the event a relation targets, or ``None`` when it names no event.
+
+    A relation target that is not a non-empty string is not an event ID, and no
+    homeserver MindRoom runs rejects one: Tuwunel's nested-thread check parses
+    ``m.relates_to`` with ruma and skips its own guard when the target fails to
+    deserialize, so the malformed relation is stored verbatim.
+
+    ``event_journal.projection.thread_root`` and ``replacement_target`` already
+    refuse such a target, so honoring it here would split the turn away from the
+    durable row that admitted the same event -- a turn resolved into thread ``''``
+    over a journal row that says room level. Guarding the shared derivation keeps
+    the thread root, the edit original, and the reaction target on one answer.
+    """
+    target = relates_to.get("event_id")
+    return target if isinstance(target, str) and target else None
+
+
 def _extract_thread_id_from_new_content(content: dict) -> str | None:
     """Extract thread root event ID from edit ``m.new_content`` relation data."""
     new_content = content.get("m.new_content", {})
@@ -260,5 +278,4 @@ def _extract_thread_id_from_new_content(content: dict) -> str | None:
     if new_relates_to.get("rel_type") != "m.thread":
         return None
 
-    event_id = new_relates_to.get("event_id")
-    return event_id if isinstance(event_id, str) else None
+    return _relation_target_event_id(new_relates_to)
