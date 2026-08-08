@@ -61,17 +61,20 @@ Matrix callback
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
 Every principal shares one durable store at `tracking/event_journal.db`, or one PostgreSQL database, and each bot reads only its own principal-bound view of it.
 Writes are serialized per store rather than per entity, so one principal's admission waits behind another's write transaction; the reader pool is separate, so reads do not.
-Its exact key combines the Matrix principal, entity, source event, and callback kind, while unsettled rows retain the original room and event source for replay.
-Unsettled rows distinguish callbacks that still need execution from callbacks that completed and deferred their source to downstream turn work.
-Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
+A row is keyed `(principal_id, event_id)`, so one Matrix event is one row no matter how many features could have claimed it, and the callback kind is a column on that row rather than part of its identity.
+Pending rows retain the original room and event source in `source_json` for replay.
+`state` holds one of exactly two values, `pending` and `settled`, so a callback that has never run and a callback that ran and deferred its source to a turn are the same durable fact.
+Telling those two apart is possible only in memory, from the parsed events the dispatcher is still holding and the live owners it can ask about, and a restart erases that -- which is why an interrupted turn replays its message instead of losing the answer.
+Settling clears `source_json` and any claimed semantic consumer in place rather than deleting the row, so terminal truth stays compact while the row goes on proving that this event already produced its one turn.
+Why the work ended, answered or deliberately not answered, is not recorded: that column existed for a while and was never read back.
 `journal_events` grows by one row per admitted event, and a settled row is retained rather than deleted so a replayed Matrix event is recognised by ID instead of admitted twice.
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM journal_events GROUP BY state;` against that store.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
-Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly with an intentionally-ignored outcome.
-This keeps ignored high-volume traffic out of the handled-turn JSON ledger without weakening exact callback de-duplication.
+Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly instead of recording a turn.
+This keeps ignored high-volume traffic out of the handled-turn ledger without weakening exact callback de-duplication.
 An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
 Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
 A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
@@ -81,7 +84,7 @@ Recovery callbacks may rely on the room ID, while cached membership and state ar
 Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
 To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
-Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
+Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit settlement.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 The sync callback admits each relevant event to the journal, in the same transaction that updates the projection, before any background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds and republishes every open gap as unrecovered on each response.
@@ -129,8 +132,9 @@ Classic Sync response-owned lifecycle hooks and their durable de-duplication mar
 The tokenless room-member baseline remains pending across rejected response attempts and records membership from both the state block and the timeline, while a restored-token timeline remains a catch-up stream that may emit missed joins.
 After a live reset from a certified checkpoint, unseen state-block joins also enter the exact durable dispatch path so a join omitted from the replay timeline is not lost.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
-Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
-Current invite callbacks bypass cold-history admission because they represent live membership work, while their callback runner still provides exact durable retry.
+Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
+Invites take neither path and are not journalled at all: an invite carries no Matrix event ID to key a durable row on, and it does not need one, because an invite the bot has not acted on reappears in every sync response until it does.
+The homeserver is therefore already providing the redelivery a journal row would have, so invite handling is a plain background task.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.
@@ -138,7 +142,7 @@ To-device call inputs and desktop pairing receivers also remain best-effort beca
 ## Completed Simplifications
 
 `TurnController` is now the only normal-turn owner.
-It sequences `precheck -> normalize -> resolve -> decide -> execute -> record`.
+It sequences `precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record`.
 
 `TurnPolicy` is now pure.
 It no longer sends messages, runs AI, or writes persistence state.

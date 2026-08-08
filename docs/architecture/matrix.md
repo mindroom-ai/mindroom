@@ -99,11 +99,16 @@ Conversation history is hydrated on demand rather than pre-warmed at join: a bou
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
-Events are processed in background tasks:
-1. Sync receives event via long-polling
-2. Event callback triggered (`_on_message`, `_on_invite`, etc.)
-3. Background task created for async processing
-4. Agent responds in thread
+An event reaches an agent through durable admission, never straight from the sync callback:
+
+1. Sync receives the event via long-polling, and nio states its provenance once.
+2. `JournalIngress._admit` runs first, as nio's event-admission callback, and commits the event and its projection row in one transaction before nio treats the event as delivered.
+3. Only after every admission callback succeeds do the ordinary event callbacks run, and they load already-persisted work rather than the parsed event they were handed.
+4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
+5. `TurnController` owns the turn and the agent responds in thread.
+
+Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses
 
@@ -159,9 +164,18 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 
 ## Response Tracking
 
-MindRoom prevents duplicate responses using a `ResponseTracker` that records which events have already been processed.
-When a sync reconnection or retry delivers the same event twice, the tracker suppresses the duplicate so only one agent response is sent per triggering message.
-Tracking state is persisted under `mindroom_data/tracking/` and survives restarts.
+Duplicate responses are prevented at two durable layers, both in `tracking/event_journal.db` under `mindroom_data/`.
+
+`journal_events` is keyed `(principal_id, event_id)`, so a Matrix event redelivered by a sync reconnection or a `/messages` walk is recognised as already admitted rather than admitted twice.
+A settled row is retained for exactly that reason, with only its replay payload cleared.
+
+`TurnStore` owns the answer to "has this turn finished?", through the handled-turn ledger in `handled_turns.py`.
+It shares the journal's database, so a terminal turn record and the settlement of the journal sources it answers commit in one transaction instead of two substrates approximately agreeing.
+Its scope is the agent rather than the sync principal, because the proof that a message was already answered stays true across a re-login.
+
+Delivery itself is owned by the `response_outbox` table, keyed `(principal_id, turn_id, stage)` over an `INITIAL` placeholder and a `FINAL` answer.
+A row's payload is claimed before the first send attempt and its Matrix transaction ID is deterministic, so a crash between sending and recording resolves by resending the same row rather than by generating a second, different answer.
+The claim also stores the sending device, because a transaction ID is only idempotent for the device that used it and a re-login would otherwise let a resend post a duplicate.
 
 ## Room Cleanup
 
