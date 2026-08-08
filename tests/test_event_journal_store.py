@@ -46,6 +46,7 @@ from mindroom.event_journal import (
     TerminalTurnWrite,
     delivery_transaction_id,
 )
+from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
     SQLITE_DIALECT,
@@ -3131,6 +3132,10 @@ class TestHotQueriesAreIndexCovered:
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=? "
             "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
         ),
+        "projection page after a cursor": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=?"  # noqa: S608 - the production clause, not input
+            f"{_CONVERSATION_CURSOR_CLAUSE} ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
         "revision point lookup": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND revision_event_id=?"
         ),
@@ -3163,6 +3168,40 @@ class TestHotQueriesAreIndexCovered:
                 offenders[name] = plan
 
         assert offenders == {}
+
+    async def test_a_deep_page_seeks_its_cursor_instead_of_filtering_down_to_it(self, tmp_path: Path) -> None:
+        """A deep page seeks its cursor rather than rescanning the conversation to reach it.
+
+        Being on an index is not the same as being bounded by one, and the test
+        above cannot tell the two apart: it rejects `SCAN` and `TEMP B-TREE`,
+        and a cursor the backend cannot position on is neither. Spelled as the
+        disjunction `created_ts < ? OR (created_ts = ? AND logical_event_id <
+        ?)`, the cursor is a filter, so every page re-enters the conversation at
+        its tip and walks forward through everything newer than it. The plan
+        still says SEARCH, the index is still covering, and a full walk is
+        quadratic.
+
+        That walk is what an export runs, and its ceiling is 1,000,000
+        messages. Measured on this schema at 500 messages a page: 0.75 s
+        against 0.037 s at 100,000 messages and 77.1 s against 0.38 s at
+        1,000,000, the disjunction growing 102.9x for the last 10x of messages
+        where the row value grows 10.1x.
+
+        So the plan has to name the cursor column. Under the disjunction the
+        index is entered on the three equality columns alone and `created_ts`
+        appears nowhere in it, which is what makes this assertion fail the
+        moment the spelling drifts back.
+        """
+        database = sqlite3.connect(tmp_path / "cursor-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = self._QUERIES["projection page after a cursor"]
+
+        plan = " | ".join(
+            row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, tuple("x" for _ in range(sql.count("?"))))
+        )
+
+        assert "created_ts" in plan, plan
 
     async def test_every_ordered_index_column_carries_the_byte_order_pin_on_postgres(self) -> None:
         """Every ordered index column carries the byte-order pin on PostgreSQL.

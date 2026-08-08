@@ -27,6 +27,33 @@ _PAGE_COLUMNS = """
     revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
 """
 
+# Everything older than one page's last row, spelled as a row value.
+#
+# The disjunction this replaces -- `created_ts < ? OR (created_ts = ? AND
+# logical_event_id < ?)` -- selects exactly the same rows and is not a bound.
+# Neither backend can position an index on it, so every page re-entered the
+# conversation at its tip and walked forward through everything newer than the
+# cursor before returning anything, making a full walk quadratic in the
+# conversation. The plan still read SEARCH and the index was still covering,
+# which is how it went unnoticed: the query-plan test rejects `SCAN` and
+# `TEMP B-TREE`, and this was neither.
+#
+# Measured on this schema, SQLite 3.53.1, walking the whole conversation 500
+# messages at a time at load average 13-14: 0.75 s against 0.037 s at 100,000
+# messages, and 77.1 s against 0.38 s at 1,000,000 -- the export ceiling. The
+# growth is the point rather than the ratio: the disjunction costs 102.9x more
+# for the last 10x of messages where the row value costs 10.1x.
+#
+# PostgreSQL degrades further rather than less. It answers the disjunction with
+# a BitmapOr feeding a Sort, giving up the index ordering as well as the bound,
+# and takes the row value as `Index Only Scan Backward` with the cursor in its
+# Index Cond.
+#
+# Shared with the query-plan test rather than copied into it, because a copy
+# could go on proving that a seek is possible while this drifted back to a
+# spelling that does not use one.
+_CONVERSATION_CURSOR_CLAUSE = " AND (created_ts, logical_event_id) < (?, ?)"
+
 
 def read_conversation(
     transaction: Transaction,
@@ -94,10 +121,8 @@ def _page_rows(
     conversation. Reading a thread therefore merges its replies with that one
     extra row, which is a primary-key lookup rather than a scan.
     """
-    cursor_clause = "" if before is None else " AND (created_ts < ? OR (created_ts = ? AND logical_event_id < ?))"
-    cursor_params: tuple[object, ...] = (
-        () if before is None else (before.created_ts, before.created_ts, before.logical_event_id)
-    )
+    cursor_clause = "" if before is None else _CONVERSATION_CURSOR_CLAUSE
+    cursor_params: tuple[object, ...] = () if before is None else (before.created_ts, before.logical_event_id)
     rows = list(
         transaction.fetchall(
             f"""
