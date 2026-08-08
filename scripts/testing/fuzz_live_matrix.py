@@ -3437,12 +3437,11 @@ class LiveFuzzRunner:
             return await release_task
         finally:
             launch_barrier.release_sends.set()
-            if not release_task.done():
-                release_task.cancel()
-                await asyncio.gather(release_task, return_exceptions=True)
-            if initial_health_task is not None and not initial_health_task.done():
-                initial_health_task.cancel()
-                await asyncio.gather(initial_health_task, return_exceptions=True)
+            cleanup_tasks = (release_task,) if initial_health_task is None else (release_task, initial_health_task)
+            for task in cleanup_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
     def _recovery_cliff_audit(
         self,

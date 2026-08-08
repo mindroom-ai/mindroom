@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import signal
 import sqlite3
@@ -1146,6 +1147,78 @@ async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurre
         ]
     finally:
         stack.close()
+
+
+@pytest.mark.parametrize("primary_exception", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.asyncio
+async def test_sustained_stream_capacity_consumes_concurrent_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_exception: type[BaseException],
+) -> None:
+    """Health failure or cancellation must not leak a simultaneous root-task exception."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    all_sends_entered = asyncio.Event()
+    fail_sends = asyncio.Event()
+    all_sends_failed = asyncio.Event()
+    send_count = 0
+    failed_send_count = 0
+
+    class ConcurrentFailureClient(_RecoveryCliffBoundaryClient):
+        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+            nonlocal send_count, failed_send_count
+            del event_type, txn_id, content
+            send_count += 1
+            if send_count == 2:
+                all_sends_entered.set()
+            await fail_sends.wait()
+            failed_send_count += 1
+            if failed_send_count == 2:
+                all_sends_failed.set()
+            msg = "root release failed"
+            raise ValueError(msg)
+
+    runner = LiveFuzzRunner(
+        stack,
+        (cast("LiveMatrixClient", ConcurrentFailureClient()),),
+        sustained_stream_capacity_scenario(root_count=2),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+
+    async def fail_health(**_kwargs: object) -> RecoveryCliffHealthSample:
+        await all_sends_entered.wait()
+        fail_sends.set()
+        await all_sends_failed.wait()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        msg = "initial health failed"
+        raise primary_exception(msg)
+
+    monkeypatch.setattr(runner, "_recovery_cliff_observer_step", fail_health)
+    loop = asyncio.get_running_loop()
+    loop_exceptions: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_exceptions.append(context))
+
+    async def run_and_assert_primary_failure() -> None:
+        with pytest.raises(primary_exception, match="initial health failed") as raised:
+            await runner._release_sustained_stream_capacity_roots(
+                run_id="unit-run",
+                deadline=time.monotonic() + 1,
+                health_samples=[],
+            )
+        raised.value.__traceback__ = None
+
+    try:
+        await run_and_assert_primary_failure()
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+        stack.close()
+
+    assert loop_exceptions == []
 
 
 @pytest.mark.asyncio
