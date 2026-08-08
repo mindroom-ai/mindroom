@@ -91,11 +91,10 @@ async def seed_thread_history(
 ) -> None:
     """Put messages into the conversation projection a read will serve from.
 
-    Written so a test can seed *before* the read path moves onto the
-    projection: while the cache still answers, this is inert, and once it
-    stops the same test keeps passing. Stubbing the reader instead would pin
-    the projection's absence -- the test would pass whether or not anything
-    ever reached it.
+    Writes straight to the journal store, because the projection is now the
+    only thing a read serves from. Stubbing the reader instead would pin the
+    projection's absence -- the test would pass whether or not anything ever
+    reached it.
 
     Pass ``hydrated=False`` to seed content the projection holds without
     claiming it is all of it, which is what makes a dispatch read report

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 class RecordedHistoryDebts:
     """A history-debt recorder that keeps what certification wrote down.
 
-    Cache trust must be unable to certify past a gap without recording it, so
+    A checkpoint must be unable to certify past a gap without recording it, so
     the collaborator is required rather than optional. Tests about the transport
     still need one; this is the smallest thing that honestly is one.
     """
