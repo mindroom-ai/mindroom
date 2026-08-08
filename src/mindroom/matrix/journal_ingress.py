@@ -345,7 +345,7 @@ class JournalIngress:
         """Install durable admission ahead of every other callback."""
         client.add_event_admission_callback(self._admit)
 
-    def admission_kind(self, event: nio.Event) -> EventKind | None:
+    def _admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
         kind = _event_kind(event)
         if kind is None and isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_enabled():
@@ -376,7 +376,7 @@ class JournalIngress:
             # Declining is exactly when a later consumer needs the verdict:
             # nothing else in the response will have written it down.
             self.timeline_member_provenance.record(event.event_id, provenance)
-        kind = self.admission_kind(event)
+        kind = self._admission_kind(event)
         if kind is None:
             return
         event_class = _event_class_for(provenance, event)

@@ -738,7 +738,7 @@ class TestStreamingProgressIsTransport:
 
         await self._admit_live(ingress, foreign)
 
-        assert ingress.admission_kind(foreign) is EventKind.MESSAGE
+        assert ingress._admission_kind(foreign) is EventKind.MESSAGE
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$theirs"]
         # Admitted, projected, and never work.
@@ -2701,7 +2701,7 @@ class TestTimelineMemberProvenance:
 
         await ingress._admit(room(), event, provenance)
 
-        assert ingress.admission_kind(event) is None
+        assert ingress._admission_kind(event) is None
         assert ingress.timeline_member_event_class(event) is expected
 
     async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
