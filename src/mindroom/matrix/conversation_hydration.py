@@ -136,24 +136,58 @@ def _is_redacted(source: Mapping[str, object]) -> bool:
     return isinstance(unsigned, dict) and "redacted_because" in unsigned
 
 
+def _redaction_target(event: nio.Event) -> str | None:
+    """Return the event one fetched event deletes, if it deletes one.
+
+    A walk meets a deletion in two shapes and both mean the same thing. The
+    ``m.room.redaction`` event itself appears in ``/messages`` like any other
+    timeline event; nio's schema requires it to name its target, and room
+    version 11 moved ``redacts`` into content while servers still serve the
+    top-level key over the client-server API, which is what nio parses.
+
+    The other shape is the deleted event itself, which comes back with its
+    content stripped and ``redacted_because`` in ``unsigned``. That one carries
+    the whole fact on its own, and for a thread walk it is the only shape there
+    is: a redaction carries no ``m.relates_to``, so it is not in any relation
+    tree. Reading it as a redaction of itself is what makes both walks agree.
+    """
+    if isinstance(event, nio.RedactionEvent):
+        return event.redacts
+    return event.event_id if _is_redacted(event.source) else None
+
+
 def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
     """Return the projection view of one fetched event, or nothing.
 
-    A redacted event comes back from the server with its content stripped.
-    Storing that would put an empty message in the conversation, so it is
-    dropped instead: the server has already told us there is nothing to show.
+    A deletion projects as a deletion, under exactly the semantics live
+    admission gives one, because the projection is what has to end up the same
+    either way. Dropping it instead -- which is what "the server already
+    stripped the body" argued for -- left every redaction that happened inside
+    a skipped gap unapplied: the original or edit it deleted had already been
+    projected from before the gap, nothing in the walk removed it, and the debt
+    was then settled with the deleted text still readable for the life of the
+    database.
 
     This bot's own in-flight streaming edits are dropped for the other reason
     the projection exists: they are transport. The same rule runs here and at
     live admission, because a cold read fetches the whole relation tree and
     would otherwise reinstall every progress edit the live path just declined.
     """
-    if _is_redacted(event.source):
-        return None
     content = event.source.get("content")
-    if not isinstance(content, dict) or not content:
-        return None
-    if event.source.get("type") != "m.room.message":
+    content = content if isinstance(content, dict) else {}
+    redacts = _redaction_target(event)
+    if redacts is not None:
+        return ProjectedEvent(
+            event_id=event.event_id,
+            room_id=room_id,
+            thread_id=thread_root(content),
+            sender=event.sender,
+            origin_server_ts=event.server_timestamp,
+            content=content,
+            replaces_event_id=None,
+            redacts_event_id=redacts,
+        )
+    if not content or event.source.get("type") != "m.room.message":
         return None
     projected = ProjectedEvent(
         event_id=event.event_id,
@@ -168,6 +202,18 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     if is_transport_progress_revision(projected, self_sender=self_sender):
         return None
     return projected
+
+
+def _is_logical_message(projected: ProjectedEvent) -> bool:
+    """Return whether one projection adds a message to a walk's window.
+
+    An edit revises a message and a redaction removes one, so neither is a
+    message the window is spent on. Counting a redaction would shorten every
+    walk of a room by however many deletions it has seen -- and for a repayment
+    walk, a room with enough of them would fill its window before reaching the
+    anchor and file live history as lost.
+    """
+    return projected.replaces_event_id is None and projected.redacts_event_id is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,7 +649,7 @@ class ConversationHydrator:
                     projected = _projected_from_event(room_id, event, self_sender=self.self_sender)
                     if projected is not None:
                         events.append(projected)
-                        if projected.replaces_event_id is None:
+                        if _is_logical_message(projected):
                             admitted += 1
                             if window_messages is not None and admitted >= window_messages:
                                 complete = False
@@ -694,7 +740,7 @@ class ConversationHydrator:
                 if projected is None:
                     continue
                 events.append(projected)
-                if projected.replaces_event_id is None:
+                if _is_logical_message(projected):
                     logical += 1
             covered = owed_through_event_id is None or saw_anchor
             if logical >= self.prompt_window_messages and covered:
@@ -753,7 +799,12 @@ class ConversationHydrator:
             )
             return False
         projected = _projected_from_event(request.room_id, original.event, self_sender=self.self_sender)
-        if projected is None:
+        if projected is None or projected.redacts_event_id is not None:
+            # The whole logical message is gone, not just the revision that was
+            # on screen, so there is no revision left to reduce to. Dropping the
+            # row is the conditional form of that -- it holds the refresh token
+            # and membership epoch this request was issued under, which
+            # projecting the redaction would bypass.
             return await self.store.drop_refetched_message(request)
         relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
         revision = _reduce_current_revision(projected, relations.events)

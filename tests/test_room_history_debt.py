@@ -63,10 +63,20 @@ def alice(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal("agent@alice")
 
 
-def raw(event_id: str, body: str, *, ts: int, thread_id: str | None = None) -> dict[str, Any]:
+def raw(
+    event_id: str,
+    body: str,
+    *,
+    ts: int,
+    thread_id: str | None = None,
+    replaces: str | None = None,
+) -> dict[str, Any]:
     """Return one raw Matrix message event."""
     content: dict[str, Any] = {"msgtype": "m.text", "body": body}
-    if thread_id is not None:
+    if replaces is not None:
+        content["m.new_content"] = {"msgtype": "m.text", "body": body}
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replaces}
+    elif thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     return {
         "event_id": event_id,
@@ -74,6 +84,27 @@ def raw(event_id: str, body: str, *, ts: int, thread_id: str | None = None) -> d
         "origin_server_ts": ts,
         "type": "m.room.message",
         "content": content,
+    }
+
+
+def redaction(event_id: str, redacts: str, *, ts: int) -> dict[str, Any]:
+    """Return one raw Matrix redaction of another event."""
+    return {
+        "event_id": event_id,
+        "sender": ALICE,
+        "origin_server_ts": ts,
+        "type": "m.room.redaction",
+        "redacts": redacts,
+        "content": {},
+    }
+
+
+def redacted(source: dict[str, Any]) -> dict[str, Any]:
+    """Return the stripped shape a server serves for an event that was redacted."""
+    return {
+        **source,
+        "content": {},
+        "unsigned": {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}},
     }
 
 
@@ -437,11 +468,14 @@ async def test_reach_is_measured_over_what_the_walk_saw_not_what_it_kept(
     """
     await admit_all(alice, [raw("$anchor", "anchor", ts=1_000)])
     await alice.record_room_history_debt(ROOM)
-    redacted = raw("$anchor", "anchor", ts=1_000)
-    redacted["content"] = {}
-    redacted["unsigned"] = {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}}
     client = FakeClient(
-        pages=[[raw("$new", "new", ts=3_000), raw("$mid", "mid", ts=2_000), redacted]],
+        pages=[
+            [
+                raw("$new", "new", ts=3_000),
+                raw("$mid", "mid", ts=2_000),
+                redacted(raw("$anchor", "anchor", ts=1_000)),
+            ],
+        ],
     )
 
     with capture_logs() as logs:
@@ -626,6 +660,74 @@ async def test_reading_a_thread_repays_the_whole_room(alice: PrincipalStore) -> 
     assert await alice.room_history_debt(ROOM) is None
 
 
+# --- A hole can contain deletions as well as messages ------------------------
+
+
+async def test_a_redaction_inside_the_gap_removes_what_it_deleted(alice: PrincipalStore) -> None:
+    """A repayment that only installs messages leaves deleted content readable.
+
+    Sync was wedged while a user deleted a message, so the redaction is inside
+    the hole and the original it deleted was projected before the hole opened.
+    A walk that keeps only ``m.room.message`` events fetches that redaction and
+    throws it away, installs nothing that removes the original, and then settles
+    the debt -- declaring the room whole with the deleted body still in the
+    projection, for the life of the database. Hydration does not run twice under
+    one membership, so nothing later would have repaired it either.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000), raw("$two", "two", ts=2_000)])
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(
+        pages=[
+            [
+                redaction("$r", "$one", ts=3_000),
+                raw("$two", "two", ts=2_000),
+                redacted(raw("$one", "one", ts=1_000)),
+            ],
+        ],
+    )
+
+    with capture_logs() as logs:
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    settled = [entry for entry in logs if entry["event"] == _SETTLED_LOG]
+    assert [entry["outcome"] for entry in settled] == [HistoryDebtOutcome.REPAID.value]
+    assert await bodies(alice) == ["two"]
+    assert await alice.room_history_debt(ROOM) is None
+
+
+async def test_a_redaction_inside_the_gap_hides_the_edit_it_deleted(alice: PrincipalStore) -> None:
+    """Deleting the revision on screen is not deleting the message.
+
+    The logical message survives its edit being redacted, so the row stays and
+    its body has to stop being readable until the server says what the message
+    looks like now -- which is exactly what live admission does, and what the
+    refresh token is for. A repayment that drops the redaction leaves the row
+    showing the edit the sender deleted and owes no refetch, so no later read
+    ever asks.
+    """
+    await admit_all(alice, [raw("$m", "first", ts=1_000), raw("$e", "second", ts=2_000, replaces="$m")])
+    assert await bodies(alice) == ["second"]
+    await alice.record_room_history_debt(ROOM)
+    client = FakeClient(
+        pages=[
+            [
+                redaction("$r", "$e", ts=3_000),
+                redacted(raw("$e", "second", ts=2_000, replaces="$m")),
+                raw("$m", "first", ts=1_000),
+            ],
+        ],
+    )
+
+    await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+    assert [message.content["body"] for message in page.messages] == []
+    # Withheld and owed, rather than silently gone: the point refetch is what
+    # learns whether an older revision survived the deletion.
+    assert [request.logical_event_id for request in page.refresh_pending] == ["$m"]
+    assert await alice.room_history_debt(ROOM) is None
+
+
 # --- What the debt refuses to do --------------------------------------------
 
 
@@ -730,10 +832,8 @@ async def test_an_empty_projection_drops_the_marker_that_certified_the_hole(
     Still no debt -- there is no stored message to anchor one on -- but the
     marker that certified the hole is dropped, so the next read walks the room.
     """
-    redacted = raw("$gone", "gone", ts=1_000)
-    redacted["content"] = {}
-    redacted["unsigned"] = {"redacted_because": {"type": "m.room.redaction", "sender": ALICE, "content": {}}}
-    warm = FakeClient(pages=[[redacted]])
+    gone = redacted(raw("$gone", "gone", ts=1_000))
+    warm = FakeClient(pages=[[gone]])
     await hydrator(alice, warm).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     # The dangerous state: a whole conversation with nothing in it.
@@ -745,7 +845,7 @@ async def test_an_empty_projection_drops_the_marker_that_certified_the_hole(
 
     # One re-walk, rather than an unbounded tax on a room that owes nothing.
     assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
-    repair = FakeClient(pages=[[raw("$missed", "missed", ts=3_000), redacted]])
+    repair = FakeClient(pages=[[raw("$missed", "missed", ts=3_000), gone]])
     await hydrator(alice, repair).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     assert await bodies(alice) == ["missed"]

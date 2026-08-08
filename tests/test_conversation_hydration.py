@@ -91,6 +91,18 @@ def raw(
     return source
 
 
+def redaction(event_id: str, redacts: str, *, ts: int = 1_000, sender: str = ALICE) -> dict[str, Any]:
+    """Return one raw Matrix redaction of another event."""
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": ts,
+        "type": "m.room.redaction",
+        "redacts": redacts,
+        "content": {},
+    }
+
+
 def parse(source: dict[str, Any]) -> nio.Event:
     """Return the parsed nio event for one raw source."""
     event = nio.Event.parse_event(source)
@@ -524,9 +536,26 @@ class TestRevisionReduction:
         assert projected is not None
         assert projected.replaces_event_id is None
 
-    async def test_a_redacted_event_projects_to_nothing(self) -> None:
-        """The server already stripped it; storing an empty body would show one."""
-        assert _projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True)), self_sender=BOT) is None
+    async def test_a_redacted_event_projects_as_its_own_deletion(self) -> None:
+        """A stripped body is a deletion, and dropping it applies nothing.
+
+        A thread walk never sees the ``m.room.redaction`` event -- a redaction
+        carries no ``m.relates_to``, so it is in no relation tree -- and this
+        shape is the only thing that says the message is gone. Reading it as a
+        deletion of itself is what removes the body already in the projection
+        instead of leaving it readable.
+        """
+        projected = _projected_from_event(ROOM, parse(raw("$m", "gone", redacted=True)), self_sender=BOT)
+
+        assert projected is not None
+        assert projected.redacts_event_id == "$m"
+
+    async def test_a_redaction_projects_as_a_deletion_of_its_target(self) -> None:
+        """The other shape a walk meets, carrying the same fact about another event."""
+        projected = _projected_from_event(ROOM, parse(redaction("$r", "$m", ts=3_000)), self_sender=BOT)
+
+        assert projected is not None
+        assert projected.redacts_event_id == "$m"
 
 
 class TestThreadHydration:
@@ -1071,6 +1100,31 @@ class TestRoomHydration:
             endless_edits_per_page=_MESSAGES_PAGE_LIMIT - 1,
         )
         window = 5
+
+        await hydrator(alice, client, prompt_window_messages=window).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert client.history_pages == window
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=window * 2)
+        assert len(page.messages) == window
+
+    async def test_the_window_is_not_spent_on_deletions_either(self, alice: PrincipalStore) -> None:
+        """A redaction removes a message from the window; it does not fill a slot in it.
+
+        Redactions project now, which is what applies a deletion the walk finds
+        -- and a projection is not automatically a message. Counting one would
+        make every deleted message in a room's recent history cost a live one
+        out of the prompt, silently, and a room whose tip is a burst of cleanup
+        would hydrate almost nothing.
+        """
+        window = 3
+        client = FakeClient(
+            pages=[
+                ([redaction("$r1", "$gone1", ts=9_000), redaction("$r2", "$gone2", ts=8_900), raw("$c", "c")], "t1"),
+                ([raw("$b", "b")], "t2"),
+                ([raw("$a", "a")], "t3"),
+                ([], None),
+            ],
+        )
 
         await hydrator(alice, client, prompt_window_messages=window).ensure_hydrated(room_id=ROOM, thread_id=None)
 
