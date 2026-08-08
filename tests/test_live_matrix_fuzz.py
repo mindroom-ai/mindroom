@@ -2345,6 +2345,18 @@ def test_reply_timeout_help_distinguishes_adaptive_and_fixed_profiles(
     assert "one fixed whole-workload non-extending SLA for recovery-cliff" in help_text
 
 
+def test_sustained_stream_capacity_readme_documents_exact_no_fault_invocation() -> None:
+    """The capacity invocation and its absence of recovery-cliff fault gates stay documented."""
+    readme = (PROJECT_ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
+
+    assert (
+        "uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity "
+        "--threads 200 --reply-timeout 180"
+    ) in readme
+    assert "does not send SIGSTOP" in readme
+    assert "does not require a recovery marker" in readme
+
+
 def test_recovery_cliff_event_audit_folds_only_same_responder_edits_in_total_order() -> None:
     """A same-timestamp later edit wins, while another sender cannot finish it."""
     events = (

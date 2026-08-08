@@ -75,6 +75,24 @@ It is reported rather than gated: a graceful restart taken mid-turn is allowed t
 The `short-stream-correctness` profile preserves the existing 13-thread hot-then-parallel stream scenario with a 180-second per-reply deadline.
 It proves exact short streamed-reply correctness and is not a capacity benchmark or capacity result.
 
+The `sustained-stream-capacity` profile is the ordinary no-fault capacity workload and defaults to 200 managed roots released together under one fixed 180-second whole-workload deadline.
+
+```bash
+uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
+```
+
+This profile measures sustained overlapping streams without pausing MindRoom or injecting a recovery-cliff context gap.
+It does not send SIGSTOP and does not require a recovery marker.
+Unlike `short-stream-correctness`, it is a capacity workload with 200 long-lived overlapping streams rather than a short correctness scenario.
+Unlike `recovery-cliff`, it does not fault-inject a context gap or require recovery-cliff-only delivery-retry, detached-worker, or unacknowledged-FINAL evidence.
+
+PASS requires exactly 200 managed root source events with unique run/thread markers, the expected sender, and an explicit mention of the configured responder.
+PASS requires exactly one completed canonical terminal reply for every root, with unique source and response identities and no missing, duplicate, orphan, malformed, nonterminal, or later-terminal replacement evidence.
+PASS requires every stream to remain active for at least 45 seconds, all 200 streams to overlap for at least 45 seconds, and peak active streams to reach 200.
+PASS requires healthy sync samples throughout the run and at least one health sample while the root release is still outstanding.
+PASS requires zero pending journal rows and unacknowledged outbox rows when the durable probe is available, with no recovery-abandonment, watchdog-stall, or durable-drain-failure markers.
+PASS requires the post-load reaction to settle, sync time to advance after the reaction fence, and shutdown to complete cleanly within the same non-extending deadline.
+
 The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for a workload that defaults to 100 roots and can be raised with `--threads`.
 With the current timeline and nio recovery limits, 1,499 roots is the largest valid recoverable trace and 1,500 is refused before the held workload rather than misreported as a runtime capacity failure.
 It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases every configured managed root concurrently, and resumes the runtime even if a send fails.
