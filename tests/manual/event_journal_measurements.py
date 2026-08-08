@@ -2,9 +2,8 @@
 
 The plan this implements requires numbers, not impressions, before the old
 owners are deleted: how fast admission and bounded reads are, whether the
-single-writer design actually eliminates SQLite lock failures under load,
-whether reads stay indexed as a conversation grows, and how large the
-replacement is compared to what it replaces.
+single-writer design actually eliminates SQLite lock failures under load, and
+whether reads stay indexed as a conversation grows.
 
 Run it with::
 
@@ -227,39 +226,6 @@ def measure_query_plans(database_path: Path, report: Report) -> None:
     report.record("pending_replay_uses_index", "journal_events_pending" in pending_detail)
 
 
-def measure_source_size(report: Report) -> None:
-    """Compare the replacement's size with the owners it is meant to replace."""
-
-    def lines(*paths: str) -> int:
-        total = 0
-        for path in paths:
-            target = PROJECT_ROOT / path
-            files = target.rglob("*.py") if target.is_dir() else [target]
-            for file in files:
-                if file.exists() and "__pycache__" not in file.parts:
-                    total += len(file.read_text(encoding="utf-8").splitlines())
-        return total
-
-    replacement = lines(
-        "src/mindroom/event_journal",
-        "src/mindroom/matrix/journal_ingress.py",
-        "src/mindroom/matrix/conversation_hydration.py",
-        "src/mindroom/matrix/conversation_reads.py",
-        "src/mindroom/pending_event_worker.py",
-        "src/mindroom/response_delivery.py",
-    )
-    replaced = lines(
-        "src/mindroom/dispatch_obligations",
-        "src/mindroom/dispatch_admission.py",
-        "src/mindroom/cold_history_fence.py",
-        "src/mindroom/turn_settlement_retry.py",
-        "src/mindroom/matrix/sync_checkpoint_trust.py",
-    )
-    report.record("replacement_source_lines", replacement)
-    report.record("replaced_owner_source_lines", replaced)
-    report.record("projected_net_line_change", replacement - replaced)
-
-
 async def run(report: Report) -> None:
     """Run every measurement against a fresh SQLite store."""
     with tempfile.TemporaryDirectory(prefix="journal-measure-") as directory:
@@ -280,7 +246,6 @@ async def run(report: Report) -> None:
             )
         finally:
             await store_root.close()
-    measure_source_size(report)
 
 
 def main() -> int:
