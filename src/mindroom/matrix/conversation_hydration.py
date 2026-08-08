@@ -528,6 +528,27 @@ class ConversationHydrator:
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
         """
+        if await self.store.room_history_debt(debt.room_id) != debt:
+            # Another reader already repaid this. `_shared` only joins readers
+            # that overlap in time: the caller read this debt before that
+            # repayment committed, and by the time it got here the finished
+            # task had already been dropped from the map, so there was nothing
+            # left to join. Walking anyway pages the entire room a second time
+            # for a question that has been answered -- `repay_room_history_debt`
+            # would refuse to install the result, so every one of those requests
+            # is spent on nothing.
+            #
+            # Rechecked here, inside the shared task, rather than at the call
+            # site: the durable debt is the serialization that already exists,
+            # and a store read cannot re-enter `_shared` and wait on the task it
+            # is running inside.
+            #
+            # A *different* debt is superseding for the same reason a stale one
+            # is -- a later gap is a different hole and this walk was not
+            # launched for it -- and the caller's loop re-reads the debt, so the
+            # new one is walked on the next pass rather than under this anchor.
+            logger.info("conversation_history_debt_already_settled", room_id=debt.room_id)
+            return
         epoch = await self.store.membership_epoch(debt.room_id)
         walk = await self._fetch_room(debt.room_id, owed_through_event_id=debt.owed_through_event_id)
         outcome = await self.store.repay_room_history_debt(

@@ -454,6 +454,34 @@ async def test_concurrent_readers_of_an_indebted_room_share_one_walk(
     assert await bodies(alice, "$root") == ["root", "two"]
 
 
+async def test_a_reader_holding_a_settled_debt_does_not_walk_the_room_again(
+    alice: PrincipalStore,
+) -> None:
+    """A repaid hole is repaid for every reader, including the ones already holding it.
+
+    The sibling above races three readers and so only catches this when the
+    scheduler happens to cooperate -- which is what made it flaky rather than
+    green. This one reproduces the losing ordering directly: ``_shared`` joins
+    only readers that overlap in time, so a reader that read this debt before
+    another reader's repayment committed finds nothing left to join and walks
+    the entire room a second time. The install is refused, so every request that
+    walk costs is spent on an answer that is thrown away.
+    """
+    await admit_all(alice, [raw("$one", "one", ts=1_000)])
+    debt = await alice.record_room_history_debt(ROOM)
+    assert debt is not None
+    client = FakeClient(pages=[[raw("$two", "two", ts=2_000), raw("$one", "one", ts=1_000)]])
+    hydrate = hydrator(alice, client)
+
+    await hydrate.ensure_hydrated(room_id=ROOM, thread_id=None)
+    assert client.calls == 2
+
+    await hydrate._repay(debt)
+
+    assert client.calls == 2
+    assert await bodies(alice) == ["one", "two"]
+
+
 async def test_reach_is_measured_over_what_the_walk_saw_not_what_it_kept(
     alice: PrincipalStore,
 ) -> None:
