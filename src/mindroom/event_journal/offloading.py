@@ -46,6 +46,8 @@ async def settled[T](work: asyncio.Future[T]) -> T:
         except asyncio.CancelledError as error:
             cancellation = error
     if cancellation is not None:
+        if not work.cancelled() and (worker_error := work.exception()) is not None:
+            raise cancellation from worker_error
         raise cancellation
     return work.result()
 

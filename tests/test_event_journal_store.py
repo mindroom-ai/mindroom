@@ -47,6 +47,7 @@ from mindroom.event_journal import (
     TerminalTurnWrite,
     delivery_transaction_id,
 )
+from mindroom.event_journal.offloading import settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -3275,6 +3276,21 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
     against is a real connection being taken away from a real statement, and a
     faked worker has no connection to take away.
     """
+
+    async def test_cancellation_retrieves_a_completed_worker_failure(self) -> None:
+        """The caller keeps cancellation while the worker's failure remains observable."""
+        work: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        waiting = asyncio.create_task(settled(work))
+        await asyncio.sleep(0)
+        waiting.cancel()
+        await asyncio.sleep(0)
+        worker_error = RuntimeError("worker failed after cancellation")
+        work.set_exception(worker_error)
+
+        with pytest.raises(asyncio.CancelledError) as cancellation:
+            await waiting
+
+        assert cancellation.value.__cause__ is worker_error
 
     async def test_closing_the_store_waits_for_a_write_already_on_a_worker_thread(
         self,
