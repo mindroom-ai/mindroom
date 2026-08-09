@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -4626,3 +4627,185 @@ async def test_shutdown_waits_for_a_cancelled_cards_recovery(tmp_path: Path) -> 
     # client were still open.
     assert editor.await_args is not None
     assert editor.await_args.args[2]["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_bounds_a_cancelled_cards_stalled_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown leaves a stalled terminal edit for the next startup sweep."""
+    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.01)
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    write_started = asyncio.Event()
+    detached_edit_started = asyncio.Event()
+    release_detached_edit = asyncio.Event()
+    real_acknowledge = cards.acknowledge_approval_card
+    acknowledge_calls = 0
+
+    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
+        nonlocal acknowledge_calls
+        acknowledge_calls += 1
+        if acknowledge_calls == 1:
+            write_started.set()
+            await asyncio.Event().wait()
+        return await real_acknowledge(*args, **kwargs)
+
+    async def stalled_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        detached_edit_started.set()
+        await release_detached_edit.wait()
+        return True
+
+    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=stalled_editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    request = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(write_started.wait(), timeout=5)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await asyncio.wait_for(detached_edit_started.wait(), timeout=5)
+
+    shutdown = asyncio.create_task(_shutdown_approval_store())
+    done, _pending = await asyncio.wait({shutdown}, timeout=1)
+    try:
+        assert shutdown in done, "shutdown waited forever for a Matrix edit that startup can retry"
+    finally:
+        release_detached_edit.set()
+        await asyncio.wait_for(shutdown, timeout=5)
+
+    (retained,) = cards.rows.values()
+    assert retained.card_event_id == "$approval"
+    assert retained.resolution is not None
+    assert retained.resolution["status"] == "expired"
+
+    recovered_edits: list[dict[str, Any]] = []
+
+    async def recovery_editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
+        recovered_edits.append(content)
+        return True
+
+    recovered = initialize_approval_store(
+        runtime_paths,
+        editor=recovery_editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    sweep = await recovered.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=1, failed=0)
+    assert recovered_edits[0]["status"] == "expired"
+    assert cards.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_detached_card_recovery_on_its_owner_loop(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown cannot leave foreign-loop recovery alive after teardown."""
+    monkeypatch.setattr("mindroom.approval_manager._SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 0.02)
+    cards = FakeApprovalCards()
+    runtime_paths = test_runtime_paths(tmp_path)
+    first_acknowledgement_started = threading.Event()
+    detached_edit_started = threading.Event()
+    detached_edit_finished = threading.Event()
+    real_acknowledge = cards.acknowledge_approval_card
+    acknowledge_calls = 0
+
+    async def gated_acknowledge(*args: object, **kwargs: object) -> object:
+        nonlocal acknowledge_calls
+        acknowledge_calls += 1
+        if acknowledge_calls == 1:
+            first_acknowledgement_started.set()
+            await asyncio.Future()
+        return await real_acknowledge(*args, **kwargs)
+
+    async def stalled_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+        detached_edit_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            detached_edit_finished.set()
+
+    cards.acknowledge_approval_card = gated_acknowledge  # type: ignore[method-assign]
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=stalled_editor,
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    worker_loop = asyncio.new_event_loop()
+    worker_thread = threading.Thread(target=worker_loop.run_forever, daemon=True)
+    request_tasks: list[asyncio.Task[ApprovalDecision]] = []
+    detached_tasks: list[asyncio.Task[Any]] = []
+    request_created = threading.Event()
+    request_finished = threading.Event()
+
+    def start_request() -> None:
+        request = worker_loop.create_task(
+            store.request_approval(
+                tool_name="read_file",
+                arguments={"path": "notes.txt"},
+                room_id="!room:localhost",
+                requester_id="@user:localhost",
+                approver_user_id="@user:localhost",
+                timeout_seconds=30,
+            ),
+        )
+        request_tasks.append(request)
+        request.add_done_callback(lambda _task: request_finished.set())
+        request_created.set()
+
+    worker_thread.start()
+    worker_loop.call_soon_threadsafe(start_request)
+    try:
+        assert await asyncio.to_thread(request_created.wait, 5)
+        assert await asyncio.to_thread(first_acknowledgement_started.wait, 5)
+        worker_loop.call_soon_threadsafe(request_tasks[0].cancel)
+        assert await asyncio.to_thread(request_finished.wait, 5)
+        assert await asyncio.to_thread(detached_edit_started.wait, 5)
+
+        snapshot_taken = threading.Event()
+
+        def snapshot_tasks() -> None:
+            detached_tasks.extend(task for task in asyncio.all_tasks(worker_loop) if not task.done())
+            snapshot_taken.set()
+
+        worker_loop.call_soon_threadsafe(snapshot_tasks)
+        assert await asyncio.to_thread(snapshot_taken.wait, 5)
+        assert len(detached_tasks) == 1
+
+        await asyncio.wait_for(_shutdown_approval_store(), timeout=5)
+
+        assert detached_tasks[0].done(), "foreign-loop recovery was still running after shutdown returned"
+        assert detached_edit_finished.is_set()
+    finally:
+        for task in [*request_tasks, *detached_tasks]:
+            if not task.done():
+                worker_loop.call_soon_threadsafe(task.cancel)
+        if detached_edit_started.is_set():
+            await asyncio.to_thread(detached_edit_finished.wait, 5)
+        worker_loop.call_soon_threadsafe(worker_loop.stop)
+        await asyncio.to_thread(worker_thread.join, 5)
+        worker_loop.close()

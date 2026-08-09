@@ -324,6 +324,15 @@ class _PostCancelCleanupTask:
     transaction_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _DetachedCardWrite:
+    """One cancelled request's recovery, owned by its originating loop."""
+
+    done_future: Future[None]
+    owner_loop: asyncio.AbstractEventLoop
+    recovery_task: asyncio.Task[None]
+
+
 @dataclass(slots=True, eq=False)
 class _ActiveApprovalSend:
     done_future: Future[None]
@@ -372,7 +381,7 @@ class _ApprovalManager:
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
-        self._detached_card_writes: set[asyncio.Future[None]] = set()
+        self._detached_card_writes: set[_DetachedCardWrite] = set()
         self._shutdown_reason: str | None = None
 
     async def request_approval(  # noqa: C901, PLR0911
@@ -867,6 +876,8 @@ class _ApprovalManager:
         work outlives the request that started it, and it must not inherit that
         request's cancellation.
         """
+        done_future: Future[None] = Future()
+        owner_loop = asyncio.get_running_loop()
 
         async def recover() -> None:
             try:
@@ -876,10 +887,15 @@ class _ApprovalManager:
                 with self._live_lock:
                     self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-        cleanup_future = asyncio.ensure_future(recover())
+        recovery_task = asyncio.create_task(recover())
+        detached_write = _DetachedCardWrite(
+            done_future=done_future,
+            owner_loop=owner_loop,
+            recovery_task=recovery_task,
+        )
         with self._live_lock:
-            self._detached_card_writes.add(cleanup_future)
-        cleanup_future.add_done_callback(self._discard_detached_card_write)
+            self._detached_card_writes.add(detached_write)
+        recovery_task.add_done_callback(lambda _future: self._discard_detached_card_write(detached_write))
 
     def _bind_live_waiter(
         self,
@@ -1697,25 +1713,58 @@ class _ApprovalManager:
                 return
 
     async def _drain_detached_card_writes(self) -> None:
-        """Wait for recovery that outlived its caller before the runtime tears down.
+        """Give detached recovery a bounded chance before runtime teardown.
 
         These record a card and then expire it, and both halves need the
         journal store and the Matrix client that bot shutdown is about to
-        close. Returning while one is still in flight lets it fail against a
-        closed store and a closed client, leaving exactly the clickable card
-        with no durable row that scheduling it was meant to prevent.
+        close. Once the bound expires, cancellation is safe because the card
+        row precedes its send and the terminal decision precedes its edit; the
+        next startup sweep resumes whichever durable half was reached.
         """
         while True:
             with self._live_lock:
                 pending = tuple(self._detached_card_writes)
             if not pending:
                 return
-            await asyncio.gather(*pending, return_exceptions=True)
+            wrapped_by_write = {
+                asyncio.wrap_future(detached_write.done_future): detached_write for detached_write in pending
+            }
+            done, unfinished = await asyncio.wait(
+                wrapped_by_write,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+            )
+            for done_future in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    done_future.result()
+            if unfinished:
+                unfinished_writes = [wrapped_by_write[wrapped] for wrapped in unfinished]
+                for detached_write in unfinished_writes:
+                    if not detached_write.recovery_task.done() and not detached_write.owner_loop.is_closed():
+                        detached_write.owner_loop.call_soon_threadsafe(detached_write.recovery_task.cancel)
+                cancelled, still_running = await asyncio.wait(
+                    unfinished,
+                    timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+                )
+                for cancelled_future in cancelled:
+                    with suppress(asyncio.CancelledError, Exception):
+                        cancelled_future.result()
+                with self._live_lock:
+                    self._detached_card_writes.difference_update(unfinished_writes)
+                logger.warning(
+                    "Timed out waiting for detached approval card recovery during shutdown",
+                    pending_card_writes=len(unfinished_writes),
+                    cancellation_incomplete=len(still_running),
+                )
+                return
 
-    def _discard_detached_card_write(self, future: asyncio.Future[None]) -> None:
+    def _discard_detached_card_write(self, detached_write: _DetachedCardWrite) -> None:
         """Drop one finished recovery from the set shutdown drains."""
+        with suppress(asyncio.CancelledError, Exception):
+            detached_write.recovery_task.result()
         with self._live_lock:
-            self._detached_card_writes.discard(future)
+            self._detached_card_writes.discard(detached_write)
+        with suppress(InvalidStateError):
+            detached_write.done_future.set_result(None)
 
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
         while True:
