@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 from agno.tools.function import ToolResult
@@ -18,7 +19,8 @@ from mcp.types import (
 )
 
 from mindroom.mcp.errors import MCPToolCallError
-from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.results import MCPAppToolResult, tool_result_from_call_result
+from mindroom.mcp.types import MCPAppResource
 
 
 def test_tool_result_from_call_result_converts_text_images_and_resources() -> None:
@@ -131,3 +133,69 @@ def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes()
     assert result.audios is not None
     assert result.audios[0].content == audio_data.encode("utf-8")
     assert result.audios[0].mime_type == "audio/wav"
+
+
+def test_tool_result_from_call_result_attaches_mcp_app_resources() -> None:
+    """Attach MCP Apps resources to a typed ToolResult without changing visible content."""
+    app_resource = MCPAppResource(
+        uri="ui://demo/chart",
+        mime_type="text/html;profile=mcp-app",
+        html="<html><body>chart</body></html>",
+        meta={"ui": {"prefersBorder": True}},
+    )
+
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(content=[TextContent(type="text", text="chart ready")]),
+        app_resources=[app_resource],
+    )
+
+    assert isinstance(result, MCPAppToolResult)
+    assert result.content == "chart ready"
+    assert result.mcp_app_resources == [app_resource]
+    assert result.mcp_app_tool_result == {
+        "content": [{"type": "text", "text": "chart ready"}],
+        "isError": False,
+    }
+
+
+@pytest.mark.parametrize("app_resources", [None, []])
+def test_tool_result_from_call_result_ignores_empty_mcp_app_resources(
+    app_resources: list[MCPAppResource] | None,
+) -> None:
+    """Return a plain ToolResult when no MCP App resource was accepted."""
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(content=[TextContent(type="text", text="chart ready")]),
+        app_resources=app_resources,
+    )
+
+    assert type(result) is ToolResult
+    assert result.content == "chart ready"
+
+
+def test_tool_result_from_call_result_keeps_mcp_app_result_json_safe() -> None:
+    """MCP App notifications must be serializable even when MCP models contain typed URIs."""
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(
+            content=[
+                ResourceLink(
+                    type="resource_link",
+                    uri="file:///report.csv",
+                    name="report",
+                ),
+            ],
+        ),
+        app_resources=[
+            MCPAppResource(
+                uri="ui://demo/chart",
+                mime_type="text/html;profile=mcp-app",
+                html="<html></html>",
+            ),
+        ],
+    )
+
+    assert isinstance(result, MCPAppToolResult)
+    serialized = json.loads(json.dumps(result.mcp_app_tool_result))
+    assert serialized["content"][0]["uri"] == "file:///report.csv"

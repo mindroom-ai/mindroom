@@ -10724,9 +10724,9 @@ For tool configuration, presets, and runtime context, see the [Tools Overview](h
 # MCP
 
 Model Context Protocol (MCP) is a standard way for AI applications to connect to external tool servers.
-MindRoom's Phase 1 MCP support acts as an MCP client for tools.
+MindRoom acts as an MCP client for tools and their optional MCP Apps interfaces.
 It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
-MindRoom does not yet consume MCP resources or prompts.
+MindRoom consumes UI resources associated with MCP Apps tools, but it does not expose general MCP resources or prompts to agents.
 
 ## Configuration Overview
 
@@ -10884,6 +10884,17 @@ They are useful when one server exposes many tools but one agent should see only
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
 OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
+
+## MCP Apps
+
+MindRoom negotiates the [`io.modelcontextprotocol/ui` MCP Apps extension](https://modelcontextprotocol.io/extensions/apps/overview) when it initializes each MCP session.
+It recognizes the current nested `_meta.ui.resourceUri` declaration and the deprecated flat `_meta["ui/resourceUri"]` declaration.
+Tools whose `_meta.ui.visibility` excludes `model` remain available to their app but are not exposed in the model-callable catalog.
+
+After a successful call to a UI-backed tool, MindRoom reads the declared `ui://` resource.
+It accepts a non-empty UTF-8 text resource or base64 blob only when the response URI matches the requested URI and its MIME type is `text/html;profile=mcp-app`.
+The accepted HTML, resource metadata, redacted tool input, and original MCP tool result are attached to the Matrix tool trace for clients that render MCP Apps.
+If the optional UI resource is missing, malformed, or unavailable, the successful tool call still returns its normal text result.
 
 ## OAuth-Backed Remote MCP
 
