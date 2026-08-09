@@ -47,7 +47,14 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore, OutboxDelivery, OutboxView, PrincipalStore
+    from mindroom.event_journal import (
+        DeliveryAcknowledgement,
+        EventJournalStore,
+        OutboxDelivery,
+        OutboxView,
+        PrincipalStore,
+        TerminalTurnWrite,
+    )
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -642,14 +649,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         assert send.await_args.kwargs["transaction_id"] == "tx-$cause-final"
 
-    async def test_recovery_resolves_an_attempted_placeholder_before_the_answer(
+    async def test_live_final_resolves_an_attempted_placeholder_before_the_answer(
         self,
         tmp_path: Path,
     ) -> None:
-        """An unknown placeholder outcome is settled before FINAL becomes visible."""
+        """Live FINAL resolves an unknown placeholder before reporting completion."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        hooks = self._hooks()
+        gateway.deps.response_hooks._apply_before_response = hooks._apply_before_response
         placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
         answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
 
@@ -662,32 +670,168 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                     delivery_stage=DeliveryStage.INITIAL,
                 ),
             )
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)):
+        with patch(
+            "mindroom.delivery_gateway.send_message_result",
+            AsyncMock(side_effect=[placeholder, answer]),
+        ) as send:
             outcome = await gateway.deliver_final(self._final_request("the answer"))
 
-        assert outbox.rows["$cause", "initial"].acknowledged_event_id is None
-        assert outcome.event_id is None
-        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
-        outbox.rows["$cause", "initial"] = replace(
-            outbox.rows["$cause", "initial"],
-            created_at_ns=2,
-        )
-        outbox.rows["$cause", "final"] = replace(
-            outbox.rows["$cause", "final"],
-            created_at_ns=1,
-        )
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$answer"
+        assert outbox.rows["$cause", "initial"].acknowledged_event_id == "$placeholder"
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
+        assert [call.args[2].get("body") for call in send.await_args_list] == [
+            PROGRESS_PLACEHOLDER,
+            "the answer",
+        ]
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=placeholder)) as first_send:
-            first_pass = await gateway.recover_deliveries()
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as second_send:
-            second_pass = await gateway.recover_deliveries()
+    async def test_cancelled_live_final_finishes_both_stages_before_propagating(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Cancellation cannot leave FINAL for recovery after resolving INITIAL."""
+        outbox = FakeOutbox()
+        terminal_committed = AsyncMock()
+        gateway = _gateway(
+            tmp_path,
+            outbox,
+            terminal_turn_committed=terminal_committed,
+        )
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+        initial_retry_started = asyncio.Event()
+        release_initial_retry = asyncio.Event()
 
-        assert first_pass.recovered == 1
-        assert first_pass.failed == 1, "a blocked FINAL was reported as complete"
-        assert second_pass.recovered == 1
-        assert second_pass.complete
-        assert first_send.await_args.args[2].get("body") == PROGRESS_PLACEHOLDER
-        assert second_send.await_args.args[2].get("body") == "the answer"
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text=PROGRESS_PLACEHOLDER,
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+
+        async def send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> SimpleNamespace:
+            if content.get("body") == PROGRESS_PLACEHOLDER:
+                initial_retry_started.set()
+                await release_initial_retry.wait()
+                return placeholder
+            return answer
+
+        with patch("mindroom.delivery_gateway.send_message_result", side_effect=send):
+            delivery = asyncio.create_task(gateway.deliver_final(self._final_request("the answer")))
+            await asyncio.wait_for(initial_retry_started.wait(), timeout=5)
+            delivery.cancel()
+            release_initial_retry.set()
+            with pytest.raises(asyncio.CancelledError):
+                await delivery
+
+        assert outbox.rows["$cause", "initial"].acknowledged_event_id == "$placeholder"
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
+        terminal_committed.assert_awaited_once_with("$cause", "$answer")
+
+    async def test_live_final_ignores_its_inline_initial_result_when_another_process_wins(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A cross-process FINAL winner cannot be reported as the placeholder."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text=PROGRESS_PLACEHOLDER,
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+
+        real_acknowledge = outbox.acknowledge_delivery
+
+        async def acknowledge(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            event_id: str,
+            terminal_turn: TerminalTurnWrite | None = None,
+        ) -> DeliveryAcknowledgement:
+            acknowledged = await real_acknowledge(
+                turn_id=turn_id,
+                stage=stage,
+                event_id=event_id,
+                terminal_turn=terminal_turn,
+            )
+            if stage is DeliveryStage.INITIAL:
+                await real_acknowledge(
+                    turn_id="$cause",
+                    stage=DeliveryStage.FINAL,
+                    event_id="$other-final",
+                )
+            return acknowledged
+
+        outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
+        with patch(
+            "mindroom.delivery_gateway.send_message_result",
+            AsyncMock(return_value=placeholder),
+        ) as send:
+            outcome = await gateway.deliver_final(self._final_request("the answer"))
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$other-final"
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$other-final"
+        assert send.await_count == 1
+        assert send.await_args.args[2]["body"] == PROGRESS_PLACEHOLDER
+
+    async def test_live_final_reports_the_durable_winner_when_its_send_loses_acknowledgement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The requested-stage callback cannot override a competing durable winner."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        real_acknowledge = outbox.acknowledge_delivery
+
+        async def acknowledge(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            event_id: str,
+            terminal_turn: TerminalTurnWrite | None = None,
+        ) -> DeliveryAcknowledgement:
+            if stage is DeliveryStage.FINAL:
+                await real_acknowledge(
+                    turn_id=turn_id,
+                    stage=stage,
+                    event_id="$winner",
+                    terminal_turn=terminal_turn,
+                )
+            return await real_acknowledge(
+                turn_id=turn_id,
+                stage=stage,
+                event_id=event_id,
+                terminal_turn=terminal_turn,
+            )
+
+        outbox.acknowledge_delivery = acknowledge  # type: ignore[method-assign]
+        sent = SimpleNamespace(event_id="$loser", content_sent={"body": "the answer"})
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=sent)):
+            outcome = await gateway.deliver_final(self._final_request("the answer"))
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$winner"
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$winner"
 
     async def test_a_pass_that_could_not_send_reports_the_debt_it_left(
         self,

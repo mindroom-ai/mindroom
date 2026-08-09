@@ -759,11 +759,13 @@ class DeliveryGateway:
             turn_id=request.delivery_turn_id,
             stage=request.delivery_stage,
         )
-        delivered: DeliveredMatrixEvent | None = None
+        requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: OutboxDelivery) -> str:
-            nonlocal delivered
+            nonlocal requested_delivery
             delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
+            if claimed.stage is request.delivery_stage:
+                requested_delivery = delivered
             return delivered.event_id
 
         try:
@@ -781,8 +783,8 @@ class DeliveryGateway:
             # answering is not the room the bot is in now, so there is nothing
             # to send and nothing to recover.
             return None
-        if delivered is not None:
-            return delivered
+        if requested_delivery is not None and requested_delivery.event_id == event_id:
+            return requested_delivery
         # The delivery was already acknowledged, so nothing was sent and the
         # callback never ran. That is a turn re-running after its answer
         # reached the room; reporting it as a failed send would make a

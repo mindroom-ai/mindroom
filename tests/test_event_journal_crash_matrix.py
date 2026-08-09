@@ -856,11 +856,17 @@ class TestInitialAndFinalStages:
         assert recovered.recovered == 1
         assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL]
 
-    async def test_final_waits_for_an_attempted_initial_whose_process_was_lost(
+    async def test_final_retries_an_attempted_initial_before_it_becomes_visible(
         self,
         runtime: TurnRuntime,
     ) -> None:
-        """A crashed sender's late INITIAL acceptance cannot land after FINAL."""
+        """A crashed sender's late INITIAL acceptance cannot land after FINAL.
+
+        Repeating INITIAL under its frozen transaction first establishes the
+        placeholder's event. The abandoned request then deduplicates onto that
+        event even when it returns after FINAL, so it cannot append a late
+        placeholder to the room.
+        """
         await runtime.store.enqueue_delivery(
             turn_id=SOURCE,
             stage=DeliveryStage.INITIAL,
@@ -897,9 +903,10 @@ class TestInitialAndFinalStages:
 
         recovered = await runtime.delivery.recover()
 
-        assert final_event_id is None, "FINAL sent while the earlier INITIAL still had an unknown outcome"
+        assert final_event_id == "$sent1"
         assert recovered.complete
         assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+        assert runtime.homeserver.visible_messages == 2
 
     async def test_initial_cannot_become_visible_after_final_owns_delivery(self, runtime: TurnRuntime) -> None:
         """A stale INITIAL waiting behind an in-flight FINAL is suppressed after FINAL completes."""

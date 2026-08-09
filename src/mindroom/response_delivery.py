@@ -14,7 +14,7 @@ outbox both owning the same turn.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -186,7 +186,38 @@ class ResponseDelivery:
             if handoff is not None:
                 handoff.released(handed_over)
             outcome = await self._flush(turn_id=turn_id, stage=stage)
+            if stage is DeliveryStage.FINAL and outcome.retry_required:
+                outcome = await self._complete_blocked_final_across_cancellation(turn_id=turn_id)
         return await self._finish_flush(turn_id, outcome)
+
+    async def _complete_blocked_final_across_cancellation(
+        self,
+        *,
+        turn_id: str,
+    ) -> _FlushOutcome:
+        """Resolve INITIAL and finish its blocked FINAL before propagating cancellation."""
+        completed: _FlushOutcome | None = None
+
+        async def finish() -> _FlushOutcome:
+            nonlocal completed
+            # A prior process may have attempted the placeholder without
+            # recording whether Matrix accepted it. FINAL is durably queued,
+            # but reporting that temporary ordering block as a delivery
+            # failure would run terminal cancellation hooks even though
+            # recovery later shows the answer. Resolve INITIAL under the same
+            # turn lock, then retry FINAL before returning a lifecycle-visible
+            # result.
+            await self._flush(turn_id=turn_id, stage=DeliveryStage.INITIAL)
+            outcome = await self._flush(turn_id=turn_id, stage=DeliveryStage.FINAL)
+            completed = outcome
+            return completed
+
+        try:
+            return await run_coroutine_until_complete(finish())
+        except asyncio.CancelledError as cancellation:
+            if completed is None:
+                raise
+            return replace(completed, propagate_cancellation=cancellation)
 
     def _transaction_id_still_deduplicates(self, claimed: OutboxDelivery) -> bool:
         """Return whether resending this row can only collapse onto its own event.
