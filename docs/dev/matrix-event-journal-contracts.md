@@ -117,7 +117,7 @@ The in-flight turn is fenced at enqueue: `_enqueue_delivery` compares the epoch 
 
 ### 9. One backend, several narrow views
 
-Eleven structural protocols — ten in `event_journal/views.py` (`AdmissionView`, `ReplayView`, `DispatchView`, `PendingTurnView`, `RelationView`, `ConversationReadView`, `HistoryDebtRecordView`, `HydrationView`, `OutboxView`, `ApprovalView`) plus `MembershipView` in `event_journal/membership.py`.
+Eleven structural protocols — ten in `event_journal/views.py` (`AdmissionView`, `ReplayView`, `DispatchView`, `PendingTurnView`, `RelationView`, `ConversationReadView`, `HistoryRecoveryRecordView`, `HydrationView`, `OutboxView`, `ApprovalView`) plus `MembershipView` in `event_journal/membership.py`.
 Count them rather than quoting this line; the archived plan's count named two views that no longer exist and missed one that does.
 Each collaborator takes the slice it calls, and the type checker enforces it: a hydrator reaching for `enqueue_delivery` fails `ty` before any test runs.
 
