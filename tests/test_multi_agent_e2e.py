@@ -292,6 +292,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
+        mock_client.room_send.side_effect = [
+            nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
+            nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
+        ]
         mock_login.return_value = mock_client
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
@@ -469,6 +473,10 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Reset mocks for Test 3
         bot.client.room_send.reset_mock()
+        bot.client.room_send.side_effect = [
+            nio.RoomSendResponse.from_dict({"event_id": "$placeholder-mention"}, test_room_id),
+            nio.RoomSendResponse.from_dict({"event_id": "$edit-mention"}, test_room_id),
+        ]
         mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond

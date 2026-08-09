@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
 
@@ -85,6 +86,8 @@ class _FlushOutcome:
 
     event_id: str | None
     publish_committed_terminal: bool = False
+    retry_required: bool = False
+    propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,12 +252,22 @@ class ResponseDelivery:
 
     async def _flush(self, *, turn_id: str, stage: DeliveryStage) -> _FlushOutcome:
         """Send one delivery while holding its turn's visible-delivery lock."""
-        if await self._superseded_placeholder(turn_id=turn_id, stage=stage):
-            return _FlushOutcome(event_id=None)
         claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
         if claimed is None:
-            logger.info("response_delivery_row_withdrawn", turn_id=turn_id, stage=stage.value)
-            return _FlushOutcome(event_id=None)
+            blocked_final = (
+                stage is DeliveryStage.FINAL
+                and await self.store.load_delivery(
+                    turn_id=turn_id,
+                    stage=stage,
+                )
+                is not None
+            )
+            logger.info(
+                "response_delivery_stage_blocked" if blocked_final else "response_delivery_row_withdrawn",
+                turn_id=turn_id,
+                stage=stage.value,
+            )
+            return _FlushOutcome(event_id=None, retry_required=blocked_final)
         if claimed.acknowledged_event_id is not None:
             return _FlushOutcome(event_id=claimed.acknowledged_event_id)
         if not self._transaction_id_still_deduplicates(claimed):
@@ -266,9 +279,38 @@ class ResponseDelivery:
         # that raises would leave the row unacknowledged but stamped with this
         # device, and the next pass would see its own marker, skip the lookup
         # and post the answer twice.
-        await self.store.record_sending_device(turn_id=turn_id, stage=stage, device_id=self.sending_device_id)
+        return await self._complete_send_across_cancellation(claimed)
+
+    async def _complete_send_across_cancellation(self, claimed: OutboxDelivery) -> _FlushOutcome:
+        """Retain a completed outcome while delaying cancellation until post-lock work."""
+        completed: _FlushOutcome | None = None
+
+        async def finish() -> _FlushOutcome:
+            nonlocal completed
+            completed = await self._send_and_acknowledge(claimed)
+            return completed
+
+        try:
+            return await run_coroutine_until_complete(finish())
+        except asyncio.CancelledError as cancellation:
+            if completed is None:
+                raise
+            return _FlushOutcome(
+                event_id=completed.event_id,
+                publish_committed_terminal=completed.publish_committed_terminal,
+                retry_required=completed.retry_required,
+                propagate_cancellation=cancellation,
+            )
+
+    async def _send_and_acknowledge(self, claimed: OutboxDelivery) -> _FlushOutcome:
+        """Finish an accepted Matrix attempt before propagating local cancellation."""
+        await self.store.record_sending_device(
+            turn_id=claimed.turn_id,
+            stage=claimed.stage,
+            device_id=self.sending_device_id,
+        )
         event_id = await self.send(claimed)
-        return await self._acknowledge(turn_id, stage, event_id)
+        return await self._acknowledge(claimed.turn_id, claimed.stage, event_id)
 
     async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> _FlushOutcome:
         """Bind the row and report whether its record needs publishing.
@@ -323,6 +365,8 @@ class ResponseDelivery:
             and self.terminal_turn_committed is not None
         ):
             await self.terminal_turn_committed(turn_id, outcome.event_id)
+        if outcome.propagate_cancellation is not None:
+            raise outcome.propagate_cancellation
         return outcome.event_id
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
@@ -371,30 +415,6 @@ class ResponseDelivery:
         )
         return already_delivered
 
-    async def _superseded_placeholder(self, *, turn_id: str, stage: DeliveryStage) -> bool:
-        """Return whether this delivery is a placeholder the answer overtook.
-
-        A placeholder send whose outcome was never confirmed leaves a row
-        behind. If the turn went on to write an answer at all, resending that
-        placeholder would put "Thinking..." into the room next to the answer
-        it was supposed to precede -- and in this same pass, before it, since
-        the older row is recovered first.
-
-        The FINAL row existing is the proof, not the FINAL row being
-        acknowledged. An unacknowledged FINAL is still a turn that got past
-        the placeholder, and recovery sends it in the same pass. An
-        edit-shaped FINAL cannot be stranded by this: its target event ID only
-        exists because the placeholder send returned one, so the placeholder
-        really is in the room whether or not the row records it.
-
-        The row is left unacknowledged rather than deleted, because an
-        attempted row is the only record that something may already be in the
-        room under its transaction ID.
-        """
-        if stage is not DeliveryStage.INITIAL:
-            return False
-        return await self.store.load_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL) is not None
-
     async def recover(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome is unknown.
 
@@ -441,6 +461,9 @@ class ResponseDelivery:
                     failed += 1
                     continue
                 if sent is None:
+                    if outcome.retry_required:
+                        failed += 1
+                        continue
                     # The row went away behind a membership fence, or a
                     # FINAL superseded this INITIAL. Nothing is owed and
                     # nothing failed.

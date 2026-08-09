@@ -642,23 +642,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         assert send.await_args.kwargs["transaction_id"] == "tx-$cause-final"
 
-    async def test_recovery_does_not_add_a_placeholder_after_the_answer(
+    async def test_recovery_resolves_an_attempted_placeholder_before_the_answer(
         self,
         tmp_path: Path,
     ) -> None:
-        """A placeholder send whose outcome was lost must not resurface later.
-
-        If the placeholder never reached Matrix, the turn goes on to send its
-        answer as a message of its own. Resending the placeholder on the next
-        start would then put "Thinking..." into the room after the answer it
-        was supposed to precede -- a message from a turn that finished.
-
-        The row is left unacknowledged rather than deleted: it is the only
-        record that something may already exist under that transaction ID.
-        """
+        """An unknown placeholder outcome is settled before FINAL becomes visible."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
         answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
 
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
@@ -671,57 +663,31 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
         with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)):
-            await gateway.deliver_final(self._final_request("the answer"))
+            outcome = await gateway.deliver_final(self._final_request("the answer"))
 
         assert outbox.rows["$cause", "initial"].acknowledged_event_id is None
-        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
-
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as send:
-            recovered = await gateway.recover_deliveries()
-
-        assert recovered.recovered == 0, "recovery resent a placeholder the answer had already overtaken"
-        send.assert_not_awaited()
-
-    async def test_an_unacknowledged_answer_also_supersedes_the_placeholder(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A placeholder is overtaken by an answer that exists, acknowledged or not.
-
-        Crashing between claiming the answer and recording it leaves both rows
-        unacknowledged. Recovery walks them oldest first, so a rule that only
-        skips the placeholder once the answer is acknowledged would send the
-        placeholder *and then* the answer -- two visible messages, in that
-        order, for one turn.
-        """
-        outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
-
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
-            await gateway.send_text(
-                SendTextRequest(
-                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
-                    response_text=PROGRESS_PLACEHOLDER,
-                    delivery_turn_id="$cause",
-                    delivery_stage=DeliveryStage.INITIAL,
-                ),
-            )
-            # The answer is claimed and then lost on the wire, exactly as a
-            # crash after claim and before acknowledgement leaves it.
-            await gateway.deliver_final(self._final_request("the answer"))
-
-        assert outbox.rows["$cause", "initial"].acknowledged_event_id is None
+        assert outcome.event_id is None
         assert outbox.rows["$cause", "final"].acknowledged_event_id is None
-
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as send:
-            recovered = await gateway.recover_deliveries()
-
-        assert recovered.recovered == 1
-        assert [call.args[2].get("body") for call in send.await_args_list] == ["the answer"], (
-            "recovery sent the placeholder alongside the answer"
+        outbox.rows["$cause", "initial"] = replace(
+            outbox.rows["$cause", "initial"],
+            created_at_ns=2,
         )
+        outbox.rows["$cause", "final"] = replace(
+            outbox.rows["$cause", "final"],
+            created_at_ns=1,
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=placeholder)) as first_send:
+            first_pass = await gateway.recover_deliveries()
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=answer)) as second_send:
+            second_pass = await gateway.recover_deliveries()
+
+        assert first_pass.recovered == 1
+        assert first_pass.failed == 1, "a blocked FINAL was reported as complete"
+        assert second_pass.recovered == 1
+        assert second_pass.complete
+        assert first_send.await_args.args[2].get("body") == PROGRESS_PLACEHOLDER
+        assert second_send.await_args.args[2].get("body") == "the answer"
 
     async def test_a_pass_that_could_not_send_reports_the_debt_it_left(
         self,
@@ -1307,39 +1273,94 @@ class TestTurnDeliverySerialization:
         assert final not in completed_before_initial_acceptance
         assert accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
 
-    async def test_cancellation_releases_the_turn_lock(
+    async def test_cancelled_initial_cannot_be_accepted_after_a_distinct_final(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """Cancelling an in-flight send lets the same turn retry immediately."""
-        await self._enqueue(alice, DeliveryStage.FINAL)
+        """Local cancellation cannot make a still-live Matrix request safe to overtake."""
+        await self._enqueue(alice, DeliveryStage.INITIAL)
         gateway = _gateway(tmp_path, alice)
-        send_started = asyncio.Event()
-        never_finishes = asyncio.Event()
+        initial_reached_matrix = asyncio.Event()
+        accept_initial = asyncio.Event()
+        accepted_stages: list[DeliveryStage] = []
+        remote_requests: set[asyncio.Task[str]] = set()
 
-        async def blocked_send(_delivery: OutboxDelivery) -> str:
-            send_started.set()
-            await never_finishes.wait()
-            return "$cancelled"
+        async def send(delivery: OutboxDelivery) -> str:
+            if delivery.stage is DeliveryStage.FINAL:
+                accepted_stages.append(delivery.stage)
+                return "$final"
 
-        async def retry_send(_delivery: OutboxDelivery) -> str:
-            return "$retry"
+            async def remote_initial_request() -> str:
+                initial_reached_matrix.set()
+                await accept_initial.wait()
+                accepted_stages.append(DeliveryStage.INITIAL)
+                return "$initial"
 
-        blocked_delivery = gateway._response_delivery(blocked_send, handoff=None)
-        retry_delivery = gateway._response_delivery(retry_send, handoff=None)
-        blocked = asyncio.create_task(blocked_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
-        await send_started.wait()
-        blocked.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await blocked
+            remote = asyncio.create_task(remote_initial_request())
+            remote_requests.add(remote)
+            return await asyncio.shield(remote)
 
-        retried = await asyncio.wait_for(
-            retry_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL),
-            timeout=1,
+        initial_delivery = gateway._response_delivery(send, handoff=None)
+        final_delivery = gateway._response_delivery(send, handoff=None)
+        initial = asyncio.create_task(initial_delivery.flush(turn_id="turn-1", stage=DeliveryStage.INITIAL))
+        await initial_reached_matrix.wait()
+        initial.cancel()
+        await asyncio.sleep(0)
+
+        final = asyncio.create_task(
+            final_delivery.deliver(
+                turn_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "final"},
+            ),
         )
+        completed_before_initial_acceptance, _ = await asyncio.wait({final}, timeout=0.1)
+        accept_initial.set()
 
-        assert retried == "$retry"
+        with pytest.raises(asyncio.CancelledError):
+            await initial
+        await asyncio.gather(*remote_requests)
+        await final
+
+        assert final not in completed_before_initial_acceptance
+        assert accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+
+    async def test_cancelled_final_publishes_its_committed_terminal_before_propagating(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """An acknowledged FINAL cannot leave its terminal-record publication behind."""
+        await self._enqueue(alice, DeliveryStage.FINAL)
+        send_started = asyncio.Event()
+        accept_final = asyncio.Event()
+        published: list[tuple[str, str]] = []
+
+        async def send(_delivery: OutboxDelivery) -> str:
+            send_started.set()
+            await accept_final.wait()
+            return "$final"
+
+        async def publish(turn_id: str, event_id: str) -> None:
+            published.append((turn_id, event_id))
+
+        gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish)
+        delivery = gateway._response_delivery(send, handoff=None)
+        final = asyncio.create_task(delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        await send_started.wait()
+        final.cancel()
+        accept_final.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await final
+
+        stored = await alice.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$final"
+        assert published == [("turn-1", "$final")]
 
     async def test_terminal_callback_can_reenter_the_same_turn(
         self,

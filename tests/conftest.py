@@ -1188,6 +1188,17 @@ class FakeOutbox:
         row = self.rows.get(key)
         if row is None:
             return None
+        if stage is DeliveryStage.INITIAL and not row.attempted and (turn_id, DeliveryStage.FINAL.value) in self.rows:
+            return None
+        initial = self.rows.get((turn_id, DeliveryStage.INITIAL.value))
+        if (
+            stage is DeliveryStage.FINAL
+            and row.edits_event_id is None
+            and initial is not None
+            and initial.attempted
+            and initial.acknowledged_event_id is None
+        ):
+            return None
         self.attempted.add(key)
         self.rows[key] = replace(row, attempted=True)
         return row

@@ -855,6 +855,51 @@ class TestInitialAndFinalStages:
         assert recovered.recovered == 1
         assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL]
 
+    async def test_final_waits_for_an_attempted_initial_whose_process_was_lost(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A crashed sender's late INITIAL acceptance cannot land after FINAL."""
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "thinking"},
+        )
+        claimed = await runtime.store.claim_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL)
+        assert claimed is not None
+        await runtime.store.record_sending_device(
+            turn_id=SOURCE,
+            stage=DeliveryStage.INITIAL,
+            device_id=runtime.homeserver.device_id,
+        )
+        remote_started = asyncio.Event()
+        accept_initial = asyncio.Event()
+
+        async def abandoned_matrix_request() -> str:
+            remote_started.set()
+            await accept_initial.wait()
+            return await runtime.homeserver.send(claimed)
+
+        remote_initial = asyncio.create_task(abandoned_matrix_request())
+        await remote_started.wait()
+        final_event_id = await runtime.delivery.deliver(
+            turn_id=SOURCE,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "answer"},
+        )
+        accept_initial.set()
+        await remote_initial
+
+        recovered = await runtime.delivery.recover()
+
+        assert final_event_id is None, "FINAL sent while the earlier INITIAL still had an unknown outcome"
+        assert recovered.complete
+        assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+
     async def test_initial_cannot_become_visible_after_final_owns_delivery(self, runtime: TurnRuntime) -> None:
         """A stale INITIAL waiting behind an in-flight FINAL is suppressed after FINAL completes."""
         final_reached_matrix = asyncio.Event()

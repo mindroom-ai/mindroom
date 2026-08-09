@@ -43,6 +43,17 @@ _OUTBOX_COLUMNS = """
 """
 
 
+def _lock_turn_deliveries(transaction: Transaction, principal_id: str, turn_id: str) -> None:
+    """Serialize stage decisions on the INITIAL row shared by both stages."""
+    transaction.execute(
+        """
+        UPDATE response_outbox SET attempted = attempted
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        """,
+        (principal_id, turn_id, DeliveryStage.INITIAL.value),
+    )
+
+
 def enqueue(
     transaction: Transaction,
     principal_id: str,
@@ -55,6 +66,7 @@ def enqueue(
     edits_event_id: str | None,
 ) -> str:
     """Record delivery intent, refusing to change an already attempted row."""
+    _lock_turn_deliveries(transaction, principal_id, turn_id)
     transaction_id = delivery_transaction_id(principal_id, turn_id, stage.value)
     transaction.execute(
         """
@@ -154,7 +166,46 @@ def claim(
     see its own device, skip the lookup, and post the answer a second time.
     ``record_sending_device`` is called once the send is actually about to
     happen.
+
+    INITIAL and FINAL are also one durable ordering decision. An unattempted
+    INITIAL is suppressed once FINAL exists. An attempted, unacknowledged
+    INITIAL is different: Matrix may still accept it, so FINAL cannot be
+    offered under its distinct transaction ID until retrying INITIAL has
+    resolved that unknown outcome. Locking the INITIAL row makes those
+    checks atomic with both claiming and insertion on PostgreSQL as well as
+    SQLite.
     """
+    _lock_turn_deliveries(transaction, principal_id, turn_id)
+    current = transaction.fetchone(
+        """
+        SELECT attempted, edits_event_id FROM response_outbox
+        WHERE principal_id = ? AND turn_id = ? AND stage = ?
+        """,
+        (principal_id, turn_id, stage.value),
+    )
+    if current is None:
+        return None
+    if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
+        final = transaction.fetchone(
+            """
+            SELECT 1 AS present FROM response_outbox
+            WHERE principal_id = ? AND turn_id = ? AND stage = ?
+            """,
+            (principal_id, turn_id, DeliveryStage.FINAL.value),
+        )
+        if final is not None:
+            return None
+    if stage is DeliveryStage.FINAL and current["edits_event_id"] is None:
+        unresolved_initial = transaction.fetchone(
+            """
+            SELECT 1 AS present FROM response_outbox
+            WHERE principal_id = ? AND turn_id = ? AND stage = ?
+              AND attempted = 1 AND acknowledged_event_id IS NULL
+            """,
+            (principal_id, turn_id, DeliveryStage.INITIAL.value),
+        )
+        if unresolved_initial is not None:
+            return None
     marked = transaction.fetchone(
         """
         UPDATE response_outbox SET attempted = 1
