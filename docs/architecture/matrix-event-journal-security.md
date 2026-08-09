@@ -100,7 +100,7 @@ Every projected row carries the `membership_epoch` it was written under.
 
 Rejoining a room can expose a different slice of history than the bot saw before, so state built under the old membership is dropped rather than merged with the new view.
 
-A departure advances the epoch and deletes that room's conversation hydration, visible messages, unresolved edits, redaction tombstones, and history debt.
+A departure advances the epoch and deletes that room's conversation hydration, visible messages, unresolved edits, redaction tombstones, and history-recovery obligation.
 
 It deletes them for the departing principal only, so another bot still joined to the same room keeps everything it holds.
 

@@ -12,9 +12,9 @@ exactly one implementation of "ask the server what this looks like now".
 
 The third caller is why hydration runs at all for a conversation that already
 has a marker. A skipped gap makes the projection wrong rather than merely
-short, and the store answers "not hydrated" for every conversation in an
-indebted room precisely so the next read comes back here. Repaying happens on
-that read and nowhere else, for the same reason nothing else here is a
+short, and the store answers "not hydrated" for every conversation in a room
+with a repairable obligation precisely so the next read comes back here. Repair
+happens on that read and nowhere else, for the same reason nothing else here is a
 background pass: an unreachable homeserver should degrade a read that someone
 is waiting for, not accumulate retry state nobody is watching.
 
@@ -51,7 +51,8 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.event_journal import (
-    HistoryDebtOutcome,
+    HistoryRecoveryOutcome,
+    HistoryRecoveryState,
     HydrationPolicy,
     ProjectedEvent,
     RefreshRequest,
@@ -69,7 +70,7 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
 
-    from mindroom.event_journal import HydrationView, RefreshRequest, RoomHistoryDebt
+    from mindroom.event_journal import HydrationView, RefreshRequest, RoomHistoryRecovery
 
 logger = get_logger(__name__)
 
@@ -164,7 +165,7 @@ def _redaction_target(event: nio.Event) -> str | None:
     return event.event_id if _is_redacted(event.source) else None
 
 
-def _readable_event(client: nio.AsyncClient, event: nio.Event) -> nio.Event | None:
+def _readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event | None:
     """Return one fetched event in the clear, or nothing if it stayed unreadable.
 
     ``room_get_event_relations`` is why this exists. nio decrypts what
@@ -186,6 +187,8 @@ def _readable_event(client: nio.AsyncClient, event: nio.Event) -> nio.Event | No
     "readable or not" rather than "decrypted or not": a caller needs to know an
     event was dropped unread, and none of them can do anything about why.
     """
+    if not isinstance(event, nio.Event):
+        return None
     if not isinstance(event, nio.MegolmEvent):
         return event
     if client.olm is None:
@@ -208,9 +211,8 @@ def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -
     either way. Dropping it instead -- which is what "the server already
     stripped the body" argued for -- left every redaction that happened inside
     a skipped gap unapplied: the original or edit it deleted had already been
-    projected from before the gap, nothing in the walk removed it, and the debt
-    was then settled with the deleted text still readable for the life of the
-    database.
+    projected from before the gap, and nothing in the walk would otherwise
+    remove it before the recovery obligation was settled.
 
     This bot's own in-flight streaming edits are dropped for the other reason
     the projection exists: they are transport. The same rule runs here and at
@@ -253,11 +255,29 @@ def _is_logical_message(projected: ProjectedEvent) -> bool:
 
     An edit revises a message and a redaction removes one, so neither is a
     message the window is spent on. Counting a redaction would shorten every
-    walk of a room by however many deletions it has seen -- and for a repayment
-    walk, a room with enough of them would fill its window before reaching the
-    anchor and file live history as lost.
+    ordinary walk of a room by however many deletions it has seen. Proof-mode
+    recovery ignores the prompt window entirely.
     """
     return projected.replaces_event_id is None and projected.redacts_event_id is None
+
+
+def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
+    """Return an advancing room pagination cursor, or fail the stalled walk."""
+    if end == start:
+        # Neither server MindRoom runs signals exhaustion this way. Tuwunel
+        # derives `end` from the last event it returned and so omits it entirely
+        # for an empty page; Synapse omits it too, explicitly, when pagination
+        # found nothing. A repeated token is therefore a stall, not the start
+        # of history.
+        #
+        # Failing is right, and the earlier reasoning that it was too harsh
+        # missed why: returning here would install a hydration marker, and
+        # hydration runs once per membership, so a single transient stall would
+        # become permanent truncation. Raising leaves the conversation
+        # unhydrated, which is the only outcome a later read can still repair.
+        msg = f"Homeserver repeated pagination token {start!r} for {room_id!r} instead of advancing"
+        raise _HydrationError(msg)
+    return end
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,18 +291,9 @@ class _Walk:
     correctness is completeness rather than recency has to be able to tell those
     apart instead of reading a warm marker as a whole conversation.
 
-    ``saw_anchor`` says a history debt's anchor event appeared in a chunk this
-    walk fetched, and it is what settles the debt. Counted over everything
-    fetched rather than everything kept: a page of redactions and state events
-    carries the walk exactly as far back as a page of messages, and a redacted
-    anchor is still the anchor.
-
-    ``reached_ts`` is the oldest timestamp the walk saw, and it settles nothing.
-    It is diagnostic: read next to the anchor's own timestamp in the settlement
-    log, it says whether the anchor was where the projection thought it was.
-    Coverage is deliberately not measured from it, because ``origin_server_ts``
-    is the sending server's clock and a skewed event at the tip would otherwise
-    prove a depth the walk never reached.
+    ``exhausted_server`` says the homeserver returned no continuation token.
+    It is independent of readability: a walk can reach the start of retained
+    history while still being unable to understand an encrypted event it saw.
 
     ``unreadable`` says the walk fetched at least one event it could not read,
     which is a different failure from either bound and has to be kept apart
@@ -300,8 +311,7 @@ class _Walk:
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
-    reached_ts: int | None = None
-    saw_anchor: bool = False
+    exhausted_server: bool = False
     unreadable: bool = False
 
 
@@ -388,12 +398,12 @@ class ConversationHydrator:
         init=False,
         repr=False,
     )
-    # Repayment walks are shared per room rather than per conversation, because
-    # one room walk repays the whole room. Kept apart from the conversation
-    # tasks rather than squeezed into their key: a repayment and the room
+    # Recovery walks are shared per room rather than per conversation, because
+    # one room walk repairs the whole room. Kept apart from the conversation
+    # tasks rather than squeezed into their key: a recovery and the room
     # conversation are both "this room, no thread", and one of them waiting on
     # the other under a shared key is a deadlock.
-    _repayments: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _recoveries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _client(self) -> nio.AsyncClient:
         """Return the Matrix client, which only exists once the bot has logged in.
@@ -435,33 +445,32 @@ class ConversationHydrator:
         counted durably rather than in a local variable, because a strict
         caller arrives in a fresh process and a fresh hydrator every time it
         runs. A second pass would re-read the same ceiling and reinstall the
-        same marker, and the two cases it cannot tell apart -- a thread past
-        even the larger bounds, and a room whose history a skipped sync gap
-        lost for good -- are both permanent. Whether the deeper walk reached
-        the start is then a fact for the caller to judge, not a reason to walk
-        again.
+        same marker, and both a thread past the larger bounds and an unknown-gap
+        recovery that spent its ceiling are durable cost decisions. Whether the
+        deeper walk reached the start is then a fact for the caller to judge,
+        not a reason to walk again.
         """
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
-            if await self._hydration_stands(room_id=room_id, thread_id=thread_id):
-                return
-            debt = await self.store.room_history_debt(room_id)
-            if debt is not None:
-                # Shared per room, so two readers in two threads of an indebted
+            recovery = await self.store.room_history_recovery(room_id)
+            if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
+                # Shared per room, so two readers in two threads of a repairable
                 # room walk it once between them rather than once each.
                 await self._shared(
-                    self._repayments,
+                    self._recoveries,
                     room_id,
-                    lambda: self._repay(debt),  # noqa: B023 - awaited before the next iteration rebinds it
-                    name=f"repay_room_history_{room_id}",
+                    lambda: self._repair(recovery),  # noqa: B023 - awaited before the next iteration rebinds it
+                    name=f"repair_room_history_{room_id}",
                 )
                 if thread_id is None:
-                    # The repayment walked the room conversation and installed
+                    # The recovery walked the room conversation and installed
                     # it, under this hydrator's own bounds, so it is also the
                     # deeper walk a strict caller was owed -- and it recorded
                     # those bounds, so the loop's own check sees that. Walking
                     # it again here would fetch the same pages a second time to
                     # reach the same rows.
                     continue
+            if await self._hydration_stands(room_id=room_id, thread_id=thread_id):
+                return
             await self._shared(
                 self._in_flight,
                 (room_id, thread_id),
@@ -500,11 +509,9 @@ class ConversationHydrator:
         walked deeply at all.
 
         Neither half is `conversation_is_complete`, which also answers no when
-        a skipped sync gap lost history behind the walk. That loss is real and
-        export must still refuse on it, but it is not something walking again
-        can repair, and asking the stronger question here would re-walk the
-        whole conversation on every read of such a room -- the same permanent
-        re-walk, arrived at from the other side.
+        an unknown-gap recovery spent its ceiling. That truncation is real and
+        export must still refuse on it, but repeating the same bounded walk on
+        every read is not useful.
         """
         if not self.require_complete:
             return await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id)
@@ -564,8 +571,8 @@ class ConversationHydrator:
             # a room the bot is no longer in the same relationship with.
             logger.info("conversation_hydration_superseded", room_id=room_id, thread_id=thread_id)
 
-    async def _repay(self, debt: RoomHistoryDebt) -> None:
-        """Walk the room this debt names and settle it against what came back.
+    async def _repair(self, recovery: RoomHistoryRecovery) -> None:
+        """Walk a repairable room to server exhaustion or a configured ceiling.
 
         A room walk and not a thread walk, whichever conversation asked. The
         skipped gap is a range of the room's timeline, and ``/messages`` returns
@@ -574,67 +581,59 @@ class ConversationHydrator:
         touched. A thread's relation tree could never prove the same thing: it
         says what that thread contains, not what the room received.
 
-        The walk is told what it owes, because the prompt window is the wrong
-        bound for this job and silently produced the wrong answer with it: a
-        room busier than the window fills it on messages newer than the anchor,
-        and the walk then reports history as lost that the homeserver would have
-        handed over on the next page. What still bounds it is the event ceiling,
-        which measures cost rather than prompts and applies to every walk.
+        The prompt window is the wrong bound for this job: a busy room can fill
+        it entirely with post-gap tail while the missing interval remains on
+        the next page. The proof walk therefore continues to readable server
+        exhaustion, while the raw-event and request ceilings still bound cost.
 
         A failure here propagates. The read that triggered it fails visibly, the
-        debt stays outstanding, and the next read tries again -- which is the
+        obligation stays repairable, and the next read tries again -- which is the
         same contract every other hydration failure follows, and the reason
         there is no retry state to leak.
         """
-        if await self.store.room_history_debt(debt.room_id) != debt:
-            # Another reader already repaid this. `_shared` only joins readers
-            # that overlap in time: the caller read this debt before that
-            # repayment committed, and by the time it got here the finished
+        if await self.store.room_history_recovery(recovery.room_id) != recovery:
+            # Another reader already settled this. `_shared` only joins readers
+            # that overlap in time: the caller read this obligation before that
+            # settlement committed, and by the time it got here the finished
             # task had already been dropped from the map, so there was nothing
             # left to join. Walking anyway pages the entire room a second time
-            # for a question that has been answered -- `repay_room_history_debt`
-            # would refuse to install the result, so every one of those requests
-            # is spent on nothing.
+            # for a question that has been answered; the store's exact CAS would
+            # refuse to install it, so every request would be spent on nothing.
             #
             # Rechecked here, inside the shared task, rather than at the call
-            # site: the durable debt is the serialization that already exists,
+            # site: the durable obligation is the serialization that already exists,
             # and a store read cannot re-enter `_shared` and wait on the task it
             # is running inside.
             #
-            # A *different* debt is superseding for the same reason a stale one
+            # A *different* obligation is superseding for the same reason a stale one
             # is -- a later gap is a different hole and this walk was not
-            # launched for it -- and the caller's loop re-reads the debt, so the
-            # new one is walked on the next pass rather than under this anchor.
-            logger.info("conversation_history_debt_already_settled", room_id=debt.room_id)
+            # launched for it -- and the caller's loop re-reads the obligation.
+            logger.info("conversation_history_recovery_already_settled", room_id=recovery.room_id)
             return
-        epoch = await self.store.membership_epoch(debt.room_id)
-        walk = await self._fetch_room(debt.room_id, owed_through_event_id=debt.owed_through_event_id)
-        outcome = await self.store.repay_room_history_debt(
-            debt,
+        epoch = await self.store.membership_epoch(recovery.room_id)
+        walk = await self._fetch_room(recovery.room_id, require_server_exhaustion=True)
+        if walk.exhausted_server and walk.unreadable:
+            msg = f"Could not prove complete readable history for {recovery.room_id!r}: unreadable events remain"
+            raise _HydrationError(msg)
+        outcome = await self.store.settle_room_history_recovery(
+            recovery,
             events=walk.events,
-            complete=walk.complete,
-            saw_anchor=walk.saw_anchor,
+            exhausted_server=walk.exhausted_server,
             attempted_policy_rank=self.policy,
             expected_membership_epoch=epoch,
         )
         log = logger.info
-        if outcome is HistoryDebtOutcome.LOST:
-            log = logger.error
-        elif outcome is HistoryDebtOutcome.TRUNCATED:
+        if outcome is HistoryRecoveryOutcome.TRUNCATED:
             # Not loss, but not nothing: the room is short until a walk
             # gets further back, and nothing schedules that on its own.
             log = logger.warning
         log(
-            "conversation_history_debt_settled",
-            room_id=debt.room_id,
+            "conversation_history_recovery_settled",
+            room_id=recovery.room_id,
             outcome=outcome.value,
-            owed_through_event_id=debt.owed_through_event_id,
-            owed_through_ts=debt.owed_through_ts,
-            # What proved coverage, and how far back the walk got. The second is
-            # diagnostic only: read against the first it says whether the
-            # anchor's clock agreed with its position in the timeline.
-            saw_anchor=walk.saw_anchor,
-            reached_ts=walk.reached_ts,
+            recovery_state=recovery.state.value,
+            exhausted_server=walk.exhausted_server,
+            unreadable=walk.unreadable,
             walk_complete=walk.complete,
         )
 
@@ -794,7 +793,12 @@ class ConversationHydrator:
             raise _HydrationError(msg) from error
         return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
 
-    async def _fetch_room(self, room_id: str, *, owed_through_event_id: str | None = None) -> _Walk:
+    async def _fetch_room(
+        self,
+        room_id: str,
+        *,
+        require_server_exhaustion: bool = False,
+    ) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
 
         A server that has run out of history answers with an empty chunk and no
@@ -807,23 +811,10 @@ class ConversationHydrator:
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
 
-        ``owed_through_event_id`` adds the second job a repayment walk has to
-        do, and it is an event rather than a count because a debt is an event.
-        The window cannot stand in for it: the window is how much history a
-        prompt reads, and the anchor is how far back a hole starts, so a room
-        busier than the window fills it on messages newer than the anchor and
-        stops with the hole untouched. Both bounds have to be satisfied, not
-        either -- a repayment installs the room conversation as well as settling
-        the debt, so stopping at coverage would leave the prompt permanently
-        short, and stopping at the window would file live history as lost.
-
-        The anchor is an event rather than its timestamp because pagination
-        order and ``origin_server_ts`` order are not the same order. Stopping
-        once the oldest timestamp seen was old enough let a single federated or
-        bridge-rewritten event at the tip end the walk on its first page, with
-        every page the hole was on still unfetched and the result reported as a
-        repayment. Seeing the anchor is a statement about how deep the walk
-        went; a clock reading is not.
+        Proof mode ignores the logical prompt window because a page of post-gap
+        tail can fill that window while the missing interval remains on the
+        next page. Only readable server exhaustion proves the interval covered;
+        the raw-event and request ceilings still bound its cost.
 
         There are three ways this returns, and only two of them mean the walk
         finished its job. The third is the event ceiling, which is logged rather
@@ -833,8 +824,6 @@ class ConversationHydrator:
         logical = 0
         fetched = 0
         pages = 0
-        reached: int | None = None
-        saw_anchor = False
         unreadable = False
         start: str | None = None
         client = self._client()
@@ -848,12 +837,11 @@ class ConversationHydrator:
             if not isinstance(response, nio.RoomMessagesResponse):
                 msg = f"Could not fetch history for {room_id!r}: {response}"
                 raise _HydrationError(msg)
-            fetched += len(response.chunk)
             pages += 1
-            for event in response.chunk:
-                reached = event.server_timestamp if reached is None else min(reached, event.server_timestamp)
-                # Before projection, so a redacted anchor still counts as seen.
-                saw_anchor = saw_anchor or event.event_id == owed_through_event_id
+            remaining = max(self.max_fetched_events - fetched, 0)
+            page = response.chunk[:remaining]
+            fetched += len(page)
+            for event in page:
                 # nio decrypts a `/messages` chunk on the way through
                 # `receive_response`, so unlike the relation walk this is only
                 # reached when decryption was tried and failed. The walk still
@@ -868,13 +856,29 @@ class ConversationHydrator:
                 events.append(projected)
                 if _is_logical_message(projected):
                     logical += 1
-            covered = owed_through_event_id is None or saw_anchor
-            if logical >= self.prompt_window_messages and covered:
+            if len(page) < len(response.chunk):
+                # A partial page cannot safely advance to its continuation
+                # token: that would skip the page suffix we did not retain.
+                # It is therefore a bounded, truncated walk.
+                logger.warning(
+                    "conversation_hydration_ceiling_reached",
+                    room_id=room_id,
+                    requests=pages,
+                    fetched_events=fetched,
+                    logical_messages=logical,
+                    prompt_window_messages=self.prompt_window_messages,
+                )
                 return _Walk(
                     events=tuple(events),
                     complete=False,
-                    reached_ts=reached,
-                    saw_anchor=saw_anchor,
+                    exhausted_server=False,
+                    unreadable=unreadable,
+                )
+            if not require_server_exhaustion and logical >= self.prompt_window_messages:
+                return _Walk(
+                    events=tuple(events),
+                    complete=False,
+                    exhausted_server=False,
                     unreadable=unreadable,
                 )
             # An empty page is not exhaustion. The server may filter a page down
@@ -889,25 +893,10 @@ class ConversationHydrator:
                     # Running out of history is only completeness if the walk
                     # could read what it ran through.
                     complete=not unreadable,
-                    reached_ts=reached,
-                    saw_anchor=saw_anchor,
+                    exhausted_server=True,
                     unreadable=unreadable,
                 )
-            if response.end == start:
-                # Neither server MindRoom runs signals exhaustion this way.
-                # Tuwunel derives `end` from the last event it returned and so
-                # omits it entirely for an empty page; Synapse omits it too,
-                # explicitly, when pagination found nothing. A repeated token
-                # is therefore a stall, not the start of history.
-                #
-                # Failing is right, and the earlier reasoning that it was too
-                # harsh missed why: returning here would install a hydration
-                # marker, and hydration runs once per membership, so a single
-                # transient stall would become permanent truncation. Raising
-                # leaves the conversation unhydrated, which is the only outcome
-                # a later read can still repair.
-                msg = f"Homeserver repeated pagination token {start!r} for {room_id!r} instead of advancing"
-                raise _HydrationError(msg)
+            next_start = _advanced_room_cursor(room_id=room_id, start=start, end=response.end)
             if fetched >= self.max_fetched_events or pages >= self.max_requests:
                 # Not the window being met, so it is said out loud. A room that
                 # reaches this is one where reading further costs more than the
@@ -923,11 +912,10 @@ class ConversationHydrator:
                 return _Walk(
                     events=tuple(events),
                     complete=False,
-                    reached_ts=reached,
-                    saw_anchor=saw_anchor,
+                    exhausted_server=False,
                     unreadable=unreadable,
                 )
-            start = response.end
+            start = next_start
 
     async def refresh(self, request: RefreshRequest) -> bool:
         """Refetch one logical message whose visible revision was redacted.

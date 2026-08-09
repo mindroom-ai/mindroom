@@ -106,7 +106,7 @@ The point refetch, and nothing else.
 Exactly-once is the substance of this contract, and it is durable rather than in-process: `fence_departure(room_id, source=LOCAL|REPORTED)` returns a `DepartureOutcome`, and `rooms_owing_departure_reports` / `retire_owed_departure_reports` carry the owed-report set across a restart.
 An in-process marker was not enough — an advance that raised left the marker set and swallowed the echo, a restart lost it, and two leaves before one echo needed two markers.
 
-An epoch advance drops `conversation_hydration`, `visible_messages`, `unresolved_edits`, `redaction_tombstones`, `room_history_debt`, and `approval_cards` in one transaction, plus unattempted outbox rows.
+An epoch advance drops `conversation_hydration`, `visible_messages`, `unresolved_edits`, `redaction_tombstones`, `room_history_recovery`, and `approval_cards` in one transaction, plus unattempted outbox rows.
 **Attempted** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.
 
 The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
@@ -183,7 +183,7 @@ No runtime API may materialize an unbounded room-scoped conversation.
 A thread is hydrated by fetching its root and traversing recursive event relations without a relation-type filter.
 
 A room-scoped conversation may perform one serialized initial `/messages` traversal.
-Concurrent first readers share one hydration task, and hydration becomes complete only after successful pagination and an atomic membership-epoch-checked installation.
+Concurrent first readers share one hydration task, and hydration projects in bounded membership-epoch-checked transactions before a final transaction publishes coverage.
 Failure stays a visible readiness or request failure rather than reviving room-wide repair scans.
 
 ## Deterministic delivery

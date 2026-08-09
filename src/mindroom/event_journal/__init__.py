@@ -7,8 +7,13 @@ Three facts live here, each with exactly one owner:
 - what MindRoom intends to send and whether it landed (the outbox).
 """
 
+from mindroom.history_recovery import (
+    HistoryRecoveryOutcome,
+    HistoryRecoveryState,
+    RoomHistoryRecovery,
+)
+
 from .approvals import RecordedApprovalDecision, StoredApprovalCard
-from .history_debt import HistoryDebtOutcome, RoomHistoryDebt
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
@@ -41,7 +46,7 @@ from .views import (
     ApprovalView,
     ConversationReadView,
     DispatchView,
-    HistoryDebtRecordView,
+    HistoryRecoveryRecordView,
     HydrationView,
     OutboxView,
     PendingTurnView,
@@ -66,8 +71,9 @@ __all__ = [
     "EventClass",
     "EventJournalStore",
     "EventKind",
-    "HistoryDebtOutcome",
-    "HistoryDebtRecordView",
+    "HistoryRecoveryOutcome",
+    "HistoryRecoveryRecordView",
+    "HistoryRecoveryState",
     "HydrationCoverage",
     "HydrationPolicy",
     "HydrationView",
@@ -85,7 +91,7 @@ __all__ = [
     "RefreshRequest",
     "RelationView",
     "ReplayView",
-    "RoomHistoryDebt",
+    "RoomHistoryRecovery",
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",

@@ -16,6 +16,11 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.history_recovery import (
+    HistoryRecoveryOutcome,
+    HistoryRecoveryState,
+    RoomHistoryRecovery,
+)
 from mindroom.logging_config import get_logger
 
 from .identity import decode_thread_id, encode_thread_id
@@ -88,6 +93,117 @@ def read_generation(transaction: Transaction) -> str | None:
     return None if row is None else str(row["generation"])
 
 
+def _room_history_recovery_from_row(room_id: str, row: Row) -> RoomHistoryRecovery:
+    """Decode one durable recovery row into its transport-neutral value."""
+    return RoomHistoryRecovery(
+        room_id=room_id,
+        state=HistoryRecoveryState(str(row["state"])),
+        revision=int(row["revision"]),
+    )
+
+
+def room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomHistoryRecovery | None:
+    """Return one room's current history-recovery obligation, if any."""
+    row = transaction.fetchone(
+        """
+        SELECT state, revision FROM room_history_recovery
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    )
+    return None if row is None else _room_history_recovery_from_row(room_id, row)
+
+
+def record_room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomHistoryRecovery | None:
+    """Record one unknown gap and retract completeness for every conversation."""
+    if _membership_state(transaction, principal_id, room_id).departure_fenced:
+        return None
+    row = transaction.fetchone(
+        """
+        INSERT INTO room_history_recovery (principal_id, room_id, state, revision)
+        VALUES (?, ?, ?, 0)
+        ON CONFLICT (principal_id, room_id) DO UPDATE SET
+            state = excluded.state,
+            revision = room_history_recovery.revision + 1
+        RETURNING state, revision
+        """,
+        (principal_id, room_id, HistoryRecoveryState.REPAIRABLE.value),
+    )
+    if row is None:
+        msg = f"Room history recovery for {room_id!r} is missing immediately after it was written"
+        raise RuntimeError(msg)
+    recovery = _room_history_recovery_from_row(room_id, row)
+    transaction.execute(
+        """
+        UPDATE conversation_hydration SET complete = 0
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    )
+    return recovery
+
+
+def claim_room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+) -> bool:
+    """Lock and compare one exact recovery value before installing its answer."""
+    row = transaction.fetchone(
+        """
+        UPDATE room_history_recovery SET state = state
+        WHERE principal_id = ? AND room_id = ? AND state = ? AND revision = ?
+        RETURNING room_id
+        """,
+        (
+            principal_id,
+            recovery.room_id,
+            recovery.state.value,
+            recovery.revision,
+        ),
+    )
+    return row is not None
+
+
+def settle_room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+    *,
+    exhausted_server: bool,
+) -> HistoryRecoveryOutcome:
+    """Commit the terminal state of a previously claimed recovery obligation."""
+    if exhausted_server:
+        transaction.execute(
+            "DELETE FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
+            (principal_id, recovery.room_id),
+        )
+        return HistoryRecoveryOutcome.REPAIRED
+    transaction.execute(
+        """
+        UPDATE room_history_recovery SET state = ?
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (HistoryRecoveryState.TRUNCATED.value, principal_id, recovery.room_id),
+    )
+    transaction.execute(
+        """
+        UPDATE conversation_hydration SET complete = 0
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, recovery.room_id),
+    )
+    return HistoryRecoveryOutcome.TRUNCATED
+
+
 def current_membership_epoch(
     transaction: Transaction,
     principal_id: str,
@@ -119,10 +235,8 @@ def _advance_membership_epoch(
     The journal rows survive on purpose. They are the proof that an event
     already produced its one turn, and that has to outlive any rejoin.
 
-    A history debt goes with the projection it describes. It names a hole
-    between messages this membership stored and messages that arrived after a
-    skipped sync gap, and both ends of that statement are being deleted here.
-    Keeping it would make the next read walk the server to repay a hole in a
+    A history-recovery obligation goes with the membership whose missing
+    interval it describes. Keeping it would ask the next membership to repair a
     conversation that no longer exists.
     """
     epoch = current_membership_epoch(transaction, principal_id, room_id) + 1
@@ -139,7 +253,7 @@ def _advance_membership_epoch(
         "visible_messages",
         "unresolved_edits",
         "redaction_tombstones",
-        "room_history_debt",
+        "room_history_recovery",
     ):
         transaction.execute(
             f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list

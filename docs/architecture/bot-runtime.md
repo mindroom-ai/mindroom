@@ -91,7 +91,7 @@ The pinned nio recovery contract publishes a recovered-room outcome only after e
 Sync continuity is owned separately by `SyncCheckpointTrust`, so a pending journal event is sufficient to preserve a certified checkpoint.
 Classic clients disable nio token and recovery persistence, so the store-generation-validated MindRoom checkpoint is the only durable Classic cursor.
 nio parses one Classic response and stages its room, recovery, and completion state in memory.
-MindRoom advances the checkpoint only after journal admission and response-owned lifecycle effects complete, and after any skipped gap has been recorded as a durable room history debt.
+MindRoom advances the checkpoint only after journal admission and response-owned lifecycle effects complete, and after any skipped gap has been recorded as a durable room history-recovery obligation.
 The same cancellation-drained publication step then acknowledges the exact staged token in nio, so nio's volatile dirty bit can only force replay and never authorizes checkpoint progress.
 nio exposes that acknowledgeable token only after all internal response processing succeeds with no retained recovery callback or failure, so failed or still-running staging stays dirty even if its mutable cursor is old or partially advanced.
 An ordinary same-token response that nio suppresses as a clean no-op has no dirty state, so MindRoom publishes continuity without calling the acknowledgement API.
@@ -108,10 +108,12 @@ Rewinding cannot shrink a gap measured from a fixed checkpoint to an advancing l
 `SyncRecoveryStallTracker` counts those failures per room against the checkpoint they were measured from, and a checkpoint that advances between attempts is forward progress that restarts the count.
 After three failures from one unchanging checkpoint, that room's gap is skipped: the response certifies its own `next_batch` and logs `matrix_sync_recovery_gap_skipped_after_stalled_rebuild` with the room and the token range it moved past.
 Three failures is a policy threshold rather than proof that recovery is impossible, so skipping does not accept the loss; it defers it.
-Before the skipping checkpoint is persisted, and inside the same lock, the room's outstanding history is written down as a `room_history_debt` row naming the newest message the projection held, and a failure to record it fails certification closed.
-A room with an outstanding debt reads as unhydrated for every conversation in it, so the next read walks `/messages` for that room and the debt is settled against how far back the walk actually reached.
-Reaching the recorded timestamp repays the debt; a walk that finishes without reaching it sets `history_lost`, which stops the retrying and makes `conversation_is_complete` and `conversation_hydration_was_truncated` answer for the hole from then on.
-A rejoin drops the debt with the projection it describes, because the membership epoch invalidates both halves of the statement it makes.
+Before the skipping checkpoint is persisted, and inside the same lock, a `room_history_recovery` row records the only fact Classic sync can prove: this room has an unknown missing interval.
+The obligation exists even when the projection is empty, and recording it retracts completeness for every room and thread marker.
+A repairable room reads as unhydrated for every conversation in it, so the next read walks `/messages` past the prompt window until readable server exhaustion or a configured cost ceiling.
+Only readable server exhaustion clears the obligation; malformed or unreadable events fail the read and leave it repairable, while a cost ceiling retains a truncated obligation and bounded context without claiming completeness.
+Every later signal resets the obligation to repairable and increments its revision, and settlement compares that exact revision so an older walk cannot clear a newer gap.
+A departure drops the old membership's obligation, a signal received while departure remains fenced is ignored, and a late unknown signal after a confirmed rejoin may conservatively over-repair the new membership.
 A skipping checkpoint also resets the client, because nio may still hold recovery state for the room the checkpoint moved past and would refuse to acknowledge the response in place.
 A positioned limited room absent from both typed outcome sets has no real nio recovery gap and may certify, including membership-reset windows.
 A complete tokenless initial snapshot may establish the first MindRoom checkpoint even when its timeline is limited.

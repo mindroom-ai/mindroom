@@ -41,7 +41,7 @@ from mindroom.event_journal import (
     EventClass,
     EventJournalStore,
     EventKind,
-    HistoryDebtOutcome,
+    HistoryRecoveryOutcome,
     InboundEvent,
     ProjectedEvent,
     TerminalTurnWrite,
@@ -61,8 +61,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, RoomHistoryDebt, TurnRecordStore
+    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, TurnRecordStore
     from mindroom.event_journal.backend import Backend, Operation, Transaction
+    from mindroom.history_recovery import RoomHistoryRecovery
 
 pytestmark = pytest.mark.asyncio
 
@@ -300,7 +301,7 @@ class _HydrationWriteShape:
     membership_claims: int = 0
     projected_messages: int = 0
     hydration_markers: int = 0
-    debt_settlements: int = 0
+    recovery_settlements: int = 0
 
 
 class _HydrationWriteTransaction:
@@ -316,8 +317,8 @@ class _HydrationWriteTransaction:
             self.shape.projected_messages += 1
         if "INSERT INTO conversation_hydration" in sql:
             self.shape.hydration_markers += 1
-        if "UPDATE room_history_debt SET owed_through_ts = NULL" in sql:
-            self.shape.debt_settlements += 1
+        if "DELETE FROM room_history_recovery" in sql:
+            self.shape.recovery_settlements += 1
         self._inner.execute(sql, params)
 
     def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
@@ -1920,30 +1921,28 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Combining recovery projection and settlement into one giant write breaks this test."""
         alice = journal_store.principal("agent@alice")
-        await admit(alice, "$anchor", ts=500)
-        debt = await alice.record_room_history_debt(ROOM)
-        assert debt is not None
-        events = (message("$anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+        events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
 
-        outcome = await recovering.repay_room_history_debt(
-            debt,
+        outcome = await recovering.settle_room_history_recovery(
+            recovery,
             events=events,
-            complete=True,
-            saw_anchor=True,
+            exhausted_server=True,
             attempted_policy_rank=2,
             expected_membership_epoch=await recovering.membership_epoch(ROOM),
         )
 
-        assert outcome is HistoryDebtOutcome.REPAID
+        assert outcome is HistoryRecoveryOutcome.REPAIRED
         self._assert_bounded_projection_writes(observed.write_shapes, expected_events=len(events))
         final_shape = observed.write_shapes[-1]
         assert final_shape.hydration_markers == 1
-        assert final_shape.debt_settlements == 1
+        assert final_shape.recovery_settlements == 1
         assert final_shape.projected_messages == 0
         assert final_shape.membership_claims == 1
-        assert await recovering.room_history_debt(ROOM) is None
+        assert await recovering.room_history_recovery(ROOM) is None
         assert await recovering.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_failure_after_a_recovery_chunk_leaves_the_obligation_retryable(
@@ -1952,10 +1951,9 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Publishing or settling before every chunk lands breaks this retry."""
         alice = journal_store.principal("agent@alice")
-        await admit(alice, "$anchor", ts=500)
-        debt = await alice.record_room_history_debt(ROOM)
-        assert debt is not None
-        events = (message("$anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+        events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
         async def fail_second_write(write_number: int) -> None:
             if write_number == 2:
@@ -1966,11 +1964,10 @@ class TestBoundedHydrationInstallation:
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
 
         with pytest.raises(RuntimeError, match="injected failure"):
-            await recovering.repay_room_history_debt(
-                debt,
+            await recovering.settle_room_history_recovery(
+                recovery,
                 events=events,
-                complete=True,
-                saw_anchor=True,
+                exhausted_server=True,
                 attempted_policy_rank=2,
                 expected_membership_epoch=await recovering.membership_epoch(ROOM),
             )
@@ -1978,19 +1975,18 @@ class TestBoundedHydrationInstallation:
         assert observed.write_shapes[0].projected_messages == _HYDRATION_TRANSACTION_EVENT_LIMIT
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None) is None
-        assert await alice.room_history_debt(ROOM) == debt
+        assert await alice.room_history_recovery(ROOM) == recovery
 
-        outcome = await alice.repay_room_history_debt(
-            debt,
+        outcome = await alice.settle_room_history_recovery(
+            recovery,
             events=events,
-            complete=True,
-            saw_anchor=True,
+            exhausted_server=True,
             attempted_policy_rank=2,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        assert outcome is HistoryDebtOutcome.REPAID
-        assert await alice.room_history_debt(ROOM) is None
+        assert outcome is HistoryRecoveryOutcome.REPAIRED
+        assert await alice.room_history_recovery(ROOM) is None
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=len(events) + 1)
         assert {message.logical_event_id for message in page.messages} == {event.event_id for event in events}
 
@@ -2072,41 +2068,40 @@ class TestBoundedHydrationInstallation:
         assert await bodies(alice, limit=_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS) == []
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
-    async def test_membership_fence_during_recovery_does_not_settle_a_newer_debt(
+    async def test_membership_fence_during_recovery_does_not_settle_a_newer_obligation(
         self,
         journal_store: EventJournalStore,
     ) -> None:
-        """Settling recovery outside final epoch validation erases this newer debt."""
+        """Settling recovery outside final epoch validation erases this newer obligation."""
         alice = journal_store.principal("agent@alice")
-        await admit(alice, "$old-anchor", ts=500)
-        old_debt = await alice.record_room_history_debt(ROOM)
-        assert old_debt is not None
+        old_recovery = await alice.record_room_history_recovery(ROOM)
+        assert old_recovery is not None
         stale_epoch = await alice.membership_epoch(ROOM)
-        newer_debt: RoomHistoryDebt | None = None
+        newer_recovery: RoomHistoryRecovery | None = None
 
-        async def fence_and_record_new_debt(write_number: int) -> None:
-            nonlocal newer_debt
+        async def fence_and_record_new_recovery(write_number: int) -> None:
+            nonlocal newer_recovery
             if write_number == 1:
                 await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+                await alice.note_membership_restarted(ROOM)
                 await admit(alice, "$new-anchor", ts=10_000)
-                newer_debt = await alice.record_room_history_debt(ROOM)
+                newer_recovery = await alice.record_room_history_recovery(ROOM)
 
-        observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_debt)
+        observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_recovery)
         recovering = EventJournalStore(backend=observed).principal("agent@alice")
-        events = (message("$old-anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+        events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
-        outcome = await recovering.repay_room_history_debt(
-            old_debt,
+        outcome = await recovering.settle_room_history_recovery(
+            old_recovery,
             events=events,
-            complete=True,
-            saw_anchor=True,
+            exhausted_server=True,
             attempted_policy_rank=2,
             expected_membership_epoch=stale_epoch,
         )
 
-        assert outcome is HistoryDebtOutcome.SUPERSEDED
-        assert newer_debt is not None
-        assert await alice.room_history_debt(ROOM) == newer_debt
+        assert outcome is HistoryRecoveryOutcome.SUPERSEDED
+        assert newer_recovery is not None
+        assert await alice.room_history_recovery(ROOM) == newer_recovery
         assert await bodies(alice, limit=len(events)) == ["$new-anchor"]
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
@@ -2351,24 +2346,19 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
         assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
-class TestRecoveryFinalizesOnlyItsExactDebt:
+class TestRecoveryFinalizesOnlyItsExactObligation:
     """The final recovery commit cannot consume a later process's obligation."""
 
-    async def test_replaced_debt_is_locked_and_refused_before_publication(
+    async def test_replaced_recovery_is_locked_and_refused_before_publication(
         self,
         rival_stores: RivalStores,
     ) -> None:
-        """A plain debt read followed by an unconditional settlement breaks this test."""
+        """A stale revision followed by an unconditional settlement breaks this test."""
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
-        await admit(reader, "$old-anchor", ts=500)
-        old_debt = await reader.record_room_history_debt(ROOM)
-        assert old_debt is not None
-        newer_debt = replace(
-            old_debt,
-            owed_through_ts=10_000,
-            owed_through_event_id="$new-anchor",
-        )
+        old_recovery = await reader.record_room_history_recovery(ROOM)
+        assert old_recovery is not None
+        newer_recovery = replace(old_recovery, revision=old_recovery.revision + 1)
         inside_final = threading.Event()
         replacement_finished = threading.Event()
 
@@ -2379,12 +2369,11 @@ class TestRecoveryFinalizesOnlyItsExactDebt:
         recovering = EventJournalStore(
             backend=_PausingBackend(rival_stores.first.backend, pause_after_first_statement),
         ).principal(principal_id)
-        repayment = asyncio.create_task(
-            recovering.repay_room_history_debt(
-                old_debt,
+        settlement = asyncio.create_task(
+            recovering.settle_room_history_recovery(
+                old_recovery,
                 events=(),
-                complete=True,
-                saw_anchor=True,
+                exhausted_server=True,
                 attempted_policy_rank=2,
                 expected_membership_epoch=await reader.membership_epoch(ROOM),
             ),
@@ -2395,13 +2384,12 @@ class TestRecoveryFinalizesOnlyItsExactDebt:
             await rival_stores.second.backend.write(
                 lambda transaction: transaction.execute(
                     """
-                    UPDATE room_history_debt
-                    SET owed_through_ts = ?, owed_through_event_id = ?
+                    UPDATE room_history_recovery
+                    SET revision = ?
                     WHERE principal_id = ? AND room_id = ?
                     """,
                     (
-                        newer_debt.owed_through_ts,
-                        newer_debt.owed_through_event_id,
+                        newer_recovery.revision,
                         principal_id,
                         ROOM,
                     ),
@@ -2410,8 +2398,8 @@ class TestRecoveryFinalizesOnlyItsExactDebt:
         finally:
             replacement_finished.set()
 
-        assert await repayment is HistoryDebtOutcome.SUPERSEDED
-        assert await reader.room_history_debt(ROOM) == newer_debt
+        assert await settlement is HistoryRecoveryOutcome.SUPERSEDED
+        assert await reader.room_history_recovery(ROOM) == newer_recovery
         assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 

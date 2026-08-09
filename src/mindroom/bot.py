@@ -445,7 +445,7 @@ class AgentBot:
             # further down, and trusting a saved token means asserting that
             # store already holds every event the token covers.
             store_generation_provider=self._resolve_journal_generation,
-            history_debt_provider=self._journal_principal,
+            history_recovery_provider=self._journal_principal,
         )
         self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None

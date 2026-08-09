@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.event_journal import HistoryDebtRecordView
+    from mindroom.event_journal import HistoryRecoveryRecordView
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 
 
@@ -44,9 +44,9 @@ class SyncCheckpointTrust:
     # Where a skipped gap's history is written down. A provider rather than a
     # value for the same reason the generation is one: the journal store is
     # built after this trust is, and it must not be optional -- a trust that
-    # could not record a debt would certify past a gap and lose it silently,
-    # which is exactly the outcome the debt exists to prevent.
-    history_debt_provider: Callable[[], HistoryDebtRecordView]
+    # could not record an obligation would certify past a gap and lose it
+    # silently, which is exactly the outcome the obligation prevents.
+    history_recovery_provider: Callable[[], HistoryRecoveryRecordView]
     # Resolves the event journal's identity.
     #
     # A provider rather than a value, resolved on demand and memoized. Reading
@@ -272,28 +272,32 @@ class SyncCheckpointTrust:
                 skipped_to_token=skipped_to_token,
             )
 
-    async def _record_skipped_history_debt(self, decision: SyncCertificationDecision) -> None:
+    async def _record_skipped_history_recovery(self, decision: SyncCertificationDecision) -> None:
         """Make a skipped room's missing history durable before certifying past it.
 
         Ordered before the checkpoint write and inside the same lock, because
         the two orderings are not equally safe. A crash after this and before
-        the checkpoint leaves a debt for a gap the rewound cursor will simply
-        re-sync, which costs one redundant walk. A crash the other way round
-        moves the watermark past history nothing is left to ask for, which is
-        the silent loss this whole mechanism exists to refuse.
+        the checkpoint leaves an obligation for a gap the rewound cursor will
+        simply re-sync, which costs one redundant walk. A crash the other way
+        round moves the watermark past history nothing is left to ask for,
+        which is the silent loss this whole mechanism exists to refuse.
 
         A failure propagates for the same reason: certification then fails
         closed, the cursor rewinds, and the stall has to prove itself again.
         """
-        recorder = self.history_debt_provider()
+        recorder = self.history_recovery_provider()
         for room_id in sorted(decision.skipped_recovery_room_ids):
-            debt = await recorder.record_room_history_debt(room_id)
+            recovery = await recorder.record_room_history_recovery(room_id)
+            if recovery is None:
+                self.logger.info(
+                    "matrix_sync_recovery_gap_ignored_after_departure",
+                    room_id=room_id,
+                )
+                continue
             self.logger.error(
-                "matrix_sync_recovery_gap_recorded_as_history_debt",
+                "matrix_sync_recovery_gap_recorded",
                 room_id=room_id,
-                # Nothing means the room's projection was empty, so the skip
-                # left no hole between stored history and what arrives next.
-                owed_through_ts=None if debt is None else debt.owed_through_ts,
+                revision=recovery.revision,
             )
 
     async def apply_response(
@@ -354,7 +358,7 @@ class SyncCheckpointTrust:
         # the wiring mistake it is.
         await self._resolve_store_generation()
         if decision.skipped_recovery_room_ids:
-            await self._record_skipped_history_debt(decision)
+            await self._record_skipped_history_recovery(decision)
         if decision.checkpoint_to_save is not None:
             record = await self._persist_checkpoint_locked(
                 decision.checkpoint_to_save,

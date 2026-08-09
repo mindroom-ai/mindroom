@@ -21,8 +21,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.history_recovery import (
+        HistoryRecoveryOutcome,
+        RoomHistoryRecovery,
+    )
+
     from .approvals import RecordedApprovalDecision, StoredApprovalCard
-    from .history_debt import HistoryDebtOutcome, RoomHistoryDebt
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -169,8 +173,8 @@ class ConversationReadView(Protocol):
         ...
 
 
-class HistoryDebtRecordView(Protocol):
-    """Writing down history a skipped sync gap left a room owing, and nothing else.
+class HistoryRecoveryRecordView(Protocol):
+    """Writing down a skipped room-history interval, and nothing else.
 
     Deliberately one method. The writer is sync certification, which has to make
     the hole durable before it moves the checkpoint past it; giving that caller
@@ -178,8 +182,11 @@ class HistoryDebtRecordView(Protocol):
     depending on the state of the projection.
     """
 
-    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Write down the history a skipped sync gap left this room owing."""
+    async def record_room_history_recovery(
+        self,
+        room_id: str,
+    ) -> RoomHistoryRecovery | None:
+        """Write down that a room's history could not be proven continuous."""
         ...
 
 
@@ -190,21 +197,20 @@ class HydrationView(Protocol):
         """Return the current membership epoch for one room."""
         ...
 
-    async def room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Return the history this room still owes a walk, or nothing."""
+    async def room_history_recovery(self, room_id: str) -> RoomHistoryRecovery | None:
+        """Return one room's current history-recovery obligation, if any."""
         ...
 
-    async def repay_room_history_debt(
+    async def settle_room_history_recovery(
         self,
-        debt: RoomHistoryDebt,
+        recovery: RoomHistoryRecovery,
         *,
         events: tuple[ProjectedEvent, ...],
-        complete: bool,
-        saw_anchor: bool,
-        attempted_policy_rank: int = 0,
+        exhausted_server: bool,
+        attempted_policy_rank: int,
         expected_membership_epoch: int,
-    ) -> HistoryDebtOutcome:
-        """Install one room walk in chunks, then publish and settle together."""
+    ) -> HistoryRecoveryOutcome:
+        """Install a recovery in chunks, then publish and settle atomically."""
         ...
 
     async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
@@ -403,7 +409,7 @@ __all__ = [
     "ApprovalView",
     "ConversationReadView",
     "DispatchView",
-    "HistoryDebtRecordView",
+    "HistoryRecoveryRecordView",
     "HydrationView",
     "OutboxView",
     "PendingTurnView",

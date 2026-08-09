@@ -24,12 +24,17 @@ from mindroom.matrix.sync_recovery_escape import (
     SkippedRecoveryGap,
     SyncRecoveryStallTracker,
 )
-from tests.sync_continuity_helpers import RecordedHistoryDebts, certify_response, load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import (
+    RecordedHistoryRecoveries,
+    certify_response,
+    load_sync_checkpoint,
+    save_sync_token,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.event_journal import HistoryDebtRecordView
+    from mindroom.event_journal import HistoryRecoveryRecordView
 
 _STORE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
@@ -40,15 +45,15 @@ _SKIPPED_TO = "s_live_now"
 _REPLAYED = "s_live_replayed"
 
 
-def _trust(tmp_path: Path, *, history_debt: HistoryDebtRecordView | None = None) -> SyncCheckpointTrust:
+def _trust(tmp_path: Path, *, history_recovery: HistoryRecoveryRecordView | None = None) -> SyncCheckpointTrust:
     """Build one principal's real checkpoint trust over a temporary continuity store."""
-    recorder = RecordedHistoryDebts() if history_debt is None else history_debt
+    recorder = RecordedHistoryRecoveries() if history_recovery is None else history_recovery
     return SyncCheckpointTrust(
         continuity_store=SyncContinuityStore(tmp_path, "code"),
         logger=get_logger(),
         state=SyncTrustState.PENDING,
         store_generation=_STORE_GENERATION,
-        history_debt_provider=lambda: recorder,
+        history_recovery_provider=lambda: recorder,
     )
 
 
@@ -198,6 +203,24 @@ async def test_an_unconvergent_rebuild_escapes_and_certifies_forward(tmp_path: P
     assert checkpoint is not None
     assert checkpoint.token == f"s_live_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
     assert trust.retry_token() == f"s_live_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
+
+
+@pytest.mark.asyncio
+async def test_classic_escape_records_one_unknown_room_obligation(tmp_path: Path) -> None:
+    """Classic records only the room after its bounded same-checkpoint stall proof."""
+    recorder = RecordedHistoryRecoveries()
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
+    trust = _trust(tmp_path, history_recovery=recorder)
+    assert await trust.prepare_startup() == _STUCK
+
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT):
+        await _certify_unrecovered(
+            trust,
+            next_batch=f"s_live_{attempt}",
+            unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
+        )
+
+    assert recorder.rooms == [_WEDGED_ROOM]
 
 
 @pytest.mark.asyncio

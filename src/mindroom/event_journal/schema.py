@@ -153,26 +153,11 @@ _TABLES = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS room_history_debt (
+    CREATE TABLE IF NOT EXISTS room_history_recovery (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
-        -- The newest message the projection held when sync gave up on
-        -- rebuilding a gap in this room, and the event a walk has to reach to
-        -- prove it covered the whole gap. NULL means nothing is owed.
-        --
-        -- The event and not the timestamp is what proves it. An
-        -- `origin_server_ts` is the sending server's clock and does not have to
-        -- agree with the order this server paginates in, so one skewed event at
-        -- the tip would otherwise satisfy the debt on the first page of a walk
-        -- that never got near the hole. The timestamp is kept because it orders
-        -- two anchors when a second gap is recorded over the first, and because
-        -- it is what an operator reads to see how far back a hole starts.
-        owed_through_event_id TEXT,
-        owed_through_ts BIGINT,
-        -- A walk finished without reaching the timestamp it owed. The hole is
-        -- real and no bounded walk will close it, so this stays set: it is the
-        -- one honest way to say that history was lost rather than deferred.
-        history_lost INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL CHECK (state IN ('repairable', 'truncated')),
+        revision BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id)
     )
     """,

@@ -12,14 +12,15 @@ from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Any
 
-from . import approvals, history_debt, journal, outbox, reads, turn_records
+from mindroom.history_recovery import (
+    HistoryRecoveryOutcome,
+    RoomHistoryRecovery,
+)
+
+from . import approvals, journal, outbox, reads, turn_records
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
     RecordedApprovalDecision,
     StoredApprovalCard,
-)
-from .history_debt import (
-    HistoryDebtOutcome,
-    RoomHistoryDebt,
 )
 from .models import DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision, project
@@ -354,55 +355,49 @@ class PrincipalStore:
             ),
         )
 
-    async def record_room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Write down the history a skipped sync gap left this room owing."""
-        return await self._backend.write(
-            lambda transaction: history_debt.record(transaction, self._principal_id, room_id),
-        )
-
-    async def room_history_debt(self, room_id: str) -> RoomHistoryDebt | None:
-        """Return the history this room still owes a walk, or nothing."""
-        return await self._backend.read(
-            lambda transaction: history_debt.outstanding(transaction, self._principal_id, room_id),
-        )
-
-    async def repay_room_history_debt(
+    async def record_room_history_recovery(
         self,
-        debt: RoomHistoryDebt,
+        room_id: str,
+    ) -> RoomHistoryRecovery | None:
+        """Write down that a room's history could not be proven continuous."""
+        return await self._backend.write(
+            lambda transaction: journal.record_room_history_recovery(
+                transaction,
+                self._principal_id,
+                room_id,
+            ),
+        )
+
+    async def room_history_recovery(self, room_id: str) -> RoomHistoryRecovery | None:
+        """Return one room's current history-recovery obligation, if any."""
+        return await self._backend.read(
+            lambda transaction: journal.room_history_recovery(transaction, self._principal_id, room_id),
+        )
+
+    async def settle_room_history_recovery(
+        self,
+        recovery: RoomHistoryRecovery,
         *,
         events: tuple[ProjectedEvent, ...],
-        complete: bool,
-        saw_anchor: bool,
-        attempted_policy_rank: int = 0,
+        exhausted_server: bool,
+        attempted_policy_rank: int,
         expected_membership_epoch: int,
-    ) -> HistoryDebtOutcome:
-        """Install one room walk in chunks, then publish and settle together.
-
-        A failed chunk leaves the exact debt outstanding and the hydration
-        marker absent. The final transaction compares the debt, claims the
-        membership epoch, publishes hydration, and settles the obligation as
-        one commit, so strict readers cannot observe those facts disagreeing.
-
-        A repayment is a real walk of the room under the hydrator's own policy,
-        so it records that policy for the same reason an ordinary hydration
-        does: it is the deeper walk a strict caller was owed, and nothing else
-        would remember that it already happened.
-        """
+    ) -> HistoryRecoveryOutcome:
+        """Install a recovery in bounded writes, then publish and settle once."""
         if not await _install_hydration_chunks(
             self._backend,
             self._principal_id,
-            room_id=debt.room_id,
+            room_id=recovery.room_id,
             events=events,
             expected_membership_epoch=expected_membership_epoch,
         ):
-            return HistoryDebtOutcome.SUPERSEDED
+            return HistoryRecoveryOutcome.SUPERSEDED
         return await self._backend.write(
-            lambda transaction: _repay_history_debt(
+            lambda transaction: _settle_history_recovery(
                 transaction,
                 self._principal_id,
-                debt,
-                complete=complete,
-                saw_anchor=saw_anchor,
+                recovery,
+                exhausted_server=exhausted_server,
                 attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
             ),
@@ -807,57 +802,39 @@ def _enqueue_delivery(
     return transaction_id
 
 
-def _repay_history_debt(
+def _settle_history_recovery(
     transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
     principal_id: str,
-    debt: RoomHistoryDebt,
+    recovery: RoomHistoryRecovery,
     *,
-    complete: bool,
-    saw_anchor: bool,
+    exhausted_server: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
-) -> HistoryDebtOutcome:
-    """Publish a repayment walk as the room hydration, and settle its debt.
-
-    Both effects are gated on the debt this walk was launched with still being
-    the outstanding one, checked here in the same transaction that applies them.
-    Concurrent readers of an indebted room can each end up carrying a snapshot:
-    one reads the debt, a second reads it before the first settles, and the
-    shared-task map cannot join a walk that has already finished. The loser then
-    arrives with an answer to a question nobody is asking. Its idempotent
-    projection chunks may remain, but they publish no coverage; allowing its
-    final marker or settlement would stamp the loser's result over a debt that
-    was repaid seconds earlier.
-
-    The check is a compare-and-set on the exact anchor rather than a presence
-    test, so a *later* gap recorded over the top is superseding too: its debt is
-    a different question, and this walk did not answer it.
-    """
+) -> HistoryRecoveryOutcome:
+    """Publish a recovery and settle its exact obligation in one transaction."""
     if not reads.claim_membership_epoch(
         transaction,
         principal_id,
-        room_id=debt.room_id,
+        room_id=recovery.room_id,
         expected_membership_epoch=expected_membership_epoch,
     ):
-        return HistoryDebtOutcome.SUPERSEDED
-    current = history_debt.claim_outstanding(transaction, principal_id, debt.room_id)
-    if current != debt:
-        return HistoryDebtOutcome.SUPERSEDED
+        return HistoryRecoveryOutcome.SUPERSEDED
+    if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
+        return HistoryRecoveryOutcome.SUPERSEDED
     reads.publish_conversation_hydration(
         transaction,
         principal_id,
-        room_id=debt.room_id,
+        room_id=recovery.room_id,
         thread_id=None,
-        complete=complete,
+        complete=exhausted_server,
         attempted_policy_rank=attempted_policy_rank,
         membership_epoch=expected_membership_epoch,
     )
-    return history_debt.settle(
+    return journal.settle_room_history_recovery(
         transaction,
         principal_id,
-        debt,
-        saw_anchor=saw_anchor,
-        walk_exhausted_server=complete,
+        recovery,
+        exhausted_server=exhausted_server,
     )
 
 
