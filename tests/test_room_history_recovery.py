@@ -549,6 +549,36 @@ async def test_settlement_publishes_only_after_paginated_events_and_repairs_obli
     assert [message.content["body"] for message in second.messages] == ["2", "3"]
 
 
+async def test_successful_room_repair_restores_existing_thread_completeness(
+    principal: PrincipalStore,
+) -> None:
+    """A room-wide proof makes pre-gap thread coverage trustworthy again."""
+    thread_id = "$thread"
+    await mark_complete(principal, thread_id)
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+    outcome = await principal.settle_room_history_recovery(
+        recovery,
+        events=(
+            projected(thread_id, "root", ts=1),
+            projected("$reply", "reply", ts=2, thread_id=thread_id),
+        ),
+        exhausted_server=True,
+        attempted_policy_rank=4,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert outcome is HistoryRecoveryOutcome.REPAIRED
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
+    coverage = await principal.conversation_hydration_coverage(room_id=ROOM, thread_id=thread_id)
+    assert coverage is not None
+    assert coverage.reached_its_end
+    assert coverage.attempted_policy_rank == 2
+
+
 async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:
     """An older walk may add facts but cannot publish over a newer abandonment."""
     stale = await principal.record_room_history_recovery(ROOM)
@@ -593,6 +623,37 @@ async def test_repeated_recovery_supersedes_an_in_flight_settlement(
         message.content["body"]
         for message in (await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)).messages
     ] == ["stale"]
+    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+
+async def test_repaired_revision_is_not_reused_by_a_later_gap(principal: PrincipalStore) -> None:
+    """Deleting a repaired row must not let a stale walk consume a new gap."""
+    first = await principal.record_room_history_recovery(ROOM)
+    assert first is not None
+    assert (
+        await principal.settle_room_history_recovery(
+            first,
+            events=(projected("$first", "first", ts=1),),
+            exhausted_server=True,
+            attempted_policy_rank=4,
+            expected_membership_epoch=await principal.membership_epoch(ROOM),
+        )
+        is HistoryRecoveryOutcome.REPAIRED
+    )
+    current = await principal.record_room_history_recovery(ROOM)
+    assert current is not None
+
+    stale_outcome = await principal.settle_room_history_recovery(
+        first,
+        events=(projected("$stale", "stale", ts=2),),
+        exhausted_server=True,
+        attempted_policy_rank=4,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+
+    assert stale_outcome is HistoryRecoveryOutcome.SUPERSEDED
+    assert current.revision > first.revision
+    assert await principal.room_history_recovery(ROOM) == current
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 

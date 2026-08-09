@@ -184,6 +184,7 @@ A thread is hydrated by fetching its root and traversing recursive event relatio
 
 A room-scoped conversation may perform one serialized initial `/messages` traversal.
 Concurrent first readers share one hydration task, and hydration projects in bounded membership-epoch-checked transactions before a final transaction publishes coverage.
+Projected rows from committed chunks may be locally visible before that final transaction; they are additive facts, while the coverage marker and exact recovery settlement remain unpublished until every chunk succeeds.
 Failure stays a visible readiness or request failure rather than reviving room-wide repair scans.
 
 ## Deterministic delivery

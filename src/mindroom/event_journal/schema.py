@@ -156,7 +156,7 @@ _TABLES = (
     CREATE TABLE IF NOT EXISTS room_history_recovery (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
-        state TEXT NOT NULL CHECK (state IN ('repairable', 'truncated')),
+        state TEXT NOT NULL CHECK (state IN ('repairable', 'truncated', 'repaired')),
         revision BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id)
     )

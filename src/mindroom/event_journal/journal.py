@@ -49,6 +49,9 @@ _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, sender,
     origin_server_ts, source_json, receipt_order, semantic_consumer
 """
+# Successful repair is hidden from callers but retained as the revision carrier,
+# so a later gap cannot reuse the identity of an old in-flight walk.
+_REPAIRED_RECOVERY_STATE = "repaired"
 
 
 def store_generation(transaction: Transaction, *, new_generation: str) -> str:
@@ -111,9 +114,9 @@ def room_history_recovery(
     row = transaction.fetchone(
         """
         SELECT state, revision FROM room_history_recovery
-        WHERE principal_id = ? AND room_id = ?
+        WHERE principal_id = ? AND room_id = ? AND state <> ?
         """,
-        (principal_id, room_id),
+        (principal_id, room_id, _REPAIRED_RECOVERY_STATE),
     )
     return None if row is None else _room_history_recovery_from_row(room_id, row)
 
@@ -123,7 +126,7 @@ def record_room_history_recovery(
     principal_id: str,
     room_id: str,
 ) -> RoomHistoryRecovery | None:
-    """Record one unknown gap and retract completeness for every conversation."""
+    """Record one unknown gap without scanning the room's conversation markers."""
     if _membership_state(transaction, principal_id, room_id).departure_fenced:
         return None
     row = transaction.fetchone(
@@ -140,15 +143,7 @@ def record_room_history_recovery(
     if row is None:
         msg = f"Room history recovery for {room_id!r} is missing immediately after it was written"
         raise RuntimeError(msg)
-    recovery = _room_history_recovery_from_row(room_id, row)
-    transaction.execute(
-        """
-        UPDATE conversation_hydration SET complete = 0
-        WHERE principal_id = ? AND room_id = ?
-        """,
-        (principal_id, room_id),
-    )
-    return recovery
+    return _room_history_recovery_from_row(room_id, row)
 
 
 def claim_room_history_recovery(
@@ -183,8 +178,11 @@ def settle_room_history_recovery(
     """Commit the terminal state of a previously claimed recovery obligation."""
     if exhausted_server:
         transaction.execute(
-            "DELETE FROM room_history_recovery WHERE principal_id = ? AND room_id = ?",
-            (principal_id, recovery.room_id),
+            """
+            UPDATE room_history_recovery SET state = ?
+            WHERE principal_id = ? AND room_id = ?
+            """,
+            (_REPAIRED_RECOVERY_STATE, principal_id, recovery.room_id),
         )
         return HistoryRecoveryOutcome.REPAIRED
     transaction.execute(
@@ -193,13 +191,6 @@ def settle_room_history_recovery(
         WHERE principal_id = ? AND room_id = ?
         """,
         (HistoryRecoveryState.TRUNCATED.value, principal_id, recovery.room_id),
-    )
-    transaction.execute(
-        """
-        UPDATE conversation_hydration SET complete = 0
-        WHERE principal_id = ? AND room_id = ?
-        """,
-        (principal_id, recovery.room_id),
     )
     return HistoryRecoveryOutcome.TRUNCATED
 

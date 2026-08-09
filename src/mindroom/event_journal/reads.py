@@ -223,6 +223,7 @@ def _current_hydration(
         LEFT JOIN room_history_recovery AS recovery
           ON recovery.principal_id = hydration.principal_id
          AND recovery.room_id = hydration.room_id
+         AND recovery.state <> 'repaired'
         WHERE hydration.principal_id = ? AND hydration.room_id = ? AND hydration.thread_id = ?
         """,
         (principal_id, room_id, encode_thread_id(thread_id)),

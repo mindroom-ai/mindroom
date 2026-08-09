@@ -231,38 +231,45 @@ def edit(target: str, body: str) -> dict[str, object]:
 
 
 class _PausingTransaction:
-    """One real transaction that runs a hook after its first statement.
+    """One real transaction that runs a hook after its first matching statement.
 
-    Only the first, because the hook is how one caller is held mid-transaction
-    while another starts, and holding it again at every later statement would
-    just pay the same wait twice.
+    With no matcher, every statement matches and this retains the ordinary
+    pause-after-first-statement behavior. A matcher opens a causal window at a
+    specific SQL boundary, so a race test cannot silently pause on an earlier
+    lock and claim it exercised a later one.
     """
 
-    def __init__(self, inner: Transaction, hook: Callable[[], object]) -> None:
+    def __init__(
+        self,
+        inner: Transaction,
+        hook: Callable[[], object],
+        statement_matches: Callable[[str], bool] | None = None,
+    ) -> None:
         self._inner = inner
         self._hook = hook
+        self._statement_matches = statement_matches
         self._paused = False
 
-    def _pause(self) -> None:
-        if not self._paused:
+    def _pause(self, sql: str) -> None:
+        if not self._paused and (self._statement_matches is None or self._statement_matches(sql)):
             self._paused = True
             self._hook()
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> None:
         """Run one statement, then pause."""
         self._inner.execute(sql, params)
-        self._pause()
+        self._pause(sql)
 
     def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
         """Run one query, then pause."""
         row = self._inner.fetchone(sql, params)
-        self._pause()
+        self._pause(sql)
         return row
 
     def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
         """Run one query, then pause."""
         rows = self._inner.fetchall(sql, params)
-        self._pause()
+        self._pause(sql)
         return rows
 
 
@@ -278,11 +285,18 @@ class _PausingBackend:
 
     inner: Backend
     after_first_statement: Callable[[], object]
+    statement_matches: Callable[[str], bool] | None = None
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Run one write, pausing inside its transaction."""
         return await self.inner.write(
-            lambda transaction: operation(_PausingTransaction(transaction, self.after_first_statement)),
+            lambda transaction: operation(
+                _PausingTransaction(
+                    transaction,
+                    self.after_first_statement,
+                    self.statement_matches,
+                ),
+            ),
         )
 
     async def read[T](self, operation: Operation[T]) -> T:
@@ -302,6 +316,7 @@ class _HydrationWriteShape:
     projected_messages: int = 0
     hydration_markers: int = 0
     recovery_settlements: int = 0
+    completeness_retractions: int = 0
 
 
 class _HydrationWriteTransaction:
@@ -317,8 +332,10 @@ class _HydrationWriteTransaction:
             self.shape.projected_messages += 1
         if "INSERT INTO conversation_hydration" in sql:
             self.shape.hydration_markers += 1
-        if "DELETE FROM room_history_recovery" in sql:
+        if "UPDATE room_history_recovery SET state = ?" in sql and params[0] == "repaired":
             self.shape.recovery_settlements += 1
+        if "UPDATE conversation_hydration SET complete = 0" in sql:
+            self.shape.completeness_retractions += 1
         self._inner.execute(sql, params)
 
     def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
@@ -1990,6 +2007,30 @@ class TestBoundedHydrationInstallation:
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=len(events) + 1)
         assert {message.logical_event_id for message in page.messages} == {event.event_id for event in events}
 
+    async def test_truncated_recovery_finalization_does_not_scan_conversation_markers(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The final bounded transaction must not rewrite every thread marker."""
+        alice = journal_store.principal("agent@alice")
+        recovery = await alice.record_room_history_recovery(ROOM)
+        assert recovery is not None
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+
+        outcome = await recovering.settle_room_history_recovery(
+            recovery,
+            events=(),
+            exhausted_server=False,
+            attempted_policy_rank=2,
+            expected_membership_epoch=await recovering.membership_epoch(ROOM),
+        )
+
+        assert outcome is HistoryRecoveryOutcome.TRUNCATED
+        assert observed.write_shapes == [
+            _HydrationWriteShape(membership_claims=1, hydration_markers=1),
+        ]
+
     async def test_cancellation_after_a_chunk_leaves_ordinary_hydration_retryable(
         self,
         journal_store: EventJournalStore,
@@ -2353,21 +2394,24 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         self,
         rival_stores: RivalStores,
     ) -> None:
-        """A stale revision followed by an unconditional settlement breaks this test."""
+        """A new gap waits behind the exact recovery claim and survives settlement."""
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
         old_recovery = await reader.record_room_history_recovery(ROOM)
         assert old_recovery is not None
-        newer_recovery = replace(old_recovery, revision=old_recovery.revision + 1)
         inside_final = threading.Event()
-        replacement_finished = threading.Event()
+        release_final = threading.Event()
 
-        def pause_after_first_statement() -> None:
+        def pause_after_recovery_claim() -> None:
             inside_final.set()
-            assert replacement_finished.wait(_WORKER_WAIT_SECONDS), "the replacement write never finished"
+            assert release_final.wait(_WORKER_WAIT_SECONDS), "the recovery transaction was never released"
 
         recovering = EventJournalStore(
-            backend=_PausingBackend(rival_stores.first.backend, pause_after_first_statement),
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause_after_recovery_claim,
+                statement_matches=lambda sql: "UPDATE room_history_recovery SET state = state" in sql,
+            ),
         ).principal(principal_id)
         settlement = asyncio.create_task(
             recovering.settle_room_history_recovery(
@@ -2379,26 +2423,24 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
             ),
         )
         await asyncio.to_thread(inside_final.wait, _WORKER_WAIT_SECONDS)
-        assert inside_final.is_set(), "the repayment never entered its final transaction"
+        assert inside_final.is_set(), "the repayment never claimed its exact recovery row"
+        replacement = asyncio.create_task(
+            rival_stores.second.principal(principal_id).record_room_history_recovery(ROOM),
+        )
         try:
-            await rival_stores.second.backend.write(
-                lambda transaction: transaction.execute(
-                    """
-                    UPDATE room_history_recovery
-                    SET revision = ?
-                    WHERE principal_id = ? AND room_id = ?
-                    """,
-                    (
-                        newer_recovery.revision,
-                        principal_id,
-                        ROOM,
-                    ),
-                ),
+            await _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
             )
         finally:
-            replacement_finished.set()
+            release_final.set()
 
-        assert await settlement is HistoryRecoveryOutcome.SUPERSEDED
+        outcome, newer_recovery = await asyncio.gather(settlement, replacement)
+
+        assert outcome is HistoryRecoveryOutcome.REPAIRED
+        assert newer_recovery is not None
+        assert newer_recovery.revision == old_recovery.revision + 1
         assert await reader.room_history_recovery(ROOM) == newer_recovery
         assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
