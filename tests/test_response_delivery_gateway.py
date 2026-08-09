@@ -31,7 +31,7 @@ from mindroom.delivery_gateway import (
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
-from mindroom.response_delivery import ResponseDelivery
+from mindroom.response_delivery import RecoveryOutcome, ResponseDelivery
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
@@ -44,7 +44,7 @@ from tests.conftest import (
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.event_journal import (
@@ -1505,6 +1505,110 @@ class TestTurnDeliverySerialization:
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
         assert published == [("turn-1", "$final")]
+
+    async def test_cancelled_final_finishes_after_its_enqueue_commits(
+        self,
+    ) -> None:
+        """Cancellation cannot strand a FINAL whose durable handoff already landed."""
+        outbox = FakeOutbox()
+        enqueue_committed = asyncio.Event()
+        return_from_enqueue = asyncio.Event()
+        original_enqueue = outbox.enqueue_delivery
+        sent: list[DeliveryStage] = []
+
+        async def enqueue_then_wait(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            room_id: str,
+            thread_id: str | None,
+            payload: Mapping[str, object],
+            edits_event_id: str | None = None,
+            settle_source_event_ids: tuple[str, ...] = (),
+        ) -> str | None:
+            transaction_id = await original_enqueue(
+                turn_id=turn_id,
+                stage=stage,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                edits_event_id=edits_event_id,
+                settle_source_event_ids=settle_source_event_ids,
+            )
+            enqueue_committed.set()
+            await return_from_enqueue.wait()
+            return transaction_id
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(store=outbox, send=send)
+        with patch.object(outbox, "enqueue_delivery", side_effect=enqueue_then_wait):
+            final = asyncio.create_task(
+                delivery.deliver(
+                    turn_id="turn-1",
+                    stage=DeliveryStage.FINAL,
+                    room_id=_ROOM_ID,
+                    thread_id=None,
+                    payload={"msgtype": "m.text", "body": "final"},
+                ),
+            )
+            await enqueue_committed.wait()
+            final.cancel()
+            return_from_enqueue.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await final
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$final"
+        assert sent == [DeliveryStage.FINAL]
+        assert await delivery.recover() == RecoveryOutcome(recovered=0, failed=0)
+
+    async def test_cancelled_final_finishes_after_claiming_starts(
+        self,
+    ) -> None:
+        """Cancellation after enqueue cannot leave recovery to overwrite a stop."""
+        outbox = FakeOutbox()
+        claim_started = asyncio.Event()
+        finish_claim = asyncio.Event()
+        original_claim = outbox.claim_delivery
+        sent: list[DeliveryStage] = []
+
+        async def claim_then_wait(*, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+            claim_started.set()
+            await finish_claim.wait()
+            return await original_claim(turn_id=turn_id, stage=stage)
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(store=outbox, send=send)
+        with patch.object(outbox, "claim_delivery", side_effect=claim_then_wait):
+            final = asyncio.create_task(
+                delivery.deliver(
+                    turn_id="turn-1",
+                    stage=DeliveryStage.FINAL,
+                    room_id=_ROOM_ID,
+                    thread_id=None,
+                    payload={"msgtype": "m.text", "body": "final"},
+                ),
+            )
+            await claim_started.wait()
+            final.cancel()
+            finish_claim.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await final
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$final"
+        assert sent == [DeliveryStage.FINAL]
+        assert await delivery.recover() == RecoveryOutcome(recovered=0, failed=0)
 
     async def test_terminal_callback_can_reenter_the_same_turn(
         self,

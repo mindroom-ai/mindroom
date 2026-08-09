@@ -169,6 +169,31 @@ class ResponseDelivery:
         half done -- and resending a frozen row is what recovery is for.
         """
         async with self._turn_lock(turn_id):
+            outcome = await self._complete_delivery_across_cancellation(
+                turn_id=turn_id,
+                stage=stage,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                edits_event_id=edits_event_id,
+            )
+        return await self._finish_flush(turn_id, outcome)
+
+    async def _complete_delivery_across_cancellation(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        edits_event_id: str | None,
+    ) -> _FlushOutcome:
+        """Finish a delivery whose durable handoff may already have committed."""
+        completed: _FlushOutcome | None = None
+
+        async def finish() -> _FlushOutcome:
+            nonlocal completed
             handoff = self.handoff if stage is DeliveryStage.FINAL else None
             handed_over = handoff.sources_for_turn(turn_id) if handoff is not None else ()
             transaction_id = await self.store.enqueue_delivery(
@@ -182,33 +207,20 @@ class ResponseDelivery:
             )
             if transaction_id is None:
                 logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
-                return None
+                completed = _FlushOutcome(event_id=None)
+                return completed
             if handoff is not None:
                 handoff.released(handed_over)
             outcome = await self._flush(turn_id=turn_id, stage=stage)
             if stage is DeliveryStage.FINAL and outcome.retry_required:
-                outcome = await self._complete_blocked_final_across_cancellation(turn_id=turn_id)
-        return await self._finish_flush(turn_id, outcome)
-
-    async def _complete_blocked_final_across_cancellation(
-        self,
-        *,
-        turn_id: str,
-    ) -> _FlushOutcome:
-        """Resolve INITIAL and finish its blocked FINAL before propagating cancellation."""
-        completed: _FlushOutcome | None = None
-
-        async def finish() -> _FlushOutcome:
-            nonlocal completed
-            # A prior process may have attempted the placeholder without
-            # recording whether Matrix accepted it. FINAL is durably queued,
-            # but reporting that temporary ordering block as a delivery
-            # failure would run terminal cancellation hooks even though
-            # recovery later shows the answer. Resolve INITIAL under the same
-            # turn lock, then retry FINAL before returning a lifecycle-visible
-            # result.
-            await self._flush(turn_id=turn_id, stage=DeliveryStage.INITIAL)
-            outcome = await self._flush(turn_id=turn_id, stage=DeliveryStage.FINAL)
+                # A prior process may have attempted the placeholder without
+                # recording whether Matrix accepted it. FINAL is durably
+                # queued, but reporting that temporary ordering block as a
+                # delivery failure would run terminal cancellation hooks even
+                # though recovery later shows the answer. Resolve INITIAL,
+                # then retry FINAL before returning a lifecycle-visible result.
+                await self._flush(turn_id=turn_id, stage=DeliveryStage.INITIAL)
+                outcome = await self._flush(turn_id=turn_id, stage=DeliveryStage.FINAL)
             completed = outcome
             return completed
 
