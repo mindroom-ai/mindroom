@@ -343,62 +343,23 @@ def conversation_hydration_was_truncated(
     return row is not None and (not bool(row["complete"]) or bool(row["history_lost"]))
 
 
-def mark_conversation_hydrated(
+def claim_membership_epoch(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
-    thread_id: str | None,
-    complete: bool,
-    attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> bool:
-    """Record a completed hydration, unless membership moved under it.
+    """Materialize and claim the expected room membership for one write.
 
-    Hydration and this record commit together, so a conversation is never
-    marked hydrated against events that a rejoin has already invalidated.
+    A write claim rather than a ``SELECT`` takes the same row lock as the
+    membership fence. The two operations therefore have a total order: rows
+    committed before a fence are deleted by it, while a writer after the fence
+    observes the advanced epoch and refuses its stale work.
 
-    Coverage only ever grows within one membership epoch, in both of the things
-    it records. Two hydrators walk this principal -- a prompt's, bounded to its
-    context window, and an export's, bounded far wider -- and nothing sequences
-    them, deliberately, because a lock between them would put a stall on every
-    warm prompt read. They can therefore finish in either order, and the
-    narrower one finishing last used to overwrite the marker with its own
-    smaller answer while the wider walk's rows were all still projected. The
-    projection is additive and a walk reads backwards from the tip, so coverage
-    is a suffix that only ever extends: reaching the start of the conversation
-    is a fact about the conversation rather than about the walk that proved it,
-    and the widest policy anyone has spent here only ever gets wider. A later
-    walk can fail to re-prove either; it cannot make either untrue.
-
-    A later epoch is a different room membership and clears both. They are
-    monotonic within an epoch and only within one, which is why each carry
-    forward is conditioned on the stored epoch rather than applied outright.
-
-    The epoch is claimed with a write rather than read with a ``SELECT``, and
-    that is the whole of what keeps a rejoin from being overtaken. This decision
-    and the projected rows it authorizes are separate statements of one
-    transaction, so on PostgreSQL -- where ``READ COMMITTED`` lets a second
-    writer commit in between, and a second writer exists the moment `mindroom
-    threads export` runs its own hydrator beside the bot -- a plain read saw an
-    epoch, a concurrent `fence_departure` deleted every row committed at that
-    moment, and the rows written afterwards outlived the fence that was supposed
-    to erase them. Nothing collects them later: no read of `visible_messages`
-    carries an epoch predicate, and the walk that runs under the new membership
-    projects over them with `ON CONFLICT DO NOTHING`. So the two memberships
-    merge into one conversation, which is the exact outcome dropping the
-    projection alongside the marker exists to prevent.
-    Self-assigning the epoch takes the same row lock the fence takes, so the two
-    can only run in an order: this transaction's rows are either deleted by a
-    fence that ran after it, or this returns the fence's new epoch and installs
-    nothing.
-
-    Inserting a zero row when none exists is the other half. A room the bot has
-    never left has no ``room_membership`` row at all, and a lock on a row that
-    does not exist orders nothing -- which would leave the first departure of
-    every room, the most likely one there is, racing exactly as before. A row
-    holding epoch zero says precisely what its absence said, so materializing it
-    changes no answer; it only gives the first fence something to queue behind.
+    Materializing epoch zero matters because a lock on a row that does not yet
+    exist orders nothing. The inserted row says exactly what absence said while
+    giving the first departure a durable row to fence against.
     """
     row = transaction.fetchone(
         """
@@ -414,8 +375,61 @@ def mark_conversation_hydrated(
         msg = f"Room membership for {room_id!r} is missing immediately after it was claimed"
         raise RuntimeError(msg)
     current_epoch = int(row["epoch"])
-    if current_epoch != expected_membership_epoch:
+    return current_epoch == expected_membership_epoch
+
+
+def mark_conversation_hydrated(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    complete: bool,
+    attempted_policy_rank: int,
+    expected_membership_epoch: int,
+) -> bool:
+    """Publish a completed hydration, unless membership moved under it.
+
+    Projection chunks remain untrusted until this final marker commits. Each
+    chunk claims the same epoch before writing, and this transaction claims it
+    once more before publishing coverage, so a fence between any two commits
+    deletes the earlier rows and makes every later step refuse the stale epoch.
+
+    Coverage only ever grows within one membership epoch. Two hydrators can
+    finish in either order, and a narrower walk finishing last cannot overwrite
+    the wider walk's proof that it reached the end or attempted a stronger
+    policy. A later membership is a different view and clears both facts.
+    """
+    if not claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
         return False
+    publish_conversation_hydration(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        complete=complete,
+        attempted_policy_rank=attempted_policy_rank,
+        membership_epoch=expected_membership_epoch,
+    )
+    return True
+
+
+def publish_conversation_hydration(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    complete: bool,
+    attempted_policy_rank: int,
+    membership_epoch: int,
+) -> None:
+    """Publish hydration after the caller has claimed ``membership_epoch``."""
     transaction.execute(
         """
         INSERT INTO conversation_hydration (
@@ -441,12 +455,11 @@ def mark_conversation_hydrated(
             principal_id,
             room_id,
             encode_thread_id(thread_id),
-            current_epoch,
+            membership_epoch,
             int(complete),
             attempted_policy_rank,
         ),
     )
-    return True
 
 
 def _visible_message(row: Row) -> VisibleMessage:

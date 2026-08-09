@@ -204,7 +204,7 @@ class HydrationView(Protocol):
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
-        """Install one room walk and settle the debt it was run for, together."""
+        """Install one room walk in chunks, then publish and settle together."""
         ...
 
     async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
@@ -230,7 +230,7 @@ class HydrationView(Protocol):
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> bool:
-        """Install a completed hydration atomically, or install nothing."""
+        """Install hydration chunks, then publish their completed marker."""
         ...
 
     async def install_refetched_revision(

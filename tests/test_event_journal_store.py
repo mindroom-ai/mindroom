@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
@@ -41,6 +41,7 @@ from mindroom.event_journal import (
     EventClass,
     EventJournalStore,
     EventKind,
+    HistoryDebtOutcome,
     InboundEvent,
     ProjectedEvent,
     TerminalTurnWrite,
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, TurnRecordStore
+    from mindroom.event_journal import OutboxDelivery, PrincipalStore, RefreshRequest, RoomHistoryDebt, TurnRecordStore
     from mindroom.event_journal.backend import Backend, Operation, Transaction
 
 pytestmark = pytest.mark.asyncio
@@ -102,6 +103,12 @@ _SETTLEMENT_WAIT_SECONDS = 5.0
 # what it dequeues wakes one parked producer per entry, so any count at or
 # below the old bound of 512 passes against the bug that stranded the rest.
 _WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND = 1_100
+# One transaction this small is independent of the one-million-message export
+# ceiling. The tests feed one more event than the bound so moving the complete
+# loop back into one write is a directly observed failure, not a timing
+# inference.
+_HYDRATION_TRANSACTION_EVENT_LIMIT = 256
+_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS = _HYDRATION_TRANSACTION_EVENT_LIMIT + 1
 
 # `PRAGMA synchronous` reports the mode it is set to as an integer.
 _SQLITE_SYNCHRONOUS_NORMAL = 1
@@ -286,6 +293,83 @@ class _PausingBackend:
         await self.inner.close()
 
 
+@dataclass(slots=True)
+class _HydrationWriteShape:
+    """The hydration work one real backend transaction was asked to commit."""
+
+    membership_claims: int = 0
+    projected_messages: int = 0
+    hydration_markers: int = 0
+    debt_settlements: int = 0
+
+
+class _HydrationWriteTransaction:
+    """Profile hydration statements while executing them on a real transaction."""
+
+    def __init__(self, inner: Transaction) -> None:
+        self._inner = inner
+        self.shape = _HydrationWriteShape()
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> None:
+        """Run one statement and record the durable hydration effect it requests."""
+        if "INSERT INTO visible_messages" in sql:
+            self.shape.projected_messages += 1
+        if "INSERT INTO conversation_hydration" in sql:
+            self.shape.hydration_markers += 1
+        if "UPDATE room_history_debt SET owed_through_ts = NULL" in sql:
+            self.shape.debt_settlements += 1
+        self._inner.execute(sql, params)
+
+    def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
+        """Run one query and record a materialized membership claim."""
+        if "INSERT INTO room_membership" in sql:
+            self.shape.membership_claims += 1
+        return self._inner.fetchone(sql, params)
+
+    def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+        """Run one query without changing the write profile."""
+        return self._inner.fetchall(sql, params)
+
+
+@dataclass(slots=True)
+class _ObservedHydrationBackend:
+    """Observe and control transaction boundaries around the real backend."""
+
+    inner: Backend
+    before_write: Callable[[int], Awaitable[None]] | None = None
+    after_write: Callable[[int], Awaitable[None]] | None = None
+    write_shapes: list[_HydrationWriteShape] = field(default_factory=list)
+    writes_started: int = 0
+
+    async def write[T](self, operation: Operation[T]) -> T:
+        """Run one profiled write, with optional boundaries for failure races."""
+        self.writes_started += 1
+        write_number = self.writes_started
+        if self.before_write is not None:
+            await self.before_write(write_number)
+        observed: _HydrationWriteTransaction | None = None
+
+        def profile(transaction: Transaction) -> T:
+            nonlocal observed
+            observed = _HydrationWriteTransaction(transaction)
+            return operation(observed)
+
+        result = await self.inner.write(profile)
+        assert observed is not None
+        self.write_shapes.append(observed.shape)
+        if self.after_write is not None:
+            await self.after_write(write_number)
+        return result
+
+    async def read[T](self, operation: Operation[T]) -> T:
+        """Run reads unchanged on the real backend."""
+        return await self.inner.read(operation)
+
+    async def close(self) -> None:
+        """Close the wrapped backend."""
+        await self.inner.close()
+
+
 def sidecar(content: dict[str, object]) -> dict[str, object]:
     """Return one edit whose real text lives in an attached file."""
     new_content = dict(cast("dict[str, object]", content["m.new_content"]))
@@ -340,6 +424,11 @@ async def bodies(store: PrincipalStore, *, thread_id: str | None = None, limit: 
     """Return the visible bodies of one conversation, oldest first."""
     page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=limit)
     return [str(m.content["body"]) for m in page.messages]
+
+
+def hydration_messages(count: int) -> tuple[ProjectedEvent, ...]:
+    """Return enough distinct projected messages to exercise hydration batching."""
+    return tuple(message(f"$hydrated-{index:04d}", ts=1_000 + index)[1] for index in range(count))
 
 
 async def refreshes(
@@ -1760,6 +1849,268 @@ class TestMembershipEpoch:
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
+class TestBoundedHydrationInstallation:
+    """Strict walks never monopolize one backend write for their full result."""
+
+    @staticmethod
+    def _assert_bounded_projection_writes(shapes: list[_HydrationWriteShape], *, expected_events: int) -> None:
+        """Assert the externally relevant transaction shape of a hydration install."""
+        projection_shapes = [shape for shape in shapes if shape.projected_messages]
+        assert sum(shape.projected_messages for shape in projection_shapes) == expected_events
+        assert len(projection_shapes) >= 2
+        assert max(shape.projected_messages for shape in projection_shapes) <= _HYDRATION_TRANSACTION_EVENT_LIMIT
+        assert all(shape.membership_claims == 1 for shape in projection_shapes)
+
+    async def test_ordinary_hydration_projects_in_bounded_writes_then_publishes(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Putting the complete projection loop back in one write breaks this test."""
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        alice = EventJournalStore(backend=observed).principal("agent@alice")
+        events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
+
+        installed = await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=events,
+            complete=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert installed
+        self._assert_bounded_projection_writes(observed.write_shapes, expected_events=len(events))
+        publication_shapes = [shape for shape in observed.write_shapes if shape.hydration_markers]
+        assert publication_shapes == [observed.write_shapes[-1]]
+        assert publication_shapes[0].projected_messages == 0
+        assert publication_shapes[0].membership_claims == 1
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
+        coverage = await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None)
+        assert coverage is not None
+        assert coverage.attempted_policy_rank == 2
+
+    async def test_empty_hydration_still_claims_the_epoch_when_it_publishes(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Skipping the final write when there are no chunks breaks this test."""
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        alice = EventJournalStore(backend=observed).principal("agent@alice")
+
+        installed = await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert installed
+        assert observed.write_shapes == [
+            _HydrationWriteShape(membership_claims=1, hydration_markers=1),
+        ]
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_history_recovery_projects_in_bounded_writes_then_settles(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Combining recovery projection and settlement into one giant write breaks this test."""
+        alice = journal_store.principal("agent@alice")
+        await admit(alice, "$anchor", ts=500)
+        debt = await alice.record_room_history_debt(ROOM)
+        assert debt is not None
+        events = (message("$anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+        observed = _ObservedHydrationBackend(journal_store.backend)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+
+        outcome = await recovering.repay_room_history_debt(
+            debt,
+            events=events,
+            complete=True,
+            saw_anchor=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=await recovering.membership_epoch(ROOM),
+        )
+
+        assert outcome is HistoryDebtOutcome.REPAID
+        self._assert_bounded_projection_writes(observed.write_shapes, expected_events=len(events))
+        final_shape = observed.write_shapes[-1]
+        assert final_shape.hydration_markers == 1
+        assert final_shape.debt_settlements == 1
+        assert final_shape.projected_messages == 0
+        assert final_shape.membership_claims == 1
+        assert await recovering.room_history_debt(ROOM) is None
+        assert await recovering.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_failure_after_a_recovery_chunk_leaves_the_obligation_retryable(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Publishing or settling before every chunk lands breaks this retry."""
+        alice = journal_store.principal("agent@alice")
+        await admit(alice, "$anchor", ts=500)
+        debt = await alice.record_room_history_debt(ROOM)
+        assert debt is not None
+        events = (message("$anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+
+        async def fail_second_write(write_number: int) -> None:
+            if write_number == 2:
+                msg = "injected failure after a committed hydration chunk"
+                raise RuntimeError(msg)
+
+        observed = _ObservedHydrationBackend(journal_store.backend, before_write=fail_second_write)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+
+        with pytest.raises(RuntimeError, match="injected failure"):
+            await recovering.repay_room_history_debt(
+                debt,
+                events=events,
+                complete=True,
+                saw_anchor=True,
+                attempted_policy_rank=2,
+                expected_membership_epoch=await recovering.membership_epoch(ROOM),
+            )
+
+        assert observed.write_shapes[0].projected_messages == _HYDRATION_TRANSACTION_EVENT_LIMIT
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None) is None
+        assert await alice.room_history_debt(ROOM) == debt
+
+        outcome = await alice.repay_room_history_debt(
+            debt,
+            events=events,
+            complete=True,
+            saw_anchor=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=await alice.membership_epoch(ROOM),
+        )
+
+        assert outcome is HistoryDebtOutcome.REPAID
+        assert await alice.room_history_debt(ROOM) is None
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=len(events) + 1)
+        assert {message.logical_event_id for message in page.messages} == {event.event_id for event in events}
+
+    async def test_cancellation_after_a_chunk_leaves_ordinary_hydration_retryable(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Publishing in a projection chunk would make cancellation look complete."""
+        first_chunk_committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause_after_first_write(write_number: int) -> None:
+            if write_number == 1:
+                first_chunk_committed.set()
+                await release.wait()
+
+        observed = _ObservedHydrationBackend(journal_store.backend, after_write=pause_after_first_write)
+        hydrating = EventJournalStore(backend=observed).principal("agent@alice")
+        alice = journal_store.principal("agent@alice")
+        events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
+        epoch = await alice.membership_epoch(ROOM)
+        install = asyncio.create_task(
+            hydrating.install_hydrated_conversation(
+                room_id=ROOM,
+                thread_id=None,
+                events=events,
+                complete=True,
+                attempted_policy_rank=2,
+                expected_membership_epoch=epoch,
+            ),
+        )
+        await first_chunk_committed.wait()
+        install.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await install
+        release.set()
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert await alice.conversation_hydration_coverage(room_id=ROOM, thread_id=None) is None
+        partial = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=len(events))
+        assert len(partial.messages) == _HYDRATION_TRANSACTION_EVENT_LIMIT
+
+        assert await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=events,
+            complete=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=epoch,
+        )
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=len(events))
+        assert {message.logical_event_id for message in page.messages} == {event.event_id for event in events}
+
+    async def test_membership_fence_between_chunks_supersedes_the_whole_install(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Omitting the per-chunk epoch claim resurrects rows behind this fence."""
+        alice = journal_store.principal("agent@alice")
+        stale_epoch = await alice.membership_epoch(ROOM)
+
+        async def fence_after_first_write(write_number: int) -> None:
+            if write_number == 1:
+                await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+
+        observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_after_first_write)
+        hydrating = EventJournalStore(backend=observed).principal("agent@alice")
+        installed = await hydrating.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS),
+            complete=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=stale_epoch,
+        )
+
+        assert not installed
+        assert await alice.membership_epoch(ROOM) == stale_epoch + 1
+        assert await bodies(alice, limit=_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS) == []
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    async def test_membership_fence_during_recovery_does_not_settle_a_newer_debt(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Settling recovery outside final epoch validation erases this newer debt."""
+        alice = journal_store.principal("agent@alice")
+        await admit(alice, "$old-anchor", ts=500)
+        old_debt = await alice.record_room_history_debt(ROOM)
+        assert old_debt is not None
+        stale_epoch = await alice.membership_epoch(ROOM)
+        newer_debt: RoomHistoryDebt | None = None
+
+        async def fence_and_record_new_debt(write_number: int) -> None:
+            nonlocal newer_debt
+            if write_number == 1:
+                await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+                await admit(alice, "$new-anchor", ts=10_000)
+                newer_debt = await alice.record_room_history_debt(ROOM)
+
+        observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_debt)
+        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        events = (message("$old-anchor", ts=500)[1], *hydration_messages(_HYDRATION_TRANSACTION_EVENT_LIMIT))
+
+        outcome = await recovering.repay_room_history_debt(
+            old_debt,
+            events=events,
+            complete=True,
+            saw_anchor=True,
+            attempted_policy_rank=2,
+            expected_membership_epoch=stale_epoch,
+        )
+
+        assert outcome is HistoryDebtOutcome.SUPERSEDED
+        assert newer_debt is not None
+        assert await alice.room_history_debt(ROOM) == newer_debt
+        assert await bodies(alice, limit=len(events)) == ["$new-anchor"]
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+
 # How long a racer is given to queue behind the held row before the test calls
 # it a failure, and how often that is checked. Generous because the wait is a
 # condition rather than a delay: reaching it early costs nothing.
@@ -1993,10 +2344,74 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
         fence.add_done_callback(lambda _: fence_finished.set())
         installed, outcome = await asyncio.gather(walk, fence)
 
-        assert installed, "the walk declined on its own, so nothing raced the fence"
+        assert not installed, "the final publication trusted the epoch the fence superseded"
         assert outcome.observation is DepartureObservation.FENCED
         assert outcome.membership_epoch == epoch + 1
         assert await bodies(reader) == [], "the walk's messages survived the departure that was supposed to erase them"
+        assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+
+class TestRecoveryFinalizesOnlyItsExactDebt:
+    """The final recovery commit cannot consume a later process's obligation."""
+
+    async def test_replaced_debt_is_locked_and_refused_before_publication(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A plain debt read followed by an unconditional settlement breaks this test."""
+        principal_id = "agent@alice"
+        reader = rival_stores.first.principal(principal_id)
+        await admit(reader, "$old-anchor", ts=500)
+        old_debt = await reader.record_room_history_debt(ROOM)
+        assert old_debt is not None
+        newer_debt = replace(
+            old_debt,
+            owed_through_ts=10_000,
+            owed_through_event_id="$new-anchor",
+        )
+        inside_final = threading.Event()
+        replacement_finished = threading.Event()
+
+        def pause_after_first_statement() -> None:
+            inside_final.set()
+            assert replacement_finished.wait(_WORKER_WAIT_SECONDS), "the replacement write never finished"
+
+        recovering = EventJournalStore(
+            backend=_PausingBackend(rival_stores.first.backend, pause_after_first_statement),
+        ).principal(principal_id)
+        repayment = asyncio.create_task(
+            recovering.repay_room_history_debt(
+                old_debt,
+                events=(),
+                complete=True,
+                saw_anchor=True,
+                attempted_policy_rank=2,
+                expected_membership_epoch=await reader.membership_epoch(ROOM),
+            ),
+        )
+        await asyncio.to_thread(inside_final.wait, _WORKER_WAIT_SECONDS)
+        assert inside_final.is_set(), "the repayment never entered its final transaction"
+        try:
+            await rival_stores.second.backend.write(
+                lambda transaction: transaction.execute(
+                    """
+                    UPDATE room_history_debt
+                    SET owed_through_ts = ?, owed_through_event_id = ?
+                    WHERE principal_id = ? AND room_id = ?
+                    """,
+                    (
+                        newer_debt.owed_through_ts,
+                        newer_debt.owed_through_event_id,
+                        principal_id,
+                        ROOM,
+                    ),
+                ),
+            )
+        finally:
+            replacement_finished.set()
+
+        assert await repayment is HistoryDebtOutcome.SUPERSEDED
+        assert await reader.room_history_debt(ROOM) == newer_debt
         assert not await reader.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 

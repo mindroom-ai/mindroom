@@ -41,7 +41,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .backend import Transaction
+    from .backend import Row, Transaction
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +164,17 @@ def record(transaction: Transaction, principal_id: str, room_id: str) -> RoomHis
     return RoomHistoryDebt(room_id=room_id, owed_through_ts=owed_ts, owed_through_event_id=owed_event_id)
 
 
+def _debt_from_row(room_id: str, row: Row | None) -> RoomHistoryDebt | None:
+    """Return the outstanding debt represented by one storage row."""
+    if row is None or row["owed_through_event_id"] is None:
+        return None
+    return RoomHistoryDebt(
+        room_id=room_id,
+        owed_through_ts=int(row["owed_through_ts"]),
+        owed_through_event_id=str(row["owed_through_event_id"]),
+    )
+
+
 def outstanding(transaction: Transaction, principal_id: str, room_id: str) -> RoomHistoryDebt | None:
     """Return the history this room still owes a walk, or nothing.
 
@@ -171,19 +182,35 @@ def outstanding(transaction: Transaction, principal_id: str, room_id: str) -> Ro
     of one a walk can settle. A row carrying a timestamp and no anchor owes
     nothing: it predates anchors, and no walk could ever prove it covered.
     """
-    row = transaction.fetchone(
-        """
-        SELECT owed_through_ts, owed_through_event_id FROM room_history_debt
-        WHERE principal_id = ? AND room_id = ?
-        """,
-        (principal_id, room_id),
+    return _debt_from_row(
+        room_id,
+        transaction.fetchone(
+            """
+            SELECT owed_through_ts, owed_through_event_id FROM room_history_debt
+            WHERE principal_id = ? AND room_id = ?
+            """,
+            (principal_id, room_id),
+        ),
     )
-    if row is None or row["owed_through_event_id"] is None:
-        return None
-    return RoomHistoryDebt(
-        room_id=room_id,
-        owed_through_ts=int(row["owed_through_ts"]),
-        owed_through_event_id=str(row["owed_through_event_id"]),
+
+
+def claim_outstanding(transaction: Transaction, principal_id: str, room_id: str) -> RoomHistoryDebt | None:
+    """Lock and return the exact debt that a final recovery may settle.
+
+    A self-update is portable across both backends and prevents another process
+    from replacing the row after this comparison but before settlement.
+    """
+    return _debt_from_row(
+        room_id,
+        transaction.fetchone(
+            """
+            UPDATE room_history_debt
+            SET owed_through_ts = owed_through_ts
+            WHERE principal_id = ? AND room_id = ?
+            RETURNING owed_through_ts, owed_through_event_id
+            """,
+            (principal_id, room_id),
+        ),
     )
 
 

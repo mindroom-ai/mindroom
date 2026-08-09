@@ -9,6 +9,7 @@ rather than something it is trusted not to do.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import batched
 from typing import TYPE_CHECKING, Any
 
 from . import approvals, history_debt, journal, outbox, reads, turn_records
@@ -21,7 +22,7 @@ from .history_debt import (
     RoomHistoryDebt,
 )
 from .models import DeliveryAcknowledgement
-from .projection import drop_refetched_message, install_refetched_revision
+from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -50,6 +51,11 @@ if TYPE_CHECKING:
 _DEFAULT_PENDING_LIMIT = 256
 _DEFAULT_UNACKNOWLEDGED_LIMIT = 256
 _DEFAULT_ROOM_CARD_LIMIT = 256
+# A strict export can retain one million messages from as many as two million
+# fetched events. Keeping each write to 256 projected events puts a hard ceiling
+# on the work done while SQLite holds its global writer, independently of the
+# export ceiling or the result's actual size.
+_HYDRATION_INSTALL_CHUNK_SIZE = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,10 +314,12 @@ class PrincipalStore:
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> bool:
-        """Install a completed hydration atomically, or install nothing.
+        """Install a hydration in bounded writes, then publish it once complete.
 
-        A partially applied hydration would look complete to the next reader,
-        so the events and the completion marker share one transaction.
+        Projection chunks are idempotent and may remain after interruption, but
+        no strict reader trusts them until the final marker commits. Every
+        chunk and the marker claim the expected membership epoch separately,
+        so a fence between commits deletes earlier rows and refuses later ones.
 
         ``complete`` is the walk's own account of why it stopped, and it is
         recorded rather than inferred because nothing downstream could recover
@@ -326,13 +334,20 @@ class PrincipalStore:
         for, and the direction that costs a redundant walk rather than a short
         answer.
         """
+        if not await _install_hydration_chunks(
+            self._backend,
+            self._principal_id,
+            room_id=room_id,
+            events=events,
+            expected_membership_epoch=expected_membership_epoch,
+        ):
+            return False
         return await self._backend.write(
-            lambda transaction: _install_hydration(
+            lambda transaction: reads.mark_conversation_hydrated(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
-                events=events,
                 complete=complete,
                 attempted_policy_rank=attempted_policy_rank,
                 expected_membership_epoch=expected_membership_epoch,
@@ -361,25 +376,31 @@ class PrincipalStore:
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
     ) -> HistoryDebtOutcome:
-        """Install one room walk and settle the debt it was run for, together.
+        """Install one room walk in chunks, then publish and settle together.
 
-        Two facts that must not be able to disagree: the events the walk found
-        and whether the hole they were fetched for is closed. Settling in a
-        second transaction would leave a crash between them owing history the
-        projection already holds, or -- far worse the other way round -- holding
-        a repaired room that still reads as indebted forever.
+        A failed chunk leaves the exact debt outstanding and the hydration
+        marker absent. The final transaction compares the debt, claims the
+        membership epoch, publishes hydration, and settles the obligation as
+        one commit, so strict readers cannot observe those facts disagreeing.
 
         A repayment is a real walk of the room under the hydrator's own policy,
         so it records that policy for the same reason an ordinary hydration
         does: it is the deeper walk a strict caller was owed, and nothing else
         would remember that it already happened.
         """
+        if not await _install_hydration_chunks(
+            self._backend,
+            self._principal_id,
+            room_id=debt.room_id,
+            events=events,
+            expected_membership_epoch=expected_membership_epoch,
+        ):
+            return HistoryDebtOutcome.SUPERSEDED
         return await self._backend.write(
             lambda transaction: _repay_history_debt(
                 transaction,
                 self._principal_id,
                 debt,
-                events=events,
                 complete=complete,
                 saw_anchor=saw_anchor,
                 attempted_policy_rank=attempted_policy_rank,
@@ -791,42 +812,46 @@ def _repay_history_debt(
     principal_id: str,
     debt: RoomHistoryDebt,
     *,
-    events: tuple[ProjectedEvent, ...],
     complete: bool,
     saw_anchor: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> HistoryDebtOutcome:
-    """Install a repayment walk as the room conversation's hydration, and settle.
+    """Publish a repayment walk as the room hydration, and settle its debt.
 
     Both effects are gated on the debt this walk was launched with still being
     the outstanding one, checked here in the same transaction that applies them.
     Concurrent readers of an indebted room can each end up carrying a snapshot:
     one reads the debt, a second reads it before the first settles, and the
     shared-task map cannot join a walk that has already finished. The loser then
-    arrives with an answer to a question nobody is asking, and neither effect is
-    harmless -- its shorter walk would replace a room conversation the winner
-    just installed in full, and `settle` would stamp permanent, sticky loss on a
-    room that was repaid seconds earlier.
+    arrives with an answer to a question nobody is asking. Its idempotent
+    projection chunks may remain, but they publish no coverage; allowing its
+    final marker or settlement would stamp the loser's result over a debt that
+    was repaid seconds earlier.
 
     The check is a compare-and-set on the exact anchor rather than a presence
     test, so a *later* gap recorded over the top is superseding too: its debt is
     a different question, and this walk did not answer it.
     """
-    current = history_debt.outstanding(transaction, principal_id, debt.room_id)
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=debt.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return HistoryDebtOutcome.SUPERSEDED
+    current = history_debt.claim_outstanding(transaction, principal_id, debt.room_id)
     if current != debt:
         return HistoryDebtOutcome.SUPERSEDED
-    if not _install_hydration(
+    reads.publish_conversation_hydration(
         transaction,
         principal_id,
         room_id=debt.room_id,
         thread_id=None,
-        events=events,
         complete=complete,
         attempted_policy_rank=attempted_policy_rank,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return HistoryDebtOutcome.SUPERSEDED
+        membership_epoch=expected_membership_epoch,
+    )
     return history_debt.settle(
         transaction,
         principal_id,
@@ -836,26 +861,43 @@ def _repay_history_debt(
     )
 
 
-def _install_hydration(
+async def _install_hydration_chunks(
+    backend: Backend,
+    principal_id: str,
+    *,
+    room_id: str,
+    events: tuple[ProjectedEvent, ...],
+    expected_membership_epoch: int,
+) -> bool:
+    """Project a walk in hard-bounded, independently fenced transactions."""
+    for chunk in batched(events, _HYDRATION_INSTALL_CHUNK_SIZE):
+        installed = await backend.write(
+            lambda transaction, chunk=chunk: _install_hydration_chunk(
+                transaction,
+                principal_id,
+                room_id=room_id,
+                events=chunk,
+                expected_membership_epoch=expected_membership_epoch,
+            ),
+        )
+        if not installed:
+            return False
+    return True
+
+
+def _install_hydration_chunk(
     transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
     principal_id: str,
     *,
     room_id: str,
-    thread_id: str | None,
     events: tuple[ProjectedEvent, ...],
-    complete: bool,
-    attempted_policy_rank: int,
     expected_membership_epoch: int,
 ) -> bool:
-    from .projection import project  # noqa: PLC0415 - keeps the module import-light
-
-    if not reads.mark_conversation_hydrated(
+    """Project one chunk only while its membership epoch is current."""
+    if not reads.claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
-        thread_id=thread_id,
-        complete=complete,
-        attempted_policy_rank=attempted_policy_rank,
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
