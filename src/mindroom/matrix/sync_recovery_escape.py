@@ -80,17 +80,19 @@ class SyncRecoveryStallTracker:
                 del self._stalls[room_id]
 
     def _record_failure(self, room_id: str, checkpoint_token: str | None) -> SkippedRecoveryGap | None:
-        """Count one failure for a room and return its gap once it must be skipped."""
+        """Count one failure and retain skip eligibility until progress resolves it."""
         stall = self._stalls.get(room_id)
         if stall is None or stall.checkpoint_token != checkpoint_token:
             # The checkpoint moved, so the previous failures were measured
             # against a position this room has since advanced past.
             stall = _RoomStall(checkpoint_token=checkpoint_token)
             self._stalls[room_id] = stall
-        stall.failed_attempts += 1
+        stall.failed_attempts = min(
+            stall.failed_attempts + 1,
+            _CLASSIC_SYNC_RECOVERY_STALL_LIMIT,
+        )
         if stall.failed_attempts < _CLASSIC_SYNC_RECOVERY_STALL_LIMIT:
             return None
-        del self._stalls[room_id]
         return SkippedRecoveryGap(
             room_id=room_id,
             skipped_from_token=checkpoint_token,

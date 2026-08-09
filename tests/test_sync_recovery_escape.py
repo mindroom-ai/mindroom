@@ -34,7 +34,7 @@ from tests.sync_continuity_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.event_journal import HistoryRecoveryRecordView
+    from mindroom.event_journal import HistoryRecoveryRecordView, RoomHistoryRecovery
 
 _STORE_GENERATION = "sync-recovery-escape"
 _WEDGED_ROOM = "!wedged:localhost"
@@ -43,6 +43,21 @@ _SKIP_LOG_EVENT = "matrix_sync_recovery_gap_skipped_after_stalled_rebuild"
 _STUCK = "s_stuck"  # an opaque Matrix sync token, not a credential
 _SKIPPED_TO = "s_live_now"
 _REPLAYED = "s_live_replayed"
+_APPLY_RETRIED = "s_apply_retried"
+
+
+class _FailOnceHistoryRecoveries(RecordedHistoryRecoveries):
+    """Refuse the first durable gap record, then behave normally."""
+
+    fail_next = True
+
+    async def record_room_history_recovery(self, room_id: str) -> RoomHistoryRecovery:
+        """Leave the first proposed skip unapplied."""
+        if self.fail_next:
+            self.fail_next = False
+            msg = "injected history-recovery persistence failure"
+            raise RuntimeError(msg)
+        return await super().record_room_history_recovery(room_id)
 
 
 def _trust(tmp_path: Path, *, history_recovery: HistoryRecoveryRecordView | None = None) -> SyncCheckpointTrust:
@@ -163,19 +178,23 @@ def test_a_wedged_room_never_skips_a_room_that_only_just_failed() -> None:
     assert [gap.room_id for gap in skipped] == [_WEDGED_ROOM]
 
 
-def test_a_skipped_room_earns_a_full_fresh_count() -> None:
-    """Skipping a gap resets that room, so the next stall is proven from scratch."""
+def test_skip_eligibility_survives_until_every_unrecovered_room_is_eligible() -> None:
+    """Offset rooms must converge instead of alternately losing their threshold."""
     tracker = SyncRecoveryStallTracker()
-    rooms = frozenset({_WEDGED_ROOM})
-    for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT):
-        tracker.observe(unrecovered_room_ids=rooms, checkpoint_token=_STUCK)
+    for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
+        tracker.observe(unrecovered_room_ids=frozenset({_WEDGED_ROOM}), checkpoint_token=_STUCK)
 
-    after_skip = [
-        tracker.observe(unrecovered_room_ids=rooms, checkpoint_token=_STUCK)
-        for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1)
+    both = frozenset({_WEDGED_ROOM, _HEALTHY_ROOM})
+    skipped_room_ids = [
+        frozenset(gap.room_id for gap in tracker.observe(unrecovered_room_ids=both, checkpoint_token=_STUCK))
+        for _ in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT)
     ]
 
-    assert after_skip == [()] * (_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1)
+    assert skipped_room_ids == [
+        frozenset({_WEDGED_ROOM}),
+        frozenset({_WEDGED_ROOM}),
+        both,
+    ]
 
 
 # --- The escape through real cache trust ------------------------------------
@@ -318,6 +337,82 @@ async def test_a_wedged_room_does_not_make_a_healthy_room_skip(tmp_path: Path) -
     assert [entry["event"] for entry in logs].count(_SKIP_LOG_EVENT) == 0
     assert load_sync_checkpoint(tmp_path, "code") is not None
     assert trust.retry_token() == _STUCK
+
+
+@pytest.mark.asyncio
+async def test_offset_wedged_rooms_eventually_advance_together(tmp_path: Path) -> None:
+    """A room already eligible to skip must wait for, then advance with, its peer."""
+    recorder = RecordedHistoryRecoveries()
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
+    trust = _trust(tmp_path, history_recovery=recorder)
+    assert await trust.prepare_startup() == _STUCK
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
+        await _certify_unrecovered(
+            trust,
+            next_batch=f"s_first_{attempt}",
+            unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
+        )
+
+    both = frozenset({_WEDGED_ROOM, _HEALTHY_ROOM})
+    outcomes = [
+        await _certify_unrecovered(
+            trust,
+            next_batch=f"s_both_{attempt}",
+            unrecovered_room_ids=both,
+        )
+        for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT)
+    ]
+
+    assert outcomes[:-1] == [(SyncTrustState.UNCERTAIN, True)] * (_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1)
+    assert outcomes[-1] == (SyncTrustState.CERTIFIED, True)
+    assert recorder.rooms == sorted(both)
+    checkpoint = load_sync_checkpoint(tmp_path, "code")
+    assert checkpoint is not None
+    assert checkpoint.token == f"s_both_{_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1}"
+
+
+@pytest.mark.asyncio
+async def test_skip_eligibility_survives_a_failed_durable_apply(tmp_path: Path) -> None:
+    """Record-before-checkpoint failure must retry the same eligible rooms."""
+    recorder = _FailOnceHistoryRecoveries()
+    save_sync_token(tmp_path, "code", _STUCK, store_generation=_STORE_GENERATION)
+    trust = _trust(tmp_path, history_recovery=recorder)
+    assert await trust.prepare_startup() == _STUCK
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
+        await _certify_unrecovered(
+            trust,
+            next_batch=f"s_first_{attempt}",
+            unrecovered_room_ids=frozenset({_WEDGED_ROOM}),
+        )
+    both = frozenset({_WEDGED_ROOM, _HEALTHY_ROOM})
+    for attempt in range(_CLASSIC_SYNC_RECOVERY_STALL_LIMIT - 1):
+        await _certify_unrecovered(
+            trust,
+            next_batch=f"s_both_{attempt}",
+            unrecovered_room_ids=both,
+        )
+
+    with pytest.raises(RuntimeError, match="injected history-recovery persistence failure"):
+        await _certify_unrecovered(
+            trust,
+            next_batch="s_apply_failed",
+            unrecovered_room_ids=both,
+        )
+
+    checkpoint = load_sync_checkpoint(tmp_path, "code")
+    assert checkpoint is not None
+    assert checkpoint.token == _STUCK
+    outcome = await _certify_unrecovered(
+        trust,
+        next_batch=_APPLY_RETRIED,
+        unrecovered_room_ids=both,
+    )
+
+    assert outcome == (SyncTrustState.CERTIFIED, True)
+    assert recorder.rooms == sorted(both)
+    checkpoint = load_sync_checkpoint(tmp_path, "code")
+    assert checkpoint is not None
+    assert checkpoint.token == _APPLY_RETRIED
 
 
 @pytest.mark.asyncio
