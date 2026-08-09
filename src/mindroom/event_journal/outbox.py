@@ -168,7 +168,7 @@ def claim(
     happen.
 
     INITIAL and FINAL are also one durable ordering decision. An unattempted
-    INITIAL is suppressed once FINAL exists. An attempted, unacknowledged
+    INITIAL is withdrawn once FINAL exists. An attempted, unacknowledged
     INITIAL is different: Matrix may still accept it, so FINAL cannot be
     offered under its distinct transaction ID until retrying INITIAL has
     resolved that unknown outcome. Locking the INITIAL row makes those
@@ -194,6 +194,13 @@ def claim(
             (principal_id, turn_id, DeliveryStage.FINAL.value),
         )
         if final is not None:
+            transaction.execute(
+                """
+                DELETE FROM response_outbox
+                WHERE principal_id = ? AND turn_id = ? AND stage = ? AND attempted = 0
+                """,
+                (principal_id, turn_id, DeliveryStage.INITIAL.value),
+            )
             return None
     if stage is DeliveryStage.FINAL and current["edits_event_id"] is None:
         unresolved_initial = transaction.fetchone(

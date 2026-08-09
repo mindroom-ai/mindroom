@@ -777,11 +777,12 @@ class TestInitialAndFinalStages:
         assert runtime.homeserver.visible_messages == 1
         sends_after_recovery = runtime.homeserver.sends
 
-        # Acknowledged deliveries leave the recovery set, and the skipped
-        # placeholder is still skipped, so a second restart sends nothing.
+        # Acknowledged deliveries leave the recovery set, and the never-sent
+        # placeholder is withdrawn, so a second restart sends nothing.
         assert (await runtime.delivery.recover()).recovered == 0
         assert runtime.homeserver.sends == sends_after_recovery
         assert runtime.homeserver.visible_messages == 1
+        assert await runtime.store.load_delivery(turn_id=SOURCE, stage=DeliveryStage.INITIAL) is None
 
     async def test_live_final_cannot_overtake_initial_recovery_before_matrix_acceptance(
         self,
