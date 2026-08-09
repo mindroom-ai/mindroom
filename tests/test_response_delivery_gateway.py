@@ -1251,6 +1251,129 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         assert losing_publishes == [], "a caller that bound nothing published a record anyway"
 
 
+class TestTurnDeliverySerialization:
+    """The gateway shares one turn-scoped delivery order without leaking the lock."""
+
+    @staticmethod
+    async def _enqueue(alice: PrincipalStore, stage: DeliveryStage) -> None:
+        transaction_id = await alice.enqueue_delivery(
+            turn_id="turn-1",
+            stage=stage,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": stage.value},
+        )
+        assert transaction_id is not None
+
+    async def test_gateway_delivery_instances_share_the_turn_lock(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovery and live delivery use distinct objects but cannot reorder one turn."""
+        await self._enqueue(alice, DeliveryStage.INITIAL)
+        gateway = _gateway(tmp_path, alice)
+        initial_reached_matrix = asyncio.Event()
+        accept_initial = asyncio.Event()
+        accepted_stages: list[DeliveryStage] = []
+
+        async def send(delivery: OutboxDelivery) -> str:
+            if delivery.stage is DeliveryStage.INITIAL:
+                initial_reached_matrix.set()
+                await accept_initial.wait()
+            accepted_stages.append(delivery.stage)
+            return f"${delivery.stage.value}"
+
+        recovery_delivery = gateway._response_delivery(send, handoff=None)
+        live_delivery = gateway._response_delivery(send, handoff=ignore_final_delivery_handoff)
+        assert recovery_delivery is not live_delivery
+        recovery = asyncio.create_task(recovery_delivery.recover())
+        await initial_reached_matrix.wait()
+        final = asyncio.create_task(
+            live_delivery.deliver(
+                turn_id="turn-1",
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "final"},
+            ),
+        )
+        completed_before_initial_acceptance, _ = await asyncio.wait({final}, timeout=0.2)
+
+        accept_initial.set()
+        await recovery
+        await final
+
+        assert final not in completed_before_initial_acceptance
+        assert accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+
+    async def test_cancellation_releases_the_turn_lock(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cancelling an in-flight send lets the same turn retry immediately."""
+        await self._enqueue(alice, DeliveryStage.FINAL)
+        gateway = _gateway(tmp_path, alice)
+        send_started = asyncio.Event()
+        never_finishes = asyncio.Event()
+
+        async def blocked_send(_delivery: OutboxDelivery) -> str:
+            send_started.set()
+            await never_finishes.wait()
+            return "$cancelled"
+
+        async def retry_send(_delivery: OutboxDelivery) -> str:
+            return "$retry"
+
+        blocked_delivery = gateway._response_delivery(blocked_send, handoff=None)
+        retry_delivery = gateway._response_delivery(retry_send, handoff=None)
+        blocked = asyncio.create_task(blocked_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+        await send_started.wait()
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
+
+        retried = await asyncio.wait_for(
+            retry_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL),
+            timeout=1,
+        )
+
+        assert retried == "$retry"
+
+    async def test_terminal_callback_can_reenter_the_same_turn(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Publishing a committed FINAL runs after releasing its visible-delivery lock."""
+        await self._enqueue(alice, DeliveryStage.FINAL)
+        reentered: list[str | None] = []
+        reentrant_delivery: ResponseDelivery | None = None
+
+        async def publish_committed(_turn_id: str, _event_id: str) -> None:
+            assert reentrant_delivery is not None
+            reentered.append(await reentrant_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL))
+
+        async def send(_delivery: OutboxDelivery) -> str:
+            return "$answer"
+
+        gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish_committed)
+        outer_delivery = gateway._response_delivery(send, handoff=None)
+        reentrant_delivery = gateway._response_delivery(send, handoff=None)
+
+        try:
+            delivered = await asyncio.wait_for(
+                outer_delivery.flush(turn_id="turn-1", stage=DeliveryStage.FINAL),
+                timeout=0.5,
+            )
+        except TimeoutError:
+            pytest.fail("terminal callback deadlocked on the turn's visible-delivery lock")
+
+        assert delivered == "$answer"
+        assert reentered == ["$answer"]
+
+
 class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
     """The record an acknowledgement commits has to be written, not just published.
 

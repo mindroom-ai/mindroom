@@ -20,6 +20,7 @@ test here while production still ran the model twice.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -69,6 +70,7 @@ class FakeHomeserver:
     # What the room holds, as (turn, event). This is what a history scan reads,
     # and the only place a duplicated answer is visible.
     room_events: list[tuple[str, str]] = field(default_factory=list)
+    accepted_stages: list[DeliveryStage] = field(default_factory=list)
     # Changing this is a re-login: a new device, and an empty transaction-ID
     # namespace to go with it.
     device_id: str = "DEVICE1"
@@ -96,6 +98,7 @@ class FakeHomeserver:
             event_id = f"$sent{len(self.room_events)}"
             self.events[key] = event_id
             self.room_events.append((delivery.turn_id, event_id))
+            self.accepted_stages.append(delivery.stage)
         if self.lose_acknowledgement:
             self.lose_acknowledgement = False
             msg = "crashed after Matrix accepted the message"
@@ -779,6 +782,122 @@ class TestInitialAndFinalStages:
         assert (await runtime.delivery.recover()).recovered == 0
         assert runtime.homeserver.sends == sends_after_recovery
         assert runtime.homeserver.visible_messages == 1
+
+    async def test_live_final_cannot_overtake_initial_recovery_before_matrix_acceptance(
+        self,
+        runtime: TurnRuntime,
+    ) -> None:
+        """A FINAL cannot become visible while recovery has an earlier INITIAL in flight.
+
+        Recovery has already listed the unacknowledged placeholder and proved
+        no FINAL exists when its Matrix request pauses immediately before
+        acceptance. The live turn then tries to deliver FINAL under its
+        distinct transaction ID. Letting that request finish first makes the
+        later placeholder newly visible after the answer.
+        """
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "thinking"},
+        )
+        initial_reached_matrix = asyncio.Event()
+        accept_initial = asyncio.Event()
+
+        async def paused_before_initial_acceptance(delivery: OutboxDelivery) -> str:
+            if delivery.stage is DeliveryStage.INITIAL:
+                initial_reached_matrix.set()
+                await accept_initial.wait()
+            return await runtime.homeserver.send(delivery)
+
+        delivery_state = runtime.delivery
+        recovery_delivery = replace(delivery_state, send=paused_before_initial_acceptance)
+        live_delivery = replace(delivery_state, send=paused_before_initial_acceptance)
+        recovery = asyncio.create_task(recovery_delivery.recover())
+        await initial_reached_matrix.wait()
+        final = asyncio.create_task(
+            live_delivery.deliver(
+                turn_id=SOURCE,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "answer"},
+            ),
+        )
+        completed_before_initial_acceptance, _ = await asyncio.wait({final}, timeout=0.2)
+
+        accept_initial.set()
+        await recovery
+        final_event_id = await final
+
+        assert final not in completed_before_initial_acceptance, (
+            "FINAL became visible while recovery's earlier INITIAL was paused before Matrix acceptance"
+        )
+        assert final_event_id is not None
+        assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+
+    async def test_failed_initial_without_a_final_remains_recoverable(self, runtime: TurnRuntime) -> None:
+        """An INITIAL that Matrix never accepted remains owed until a later pass sends it."""
+        await runtime.store.enqueue_delivery(
+            turn_id=SOURCE,
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "thinking"},
+        )
+        runtime.homeserver.fail_next_send = True
+
+        failed = await runtime.delivery.recover()
+        recovered = await runtime.delivery.recover()
+
+        assert failed.failed == 1
+        assert recovered.recovered == 1
+        assert runtime.homeserver.accepted_stages == [DeliveryStage.INITIAL]
+
+    async def test_initial_cannot_become_visible_after_final_owns_delivery(self, runtime: TurnRuntime) -> None:
+        """A stale INITIAL waiting behind an in-flight FINAL is suppressed after FINAL completes."""
+        final_reached_matrix = asyncio.Event()
+        accept_final = asyncio.Event()
+
+        async def paused_before_final_acceptance(delivery: OutboxDelivery) -> str:
+            if delivery.stage is DeliveryStage.FINAL:
+                final_reached_matrix.set()
+                await accept_final.wait()
+            return await runtime.homeserver.send(delivery)
+
+        delivery_state = runtime.delivery
+        final_delivery = replace(delivery_state, send=paused_before_final_acceptance)
+        initial_delivery = replace(delivery_state, send=paused_before_final_acceptance)
+        final = asyncio.create_task(
+            final_delivery.deliver(
+                turn_id=SOURCE,
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "answer"},
+            ),
+        )
+        await final_reached_matrix.wait()
+        initial = asyncio.create_task(
+            initial_delivery.deliver(
+                turn_id=SOURCE,
+                stage=DeliveryStage.INITIAL,
+                room_id=ROOM,
+                thread_id=None,
+                payload={"msgtype": "m.text", "body": "thinking"},
+            ),
+        )
+        completed_before_final_acceptance, _ = await asyncio.wait({initial}, timeout=0.2)
+
+        accept_final.set()
+        final_event_id = await final
+        initial_event_id = await initial
+
+        assert initial not in completed_before_final_acceptance
+        assert final_event_id is not None
+        assert initial_event_id is None
+        assert runtime.homeserver.accepted_stages == [DeliveryStage.FINAL]
 
 
 class TestARelogInCannotDuplicateTheAnswer:

@@ -13,8 +13,10 @@ outbox both owning the same turn.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 from mindroom.event_journal import DeliveryStage
 from mindroom.logging_config import get_logger
@@ -78,6 +80,14 @@ class RecoveryOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _FlushOutcome:
+    """One locked send result and the callback it leaves for after unlock."""
+
+    event_id: str | None
+    publish_committed_terminal: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseDelivery:
     """Claim-before-send delivery against one principal's outbox."""
 
@@ -105,6 +115,19 @@ class ResponseDelivery:
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
+    turn_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        repr=False,
+        compare=False,
+    )
+
+    def _turn_lock(self, turn_id: str) -> asyncio.Lock:
+        """Return the lock ordering visible delivery for one turn."""
+        lock = self.turn_locks.get(turn_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.turn_locks[turn_id] = lock
+        return lock
 
     async def deliver(
         self,
@@ -125,10 +148,10 @@ class ResponseDelivery:
         duplicate transaction and the durable result and the room would
         disagree forever.
 
-        Nothing means the answer is not this membership's to give: either the
-        store refused the intent, or the fence deleted the row between
-        recording it and claiming it. Both are the same fact arriving through
-        different orderings, and neither is a failure to report.
+        Nothing means the delivery must not become visible: either the store
+        refused the intent, the fence deleted the row between recording it and
+        claiming it, or a FINAL already superseded an INITIAL. None is a
+        failure to report.
 
         A refusal is the one outcome that must leave the turn where it was.
         Nothing durable owes the answer afterwards -- there is no row -- so
@@ -142,23 +165,25 @@ class ResponseDelivery:
         commit together, so the send below is the only step a crash can leave
         half done -- and resending a frozen row is what recovery is for.
         """
-        handoff = self.handoff if stage is DeliveryStage.FINAL else None
-        handed_over = handoff.sources_for_turn(turn_id) if handoff is not None else ()
-        transaction_id = await self.store.enqueue_delivery(
-            turn_id=turn_id,
-            stage=stage,
-            room_id=room_id,
-            thread_id=thread_id,
-            payload=payload,
-            edits_event_id=edits_event_id,
-            settle_source_event_ids=handed_over,
-        )
-        if transaction_id is None:
-            logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
-            return None
-        if handoff is not None:
-            handoff.released(handed_over)
-        return await self.flush(turn_id=turn_id, stage=stage)
+        async with self._turn_lock(turn_id):
+            handoff = self.handoff if stage is DeliveryStage.FINAL else None
+            handed_over = handoff.sources_for_turn(turn_id) if handoff is not None else ()
+            transaction_id = await self.store.enqueue_delivery(
+                turn_id=turn_id,
+                stage=stage,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                edits_event_id=edits_event_id,
+                settle_source_event_ids=handed_over,
+            )
+            if transaction_id is None:
+                logger.info("response_delivery_refused_for_ended_membership", turn_id=turn_id, stage=stage.value)
+                return None
+            if handoff is not None:
+                handoff.released(handed_over)
+            outcome = await self._flush(turn_id=turn_id, stage=stage)
+        return await self._finish_flush(turn_id, outcome)
 
     def _transaction_id_still_deduplicates(self, claimed: OutboxDelivery) -> bool:
         """Return whether resending this row can only collapse onto its own event.
@@ -208,8 +233,8 @@ class ResponseDelivery:
     async def flush(self, *, turn_id: str, stage: DeliveryStage) -> str | None:
         """Send one enqueued delivery, or resend the identical one.
 
-        Nothing means the row is gone, which only a membership fence does, and
-        only to a delivery nothing outside this process has seen.
+        Nothing means the row is gone behind a membership fence, or this is an
+        INITIAL a FINAL already superseded.
 
         Between the claim and the send sits the one question the outbox cannot
         answer from its own state: is the frozen transaction ID still proof
@@ -218,12 +243,20 @@ class ResponseDelivery:
         asked directly, and an answer already there is adopted instead of sent
         again.
         """
+        async with self._turn_lock(turn_id):
+            outcome = await self._flush(turn_id=turn_id, stage=stage)
+        return await self._finish_flush(turn_id, outcome)
+
+    async def _flush(self, *, turn_id: str, stage: DeliveryStage) -> _FlushOutcome:
+        """Send one delivery while holding its turn's visible-delivery lock."""
+        if await self._superseded_placeholder(turn_id=turn_id, stage=stage):
+            return _FlushOutcome(event_id=None)
         claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
         if claimed is None:
             logger.info("response_delivery_row_withdrawn", turn_id=turn_id, stage=stage.value)
-            return None
+            return _FlushOutcome(event_id=None)
         if claimed.acknowledged_event_id is not None:
-            return claimed.acknowledged_event_id
+            return _FlushOutcome(event_id=claimed.acknowledged_event_id)
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
@@ -237,16 +270,19 @@ class ResponseDelivery:
         event_id = await self.send(claimed)
         return await self._acknowledge(turn_id, stage, event_id)
 
-    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> str:
-        """Bind the row, then settle the record the transaction committed with it.
+    async def _acknowledge(self, turn_id: str, stage: DeliveryStage, event_id: str) -> _FlushOutcome:
+        """Bind the row and report whether its record needs publishing.
 
         The record commits inside the acknowledgement, so nothing else writes
         it -- which means the ledger never sees that write in the order it
         orders its own. Recovery is where that matters: it acknowledges and
         returns with no ordinary terminal write following, so a mutation racing
         this one overwrites the row and the answer's event ID is gone for good.
-        Settling here is what puts the record back under the ledger's ordering,
-        and it is awaited because a write is what it now is.
+        Publishing the committed record is what puts it back under the
+        ledger's ordering. That callback runs after the visible-delivery lock
+        is released: it is downstream bookkeeping, and keeping the lock while
+        calling out would let a callback that re-enters delivery deadlock the
+        turn on itself.
 
         Only on a bound acknowledgement. A loser committed nothing, so it has
         nothing to settle and must not overwrite the winner's record.
@@ -273,10 +309,21 @@ class ResponseDelivery:
             terminal_turn=self._terminal_turn(turn_id, stage, event_id),
         )
         if acknowledged.settled_event_id is None:
-            return event_id
-        if acknowledged.bound and stage is DeliveryStage.FINAL and self.terminal_turn_committed is not None:
-            await self.terminal_turn_committed(turn_id, acknowledged.settled_event_id)
-        return acknowledged.settled_event_id
+            return _FlushOutcome(event_id=event_id)
+        return _FlushOutcome(
+            event_id=acknowledged.settled_event_id,
+            publish_committed_terminal=acknowledged.bound and stage is DeliveryStage.FINAL,
+        )
+
+    async def _finish_flush(self, turn_id: str, outcome: _FlushOutcome) -> str | None:
+        """Run post-lock bookkeeping and return the visible event."""
+        if (
+            outcome.publish_committed_terminal
+            and outcome.event_id is not None
+            and self.terminal_turn_committed is not None
+        ):
+            await self.terminal_turn_committed(turn_id, outcome.event_id)
+        return outcome.event_id
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.
@@ -324,7 +371,7 @@ class ResponseDelivery:
         )
         return already_delivered
 
-    async def _superseded_placeholder(self, delivery: OutboxDelivery) -> bool:
+    async def _superseded_placeholder(self, *, turn_id: str, stage: DeliveryStage) -> bool:
         """Return whether this delivery is a placeholder the answer overtook.
 
         A placeholder send whose outcome was never confirmed leaves a row
@@ -344,9 +391,9 @@ class ResponseDelivery:
         attempted row is the only record that something may already be in the
         room under its transaction ID.
         """
-        if delivery.stage is not DeliveryStage.INITIAL:
+        if stage is not DeliveryStage.INITIAL:
             return False
-        return await self.store.load_delivery(turn_id=delivery.turn_id, stage=DeliveryStage.FINAL) is not None
+        return await self.store.load_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL) is not None
 
     async def recover(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome is unknown.
@@ -378,10 +425,10 @@ class ResponseDelivery:
                 return RecoveryOutcome(recovered=recovered, failed=failed)
             cursor = (batch[-1].created_at_ns, batch[-1].turn_id, batch[-1].stage.value)
             for delivery in batch:
-                if await self._superseded_placeholder(delivery):
-                    continue
                 try:
-                    sent = await self.flush(turn_id=delivery.turn_id, stage=delivery.stage)
+                    async with self._turn_lock(delivery.turn_id):
+                        outcome = await self._flush(turn_id=delivery.turn_id, stage=delivery.stage)
+                    sent = await self._finish_flush(delivery.turn_id, outcome)
                 except Exception:
                     logger.exception(
                         "response_delivery_recovery_failed",
@@ -394,9 +441,9 @@ class ResponseDelivery:
                     failed += 1
                     continue
                 if sent is None:
-                    # The row went away between being listed and being
-                    # claimed, which only a membership fence does. Nothing is
-                    # owed and nothing failed.
+                    # The row went away behind a membership fence, or a
+                    # FINAL superseded this INITIAL. Nothing is owed and
+                    # nothing failed.
                     continue
                 recovered += 1
 

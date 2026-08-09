@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
+from weakref import WeakValueDictionary
 
 from nio.exceptions import SendRetryError
 
@@ -403,6 +404,12 @@ class DeliveryGateway:
     """Send, edit, redact, and finalize visible Matrix responses."""
 
     deps: DeliveryGatewayDeps
+    _delivery_turn_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for delivery."""
@@ -626,6 +633,7 @@ class DeliveryGateway:
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
             terminal_turn_committed=self.deps.terminal_turn_committed,
+            turn_locks=self._delivery_turn_locks,
         )
 
     def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
