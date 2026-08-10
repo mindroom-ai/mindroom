@@ -124,6 +124,7 @@ class TestMemoryConfig:
         ("model_id", "expected_top_p"),
         [
             ("gpt-5.6-luna", None),
+            ("gpt-5.6-terra", None),
             ("gpt-4", 0.8),
         ],
     )

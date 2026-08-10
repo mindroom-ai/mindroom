@@ -6,7 +6,9 @@ from typing import Any
 
 from mem0.llms.openai import OpenAILLM
 
-from mindroom.model_defaults import OPENAI_GPT_LUNA
+from mindroom.model_defaults import OPENAI_GPT_LUNA, OPENAI_GPT_TERRA
+
+MEM0_OPENAI_MODELS_WITHOUT_TOP_P = frozenset({OPENAI_GPT_LUNA, OPENAI_GPT_TERRA})
 
 
 class MindRoomMem0OpenAILLM(OpenAILLM):
@@ -14,6 +16,6 @@ class MindRoomMem0OpenAILLM(OpenAILLM):
 
     def _get_common_params(self, **kwargs: object) -> dict[str, Any]:
         params = super()._get_common_params(**kwargs)
-        if self.config.model == OPENAI_GPT_LUNA:
+        if self.config.model in MEM0_OPENAI_MODELS_WITHOUT_TOP_P:
             params.pop("top_p", None)
         return params
