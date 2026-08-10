@@ -19,6 +19,7 @@ from mindroom.approval_manager import (
     ApprovalActionResult,
     ApprovalCardLocator,
     ApprovalDecision,
+    ApprovalDecisionReady,
     ApprovalRoomProvider,
     ApprovalStartupSweep,
     MatrixEventEditor,
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     from mindroom.approval_events import PendingApproval
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalView, StoredApprovalContinuation
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -54,13 +55,21 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "ToolCallWorkflowOrigin",
+    "approval_continuation",
+    "claim_approval_continuation",
+    "complete_approval_continuation",
+    "create_approval_continuation",
+    "create_approval_continuation_with_turn",
+    "create_required_tool_approval_for_call",
     "create_tool_approval_for_call",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
+    "fail_approval_continuation",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
     "is_process_approval_card",
+    "mark_approval_continuation_delivered",
     "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
@@ -338,6 +347,94 @@ async def create_tool_approval_for_call(
     )
 
 
+async def create_required_tool_approval_for_call(
+    call: ToolApprovalCall,
+    *,
+    approval_id: str,
+    timeout_seconds: float,
+) -> PendingApproval | ApprovalDecision:
+    """Create a detached card after the caller has evaluated and persisted its exact continuation."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return _terminal_decision(
+            "expired",
+            "Tool approval is required but the approval store is not initialized.",
+        )
+    origin = call.workflow_origin
+    return await manager.create_approval(
+        approval_id=approval_id,
+        tool_name=call.tool_name,
+        arguments=deepcopy(call.arguments),
+        agent_name=call.agent_name,
+        room_id=call.room_id,
+        thread_id=call.thread_id,
+        requester_id=call.requester_id,
+        workflow_id=origin.workflow_id if origin is not None else None,
+        participant_id=origin.participant_id if origin is not None else None,
+        approver_user_id=resolve_tool_approval_approver(
+            call.config,
+            call.runtime_paths,
+            call.requester_id,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def create_approval_continuation(continuation: StoredApprovalContinuation) -> bool:
+    """Persist one exact suspended tool call before exposing its approval card."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.create_continuation(continuation)
+
+
+async def create_approval_continuation_with_turn(
+    continuation: StoredApprovalContinuation,
+    *,
+    agent_name: str,
+    index_event_ids: tuple[str, ...],
+    anchor_event_id: str,
+    record_json: str,
+) -> bool:
+    """Atomically transfer one handled source turn to its continuation."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.create_continuation_with_turn(
+        continuation,
+        agent_name=agent_name,
+        index_event_ids=index_event_ids,
+        anchor_event_id=anchor_event_id,
+        record_json=record_json,
+    )
+
+
+async def approval_continuation(approval_id: str) -> StoredApprovalContinuation | None:
+    """Return one durable approval continuation by approval identity."""
+    manager = approval_manager.get_approval_store()
+    return None if manager is None else await manager.continuation(approval_id)
+
+
+async def claim_approval_continuation(approval_id: str, claimant_id: str) -> bool:
+    """Claim one ready continuation for exactly-once execution."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.claim_continuation(approval_id, claimant_id)
+
+
+async def complete_approval_continuation(approval_id: str, claimant_id: str) -> bool:
+    """Complete one continuation owned by the given claimant."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.complete_continuation(approval_id, claimant_id)
+
+
+async def mark_approval_continuation_delivered(approval_id: str, claimant_id: str) -> bool:
+    """Record that one claimed call and its visible response finished."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.mark_continuation_delivered(approval_id, claimant_id)
+
+
+async def fail_approval_continuation(approval_id: str, reason: str) -> bool:
+    """Settle one nonterminal continuation as a safe terminal failure."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.fail_continuation(approval_id, reason)
+
+
 def is_process_approval_card(card_event_id: str) -> bool:
     """Return whether the current process has seen one approval card id."""
     manager = approval_manager.get_approval_store()
@@ -393,6 +490,7 @@ def initialize_approval_runtime(
     transport_sender: TransportSenderProvider,
     sending_device: SendingDeviceProvider,
     locate_card: ApprovalCardLocator,
+    decision_ready: ApprovalDecisionReady | None = None,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
@@ -404,6 +502,7 @@ def initialize_approval_runtime(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
+        decision_ready=decision_ready,
     )
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import ExitStack, aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -126,7 +126,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.response_turn import EmptyRunDiscard, TurnRunState
+    from mindroom.response_turn import EmptyRunDiscard, PausedToolCall, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1822,6 +1822,114 @@ def build_materialized_team_instance(
     )
 
 
+@dataclass(frozen=True)
+class TeamContinuationRuntime:
+    """Materialized exact team state owned by one approval continuation."""
+
+    team: Team
+    agents: tuple[Agent, ...]
+    display_names: tuple[str, ...]
+    scope_context: ScopeSessionContext
+    scope_stack: ExitStack
+
+    def close(self) -> None:
+        """Close every runtime database opened for this continuation."""
+        close_team_runtime_state_dbs(
+            agents=list(self.agents),
+            team_db=cast("BaseDb | None", self.team.db),
+            shared_scope_storage=self.scope_context.storage,
+        )
+        self.scope_stack.close()
+
+
+async def materialize_team_continuation_runtime(
+    *,
+    member_names: tuple[str, ...],
+    mode: TeamMode,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    session_id: str,
+    model_name: str,
+    configured_team_name: str | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+) -> TeamContinuationRuntime:
+    """Rebuild the exact persisted team and its shared Agno session."""
+    members = await asyncio.to_thread(
+        materialize_exact_team_members,
+        list(member_names),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        session_id=session_id,
+        refresh_scheduler=refresh_scheduler,
+        dynamic_tool_continuation=True,
+    )
+    scope_stack = ExitStack()
+    scope_context = scope_stack.enter_context(
+        open_bound_scope_session_context(
+            agents=members.agents,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            team_name=configured_team_name,
+        ),
+    )
+    if scope_context is None:
+        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
+        scope_stack.close()
+        msg = "Team approval continuation could not open its persisted history scope."
+        raise RuntimeError(msg)
+    try:
+        team = build_materialized_team_instance(
+            requested_agent_names=list(member_names),
+            agents=members.agents,
+            mode=mode,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=scope_context,
+            model_name=model_name,
+            configured_team_name=configured_team_name,
+            execution_identity=execution_identity,
+        )
+    except BaseException:
+        close_team_runtime_state_dbs(
+            agents=members.agents,
+            team_db=None,
+            shared_scope_storage=scope_context.storage,
+        )
+        scope_stack.close()
+        raise
+    return TeamContinuationRuntime(
+        team=team,
+        agents=tuple(members.agents),
+        display_names=tuple(members.display_names),
+        scope_context=scope_context,
+        scope_stack=scope_stack,
+    )
+
+
+def team_paused_tool_calls(response: TeamRunOutput | RunOutput) -> tuple[PausedToolCall, ...]:
+    """Return the exact approval-gated calls persisted on one paused team run."""
+    owner = response.agent_id if isinstance(response, RunOutput) else None
+    paused = list(paused_tool_calls_from_executions(response.tools, agent_name=owner))
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                paused.extend(team_paused_tool_calls(member_response))
+    return tuple(paused)
+
+
+def format_continued_team_response(
+    response: TeamRunOutput,
+    *,
+    display_names: tuple[str, ...],
+) -> str:
+    """Render a continued team result with the normal team response format."""
+    return _format_terminal_team_response(response, team_display_names=list(display_names))
+
+
 async def prepare_materialized_team_execution(
     ctx: ResponseTurnContext,
     *,
@@ -2192,11 +2300,7 @@ async def team_response(  # noqa: C901, PLR0915
                     response,
                     team_display_names=team_members.display_names,
                 )
-            paused_tool_calls = (
-                paused_tool_calls_from_executions(run_tool_executions)
-                if original_status is RunStatus.paused
-                else ()
-            )
+            paused_tool_calls = team_paused_tool_calls(response) if original_status is RunStatus.paused else ()
             if paused_tool_calls:
                 return SuspendedAttempt(
                     response_text=response_text,
@@ -2851,7 +2955,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
                     if event.status == RunStatus.paused:
                         completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
-                        paused_tool_calls = paused_tool_calls_from_executions(event_tool_executions)
+                        paused_tool_calls = team_paused_tool_calls(event)
                         if paused_tool_calls:
                             yield AttemptResolved(
                                 SuspendedAttempt(
@@ -3237,6 +3341,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
 
 __all__ = [
+    "TeamContinuationRuntime",
     "TeamIntent",
     "TeamMemberStatus",
     "TeamMode",
@@ -3245,15 +3350,18 @@ __all__ = [
     "TeamResolutionMember",
     "build_materialized_team_instance",
     "decide_team_formation",
+    "format_continued_team_response",
     "format_team_response",
     "is_cancelled_run_output",
     "is_errored_run_output",
     "materialize_exact_team_members",
+    "materialize_team_continuation_runtime",
     "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
     "select_ad_hoc_team_mode",
     "select_model_for_team",
+    "team_paused_tool_calls",
     "team_response",
     "team_response_stream",
 ]

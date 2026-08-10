@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
 
+from mindroom.approval_manager import SentApprovalEvent, initialize_approval_store
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
 )
+from mindroom.event_journal import StoredApprovalContinuation
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -30,9 +39,20 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
 )
-from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.response_turn import PausedToolCall
+from mindroom.teams import (
+    TeamIntent,
+    TeamMemberStatus,
+    TeamMode,
+    TeamOutcome,
+    TeamResolution,
+    TeamResolutionMember,
+    materialize_team_continuation_runtime,
+)
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.turn_policy import _ResponderAvailability
+from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -61,7 +81,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -78,8 +98,262 @@ def mock_agent_user() -> AgentMatrixUser:
     return make_mock_agent_user()
 
 
+@pytest.mark.asyncio
+async def test_team_continuation_keeps_scope_open_until_runtime_close() -> None:
+    """A rematerialized team must retain its history scope throughout continuation execution."""
+    events: list[str] = []
+    scope_storage = MagicMock()
+    scope_context = SimpleNamespace(storage=scope_storage)
+
+    @contextmanager
+    def open_scope() -> Iterator[SimpleNamespace]:
+        events.append("opened")
+        try:
+            yield scope_context
+        finally:
+            events.append("closed")
+
+    agent = MagicMock()
+    team = MagicMock()
+    members = SimpleNamespace(agents=[agent], display_names=["Code"])
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch("mindroom.teams.open_bound_scope_session_context", side_effect=lambda **_kwargs: open_scope()),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team) as build_team,
+        patch("mindroom.teams.close_team_runtime_state_dbs") as close_runtime_dbs,
+    ):
+        runtime = await materialize_team_continuation_runtime(
+            member_names=("code",),
+            mode=TeamMode.COORDINATE,
+            config=MagicMock(),
+            runtime_paths=MagicMock(),
+            execution_identity=MagicMock(),
+            session_id="session-1",
+            model_name="default",
+            configured_team_name="engineering",
+            refresh_scheduler=None,
+        )
+
+        assert events == ["opened"]
+        assert build_team.call_args.kwargs["scope_context"] is scope_context
+        runtime.close()
+
+    assert events == ["opened", "closed"]
+    close_runtime_dbs.assert_called_once_with(
+        agents=[agent],
+        team_db=team.db,
+        shared_scope_storage=scope_storage,
+    )
+
+
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_team_approval_pause_releases_lifecycle_with_exact_members(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A paused team tool call should use the same durable lifecycle suspension as an agent."""
+        config = self._config_for_storage(tmp_path)
+        config.tool_approval.default = "require_approval"
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        cards = FakeApprovalCards()
+        manager = initialize_approval_store(
+            runtime_paths_for(config),
+            sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+            editor=AsyncMock(return_value=True),
+            cards=cards,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
+        approval_policy = AsyncMock(return_value=(True, 30.0))
+
+        async def paused_team_response(*_args: object, **kwargs: object) -> str:
+            recorder = cast("TurnRecorder", kwargs["turn_recorder"])
+            recorder.record_suspended(
+                run_metadata=recorder.run_metadata,
+                assistant_text="Waiting for approval",
+                completed_tools=[],
+                paused_tool_calls=[
+                    PausedToolCall(
+                        "call-1",
+                        "write_file",
+                        {"path": "team.txt"},
+                        agent_name="calculator",
+                    ),
+                ],
+                session_id=kwargs["ctx"].session_id,
+                run_id="team-run-1",
+            )
+            return "Waiting for approval"
+
+        async def record_handoff(
+            _response_event_id: str,
+            continuation: StoredApprovalContinuation,
+        ) -> None:
+            assert await manager.create_continuation(continuation)
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch("mindroom.response_runner.DeliveryGateway.edit_text", new=AsyncMock(return_value=True)),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=AsyncMock(side_effect=paused_team_response),
+                evaluate_tool_approval=approval_policy,
+            ),
+        ):
+            result = await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    on_approval_suspended=record_handoff,
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        assert result is None
+        assert (
+            bot._response_runner.has_active_response_for_target(
+                MessageTarget.resolve("!test:localhost", None, "$team-root"),
+            )
+            is False
+        )
+        continuation = next(iter(cards.continuations.values()))
+        assert continuation.entity_kind == "team"
+        assert continuation.team_member_names == ("calculator", "general")
+        assert continuation.team_mode == "collaborate"
+        assert continuation.tool_agent_name == "calculator"
+        assert approval_policy.await_args.args[4] == "calculator"
+
+    @pytest.mark.asyncio
+    async def test_team_approval_continuation_executes_exact_call_once(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Duplicate team wakes must share one claim and preserve the paused call identity."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        cards = FakeApprovalCards()
+        manager = initialize_approval_store(
+            runtime_paths_for(config),
+            cards=cards,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+        target = MessageTarget(
+            room_id="!test:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$thread",
+            reply_to_event_id=None,
+            session_id="session-1",
+        )
+        identity = bot._tool_runtime_support.build_execution_identity(
+            target=target,
+            user_id="@alice:localhost",
+        )
+        continuation = StoredApprovalContinuation(
+            approval_id="team-approval-1",
+            card_transaction_id="mindroom-approval-team-approval-1",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            response_event_id="$response",
+            source_event_ids=("$source",),
+            entity_kind="team",
+            entity_name=bot.agent_name,
+            session_id=target.session_id,
+            run_id="team-run-1",
+            tool_call_id="call-1",
+            tool_name="write_file",
+            arguments={"path": "team.txt"},
+            requester_id="@alice:localhost",
+            execution_identity=serialize_tool_execution_identity(identity),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            tool_agent_name="calculator",
+            team_member_names=("calculator", "general"),
+            team_mode="collaborate",
+        )
+        await cards.create_approval_continuation(continuation)
+        await cards.resolve_approval_continuation(continuation.approval_id, "approved")
+        paused = TeamRunOutput(
+            run_id="team-run-1",
+            team_id=bot.agent_name,
+            session_id=target.session_id,
+            content="",
+            status=RunStatus.paused,
+            member_responses=[
+                RunOutput(
+                    run_id="member-run-1",
+                    agent_id="calculator",
+                    session_id=target.session_id,
+                    status=RunStatus.paused,
+                    tools=[
+                        ToolExecution(
+                            tool_call_id="call-1",
+                            tool_name="write_file",
+                            tool_args={"path": "team.txt"},
+                            requires_confirmation=True,
+                        ),
+                    ],
+                ),
+            ],
+        )
+        completed = TeamRunOutput(
+            run_id="team-run-1",
+            team_id=bot.agent_name,
+            session_id=target.session_id,
+            content="Done",
+            status=RunStatus.completed,
+        )
+        team = MagicMock()
+        team.aget_session.side_effect = lambda **_kwargs: asyncio.sleep(
+            0,
+            result=TeamSession(session_id=target.session_id, runs=[paused]),
+        )
+        team.acontinue_run.side_effect = lambda **_kwargs: asyncio.sleep(0, result=completed)
+        materialized = SimpleNamespace(
+            team=team,
+            display_names=("Calculator", "General"),
+            close=MagicMock(),
+        )
+
+        with (
+            patch(
+                "mindroom.response_runner.materialize_team_continuation_runtime",
+                new=AsyncMock(return_value=materialized),
+            ),
+            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.format_continued_team_response", return_value="Team done"),
+            patch("mindroom.response_runner.DeliveryGateway.edit_text", new=AsyncMock(return_value=True)),
+        ):
+            first = await bot._response_runner.resume_approval_continuation(continuation)
+            duplicate = await bot._response_runner.resume_approval_continuation(continuation)
+
+        assert first is not None
+        assert duplicate is None
+        team.acontinue_run.assert_called_once()
+        updated_tool = team.acontinue_run.call_args.kwargs["updated_tools"][0]
+        assert updated_tool.tool_call_id == "call-1"
+        assert updated_tool.tool_args == {"path": "team.txt"}
+        assert updated_tool.confirmed is True
+        stored = await manager.continuation(continuation.approval_id)
+        assert stored is not None
+        assert stored.state.value == "delivered"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_applies_hooks_to_final_team_message(

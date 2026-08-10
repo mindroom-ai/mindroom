@@ -27,13 +27,14 @@ from mindroom.session_ids import create_session_id
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
     from pathlib import Path
 
     import nio
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
+    from mindroom.event_journal import StoredApprovalContinuation
     from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
@@ -68,6 +69,7 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
+    approval_handoff_writer: Callable[..., Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,55 @@ class TurnStore:
             msg = "A responded turn requires a visible Matrix response event ID"
             raise RuntimeError(msg)
         await self.record_turn(turn_record)
+
+    async def record_waiting_for_approval(
+        self,
+        turn_record: TurnRecord,
+        response_event_id: str,
+        continuation: StoredApprovalContinuation,
+    ) -> None:
+        """Atomically mark a source handled and transfer it to a continuation."""
+        pending = canonicalize_turn_record(
+            turn_record,
+            response_event_id=response_event_id,
+            completed=True,
+            timestamp=0.0,
+        )
+
+        def waiting_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            terminal = next((record for record in existing_records.values() if record.completed), None)
+            if terminal is not None:
+                return terminal
+            existing = next(iter(existing_records.values()), None)
+            return canonicalize_turn_record(
+                _backfill_missing_turn_facts(pending, existing) if existing is not None else pending,
+                response_event_id=response_event_id,
+                completed=True,
+                timestamp=0.0,
+            )
+
+        writer = self.deps.approval_handoff_writer
+        if writer is None:
+            msg = "Approval continuation handoff storage is not configured."
+            raise RuntimeError(msg)
+
+        async def persist(index_event_ids: tuple[str, ...], anchor_event_id: str, record_json: str) -> None:
+            created = await writer(
+                continuation,
+                agent_name=self.deps.agent_name,
+                index_event_ids=index_event_ids,
+                anchor_event_id=anchor_event_id,
+                record_json=record_json,
+            )
+            if not created:
+                msg = "Approval continuation handoff could not be recorded durably."
+                raise RuntimeError(msg)
+
+        await self._ledger.update_handled_turn(
+            pending.indexed_event_ids,
+            waiting_record,
+            persist=persist,
+        )
 
     async def _record_terminal_turn(self, turn_record: TurnRecord) -> None:
         """Apply the canonical terminal merge, durable once it returns.

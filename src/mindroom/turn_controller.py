@@ -133,7 +133,7 @@ if TYPE_CHECKING:
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import PendingTurnView
+    from mindroom.event_journal import PendingTurnView, StoredApprovalContinuation
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -1414,7 +1414,12 @@ class TurnController:
             ),
         )
 
-        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
+        (
+            record_interrupted_turn,
+            record_deferred_outcome,
+            record_user_stop,
+            record_approval_suspended,
+        ) = self._build_response_settlement_callbacks(
             room,
             source_event_id=source_event_id,
             handled_turn=selection_handled_turn,
@@ -1439,6 +1444,7 @@ class TurnController:
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 on_deferred_outcome_handled=record_deferred_outcome,
                 on_user_stop_handled=record_user_stop,
+                on_approval_suspended=record_approval_suspended,
             ),
         )
         if response_event_id is not None:
@@ -1800,6 +1806,7 @@ class TurnController:
         Callable[[], None],
         Callable[[str], Awaitable[None]],
         Callable[[str, int], Awaitable[None]],
+        Callable[[str, StoredApprovalContinuation], Awaitable[None]],
     ]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
@@ -1821,7 +1828,17 @@ class TurnController:
                 ),
             )
 
-        return record_interrupted_turn, record_deferred_outcome, record_user_stop
+        async def record_approval_suspended(
+            response_event_id: str,
+            continuation: StoredApprovalContinuation,
+        ) -> None:
+            await self.deps.turn_store.record_waiting_for_approval(
+                handled_turn,
+                response_event_id,
+                continuation,
+            )
+
+        return record_interrupted_turn, record_deferred_outcome, record_user_stop, record_approval_suspended
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -1927,7 +1944,7 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_interrupted_turn, record_deferred_outcome, record_user_stop = (
+            record_interrupted_turn, record_deferred_outcome, record_user_stop, record_approval_suspended = (
                 self._build_response_settlement_callbacks(
                     room,
                     source_event_id=event.event_id,
@@ -1978,6 +1995,7 @@ class TurnController:
                     on_deferred_outcome_handled=record_deferred_outcome,
                     on_user_stop_handled=record_user_stop,
                     on_visible_response=record_visible_response,
+                    on_approval_suspended=record_approval_suspended,
                 )
                 if action.kind == "team":
                     assert action.form_team is not None

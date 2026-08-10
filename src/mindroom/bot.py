@@ -79,7 +79,11 @@ from mindroom.runtime_shutdown import (
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.tool_approval import is_process_active_approval_card
+from mindroom.tool_approval import (
+    complete_approval_continuation,
+    create_approval_continuation_with_turn,
+    is_process_active_approval_card,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -104,6 +108,7 @@ from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
+    ApprovalContinuationState,
     ApprovalView,
     EventClass,
     EventJournalStore,
@@ -111,6 +116,7 @@ from .event_journal import (
     MembershipFence,
     PrincipalStore,
     SemanticConsumer,
+    StoredApprovalContinuation,
 )
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -151,6 +157,7 @@ from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
+from .turn_record import canonicalize_turn_record
 from .turn_store import TurnStore, TurnStoreDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
@@ -655,6 +662,7 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
+                approval_handoff_writer=create_approval_continuation_with_turn,
             ),
         )
         self._journal_dispatcher = JournalDispatcher(
@@ -1001,6 +1009,67 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def resume_approval_continuation(self, continuation: StoredApprovalContinuation) -> None:
+        """Resume one durable approval owned by this bot and terminalize its source turn."""
+        result = await self._response_runner.resume_approval_continuation(continuation)
+        if result is None:
+            return
+        source_record = None
+        for source_event_id in continuation.source_event_ids:
+            source_record = self._turn_store.get_turn_record(source_event_id)
+            if source_record is not None:
+                break
+        if source_record is not None:
+            await self._turn_store.record_responded_turn(
+                canonicalize_turn_record(source_record, response_event_id=result.response_event_id),
+            )
+        elif result.claimant_id is not None:
+            await self._response_runner.fail_approval_continuation(
+                continuation,
+                "Approval continuation completed without its durable source turn.",
+            )
+            return
+        if result.claimant_id is not None and not await complete_approval_continuation(
+            continuation.approval_id,
+            result.claimant_id,
+        ):
+            logger.error(
+                "approval_continuation_completion_not_recorded",
+                approval_id=continuation.approval_id,
+                agent_name=self.agent_name,
+            )
+
+    async def fail_approval_continuation(
+        self,
+        continuation: StoredApprovalContinuation,
+        reason: str,
+    ) -> None:
+        """Publish a terminal continuation failure through this available bot."""
+        await self._response_runner.fail_approval_continuation(continuation, reason)
+        for source_event_id in continuation.source_event_ids:
+            source_record = self._turn_store.get_turn_record(source_event_id)
+            if source_record is not None:
+                await self._turn_store.record_responded_turn(
+                    canonicalize_turn_record(
+                        source_record,
+                        response_event_id=continuation.response_event_id,
+                    ),
+                )
+                break
+
+    async def recover_claimed_approval_continuation(
+        self,
+        continuation: StoredApprovalContinuation,
+    ) -> None:
+        """Complete a proven delivered claim or fail an uncertain one without retrying it."""
+        if continuation.state is ApprovalContinuationState.DELIVERED and continuation.claimant_id is not None:
+            await complete_approval_continuation(continuation.approval_id, continuation.claimant_id)
+            return
+        await self.fail_approval_continuation(
+            continuation,
+            "MindRoom restarted after claiming this tool call; execution outcome is uncertain, so it was not retried.",
+        )
 
     async def _emit_reaction_received_hooks(
         self,

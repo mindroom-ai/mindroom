@@ -303,6 +303,7 @@ class PausedToolCall:
     tool_call_id: str
     tool_name: str
     arguments: dict[str, Any]
+    agent_name: str | None = None
 
     def __post_init__(self) -> None:  # noqa: D105
         object.__setattr__(self, "arguments", deepcopy(self.arguments))
@@ -310,6 +311,8 @@ class PausedToolCall:
 
 def paused_tool_calls_from_executions(
     tools: list[ToolExecution] | tuple[ToolExecution, ...] | None,
+    *,
+    agent_name: str | None = None,
 ) -> tuple[PausedToolCall, ...]:
     """Project strict executable identities from paused Agno tool records."""
     paused: list[PausedToolCall] = []
@@ -324,6 +327,7 @@ def paused_tool_calls_from_executions(
                 tool_call_id=tool.tool_call_id,
                 tool_name=tool.tool_name,
                 arguments=tool.tool_args,
+                agent_name=agent_name,
             ),
         )
     return tuple(paused)

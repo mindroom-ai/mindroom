@@ -70,6 +70,7 @@ class ApprovalContinuationState(StrEnum):
     WAITING_FOR_DECISION = "waiting_for_decision"
     READY = "ready"
     CLAIMED = "claimed"
+    DELIVERED = "delivered"
     COMPLETED = "completed"
     TERMINAL_FAILURE = "terminal_failure"
 
@@ -94,6 +95,9 @@ class StoredApprovalContinuation:
     requester_id: str
     execution_identity: dict[str, object]
     expires_at: datetime
+    tool_agent_name: str | None = None
+    team_member_names: tuple[str, ...] = ()
+    team_mode: Literal["coordinate", "collaborate"] | None = None
     decision: ApprovalContinuationDecision | None = None
     state: ApprovalContinuationState = ApprovalContinuationState.WAITING_FOR_DECISION
     claimant_id: str | None = None
@@ -113,9 +117,10 @@ def create_continuation(
             principal_id, approval_id, card_transaction_id, room_id, thread_id,
             response_event_id, source_event_ids_json, entity_kind, entity_name,
             session_id, run_id, tool_call_id, tool_name, arguments_json,
-            requester_id, execution_identity_json, expires_at, decision, state,
+            requester_id, execution_identity_json, expires_at,
+            tool_agent_name, team_member_names_json, team_mode, decision, state,
             claimant_id, failure_reason, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?)
         ON CONFLICT (principal_id, approval_id) DO NOTHING
         RETURNING approval_id
         """,
@@ -137,6 +142,9 @@ def create_continuation(
             continuation.requester_id,
             _json(continuation.execution_identity),
             continuation.expires_at.isoformat(),
+            continuation.tool_agent_name,
+            _json(list(continuation.team_member_names)),
+            continuation.team_mode,
             ApprovalContinuationState.WAITING_FOR_DECISION.value,
             time.time_ns(),
         ),
@@ -209,11 +217,35 @@ def complete_continuation(
             ApprovalContinuationState.COMPLETED.value,
             principal_id,
             approval_id,
-            ApprovalContinuationState.CLAIMED.value,
+            ApprovalContinuationState.DELIVERED.value,
             claimant_id,
         ),
     )
     return completed is not None
+
+
+def mark_continuation_delivered(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    claimant_id: str,
+) -> bool:
+    """Record that one claimed call and its visible delivery finished."""
+    delivered = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ? AND claimant_id = ?
+        RETURNING approval_id
+        """,
+        (
+            ApprovalContinuationState.DELIVERED.value,
+            principal_id,
+            approval_id,
+            ApprovalContinuationState.CLAIMED.value,
+            claimant_id,
+        ),
+    )
+    return delivered is not None
 
 
 def fail_continuation(
@@ -250,7 +282,7 @@ def recoverable_continuations(
     rows = transaction.fetchall(
         """
         SELECT * FROM approval_continuations
-        WHERE principal_id = ? AND state IN (?, ?, ?)
+        WHERE principal_id = ? AND state IN (?, ?, ?, ?)
         ORDER BY created_at_ns, approval_id/*bytes*/
         """,
         (
@@ -258,6 +290,7 @@ def recoverable_continuations(
             ApprovalContinuationState.WAITING_FOR_DECISION.value,
             ApprovalContinuationState.READY.value,
             ApprovalContinuationState.CLAIMED.value,
+            ApprovalContinuationState.DELIVERED.value,
         ),
     )
     return tuple(_continuation(row) for row in rows)
@@ -305,6 +338,10 @@ def _continuation(row: Row) -> StoredApprovalContinuation:
     if decision not in (None, "approved", "denied", "expired"):
         msg = "Stored approval continuation decision is invalid"
         raise TypeError(msg)
+    team_mode = row["team_mode"]
+    if team_mode not in (None, "coordinate", "collaborate"):
+        msg = "Stored approval continuation team mode is invalid"
+        raise TypeError(msg)
     return StoredApprovalContinuation(
         approval_id=str(row["approval_id"]),
         card_transaction_id=str(row["card_transaction_id"]),
@@ -325,6 +362,9 @@ def _continuation(row: Row) -> StoredApprovalContinuation:
             _object(str(row["execution_identity_json"]), field="execution identity"),
         ),
         expires_at=datetime.fromisoformat(str(row["expires_at"])),
+        tool_agent_name=row["tool_agent_name"],
+        team_member_names=_string_tuple(str(row["team_member_names_json"])),
+        team_mode=cast("Literal['coordinate', 'collaborate'] | None", team_mode),
         decision=cast("ApprovalContinuationDecision | None", decision),
         state=ApprovalContinuationState(str(row["state"])),
         claimant_id=row["claimant_id"],

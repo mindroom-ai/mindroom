@@ -52,7 +52,7 @@ from mindroom.turn_record import (
 )
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
     from pathlib import Path
 
     from mindroom.event_journal.store import TurnRecordStore
@@ -473,6 +473,8 @@ class HandledTurnLedger:
         self,
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        *,
+        persist: Callable[[tuple[str, ...], str, str], Awaitable[None]] | None = None,
     ) -> TurnRecord | None:
         """Atomically update one record and store it before returning.
 
@@ -550,11 +552,18 @@ class HandledTurnLedger:
             # cancellation would be worse. Awaiting the upsert bare is weaker
             # still: it cancels the coroutine outright, so the write never
             # reaches a backend that could have drained it.
+            record_json = json.dumps(TurnRecordCodec._to_ledger_record(persisted_record))
             write = asyncio.ensure_future(
                 self.records.upsert(
                     index_event_ids=persisted_record.indexed_event_ids,
                     anchor_event_id=persisted_record.anchor_event_id,
-                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(persisted_record)),
+                    record_json=record_json,
+                )
+                if persist is None
+                else persist(
+                    persisted_record.indexed_event_ids,
+                    persisted_record.anchor_event_id,
+                    record_json,
                 ),
             )
             try:

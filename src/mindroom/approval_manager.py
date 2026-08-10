@@ -20,7 +20,7 @@ from mindroom.approval_events import (
     PendingApprovalStatus,
     parse_approval_datetime,
 )
-from mindroom.event_journal import StoredApprovalCard
+from mindroom.event_journal import ApprovalContinuationState, StoredApprovalCard, StoredApprovalContinuation
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
@@ -349,8 +349,8 @@ class _ActiveApprovalSend:
 class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
-    Recovered approval cards support terminal cleanup only; they never make an
-    approval actionable after its live waiter is gone.
+    Recovered standalone cards support terminal cleanup only. Cards backed by
+    durable continuations remain actionable without a live waiter.
     """
 
     def __init__(
@@ -385,6 +385,8 @@ class _ApprovalManager:
         # Recovery that outlived the request that started it, held so it is
         # not garbage collected mid-flight.
         self._detached_card_writes: set[_DetachedCardWrite] = set()
+        self._continuation_expiry_handles: dict[str, asyncio.TimerHandle] = {}
+        self._continuation_expiry_tasks: set[asyncio.Task[None]] = set()
         self._shutdown_reason: str | None = None
 
     async def request_approval(
@@ -439,6 +441,7 @@ class _ApprovalManager:
         thread_id: str | None = None,
         workflow_id: str | None = None,
         participant_id: str | None = None,
+        approval_id: str | None = None,
     ) -> PendingApproval | ApprovalDecision:
         """Send and durably bind one approval card without retaining a live waiter."""
         created = await self._create_bound_approval(
@@ -452,12 +455,16 @@ class _ApprovalManager:
             thread_id=thread_id,
             workflow_id=workflow_id,
             participant_id=participant_id,
+            approval_id=approval_id,
         )
         if isinstance(created, ApprovalDecision):
             return created
         waiter, _expires_at = created
         try:
-            return PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+            pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+            if await self._has_continuation(pending.approval_id):
+                self._schedule_continuation_expiry(pending, waiter.transaction_id)
+            return pending
         finally:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
@@ -475,6 +482,7 @@ class _ApprovalManager:
         thread_id: str | None,
         workflow_id: str | None,
         participant_id: str | None,
+        approval_id: str | None = None,
     ) -> tuple[_LiveApprovalWaiter, datetime] | ApprovalDecision:
         """Create one answerable card and return its temporary bound identity."""
         # Keep the send/bind flow linear so cancellation cleanup remains visible.
@@ -488,7 +496,7 @@ class _ApprovalManager:
         if shutdown_reason is not None:
             return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
 
-        approval_id = uuid4().hex
+        approval_id = approval_id or uuid4().hex
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
@@ -552,14 +560,12 @@ class _ApprovalManager:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
         return waiter, expires_at
 
-    async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
+    async def discard_pending_on_startup(self) -> ApprovalStartupSweep:  # noqa: C901
         """Settle every router-authored card this bot restarted holding.
 
-        A card whose decision was already recorded is redelivered rather than
-        expired: the previous process committed to it, its tool may already
-        have run, and the room may already show it. Only a card nobody ever
-        answered is expired, because its requester is gone with the process
-        that asked.
+        A card backed by a durable continuation survives restart. Its expiry
+        timer or committed decision is restored without recreating a live
+        response coroutine. Standalone cards retain the legacy cleanup rules.
 
         Every card is walked, not one page of them, and what could not be
         settled is counted rather than swallowed. Both matter for the same
@@ -573,6 +579,7 @@ class _ApprovalManager:
 
         discarded = 0
         failed = 0
+        recovered_approval_ids: set[str] = set()
         for room_id in self._configured_approval_room_ids():
             # A card whose settlement failed keeps its row deliberately, so it
             # stays inside the scan's window. Skipping it in memory is not
@@ -585,6 +592,16 @@ class _ApprovalManager:
                     break
                 cursor = (page[-1].created_at_ns, page[-1].transaction_id)
                 for claimed in page:
+                    continuation = await self._continuation_for_card(claimed)
+                    if continuation is not None:
+                        recovered_approval_ids.add(continuation.approval_id)
+                        recovered = await self._recover_continuation_card(
+                            continuation,
+                            claimed,
+                            transport_sender=transport_sender,
+                        )
+                        failed += int(not recovered)
+                        continue
                     settled = await self._settle_recovered_card(
                         room_id=room_id,
                         claimed=claimed,
@@ -596,7 +613,184 @@ class _ApprovalManager:
                         discarded += 1
                     else:
                         failed += 1
+        if self._cards is not None:
+            for continuation in await self._cards.recoverable_approval_continuations():
+                if continuation.approval_id not in recovered_approval_ids:
+                    await self._recover_orphaned_continuation(continuation)
         return ApprovalStartupSweep(discarded=discarded, failed=failed)
+
+    async def _recover_orphaned_continuation(self, continuation: StoredApprovalContinuation) -> None:
+        """Wake decided work or fail non-resumable work that has no approval card."""
+        if continuation.state is ApprovalContinuationState.READY:
+            if self._decision_ready is not None:
+                self._decision_ready(continuation.approval_id)
+            return
+        if continuation.state in {ApprovalContinuationState.CLAIMED, ApprovalContinuationState.DELIVERED}:
+            if self._decision_ready is not None:
+                self._decision_ready(continuation.approval_id)
+            return
+        await self._fail_recovered_continuation(
+            continuation,
+            "The durable approval continuation has no answerable Matrix card.",
+        )
+
+    async def _fail_recovered_continuation(
+        self,
+        continuation: StoredApprovalContinuation,
+        reason: str,
+    ) -> None:
+        if self._cards is None or not await self._cards.fail_approval_continuation(
+            continuation.approval_id,
+            reason,
+        ):
+            return
+        if self._decision_ready is not None:
+            self._decision_ready(continuation.approval_id)
+
+    async def _continuation_for_card(
+        self,
+        claimed: StoredApprovalCard,
+    ) -> StoredApprovalContinuation | None:
+        content = claimed.card.get("content")
+        approval_id = content.get("approval_id") if isinstance(content, dict) else None
+        if self._cards is None or not isinstance(approval_id, str) or not approval_id:
+            return None
+        return await self._cards.approval_continuation(approval_id)
+
+    async def _recover_continuation_card(
+        self,
+        continuation: StoredApprovalContinuation,
+        claimed: StoredApprovalCard,
+        *,
+        transport_sender: str,
+    ) -> bool:
+        """Restore timers or execution wakes without expiring restartable work."""
+        identified_card, settled = await self._identify_continuation_card(continuation, claimed)
+        if identified_card is None:
+            return settled
+        claimed = identified_card
+
+        pending = self._trusted_pending_from_card_event(
+            claimed.card,
+            room_id=continuation.room_id,
+            transport_sender=transport_sender,
+            expected_card_event_id=claimed.card_event_id,
+        )
+        if pending is None:
+            await self._fail_recovered_continuation(
+                continuation,
+                "The durable approval continuation no longer has an answerable Matrix card.",
+            )
+            return True
+        if claimed.resolution is not None:
+            await self._redeliver_recorded_resolution(pending, claimed)
+
+        if continuation.state is ApprovalContinuationState.WAITING_FOR_DECISION:
+            if continuation.expires_at <= _utcnow():
+                await self._expire_continuation_card(
+                    continuation,
+                    claimed,
+                    transport_sender=transport_sender,
+                )
+                return True
+            self._schedule_continuation_expiry(pending, claimed.transaction_id)
+            return True
+        if continuation.state is ApprovalContinuationState.READY and self._decision_ready is not None:
+            if claimed.resolution is None and pending is not None and continuation.decision is not None:
+                await self._emit_resolution(
+                    pending,
+                    transaction_id=claimed.transaction_id,
+                    status=continuation.decision,
+                    reason="Approval decision restored after MindRoom restarted.",
+                    resolved_by=(pending.approver_user_id if continuation.decision in {"approved", "denied"} else None),
+                )
+            self._decision_ready(continuation.approval_id)
+            return True
+        if (
+            continuation.state
+            in {
+                ApprovalContinuationState.CLAIMED,
+                ApprovalContinuationState.DELIVERED,
+            }
+            and self._decision_ready is not None
+        ):
+            self._decision_ready(continuation.approval_id)
+        return True
+
+    async def _identify_continuation_card(
+        self,
+        continuation: StoredApprovalContinuation,
+        claimed: StoredApprovalCard,
+    ) -> tuple[StoredApprovalCard | None, bool]:
+        """Identify an unknown continuation card and report whether recovery is settled."""
+        if claimed.card_event_id is not None:
+            return claimed, True
+        if self._send_is_in_flight(claimed.transaction_id):
+            return None, True
+        identified = await self._identified_card(continuation.room_id, claimed)
+        if identified.card is not None:
+            return identified.card, True
+        if identified.settled:
+            await self._fail_recovered_continuation(
+                continuation,
+                "The approval card was never delivered, so the tool call cannot be resumed.",
+            )
+        return None, identified.settled
+
+    def _schedule_continuation_expiry(self, pending: PendingApproval, transaction_id: str) -> None:
+        expires_at = parse_approval_datetime(pending.expires_at)
+        if expires_at is None:
+            return
+        existing = self._continuation_expiry_handles.pop(pending.approval_id, None)
+        if existing is not None:
+            existing.cancel()
+        delay = max(0.0, (expires_at - _utcnow()).total_seconds())
+        loop = asyncio.get_running_loop()
+
+        def expire() -> None:
+            self._continuation_expiry_handles.pop(pending.approval_id, None)
+            task = asyncio.create_task(
+                self._expire_detached_pending(pending, transaction_id),
+                name=f"approval-expiry-{pending.approval_id}",
+            )
+            self._continuation_expiry_tasks.add(task)
+            task.add_done_callback(self._continuation_expiry_tasks.discard)
+
+        self._continuation_expiry_handles[pending.approval_id] = loop.call_later(delay, expire)
+
+    async def _expire_detached_pending(self, pending: PendingApproval, transaction_id: str) -> None:
+        if self._cards is None or not await self._cards.resolve_approval_continuation(
+            pending.approval_id,
+            "expired",
+        ):
+            return
+        if self._decision_ready is not None:
+            self._decision_ready(pending.approval_id)
+        await self._emit_resolution(
+            pending,
+            transaction_id=transaction_id,
+            status="expired",
+            reason=_DEFAULT_TIMEOUT_REASON,
+            resolved_by=None,
+        )
+
+    async def _expire_continuation_card(
+        self,
+        continuation: StoredApprovalContinuation,
+        claimed: StoredApprovalCard,
+        *,
+        transport_sender: str,
+    ) -> None:
+        if self._cards is None or claimed.card_event_id is None:
+            return
+        pending = self._trusted_pending_from_card_event(
+            claimed.card,
+            room_id=continuation.room_id,
+            transport_sender=transport_sender,
+            expected_card_event_id=claimed.card_event_id,
+        )
+        if pending is not None:
+            await self._expire_detached_pending(pending, claimed.transaction_id)
 
     async def _settle_recovered_card(
         self,
@@ -845,6 +1039,11 @@ class _ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
+        if self._decision_ready is not None:
+            self._decision_ready(pending.approval_id)
+        expiry = self._continuation_expiry_handles.pop(pending.approval_id, None)
+        if expiry is not None:
+            expiry.cancel()
         outcome = await self._emit_resolution(
             pending,
             transaction_id=transaction_id,
@@ -852,8 +1051,6 @@ class _ApprovalManager:
             reason=resolved_reason,
             resolved_by=resolved_by,
         )
-        if self._decision_ready is not None:
-            self._decision_ready(pending.approval_id)
         delivered = outcome is _ResolutionOutcome.DELIVERED
         with self._live_lock:
             self._resolved_card_event_ids.add(pending.card_event_id)
@@ -1762,6 +1959,10 @@ class _ApprovalManager:
         with self._live_lock:
             self._shutdown_reason = reason
             waiters = list(self._pending_by_card_event.values())
+        expiry_handles = list(self._continuation_expiry_handles.values())
+        self._continuation_expiry_handles.clear()
+        for expiry_handle in expiry_handles:
+            expiry_handle.cancel()
         for waiter in waiters:
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
             claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
@@ -1775,6 +1976,8 @@ class _ApprovalManager:
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
         await self._drain_detached_card_writes()
+        if self._continuation_expiry_tasks:
+            await asyncio.gather(*tuple(self._continuation_expiry_tasks), return_exceptions=True)
 
     async def _stand_down_for_the_claim_holder(self, waiter: _LiveApprovalWaiter) -> None:
         """Leave one card to whoever already claimed it, for as long as shutdown can afford.
@@ -1943,6 +2146,62 @@ class _ApprovalManager:
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
         return has_waiters or has_active_sends or has_cleanup_tasks
+
+    async def create_continuation(self, continuation: StoredApprovalContinuation) -> bool:
+        """Persist one exact paused call in the manager's durable approval store."""
+        if self._cards is None:
+            return False
+        return await self._cards.create_approval_continuation(continuation)
+
+    async def create_continuation_with_turn(
+        self,
+        continuation: StoredApprovalContinuation,
+        *,
+        agent_name: str,
+        index_event_ids: tuple[str, ...],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> bool:
+        """Atomically transfer source-turn ownership to one continuation."""
+        if self._cards is None:
+            return False
+        return await self._cards.create_approval_continuation_with_turn(
+            continuation,
+            agent_name=agent_name,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+    async def fail_continuation(self, approval_id: str, reason: str) -> bool:
+        """Settle continuation setup that failed before it became actionable."""
+        if self._cards is None:
+            return False
+        return await self._cards.fail_approval_continuation(approval_id, reason)
+
+    async def continuation(self, approval_id: str) -> StoredApprovalContinuation | None:
+        """Return one durable continuation by approval identity."""
+        if self._cards is None:
+            return None
+        return await self._cards.approval_continuation(approval_id)
+
+    async def claim_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Claim one ready continuation for at-most-once execution."""
+        if self._cards is None:
+            return False
+        return await self._cards.claim_approval_continuation(approval_id, claimant_id)
+
+    async def complete_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Record successful terminal settlement by the owning worker."""
+        if self._cards is None:
+            return False
+        return await self._cards.complete_approval_continuation(approval_id, claimant_id)
+
+    async def mark_continuation_delivered(self, approval_id: str, claimant_id: str) -> bool:
+        """Record that one claimed call and its visible response finished."""
+        if self._cards is None:
+            return False
+        return await self._cards.mark_approval_continuation_delivered(approval_id, claimant_id)
 
     def _send_is_in_flight(self, transaction_id: str) -> bool:
         """Return whether this row is still owned by a send that has not come back.

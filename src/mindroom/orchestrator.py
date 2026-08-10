@@ -291,6 +291,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             cards_provider=self._approval_cards,
+            entity_configured=self._approval_entity_configured,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -414,6 +415,13 @@ class _MultiAgentOrchestrator:
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
         self._approval_transport.bind_approval_runtime()
+
+    def _approval_entity_configured(self, entity_name: str) -> bool:
+        """Return whether a temporarily absent continuation owner remains configured."""
+        config = self.config
+        return config is not None and (
+            entity_name == ROUTER_AGENT_NAME or entity_name in config.agents or entity_name in config.teams
+        )
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -1928,6 +1936,8 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind()
         await self._approval_transport.cancel_startup_cleanup_retry()
         await shutdown_approval_runtime()
+        self._approval_transport.cancel_continuation_retries()
+        await self._approval_transport.drain_continuation_tasks()
         await self.config_reload.cancel()
         owner = self._mcp_catalog_change_task_owner
         await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)

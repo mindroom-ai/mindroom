@@ -24,7 +24,10 @@ from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     SentApprovalEvent,
     ToolApprovalTransportError,
+    approval_continuation,
+    complete_approval_continuation,
     expire_orphaned_approval_cards_on_startup,
+    fail_approval_continuation,
     initialize_approval_runtime,
 )
 
@@ -32,7 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalView
+    from mindroom.event_journal import ApprovalView, StoredApprovalContinuation
 
 logger = get_logger(__name__)
 
@@ -44,6 +47,7 @@ _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 # failure would leave answered cards clickable until the next restart.
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
+_CONTINUATION_RETRY_SECONDS = 0.1
 
 
 class _ApprovalTransportBot(Protocol):
@@ -62,6 +66,25 @@ class _ApprovalTransportBot(Protocol):
         thread_id: str,
     ) -> str | None:
         """Return the latest event id for one Matrix thread when known."""
+        ...
+
+    async def resume_approval_continuation(self, continuation: StoredApprovalContinuation) -> None:
+        """Resume one durable approval continuation owned by this bot."""
+        ...
+
+    async def fail_approval_continuation(
+        self,
+        continuation: StoredApprovalContinuation,
+        reason: str,
+    ) -> None:
+        """Publish a visible terminal result for an unavailable continuation owner."""
+        ...
+
+    async def recover_claimed_approval_continuation(
+        self,
+        continuation: StoredApprovalContinuation,
+    ) -> None:
+        """Reconcile an uncertain claimed continuation after restart."""
         ...
 
 
@@ -123,6 +146,7 @@ class ApprovalMatrixTransport:
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
     cards_provider: Callable[[], ApprovalView | None]
+    entity_configured: Callable[[str], bool] | None = None
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
@@ -134,6 +158,9 @@ class ApprovalMatrixTransport:
         init=False,
         repr=False,
     )
+    _continuation_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _continuation_retry_handles: dict[str, asyncio.TimerHandle] = field(default_factory=dict, init=False, repr=False)
+    _continuation_dispatch_stopping: bool = field(default=False, init=False, repr=False)
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -147,6 +174,7 @@ class ApprovalMatrixTransport:
 
     def bind_approval_runtime(self) -> None:
         """Bind approval manager runtime hooks to the current Matrix transport."""
+        self._continuation_dispatch_stopping = False
         initialize_approval_runtime(
             self.runtime_paths,
             sender=self.send_approval_event,
@@ -156,7 +184,99 @@ class ApprovalMatrixTransport:
             transport_sender=self.transport_sender_id,
             sending_device=self.transport_device_id,
             locate_card=self.locate_approval_card,
+            decision_ready=self._decision_ready,
         )
+
+    def _decision_ready(self, approval_id: str) -> None:
+        """Schedule a committed decision outside the Matrix action callback."""
+        retry = self._continuation_retry_handles.pop(approval_id, None)
+        if retry is not None:
+            retry.cancel()
+        if self._continuation_dispatch_stopping:
+            return
+        task = asyncio.create_task(
+            self._resume_continuation(approval_id),
+            name=f"approval-continuation-{approval_id}",
+        )
+        self._continuation_tasks.add(task)
+        task.add_done_callback(self._continuation_done)
+
+    def _continuation_done(self, task: asyncio.Task[None]) -> None:
+        """Retire one wake task and report failures that escaped its safe boundary."""
+        self._continuation_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("approval_continuation_wake_failed", error=str(task.exception()))
+
+    def _retry_ready_continuation(self, approval_id: str) -> None:
+        """Retry durable READY work after a replacing bot has had time to register."""
+        if self._continuation_dispatch_stopping or approval_id in self._continuation_retry_handles:
+            return
+
+        def retry() -> None:
+            self._continuation_retry_handles.pop(approval_id, None)
+            self._decision_ready(approval_id)
+
+        self._continuation_retry_handles[approval_id] = asyncio.get_running_loop().call_later(
+            _CONTINUATION_RETRY_SECONDS,
+            retry,
+        )
+
+    async def _resume_continuation(self, approval_id: str) -> None:
+        continuation = await approval_continuation(approval_id)
+        if continuation is None:
+            return
+        if continuation.state.value == "terminal_failure":
+            reason = continuation.failure_reason or "Tool approval continuation failed safely."
+            bot = self.bot_provider(continuation.entity_name) or self.bot_provider(ROUTER_AGENT_NAME)
+            if bot is not None:
+                await bot.fail_approval_continuation(continuation, reason)
+            return
+        bot = self.bot_provider(continuation.entity_name)
+        if continuation.state.value in {"claimed", "delivered"}:
+            if bot is not None:
+                await bot.recover_claimed_approval_continuation(continuation)
+                return
+            if continuation.state.value == "delivered" and continuation.claimant_id is not None:
+                await complete_approval_continuation(approval_id, continuation.claimant_id)
+                return
+            reason = (
+                f"Requesting agent '{continuation.entity_name}' is no longer available after claiming this tool call; "
+                "the uncertain side effect was not retried."
+            )
+            fallback_bot = self.bot_provider(ROUTER_AGENT_NAME)
+            if fallback_bot is not None:
+                await fallback_bot.fail_approval_continuation(continuation, reason)
+            else:
+                await fail_approval_continuation(approval_id, reason)
+            return
+        if bot is None:
+            await self._handle_unavailable_ready_continuation(continuation)
+        else:
+            await bot.resume_approval_continuation(continuation)
+            await self._retry_if_still_ready(approval_id)
+
+    async def _handle_unavailable_ready_continuation(self, continuation: StoredApprovalContinuation) -> None:
+        """Retry configured owners and fail only entities removed from configuration."""
+        if self.entity_configured is not None and self.entity_configured(continuation.entity_name):
+            self._retry_ready_continuation(continuation.approval_id)
+            return
+        reason = f"Requesting agent '{continuation.entity_name}' is no longer available."
+        logger.error(
+            "approval_continuation_entity_unavailable",
+            approval_id=continuation.approval_id,
+            entity_name=continuation.entity_name,
+        )
+        fallback_bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if fallback_bot is not None:
+            await fallback_bot.fail_approval_continuation(continuation, reason)
+        else:
+            await fail_approval_continuation(continuation.approval_id, reason)
+
+    async def _retry_if_still_ready(self, approval_id: str) -> None:
+        """Re-dispatch work an old bot could not claim during replacement."""
+        unresolved = await approval_continuation(approval_id)
+        if unresolved is not None and unresolved.state.value == "ready":
+            self._retry_ready_continuation(approval_id)
 
     async def _run_on_runtime_loop(
         self,
@@ -470,6 +590,21 @@ class ApprovalMatrixTransport:
         retry.cancel()
         with suppress(asyncio.CancelledError):
             await retry
+
+    async def drain_continuation_tasks(self) -> None:
+        """Wait for every claimed continuation before tearing down its bot runtime."""
+        while self._continuation_tasks:
+            tasks = tuple(self._continuation_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._continuation_tasks.difference_update(tasks)
+
+    def cancel_continuation_retries(self) -> None:
+        """Stop replacement retries while preserving READY rows for next startup."""
+        self._continuation_dispatch_stopping = True
+        retries = tuple(self._continuation_retry_handles.values())
+        self._continuation_retry_handles.clear()
+        for retry in retries:
+            retry.cancel()
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that approval runtime support can now perform startup cleanup."""

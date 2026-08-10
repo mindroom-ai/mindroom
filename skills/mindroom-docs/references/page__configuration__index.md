@@ -122,8 +122,10 @@ They ride inline in a `full_arguments` content field when they fit the Matrix ev
 When the complete redacted arguments cannot be delivered — over the 2MB completeness cap or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
-If MindRoom restarts before a tool call is approved, the live tool call is cancelled.
-On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as expired.
+When an agent or team tool call requires approval, MindRoom persists the exact paused call and releases the response lifecycle lock while the card is pending.
+Approval, denial, and expiry resume that continuation through the normal response admission gate and the original conversation's lifecycle lock.
+Pending continuations survive config reloads and process restarts, and duplicate decisions or wake-ups cannot claim the same tool call twice.
+If a restart finds a claimed call whose delivery was not durably recorded, MindRoom reports a visible failure instead of risking a duplicate side effect.
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 

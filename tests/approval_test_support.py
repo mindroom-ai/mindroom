@@ -87,6 +87,14 @@ class FakeApprovalCards:
         self.continuations[continuation.approval_id] = continuation
         return True
 
+    async def create_approval_continuation_with_turn(
+        self,
+        continuation: StoredApprovalContinuation,
+        **_turn: object,
+    ) -> bool:
+        """Stand in for the journal's atomic continuation/turn handoff."""
+        return await self.create_approval_continuation(continuation)
+
     async def resolve_approval_continuation(
         self,
         approval_id: str,
@@ -106,6 +114,66 @@ class FakeApprovalCards:
     async def approval_continuation(self, approval_id: str) -> StoredApprovalContinuation | None:
         """Return one fake continuation by approval identity."""
         return self.continuations.get(approval_id)
+
+    async def claim_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Give one ready fake continuation to one execution owner."""
+        continuation = self.continuations.get(approval_id)
+        if continuation is None or continuation.state is not ApprovalContinuationState.READY:
+            return False
+        self.continuations[approval_id] = replace(
+            continuation,
+            state=ApprovalContinuationState.CLAIMED,
+            claimant_id=claimant_id,
+        )
+        return True
+
+    async def complete_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Complete one fake continuation only for its owner."""
+        continuation = self.continuations.get(approval_id)
+        if (
+            continuation is None
+            or continuation.state is not ApprovalContinuationState.DELIVERED
+            or continuation.claimant_id != claimant_id
+        ):
+            return False
+        self.continuations[approval_id] = replace(continuation, state=ApprovalContinuationState.COMPLETED)
+        return True
+
+    async def mark_approval_continuation_delivered(self, approval_id: str, claimant_id: str) -> bool:
+        """Record successful fake execution and visible delivery for its owner."""
+        continuation = self.continuations.get(approval_id)
+        if (
+            continuation is None
+            or continuation.state is not ApprovalContinuationState.CLAIMED
+            or continuation.claimant_id != claimant_id
+        ):
+            return False
+        self.continuations[approval_id] = replace(continuation, state=ApprovalContinuationState.DELIVERED)
+        return True
+
+    async def fail_approval_continuation(self, approval_id: str, reason: str) -> bool:
+        """Settle one nonterminal fake continuation as a visible failure."""
+        continuation = self.continuations.get(approval_id)
+        if continuation is None or continuation.state in {
+            ApprovalContinuationState.COMPLETED,
+            ApprovalContinuationState.TERMINAL_FAILURE,
+        }:
+            return False
+        self.continuations[approval_id] = replace(
+            continuation,
+            state=ApprovalContinuationState.TERMINAL_FAILURE,
+            failure_reason=reason,
+        )
+        return True
+
+    async def recoverable_approval_continuations(self) -> tuple[StoredApprovalContinuation, ...]:
+        """Return nonterminal fake continuations in insertion order."""
+        return tuple(
+            continuation
+            for continuation in self.continuations.values()
+            if continuation.state
+            not in {ApprovalContinuationState.COMPLETED, ApprovalContinuationState.TERMINAL_FAILURE}
+        )
 
     @property
     def resolutions(self) -> dict[str, dict[str, Any]]:

@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_may_require_approval, tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1303,7 +1303,7 @@ def _mark_toolkit_approval_functions(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        if tool_may_require_approval(config, function.name):
+        if tool_requires_approval_for_openai_compat(config, function.name):
             function.requires_confirmation = True
     return toolkit
 
@@ -1544,7 +1544,7 @@ def _assemble_agent_toolkits(
                 toolkit = _mark_toolkit_approval_functions(
                     toolkit,
                     config=config,
-                    matrix_execution=execution_identity is not None and execution_identity.channel == "matrix",
+                    matrix_execution=(execution_identity is not None and execution_identity.channel == "matrix"),
                 )
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)

@@ -13,8 +13,12 @@ from zoneinfo import ZoneInfo
 
 import nio
 import pytest
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
+from mindroom.approval_manager import SentApprovalEvent, initialize_approval_store
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -35,6 +39,7 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
 )
+from mindroom.event_journal import StoredApprovalContinuation
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import write_scope_state
@@ -63,9 +68,12 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
 )
+from mindroom.response_turn import PausedToolCall
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from tests.approval_test_support import FakeApprovalCards
 from tests.bot_helpers import (
     AgentBotTestBase,
     _handled_response_event_id,
@@ -95,7 +103,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -134,6 +142,348 @@ def test_cached_room_display_name_uses_synced_matrix_room() -> None:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_suspended_approval_releases_lifecycle_without_terminal_effects(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A durable approval pause should return from the lock without running terminal effects."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        target = MessageTarget.resolve(
+            room_id="!test:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$source",
+        )
+
+        async def run_cancellable_response(
+            *,
+            response_function: Callable[[str | None], Awaitable[None]],
+            **_: object,
+        ) -> None:
+            await response_function("$response")
+
+        with (
+            patch.object(
+                ResponseRunner,
+                "_process_and_respond",
+                new=AsyncMock(
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="Waiting for approval",
+                            suppressed=True,
+                        ),
+                        run_succeeded=False,
+                        suspended=True,
+                    ),
+                ),
+            ),
+            patch.object(
+                ResponseRunner,
+                "_run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_lifecycle.apply_post_response_effects", new_callable=AsyncMock) as post_effects,
+        ):
+            result = await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Write the file",
+                    thread_history=[],
+                    existing_event_id="$response",
+                    existing_event_is_placeholder=True,
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id=target.room_id,
+                        reply_to_event_id=target.reply_to_event_id,
+                        thread_id=target.source_thread_id,
+                        prompt="Write the file",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
+                ),
+            )
+
+        assert result is None
+        assert bot._response_runner.has_active_response_for_target(target) is False
+        post_effects.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_process_suspension_persists_exact_call_and_detaches_card(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The response seam should persist exact execution identity before exposing the approval card."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                tool_approval={
+                    "default": "auto_approve",
+                    "rules": [{"match": "write_file", "action": "require_approval"}],
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$response-edit")
+        cards = FakeApprovalCards()
+        approval_sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+        manager = initialize_approval_store(
+            runtime_paths_for(config),
+            sender=approval_sender,
+            editor=AsyncMock(return_value=True),
+            cards=cards,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+
+        async def pause_response(*_args: object, **kwargs: object) -> str:
+            recorder = cast("Any", kwargs["turn_recorder"])
+            recorder.record_suspended(
+                run_metadata=recorder.run_metadata,
+                assistant_text="Waiting for approval",
+                completed_tools=[],
+                paused_tool_calls=[
+                    PausedToolCall(
+                        "call-1",
+                        "write_file",
+                        {"path": "notes.txt", "contents": "hello"},
+                    ),
+                ],
+                session_id="session-1",
+                run_id="run-1",
+            )
+            return "Waiting for approval"
+
+        async def record_handoff(
+            _response_event_id: str,
+            continuation: StoredApprovalContinuation,
+        ) -> None:
+            assert await manager.create_continuation(continuation)
+
+        typing_events: list[str] = []
+
+        @asynccontextmanager
+        async def track_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+            typing_events.append("started")
+            try:
+                yield
+            finally:
+                typing_events.append("stopped")
+
+        request = replace(
+            _response_request(
+                room_id="!test:localhost",
+                prompt="Write the file",
+                reply_to_event_id="$source",
+                existing_event_id="$response",
+                existing_event_is_placeholder=True,
+                user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$source",
+                    prompt="Write the file",
+                    user_id="@user:localhost",
+                ),
+            ),
+            on_approval_suspended=record_handoff,
+        )
+
+        with patch_response_runner_module(
+            typing_indicator=track_typing,
+            ai_response=AsyncMock(side_effect=pause_response),
+        ):
+            generation = await bot._response_runner._process_and_respond(
+                request,
+            )
+
+        assert generation.suspended is True
+        assert generation.delivery.event_id == "$response"
+        assert manager.has_live_work() is False
+        assert cards.stored_event_ids() == {"$approval"}
+        continuation = next(iter(cards.continuations.values()))
+        assert continuation.tool_call_id == "call-1"
+        assert continuation.arguments == {"path": "notes.txt", "contents": "hello"}
+        assert continuation.response_event_id == "$response"
+        assert typing_events == ["started", "stopped"]
+
+    @pytest.mark.asyncio
+    async def test_argument_sensitive_auto_approval_continues_without_suspending(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A potentially gated tool whose exact arguments are allowed should continue inline."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        request = _response_request(
+            room_id="!test:localhost",
+            prompt="Read the safe file",
+            reply_to_event_id="$source",
+            existing_event_id="$response",
+            existing_event_is_placeholder=True,
+            user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$source",
+                prompt="Read the safe file",
+                user_id="@user:localhost",
+            ),
+        )
+        runtime = await bot._response_runner.prepare_response_runtime(request)
+        recorder = bot._response_runner._build_turn_recorder(
+            user_message=request.prompt,
+            user_message_is_structured=False,
+            reply_to_event_id=request.reply_to_event_id,
+            requester_id=request.user_id,
+            matrix_run_metadata=None,
+        )
+        recorder.record_suspended(
+            run_metadata=recorder.run_metadata,
+            assistant_text="",
+            completed_tools=[],
+            paused_tool_calls=[PausedToolCall("call-1", "read_file", {"path": "safe.txt"})],
+            session_id=runtime.session_id,
+            run_id="run-1",
+        )
+
+        with (
+            patch("mindroom.response_runner.evaluate_tool_approval", new=AsyncMock(return_value=(False, 30.0))),
+            patch.object(
+                bot._response_runner,
+                "_continue_agent_call",
+                new=AsyncMock(return_value="Safe file contents"),
+            ) as continue_call,
+        ):
+            delivery = await bot._response_runner._suspend_approval(
+                request=request,
+                runtime=runtime,
+                recorder=recorder,
+                response_event_id="$response",
+                tool_trace=[],
+                extra_content=None,
+            )
+
+        assert recorder.outcome == "completed"
+        assert delivery.suppressed is False
+        assert delivery.final_visible_body == "Safe file contents"
+        continued = continue_call.await_args.args[0]
+        assert continued.tool_call_id == "call-1"
+        assert continued.decision == "approved"
+
+    @pytest.mark.asyncio
+    async def test_approved_continuation_executes_exact_call_once_under_target_lock(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Duplicate worker wake-ups must not execute an approved side effect twice."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        cards = FakeApprovalCards()
+        manager = initialize_approval_store(
+            runtime_paths_for(config),
+            sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+            editor=AsyncMock(return_value=True),
+            cards=cards,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+        target = MessageTarget(
+            room_id="!test:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$thread",
+            reply_to_event_id=None,
+            session_id="session-1",
+        )
+        identity = bot._tool_runtime_support.build_execution_identity(
+            target=target,
+            user_id="@alice:localhost",
+        )
+        continuation = StoredApprovalContinuation(
+            approval_id="approval-1",
+            card_transaction_id="mindroom-approval-approval-1",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            response_event_id="$response",
+            source_event_ids=("$source",),
+            entity_kind="agent",
+            entity_name=bot.agent_name,
+            session_id=target.session_id,
+            run_id="run-1",
+            tool_call_id="call-1",
+            tool_name="write_file",
+            arguments={"path": "notes.txt", "contents": "hello"},
+            requester_id="@alice:localhost",
+            execution_identity=serialize_tool_execution_identity(identity),
+            expires_at=datetime.now(ZoneInfo("UTC")),
+        )
+        await cards.create_approval_continuation(continuation)
+        await cards.resolve_approval_continuation(continuation.approval_id, "approved")
+        continued = RunOutput(
+            run_id="run-1",
+            agent_id=bot.agent_name,
+            session_id=target.session_id,
+            content="Done",
+            status=RunStatus.completed,
+        )
+        paused = RunOutput(
+            run_id="run-1",
+            agent_id=bot.agent_name,
+            session_id=target.session_id,
+            content="",
+            status=RunStatus.paused,
+            tools=[
+                ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="write_file",
+                    tool_args={"path": "notes.txt", "contents": "hello"},
+                    requires_confirmation=True,
+                ),
+            ],
+        )
+        agent = MagicMock()
+        agent.aget_session.side_effect = lambda **_kwargs: asyncio.sleep(
+            0,
+            result=AgentSession(session_id=target.session_id, runs=[paused]),
+        )
+        agent.acontinue_run.side_effect = lambda **_kwargs: asyncio.sleep(0, result=continued)
+
+        with (
+            patch("mindroom.response_runner.create_agent", return_value=agent),
+            patch("mindroom.response_runner.close_agent_runtime_state_dbs"),
+            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.DeliveryGateway.edit_text", new=AsyncMock(return_value=True)) as edit_text,
+        ):
+            first = await bot._response_runner.resume_approval_continuation(continuation)
+            duplicate = await bot._response_runner.resume_approval_continuation(continuation)
+
+        assert first is not None
+        assert first.response_event_id == "$response"
+        assert first.claimant_id is not None
+        assert duplicate is None
+        agent.acontinue_run.assert_called_once()
+        updated_tool = agent.acontinue_run.call_args.kwargs["updated_tools"][0]
+        assert updated_tool.tool_call_id == "call-1"
+        assert updated_tool.tool_args == {"path": "notes.txt", "contents": "hello"}
+        assert updated_tool.confirmed is True
+        edit_text.assert_awaited_once()
+        stored = await manager.continuation(continuation.approval_id)
+        assert stored is not None
+        assert stored.state.value == "delivered"
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_tool_enabled(

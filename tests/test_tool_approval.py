@@ -194,6 +194,28 @@ def _approval_card(
     }
 
 
+def _approval_continuation(approval_id: str) -> StoredApprovalContinuation:
+    """Build one pending continuation matching the standard approval card."""
+    return StoredApprovalContinuation(
+        approval_id=approval_id,
+        card_transaction_id=_approval_transaction_id(approval_id),
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$response",
+        source_event_ids=("$source",),
+        entity_kind="agent",
+        entity_name="code",
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="read_file",
+        arguments={"path": "notes.txt"},
+        requester_id="@user:localhost",
+        execution_identity={"agent_name": "code"},
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+
 def _approval_edit(
     card: dict[str, Any],
     *,
@@ -350,6 +372,418 @@ async def test_detached_approval_decision_wakes_continuation_once(tmp_path: Path
     continuation = await cards.approval_continuation(pending.approval_id)
     assert continuation is not None
     assert continuation.decision == "approved"
+
+
+@pytest.mark.asyncio
+async def test_detached_approval_expiry_wakes_continuation_without_live_work(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    ready = asyncio.Event()
+    approval_id = "approval-expiry"
+    expires_at = datetime.now(UTC) + timedelta(milliseconds=20)
+    await cards.create_approval_continuation(
+        StoredApprovalContinuation(
+            approval_id=approval_id,
+            card_transaction_id=_approval_transaction_id(approval_id),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            response_event_id="$response",
+            source_event_ids=("$source",),
+            entity_kind="agent",
+            entity_name="code",
+            session_id="session-1",
+            run_id="run-1",
+            tool_call_id="call-1",
+            tool_name="write_file",
+            arguments={"path": "notes.txt", "contents": "hello"},
+            requester_id="@user:localhost",
+            execution_identity={"agent_name": "code"},
+            expires_at=expires_at,
+        ),
+    )
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=lambda _approval_id: ready.set(),
+    )
+
+    pending = await store.create_approval(
+        approval_id=approval_id,
+        tool_name="write_file",
+        arguments={"path": "notes.txt", "contents": "hello"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=0.02,
+    )
+    assert isinstance(pending, PendingApproval)
+    assert store.has_live_work() is False
+
+    await asyncio.wait_for(ready.wait(), timeout=1)
+
+    continuation = await cards.approval_continuation(approval_id)
+    assert continuation is not None
+    assert continuation.decision == "expired"
+
+
+@pytest.mark.asyncio
+async def test_committed_human_decision_wakes_before_cancelled_card_edit(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-cancelled-edit"
+    continuation = _approval_continuation(approval_id)
+    card = _approval_card(approval_id=approval_id)
+    await cards.create_approval_continuation(continuation)
+    await cards.store_card("$approval", continuation.room_id, card)
+    edit_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def editor(*_args: object) -> bool:
+        edit_started.set()
+        await never_finishes.wait()
+        return True
+
+    ready: list[str] = []
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+    decision = asyncio.create_task(
+        store.handle_card_response(
+            room_id=continuation.room_id,
+            sender_id="@user:localhost",
+            card_event_id="$approval",
+            status="approved",
+            reason=None,
+        ),
+    )
+    await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+    assert ready == [approval_id]
+    decision.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await decision
+    stored = await cards.approval_continuation(approval_id)
+    assert stored is not None
+    assert stored.state.value == "ready"
+
+
+@pytest.mark.asyncio
+async def test_committed_expiry_wakes_before_cancelled_card_edit(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-cancelled-expiry-edit"
+    continuation = _approval_continuation(approval_id)
+    card = _approval_card(approval_id=approval_id)
+    pending = PendingApproval.from_card_event(card, room_id=continuation.room_id)
+    await cards.create_approval_continuation(continuation)
+    await cards.store_card("$approval", continuation.room_id, card)
+    edit_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def editor(*_args: object) -> bool:
+        edit_started.set()
+        await never_finishes.wait()
+        return True
+
+    ready: list[str] = []
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+    expiry = asyncio.create_task(store._expire_detached_pending(pending, transaction_id_for("$approval")))
+    await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+    assert ready == [approval_id]
+    expiry.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await expiry
+    stored = await cards.approval_continuation(approval_id)
+    assert stored is not None
+    assert stored.decision == "expired"
+    assert stored.state.value == "ready"
+
+
+@pytest.mark.asyncio
+async def test_restart_preserves_pending_continuation_and_restores_decision_wake(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-restart"
+    expires_at = datetime.now(UTC) + timedelta(seconds=30)
+    await cards.create_approval_continuation(
+        StoredApprovalContinuation(
+            approval_id=approval_id,
+            card_transaction_id=_approval_transaction_id(approval_id),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            response_event_id="$response",
+            source_event_ids=("$source",),
+            entity_kind="agent",
+            entity_name="code",
+            session_id="session-1",
+            run_id="run-1",
+            tool_call_id="call-1",
+            tool_name="write_file",
+            arguments={"path": "notes.txt", "contents": "hello"},
+            requester_id="@user:localhost",
+            execution_identity={"agent_name": "code"},
+            expires_at=expires_at,
+        ),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    initial = initialize_approval_store(
+        runtime_paths,
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    pending = await initial.create_approval(
+        approval_id=approval_id,
+        tool_name="write_file",
+        arguments={"path": "notes.txt", "contents": "hello"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+    assert isinstance(pending, PendingApproval)
+    await initial.shutdown(reason="reload")
+
+    ready: list[str] = []
+    restarted = initialize_approval_store(
+        runtime_paths,
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+
+    assert await restarted.discard_pending_on_startup() == ApprovalStartupSweep(discarded=0, failed=0)
+    unresolved = await cards.approval_continuation(approval_id)
+    assert unresolved is not None
+    assert unresolved.decision is None
+
+    result = await restarted.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status="denied",
+        reason="Not now",
+    )
+
+    assert result.resolved is True
+    assert ready == [approval_id]
+    continuation = await cards.approval_continuation(approval_id)
+    assert continuation is not None
+    assert continuation.decision == "denied"
+    await restarted.shutdown(reason="test complete")
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_card_resolution_before_waking_ready_continuation(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-ready-after-crash"
+    continuation = _approval_continuation(approval_id)
+    await cards.create_approval_continuation(continuation)
+    await cards.resolve_approval_continuation(approval_id, "approved")
+    await cards.store_card(
+        "$approval",
+        continuation.room_id,
+        _approval_card(approval_id=approval_id),
+    )
+    ready: list[str] = []
+    editor = AsyncMock(return_value=True)
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        cards=cards,
+        approval_room_ids=lambda: {continuation.room_id},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+
+    sweep = await restarted.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    assert ready == [approval_id]
+    assert editor.await_args.args[2]["status"] == "approved"
+    assert not cards.rows
+
+
+@pytest.mark.asyncio
+async def test_restart_fails_continuation_when_card_send_never_started(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-never-sent"
+    continuation = _approval_continuation(approval_id)
+    await cards.create_approval_continuation(continuation)
+    await cards.store_unsent_card(
+        continuation.card_transaction_id,
+        continuation.room_id,
+        _approval_card(approval_id=approval_id),
+        attempted=False,
+    )
+    ready: list[str] = []
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        approval_room_ids=lambda: {continuation.room_id},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+
+    sweep = await restarted.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=0)
+    stored = await cards.approval_continuation(approval_id)
+    assert stored is not None
+    assert stored.state.value == "terminal_failure"
+    assert ready == [approval_id]
+
+
+@pytest.mark.asyncio
+async def test_restart_retries_continuation_when_attempted_card_is_still_unknown(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    approval_id = "approval-send-unknown"
+    continuation = _approval_continuation(approval_id)
+    await cards.create_approval_continuation(continuation)
+    await cards.store_unsent_card(
+        continuation.card_transaction_id,
+        continuation.room_id,
+        _approval_card(approval_id=approval_id),
+    )
+    restarted = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(side_effect=RuntimeError("homeserver unavailable")),
+        cards=cards,
+        approval_room_ids=lambda: {continuation.room_id},
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+    )
+
+    sweep = await restarted.discard_pending_on_startup()
+
+    assert sweep == ApprovalStartupSweep(discarded=0, failed=1)
+    stored = await cards.approval_continuation(approval_id)
+    assert stored is not None
+    assert stored.state.value == "waiting_for_decision"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_continuation_owner_uses_router_for_visible_failure(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    continuation = StoredApprovalContinuation(
+        approval_id="approval-missing-agent",
+        card_transaction_id="mindroom-approval-approval-missing-agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        response_event_id="$response",
+        source_event_ids=("$source",),
+        entity_kind="agent",
+        entity_name="removed-agent",
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="write_file",
+        arguments={"path": "notes.txt"},
+        requester_id="@user:localhost",
+        execution_identity={"agent_name": "removed-agent"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    await cards.create_approval_continuation(continuation)
+    await cards.resolve_approval_continuation(continuation.approval_id, "approved")
+    initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    router = MagicMock()
+    router.fail_approval_continuation = AsyncMock()
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider={"router": router}.get,
+        cards_provider=lambda: cards,
+    )
+
+    await transport._resume_continuation(continuation.approval_id)
+
+    router.fail_approval_continuation.assert_awaited_once()
+    assert "removed-agent" in router.fail_approval_continuation.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_ready_continuation_retries_against_replacement_bot_after_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mindroom.approval_transport._CONTINUATION_RETRY_SECONDS", 0.01)
+    cards = FakeApprovalCards()
+    continuation = _approval_continuation("approval-reload-race")
+    await cards.create_approval_continuation(continuation)
+    await cards.resolve_approval_continuation(continuation.approval_id, "approved")
+    initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    resumed = asyncio.Event()
+    replacement = MagicMock()
+
+    async def replacement_resume(current: StoredApprovalContinuation) -> None:
+        assert await cards.claim_approval_continuation(current.approval_id, "replacement")
+        resumed.set()
+
+    replacement.resume_approval_continuation = AsyncMock(side_effect=replacement_resume)
+    bots: dict[str, MagicMock] = {}
+    old = MagicMock()
+    replacement_published: asyncio.Task[None] | None = None
+    absent_lookups = 0
+
+    async def refused_during_reload(_current: StoredApprovalContinuation) -> None:
+        nonlocal replacement_published
+        bots.pop(continuation.entity_name)
+
+        async def publish_replacement() -> None:
+            await asyncio.sleep(0.04)
+            bots[continuation.entity_name] = replacement
+
+        replacement_published = asyncio.create_task(publish_replacement())
+
+    def bot_provider(name: str) -> MagicMock | None:
+        nonlocal absent_lookups
+        bot = bots.get(name)
+        if name == continuation.entity_name and bot is None:
+            absent_lookups += 1
+        return bot
+
+    old.resume_approval_continuation = AsyncMock(side_effect=refused_during_reload)
+    bots[continuation.entity_name] = old
+    transport = approval_transport.ApprovalMatrixTransport(
+        runtime_paths=test_runtime_paths(tmp_path),
+        bot_provider=bot_provider,
+        cards_provider=lambda: cards,
+        entity_configured=lambda name: name == continuation.entity_name,
+    )
+
+    transport._decision_ready(continuation.approval_id)
+    await asyncio.wait_for(resumed.wait(), timeout=1)
+    await transport.drain_continuation_tasks()
+    assert replacement_published is not None
+    await replacement_published
+
+    old.resume_approval_continuation.assert_awaited_once()
+    replacement.resume_approval_continuation.assert_awaited_once()
+    assert absent_lookups >= 1
 
 
 @pytest.mark.asyncio

@@ -124,6 +124,7 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.response_delivery",
+    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.approval_manager",
     "mindroom.turn_controller",
@@ -324,6 +325,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
+    "mindroom.response_runner",
     "mindroom.teams",
 ]
 
@@ -604,6 +606,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.orchestrator",
+    "mindroom.response_runner",
     "mindroom.tool_system.tool_hooks",
 ]
 
@@ -1530,6 +1533,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
+    "mindroom.event_journal",
+    "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.history.interrupted_replay",
@@ -1543,6 +1548,7 @@ depends_on = [
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
+    "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
@@ -1550,6 +1556,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_approval",
     "mindroom.user_turn_time",
 ]
 
@@ -3791,6 +3798,8 @@ expose = [
     "TeamOutcome",
     "TeamResolution",
     "TeamResolutionMember",
+    "format_continued_team_response",
+    "materialize_team_continuation_runtime",
     "resolve_configured_team",
     "decide_team_formation",
     "select_ad_hoc_team_mode",
@@ -3803,6 +3812,7 @@ expose = [
     "select_model_for_team",
     "team_response",
     "team_response_stream",
+    "team_paused_tool_calls",
     "resolve_live_shared_agent_names",
 ]
 from = ["mindroom.teams"]
@@ -4513,12 +4523,20 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "ToolCallWorkflowOrigin",
+    "approval_continuation",
+    "claim_approval_continuation",
+    "complete_approval_continuation",
+    "create_approval_continuation",
+    "create_approval_continuation_with_turn",
+    "create_required_tool_approval_for_call",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
+    "fail_approval_continuation",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
     "is_process_active_approval_card",
     "is_process_approval_card",
+    "mark_approval_continuation_delivered",
     "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",

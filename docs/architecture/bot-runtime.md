@@ -197,6 +197,14 @@ There are now four active runtime contracts for tool and scheduling dispatch.
 `SchedulingRuntime` is the explicit live scheduling contract consumed by command and tool scheduling entrypoints.
 Hook bridges and response execution now consume these contracts directly instead of rebuilding identity from partial nullable fields.
 
+Approval-gated Matrix tool calls suspend instead of keeping the response lifecycle alive while a human decides.
+The continuation and handled source turn are committed in one journal transaction before the lifecycle lock and typing indicator are released.
+The continuation stores the exact Agno run, tool-call identity, arguments, execution identity, and exact team membership when the owner is a team.
+Approval, denial, and expiry each commit one decision, then re-enter the global response admission gate and the original conversation serializer before claiming the call.
+The resumed runtime verifies that the persisted paused call exactly matches the continuation before passing the decision to Agno.
+A durable `claimed` state prevents duplicate execution, while a separate `delivered` state proves that execution and the visible Matrix edit completed before the source turn is finalized.
+Startup retries ready work, finalizes delivered work, and converts an uncertain claimed call into a visible terminal failure without rerunning it.
+
 `AgentBot` is closer to a runtime shell again.
 It still needs more cleanup, but normal turn control, edit regeneration, and interactive selection execution no longer live in the bot class itself.
 

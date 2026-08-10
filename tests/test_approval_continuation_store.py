@@ -69,6 +69,42 @@ async def test_continuation_decision_and_claim_are_first_writer_wins(
     assert stored.arguments == {"path": "notes.txt", "contents": "hello"}
 
 
+async def test_continuation_and_handled_source_turn_commit_as_one_handoff(
+    journal_store: EventJournalStore,
+) -> None:
+    """The source cannot become replayable independently of its durable continuation."""
+    alice = journal_store.principal("agent@alice")
+    continuation = _continuation()
+
+    created = await alice.create_approval_continuation_with_turn(
+        continuation,
+        agent_name="code",
+        index_event_ids=("$source",),
+        anchor_event_id="$source",
+        record_json='{"completed":true,"response_event_id":"$response"}',
+    )
+
+    assert created is True
+    assert await alice.approval_continuation("approval-1") is not None
+    assert await journal_store.turn_records("code").load_all() == (
+        (
+            "$source",
+            "$source",
+            '{"completed":true,"response_event_id":"$response"}',
+        ),
+    )
+
+    duplicate = await alice.create_approval_continuation_with_turn(
+        continuation,
+        agent_name="code",
+        index_event_ids=("$source",),
+        anchor_event_id="$source",
+        record_json='{"completed":false}',
+    )
+    assert duplicate is False
+    assert (await journal_store.turn_records("code").load_all())[0][2] != '{"completed":false}'
+
+
 async def test_completed_or_failed_continuations_cannot_be_reclaimed(
     journal_store: EventJournalStore,
 ) -> None:
@@ -78,6 +114,7 @@ async def test_completed_or_failed_continuations_cannot_be_reclaimed(
     await alice.resolve_approval_continuation("completed", "approved")
     await alice.claim_approval_continuation("completed", "worker-a")
 
+    assert await alice.mark_approval_continuation_delivered("completed", "worker-a") is True
     assert await alice.complete_approval_continuation("completed", "worker-a") is True
     assert await alice.claim_approval_continuation("completed", "worker-b") is False
 
@@ -95,16 +132,20 @@ async def test_recovery_scan_returns_only_nonterminal_continuations(
 ) -> None:
     """Startup must find waiting, ready, and uncertain claimed work without reviving terminal rows."""
     alice = journal_store.principal("agent@alice")
-    for approval_id in ("waiting", "ready", "claimed", "completed", "failed"):
+    for approval_id in ("waiting", "ready", "claimed", "delivered", "completed", "failed"):
         await alice.create_approval_continuation(_continuation(approval_id))
     await alice.resolve_approval_continuation("ready", "denied")
     await alice.resolve_approval_continuation("claimed", "approved")
     await alice.claim_approval_continuation("claimed", "dead-worker")
+    await alice.resolve_approval_continuation("delivered", "approved")
+    await alice.claim_approval_continuation("delivered", "worker-b")
+    await alice.mark_approval_continuation_delivered("delivered", "worker-b")
     await alice.resolve_approval_continuation("completed", "approved")
     await alice.claim_approval_continuation("completed", "worker-a")
+    await alice.mark_approval_continuation_delivered("completed", "worker-a")
     await alice.complete_approval_continuation("completed", "worker-a")
     await alice.fail_approval_continuation("failed", "terminal")
 
     recoverable = await alice.recoverable_approval_continuations()
 
-    assert [item.approval_id for item in recoverable] == ["waiting", "ready", "claimed"]
+    assert [item.approval_id for item in recoverable] == ["waiting", "ready", "claimed", "delivered"]

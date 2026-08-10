@@ -74,6 +74,31 @@ class PrincipalStore:
             lambda transaction: approvals.create_continuation(transaction, self._principal_id, continuation),
         )
 
+    async def create_approval_continuation_with_turn(
+        self,
+        continuation: StoredApprovalContinuation,
+        *,
+        agent_name: str,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> bool:
+        """Atomically hand one handled source turn to its durable continuation."""
+
+        def write(transaction: Transaction) -> bool:
+            if not approvals.create_continuation(transaction, self._principal_id, continuation):
+                return False
+            turn_records.upsert(
+                transaction,
+                agent_name,
+                index_event_ids=index_event_ids,
+                anchor_event_id=anchor_event_id,
+                record_json=record_json,
+            )
+            return True
+
+        return await self._backend.write(write)
+
     async def resolve_approval_continuation(
         self,
         approval_id: str,
@@ -110,6 +135,17 @@ class PrincipalStore:
         """Finish the continuation owned by one execution worker."""
         return await self._backend.write(
             lambda transaction: approvals.complete_continuation(
+                transaction,
+                self._principal_id,
+                approval_id,
+                claimant_id,
+            ),
+        )
+
+    async def mark_approval_continuation_delivered(self, approval_id: str, claimant_id: str) -> bool:
+        """Record that one claimed call and visible delivery finished."""
+        return await self._backend.write(
+            lambda transaction: approvals.mark_continuation_delivered(
                 transaction,
                 self._principal_id,
                 approval_id,

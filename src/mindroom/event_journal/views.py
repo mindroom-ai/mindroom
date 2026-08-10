@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from mindroom.history_recovery import (
         HistoryRecoveryOutcome,
@@ -334,6 +334,18 @@ class ApprovalView(Protocol):
         """Persist one exact paused tool call before its approval becomes actionable."""
         ...
 
+    async def create_approval_continuation_with_turn(
+        self,
+        continuation: StoredApprovalContinuation,
+        *,
+        agent_name: str,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> bool:
+        """Atomically hand one handled source turn to its durable continuation."""
+        ...
+
     async def resolve_approval_continuation(
         self,
         approval_id: str,
@@ -352,6 +364,10 @@ class ApprovalView(Protocol):
 
     async def complete_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
         """Finish the continuation owned by one execution worker."""
+        ...
+
+    async def mark_approval_continuation_delivered(self, approval_id: str, claimant_id: str) -> bool:
+        """Record that one claimed call and visible delivery finished."""
         ...
 
     async def fail_approval_continuation(self, approval_id: str, reason: str) -> bool:

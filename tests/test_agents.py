@@ -146,6 +146,7 @@ def _test_config() -> Config:
 
 def test_matrix_toolkit_marks_only_functions_that_may_require_approval() -> None:
     """Matrix agents should delegate potentially gated calls to Agno pause handling."""
+
     def read_file(path: str) -> str:
         return path
 
@@ -168,6 +169,7 @@ def test_matrix_toolkit_marks_only_functions_that_may_require_approval() -> None
 
 def test_non_matrix_toolkit_does_not_enable_agno_confirmation() -> None:
     """Surfaces without Matrix approval UI should retain their existing tool shape."""
+
     def write_file(path: str) -> str:
         return path
 
