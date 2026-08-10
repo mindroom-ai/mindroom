@@ -10,7 +10,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embedding_factory import resolve_embedder_settings
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENAI_GPT_LUNA
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -262,6 +262,11 @@ async def create_memory_instance(
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
     memory = AsyncMemory.from_config(config_dict)
+    memory_llm = config.memory.llm
+    if memory_llm is not None and memory_llm.provider == "openai" and memory_llm.config.get("model") == OPENAI_GPT_LUNA:
+        from mindroom.memory._mem0_openai import MindRoomMem0OpenAILLM  # noqa: PLC0415
+
+        memory.llm = MindRoomMem0OpenAILLM(memory.llm.config)
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.

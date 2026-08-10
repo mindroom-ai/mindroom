@@ -10,6 +10,7 @@ import pytest
 from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
+from mem0.llms.openai import OpenAILLM
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -117,6 +118,59 @@ class TestMemoryConfig:
         assert result["llm"]["provider"] == "openai"
         assert result["llm"]["config"]["model"] == "gpt-4"
         assert result["llm"]["config"]["api_key"] == "test-key"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_id", "expected_top_p"),
+        [
+            ("gpt-5.6-luna", None),
+            ("gpt-4", 0.8),
+        ],
+    )
+    async def test_mem0_openai_top_p_support_is_model_specific(
+        self,
+        tmp_path: Path,
+        model_id: str,
+        expected_top_p: float | None,
+    ) -> None:
+        """Memory extraction must omit only sampling controls rejected by its model."""
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="ollama",
+                config=EmbedderConfig(model="nomic-embed-text", host="http://localhost:11434"),
+            ),
+            llm=_MemoryLLMConfig(
+                provider="openai",
+                config={
+                    "api_key": "test-key",
+                    "model": model_id,
+                    "temperature": 0.1,
+                    "top_p": 0.8,
+                },
+            ),
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+
+        def fake_from_config(config_dict: dict) -> SimpleNamespace:
+            return SimpleNamespace(
+                llm=OpenAILLM(config_dict["llm"]["config"]),
+                vector_store=object(),
+            )
+
+        with patch.object(AsyncMemory, "from_config", side_effect=fake_from_config):
+            instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+        create_completion = MagicMock(return_value=response)
+        instance.llm.client.chat.completions.create = create_completion
+        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
+
+        request_params = create_completion.call_args.kwargs
+        assert request_params["temperature"] == 0.1
+        if expected_top_p is None:
+            assert "top_p" not in request_params
+        else:
+            assert request_params["top_p"] == expected_top_p
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
