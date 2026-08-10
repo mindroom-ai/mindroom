@@ -11,6 +11,8 @@ import os
 import stat
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +103,42 @@ _TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
     "knowledge_bases": {},
 }
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+
+
+@pytest.mark.asyncio
+async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
+    """Worker proxy calls must not queue behind unrelated default-pool work."""
+    loop = asyncio.get_running_loop()
+    default_executor = ThreadPoolExecutor(max_workers=1)
+    replacement_executor = ThreadPoolExecutor()
+    loop.set_default_executor(default_executor)
+    default_started = threading.Event()
+    release_default = threading.Event()
+    request_scope = ContextVar[str]("test_worker_proxy_request_scope")
+
+    def block_default_executor() -> None:
+        default_started.set()
+        release_default.wait(timeout=5)
+
+    default_blocker = loop.run_in_executor(None, block_default_executor)
+    assert default_started.wait(timeout=1)
+    token = request_scope.set("request-scope")
+
+    try:
+        result = await asyncio.wait_for(
+            sandbox_proxy_module._run_in_worker_proxy_executor(request_scope.get),
+            timeout=1,
+        )
+
+        assert result == "request-scope"
+        assert not default_blocker.done()
+    finally:
+        request_scope.reset(token)
+        release_default.set()
+        await default_blocker
+        loop.set_default_executor(replacement_executor)
+        default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
 
 
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
