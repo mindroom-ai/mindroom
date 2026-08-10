@@ -19,8 +19,10 @@ from mindroom.history_recovery import (
 
 from . import approvals, journal, outbox, reads, turn_records
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
+    ApprovalContinuationDecision,
     RecordedApprovalDecision,
     StoredApprovalCard,
+    StoredApprovalContinuation,
 )
 from .models import DeliveryAcknowledgement
 from .projection import drop_refetched_message, install_refetched_revision, project
@@ -65,6 +67,72 @@ class PrincipalStore:
 
     _backend: Backend
     _principal_id: str
+
+    async def create_approval_continuation(self, continuation: StoredApprovalContinuation) -> bool:
+        """Persist one exact paused tool call before its approval becomes actionable."""
+        return await self._backend.write(
+            lambda transaction: approvals.create_continuation(transaction, self._principal_id, continuation),
+        )
+
+    async def resolve_approval_continuation(
+        self,
+        approval_id: str,
+        decision: ApprovalContinuationDecision,
+    ) -> bool:
+        """Commit the first decision for one suspended tool call."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_continuation(
+                transaction,
+                self._principal_id,
+                approval_id,
+                decision,
+            ),
+        )
+
+    async def claim_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Give one ready continuation to one execution owner."""
+        return await self._backend.write(
+            lambda transaction: approvals.claim_continuation(
+                transaction,
+                self._principal_id,
+                approval_id,
+                claimant_id,
+            ),
+        )
+
+    async def approval_continuation(self, approval_id: str) -> StoredApprovalContinuation | None:
+        """Return one suspended continuation by approval identity."""
+        return await self._backend.read(
+            lambda transaction: approvals.continuation(transaction, self._principal_id, approval_id),
+        )
+
+    async def complete_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Finish the continuation owned by one execution worker."""
+        return await self._backend.write(
+            lambda transaction: approvals.complete_continuation(
+                transaction,
+                self._principal_id,
+                approval_id,
+                claimant_id,
+            ),
+        )
+
+    async def fail_approval_continuation(self, approval_id: str, reason: str) -> bool:
+        """Settle nonterminal continuation work without executing it."""
+        return await self._backend.write(
+            lambda transaction: approvals.fail_continuation(
+                transaction,
+                self._principal_id,
+                approval_id,
+                reason,
+            ),
+        )
+
+    async def recoverable_approval_continuations(self) -> tuple[StoredApprovalContinuation, ...]:
+        """Return every nonterminal continuation startup must reconcile."""
+        return await self._backend.read(
+            lambda transaction: approvals.recoverable_continuations(transaction, self._principal_id),
+        )
 
     async def admit(
         self,

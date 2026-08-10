@@ -223,6 +223,34 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS approval_continuations (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        card_transaction_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT,
+        response_event_id TEXT NOT NULL,
+        source_event_ids_json TEXT NOT NULL,
+        entity_kind TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        execution_identity_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decision TEXT,
+        state TEXT NOT NULL,
+        claimant_id TEXT,
+        failure_reason TEXT,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id),
+        UNIQUE (principal_id, card_transaction_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS turn_records (
         -- Scoped to the agent, not to a journal principal. Every other table
         -- here is per (agent, Matrix identity), because what it holds is only

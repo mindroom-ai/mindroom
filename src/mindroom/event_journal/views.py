@@ -26,7 +26,12 @@ if TYPE_CHECKING:
         RoomHistoryRecovery,
     )
 
-    from .approvals import RecordedApprovalDecision, StoredApprovalCard
+    from .approvals import (
+        ApprovalContinuationDecision,
+        RecordedApprovalDecision,
+        StoredApprovalCard,
+        StoredApprovalContinuation,
+    )
     from .models import (
         AdmissionResult,
         ConversationCursor,
@@ -324,6 +329,38 @@ class OutboxView(Protocol):
 
 class ApprovalView(Protocol):
     """The approval cards this bot owes a decision on, and nothing else."""
+
+    async def create_approval_continuation(self, continuation: StoredApprovalContinuation) -> bool:
+        """Persist one exact paused tool call before its approval becomes actionable."""
+        ...
+
+    async def resolve_approval_continuation(
+        self,
+        approval_id: str,
+        decision: ApprovalContinuationDecision,
+    ) -> bool:
+        """Commit the first decision for one suspended tool call."""
+        ...
+
+    async def claim_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Give one ready continuation to one execution owner."""
+        ...
+
+    async def approval_continuation(self, approval_id: str) -> StoredApprovalContinuation | None:
+        """Return one suspended continuation by approval identity."""
+        ...
+
+    async def complete_approval_continuation(self, approval_id: str, claimant_id: str) -> bool:
+        """Finish the continuation owned by one execution worker."""
+        ...
+
+    async def fail_approval_continuation(self, approval_id: str, reason: str) -> bool:
+        """Settle nonterminal continuation work without executing it."""
+        ...
+
+    async def recoverable_approval_continuations(self) -> tuple[StoredApprovalContinuation, ...]:
+        """Return every nonterminal continuation startup must reconcile."""
+        ...
 
     async def claim_approval_card(
         self,

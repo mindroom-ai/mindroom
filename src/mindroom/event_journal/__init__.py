@@ -13,7 +13,13 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from .approvals import RecordedApprovalDecision, StoredApprovalCard
+from .approvals import (
+    ApprovalContinuationDecision,
+    ApprovalContinuationState,
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+    StoredApprovalContinuation,
+)
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
@@ -58,6 +64,8 @@ __all__ = [
     "TURN_BACKED_KINDS",
     "AdmissionResult",
     "AdmissionView",
+    "ApprovalContinuationDecision",
+    "ApprovalContinuationState",
     "ApprovalView",
     "ConversationCursor",
     "ConversationPage",
@@ -94,6 +102,7 @@ __all__ = [
     "RoomHistoryRecovery",
     "SemanticConsumer",
     "StoredApprovalCard",
+    "StoredApprovalContinuation",
     "TerminalTurnWrite",
     "TurnRecordStore",
     "VisibleMessage",

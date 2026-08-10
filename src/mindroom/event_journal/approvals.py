@@ -44,7 +44,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -58,6 +60,277 @@ _CARD_COLUMNS = """
     cards.attempted AS attempted, cards.sending_device_id AS sending_device_id,
     cards.created_at_ns AS created_at_ns
 """
+
+type ApprovalContinuationDecision = Literal["approved", "denied", "expired"]
+
+
+class ApprovalContinuationState(StrEnum):
+    """Durable execution ownership for one suspended approval."""
+
+    WAITING_FOR_DECISION = "waiting_for_decision"
+    READY = "ready"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+    TERMINAL_FAILURE = "terminal_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredApprovalContinuation:
+    """Everything needed to resume one exact paused Agno tool call."""
+
+    approval_id: str
+    card_transaction_id: str
+    room_id: str
+    thread_id: str | None
+    response_event_id: str
+    source_event_ids: tuple[str, ...]
+    entity_kind: Literal["agent", "team"]
+    entity_name: str
+    session_id: str
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    requester_id: str
+    execution_identity: dict[str, object]
+    expires_at: datetime
+    decision: ApprovalContinuationDecision | None = None
+    state: ApprovalContinuationState = ApprovalContinuationState.WAITING_FOR_DECISION
+    claimant_id: str | None = None
+    failure_reason: str | None = None
+    created_at_ns: int = 0
+
+
+def create_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: StoredApprovalContinuation,
+) -> bool:
+    """Persist one suspended call without replacing an existing identity."""
+    inserted = transaction.fetchone(
+        """
+        INSERT INTO approval_continuations (
+            principal_id, approval_id, card_transaction_id, room_id, thread_id,
+            response_event_id, source_event_ids_json, entity_kind, entity_name,
+            session_id, run_id, tool_call_id, tool_name, arguments_json,
+            requester_id, execution_identity_json, expires_at, decision, state,
+            claimant_id, failure_reason, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?)
+        ON CONFLICT (principal_id, approval_id) DO NOTHING
+        RETURNING approval_id
+        """,
+        (
+            principal_id,
+            continuation.approval_id,
+            continuation.card_transaction_id,
+            continuation.room_id,
+            continuation.thread_id,
+            continuation.response_event_id,
+            _json(list(continuation.source_event_ids)),
+            continuation.entity_kind,
+            continuation.entity_name,
+            continuation.session_id,
+            continuation.run_id,
+            continuation.tool_call_id,
+            continuation.tool_name,
+            _json(continuation.arguments),
+            continuation.requester_id,
+            _json(continuation.execution_identity),
+            continuation.expires_at.isoformat(),
+            ApprovalContinuationState.WAITING_FOR_DECISION.value,
+            time.time_ns(),
+        ),
+    )
+    return inserted is not None
+
+
+def resolve_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    decision: ApprovalContinuationDecision,
+) -> bool:
+    """Commit the first decision for one suspended call."""
+    resolved = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET decision = ?, state = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ? AND decision IS NULL
+        RETURNING approval_id
+        """,
+        (
+            decision,
+            ApprovalContinuationState.READY.value,
+            principal_id,
+            approval_id,
+            ApprovalContinuationState.WAITING_FOR_DECISION.value,
+        ),
+    )
+    return resolved is not None
+
+
+def claim_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    claimant_id: str,
+) -> bool:
+    """Give one ready continuation to exactly one execution owner."""
+    claimed = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?, claimant_id = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ?
+        RETURNING approval_id
+        """,
+        (
+            ApprovalContinuationState.CLAIMED.value,
+            claimant_id,
+            principal_id,
+            approval_id,
+            ApprovalContinuationState.READY.value,
+        ),
+    )
+    return claimed is not None
+
+
+def complete_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    claimant_id: str,
+) -> bool:
+    """Finish only the continuation owned by the named execution worker."""
+    completed = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?
+        WHERE principal_id = ? AND approval_id = ? AND state = ? AND claimant_id = ?
+        RETURNING approval_id
+        """,
+        (
+            ApprovalContinuationState.COMPLETED.value,
+            principal_id,
+            approval_id,
+            ApprovalContinuationState.CLAIMED.value,
+            claimant_id,
+        ),
+    )
+    return completed is not None
+
+
+def fail_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    reason: str,
+) -> bool:
+    """Settle nonterminal continuation work without making it executable."""
+    failed = transaction.fetchone(
+        """
+        UPDATE approval_continuations SET state = ?, failure_reason = ?
+        WHERE principal_id = ? AND approval_id = ? AND state IN (?, ?, ?)
+        RETURNING approval_id
+        """,
+        (
+            ApprovalContinuationState.TERMINAL_FAILURE.value,
+            reason,
+            principal_id,
+            approval_id,
+            ApprovalContinuationState.WAITING_FOR_DECISION.value,
+            ApprovalContinuationState.READY.value,
+            ApprovalContinuationState.CLAIMED.value,
+        ),
+    )
+    return failed is not None
+
+
+def recoverable_continuations(
+    transaction: Transaction,
+    principal_id: str,
+) -> tuple[StoredApprovalContinuation, ...]:
+    """Return every nonterminal continuation startup must reconcile."""
+    rows = transaction.fetchall(
+        """
+        SELECT * FROM approval_continuations
+        WHERE principal_id = ? AND state IN (?, ?, ?)
+        ORDER BY created_at_ns, approval_id/*bytes*/
+        """,
+        (
+            principal_id,
+            ApprovalContinuationState.WAITING_FOR_DECISION.value,
+            ApprovalContinuationState.READY.value,
+            ApprovalContinuationState.CLAIMED.value,
+        ),
+    )
+    return tuple(_continuation(row) for row in rows)
+
+
+def continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+) -> StoredApprovalContinuation | None:
+    """Return one suspended approval continuation by identity."""
+    row = transaction.fetchone(
+        "SELECT * FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    return None if row is None else _continuation(row)
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def _object(stored: str, *, field: str) -> dict[str, Any]:
+    value = json.loads(stored)
+    if not isinstance(value, dict):
+        msg = f"Stored approval continuation {field} is not an object"
+        raise TypeError(msg)
+    return value
+
+
+def _string_tuple(stored: str) -> tuple[str, ...]:
+    value = json.loads(stored)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        msg = "Stored approval continuation source event IDs are not strings"
+        raise TypeError(msg)
+    return tuple(value)
+
+
+def _continuation(row: Row) -> StoredApprovalContinuation:
+    entity_kind = str(row["entity_kind"])
+    if entity_kind not in ("agent", "team"):
+        msg = "Stored approval continuation entity kind is invalid"
+        raise TypeError(msg)
+    decision = row["decision"]
+    if decision not in (None, "approved", "denied", "expired"):
+        msg = "Stored approval continuation decision is invalid"
+        raise TypeError(msg)
+    return StoredApprovalContinuation(
+        approval_id=str(row["approval_id"]),
+        card_transaction_id=str(row["card_transaction_id"]),
+        room_id=str(row["room_id"]),
+        thread_id=row["thread_id"],
+        response_event_id=str(row["response_event_id"]),
+        source_event_ids=_string_tuple(str(row["source_event_ids_json"])),
+        entity_kind=cast("Literal['agent', 'team']", entity_kind),
+        entity_name=str(row["entity_name"]),
+        session_id=str(row["session_id"]),
+        run_id=str(row["run_id"]),
+        tool_call_id=str(row["tool_call_id"]),
+        tool_name=str(row["tool_name"]),
+        arguments=_object(str(row["arguments_json"]), field="arguments"),
+        requester_id=str(row["requester_id"]),
+        execution_identity=cast(
+            "dict[str, object]",
+            _object(str(row["execution_identity_json"]), field="execution identity"),
+        ),
+        expires_at=datetime.fromisoformat(str(row["expires_at"])),
+        decision=cast("ApprovalContinuationDecision | None", decision),
+        state=ApprovalContinuationState(str(row["state"])),
+        claimant_id=row["claimant_id"],
+        failure_reason=row["failure_reason"],
+        created_at_ns=int(row["created_at_ns"]),
+    )
 
 
 @dataclass(frozen=True, slots=True)
