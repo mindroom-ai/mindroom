@@ -10,6 +10,7 @@ import mimetypes
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
@@ -496,17 +497,6 @@ def _claim_due_attachment_cleanup(storage_path: Path) -> tuple[Path, object, dat
     return resolved_storage_path, claim_token, cleanup_started_at
 
 
-def _record_attachment_cleanup_success(
-    storage_path: Path,
-    claim_token: object,
-    cleanup_started_at: datetime,
-) -> None:
-    """Update throttle state only when current claim completed successfully."""
-    with _attachment_cleanup_lock:
-        if _attachment_cleanup_claim_tokens_by_storage_path.get(storage_path) is claim_token:
-            _last_cleanup_time_by_storage_path[storage_path] = cleanup_started_at
-
-
 def _release_attachment_cleanup_claim(storage_path: Path, claim_token: object) -> None:
     """Release a cleanup claim only when it still belongs to this cleanup."""
     with _attachment_cleanup_lock:
@@ -514,74 +504,60 @@ def _release_attachment_cleanup_claim(storage_path: Path, claim_token: object) -
             del _attachment_cleanup_claim_tokens_by_storage_path[storage_path]
 
 
-def _finish_attachment_cleanup_task(
-    task: asyncio.Task[object],
-    *,
-    storage_path: Path,
-    claim_token: object,
-    cleanup_started_at: datetime,
-) -> None:
-    """Record background cleanup result and release its matching claim."""
+def _claim_and_cleanup_attachment_storage(storage_path: Path) -> None:
+    """Resolve, claim, and clean one storage path in the calling worker."""
+    try:
+        cleanup_claim = _claim_due_attachment_cleanup(storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+        return
+
+    if cleanup_claim is None:
+        return
+
+    resolved_storage_path, claim_token, cleanup_started_at = cleanup_claim
+    try:
+        _cleanup_attachment_storage(resolved_storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+    else:
+        with _attachment_cleanup_lock:
+            if _attachment_cleanup_claim_tokens_by_storage_path.get(resolved_storage_path) is claim_token:
+                _last_cleanup_time_by_storage_path[resolved_storage_path] = cleanup_started_at
+    finally:
+        _release_attachment_cleanup_claim(resolved_storage_path, claim_token)
+
+
+def _finish_attachment_cleanup_task(task: asyncio.Task[object]) -> None:
+    """Log an unexpected scheduling failure after worker cleanup completes."""
     try:
         task.result()
     except asyncio.CancelledError:
         pass
     except Exception:
         logger.exception("Failed to prune expired attachment storage")
-    else:
-        _record_attachment_cleanup_success(storage_path, claim_token, cleanup_started_at)
-    finally:
-        _release_attachment_cleanup_claim(storage_path, claim_token)
-
-
-def _run_attachment_cleanup_synchronously(
-    storage_path: Path,
-    claim_token: object,
-    cleanup_started_at: datetime,
-) -> None:
-    """Run cleanup directly when no event loop is available."""
-    try:
-        _cleanup_attachment_storage(storage_path)
-    except Exception:
-        logger.exception("Failed to prune expired attachment storage")
-    else:
-        _record_attachment_cleanup_success(storage_path, claim_token, cleanup_started_at)
-    finally:
-        _release_attachment_cleanup_claim(storage_path, claim_token)
 
 
 def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
     """Run cleanup at most once per ``_CLEANUP_INTERVAL``."""
-    cleanup_claim = _claim_due_attachment_cleanup(storage_path)
-    if cleanup_claim is None:
-        return
-    resolved_storage_path, claim_token, cleanup_started_at = cleanup_claim
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        _run_attachment_cleanup_synchronously(resolved_storage_path, claim_token, cleanup_started_at)
+        _claim_and_cleanup_attachment_storage(storage_path)
         return
 
     scheduling_started = time.monotonic()
     try:
         cleanup_task = create_background_task(
-            run_blocking_until_complete(_cleanup_attachment_storage, resolved_storage_path),
+            run_blocking_until_complete(_claim_and_cleanup_attachment_storage, storage_path),
             name="attachment_cleanup",
             owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
             log_exceptions=False,
         )
     except Exception:
         logger.exception("Failed to prune expired attachment storage")
-        _release_attachment_cleanup_claim(resolved_storage_path, claim_token)
         return
-    cleanup_task.add_done_callback(
-        lambda task: _finish_attachment_cleanup_task(
-            task,
-            storage_path=resolved_storage_path,
-            claim_token=claim_token,
-            cleanup_started_at=cleanup_started_at,
-        ),
-    )
+    cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
     logger.debug(
         "Attachment cleanup scheduled",
         event_loop_scheduling_duration_ms=(time.monotonic() - scheduling_started) * 1000,
@@ -702,19 +678,21 @@ async def _register_media_attachment(
     )
     if local_media_path is None:
         return None
-    return await asyncio.to_thread(
-        register_local_attachment,
-        storage_path,
-        local_media_path,
-        kind=kind,
-        attachment_id=_attachment_id_for_event(event_id),
-        filename=filename,
-        mime_type=mime_type,
-        room_id=room_id,
-        thread_id=thread_id,
-        source_event_id=event_id,
-        sender=sender,
-        event_timestamp=event_timestamp,
+    return await run_blocking_until_complete(
+        partial(
+            register_local_attachment,
+            storage_path,
+            local_media_path,
+            kind=kind,
+            attachment_id=_attachment_id_for_event(event_id),
+            filename=filename,
+            mime_type=mime_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            source_event_id=event_id,
+            sender=sender,
+            event_timestamp=event_timestamp,
+        ),
     )
 
 
