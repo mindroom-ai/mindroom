@@ -437,6 +437,8 @@ async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: 
     cleanup_started = threading.Event()
     release_cleanup = threading.Event()
     cleanup_calls = 0
+    cleanup_claims: dict[Path, object] = {}
+    scheduled_cleanups: dict[Path, object] = {}
     file_path = tmp_path / "payload.txt"
     file_path.write_text("payload", encoding="utf-8")
 
@@ -447,8 +449,13 @@ async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: 
         assert release_cleanup.wait(timeout=1)
 
     with (
-        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch("mindroom.attachments._attachment_cleanup_scheduled_tokens_by_storage_path", scheduled_cleanups),
         patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+        patch(
+            "mindroom.attachments.create_background_task",
+            wraps=attachments_module.create_background_task,
+        ) as mock_create_background_task,
     ):
         first = register_local_attachment(
             tmp_path,
@@ -458,6 +465,8 @@ async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: 
             room_id="!room:localhost",
         )
         assert await asyncio.to_thread(cleanup_started.wait, 2)
+        assert tmp_path in scheduled_cleanups
+        assert tmp_path.resolve() in cleanup_claims
         second = register_local_attachment(
             tmp_path,
             file_path,
@@ -466,8 +475,11 @@ async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: 
             room_id="!room:localhost",
         )
         release_cleanup.set()
-        assert cleanup_calls == 1
         assert await attachments_module.wait_for_attachment_cleanup_tasks()
+        assert cleanup_calls == 1
+        assert mock_create_background_task.call_count == 1
+        assert scheduled_cleanups == {}
+        assert cleanup_claims == {}
 
     assert first is not None
     assert second is not None

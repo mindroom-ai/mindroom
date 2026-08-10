@@ -52,6 +52,7 @@ _CLEANUP_INTERVAL = timedelta(hours=1)
 _last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
 _attachment_cleanup_lock = Lock()
 _attachment_cleanup_claim_tokens_by_storage_path: dict[Path, object] = {}
+_attachment_cleanup_scheduled_tokens_by_storage_path: dict[Path, object] = {}
 _ATTACHMENT_CLEANUP_TASK_OWNER = object()
 
 
@@ -504,6 +505,29 @@ def _release_attachment_cleanup_claim(storage_path: Path, claim_token: object) -
             del _attachment_cleanup_claim_tokens_by_storage_path[storage_path]
 
 
+def _claim_attachment_cleanup_schedule(storage_path: Path) -> object | None:
+    """Claim the cheap pre-worker scheduling slot for one storage path."""
+    now = datetime.now(UTC)
+    with _attachment_cleanup_lock:
+        if storage_path in _attachment_cleanup_scheduled_tokens_by_storage_path:
+            return None
+        if storage_path in _attachment_cleanup_claim_tokens_by_storage_path:
+            return None
+        last_cleanup_time = _last_cleanup_time_by_storage_path.get(storage_path)
+        if last_cleanup_time is not None and now - last_cleanup_time < _CLEANUP_INTERVAL:
+            return None
+        schedule_token = object()
+        _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path] = schedule_token
+    return schedule_token
+
+
+def _release_attachment_cleanup_schedule(storage_path: Path, schedule_token: object) -> None:
+    """Release a pre-worker scheduling slot owned by this cleanup task."""
+    with _attachment_cleanup_lock:
+        if _attachment_cleanup_scheduled_tokens_by_storage_path.get(storage_path) is schedule_token:
+            del _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path]
+
+
 def _claim_and_cleanup_attachment_storage(storage_path: Path) -> None:
     """Resolve, claim, and clean one storage path in the calling worker."""
     try:
@@ -528,6 +552,14 @@ def _claim_and_cleanup_attachment_storage(storage_path: Path) -> None:
         _release_attachment_cleanup_claim(resolved_storage_path, claim_token)
 
 
+async def _run_scheduled_attachment_cleanup(storage_path: Path, schedule_token: object) -> None:
+    """Run one claimed cleanup job and release its scheduling slot."""
+    try:
+        await run_blocking_until_complete(_claim_and_cleanup_attachment_storage, storage_path)
+    finally:
+        _release_attachment_cleanup_schedule(storage_path, schedule_token)
+
+
 def _finish_attachment_cleanup_task(task: asyncio.Task[object]) -> None:
     """Log an unexpected scheduling failure after worker cleanup completes."""
     try:
@@ -535,7 +567,7 @@ def _finish_attachment_cleanup_task(task: asyncio.Task[object]) -> None:
     except asyncio.CancelledError:
         pass
     except Exception:
-        logger.exception("Failed to prune expired attachment storage")
+        logger.exception("Attachment cleanup background task failed")
 
 
 def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
@@ -547,15 +579,21 @@ def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
         return
 
     scheduling_started = time.monotonic()
+    schedule_token = _claim_attachment_cleanup_schedule(storage_path)
+    if schedule_token is None:
+        return
+    cleanup_coroutine = _run_scheduled_attachment_cleanup(storage_path, schedule_token)
     try:
         cleanup_task = create_background_task(
-            run_blocking_until_complete(_claim_and_cleanup_attachment_storage, storage_path),
+            cleanup_coroutine,
             name="attachment_cleanup",
             owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
             log_exceptions=False,
         )
     except Exception:
-        logger.exception("Failed to prune expired attachment storage")
+        cleanup_coroutine.close()
+        _release_attachment_cleanup_schedule(storage_path, schedule_token)
+        logger.exception("Failed to schedule attachment storage cleanup")
         return
     cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
     logger.debug(
