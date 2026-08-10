@@ -31,6 +31,7 @@ from mindroom.agents import (
     _AdditionalContextChunk,
     _apply_preload_cap,
     _load_context_files,
+    _mark_toolkit_approval_functions,
     _prune_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
@@ -141,6 +142,41 @@ def _test_config() -> Config:
         ),
         runtime_paths,
     )
+
+
+def test_matrix_toolkit_marks_only_functions_that_may_require_approval() -> None:
+    """Matrix agents should delegate potentially gated calls to Agno pause handling."""
+    def read_file(path: str) -> str:
+        return path
+
+    def write_file(path: str) -> str:
+        return path
+
+    toolkit = Toolkit(name="files", tools=[read_file, write_file])
+    config = Config(
+        tool_approval={
+            "default": "auto_approve",
+            "rules": [{"match": "write_*", "action": "require_approval"}],
+        },
+    )
+
+    _mark_toolkit_approval_functions(toolkit, config=config, matrix_execution=True)
+
+    assert toolkit.functions["read_file"].requires_confirmation is not True
+    assert toolkit.functions["write_file"].requires_confirmation is True
+
+
+def test_non_matrix_toolkit_does_not_enable_agno_confirmation() -> None:
+    """Surfaces without Matrix approval UI should retain their existing tool shape."""
+    def write_file(path: str) -> str:
+        return path
+
+    toolkit = Toolkit(name="files", tools=[write_file])
+    config = Config(tool_approval={"default": "require_approval"})
+
+    _mark_toolkit_approval_functions(toolkit, config=config, matrix_execution=False)
+
+    assert toolkit.functions["write_file"].requires_confirmation is not True
 
 
 def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:

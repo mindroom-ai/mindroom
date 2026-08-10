@@ -262,6 +262,27 @@ def _execution_identity() -> ToolExecutionIdentity:
     )
 
 
+@pytest.mark.asyncio
+async def test_agno_managed_approval_bridge_does_not_wait_inline(tmp_path: Path) -> None:
+    """A confirmed Agno continuation must reach the tool body without opening another approval."""
+    config = _config(tmp_path)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        agno_managed_approval=True,
+    )
+    assert bridge is not None
+
+    with patch("mindroom.tool_system.tool_hooks.request_tool_approval_for_call", new_callable=AsyncMock) as request:
+        result = await bridge("echo", lambda text: text.upper(), {"text": "hi"})
+
+    assert result == "HI"
+    request.assert_not_awaited()
+
+
 def _dispatch_context(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> ToolDispatchContext | None:

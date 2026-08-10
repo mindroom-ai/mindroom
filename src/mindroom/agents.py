@@ -35,7 +35,7 @@ from mindroom.runtime_resolution import (
     resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval, tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1250,6 +1250,9 @@ def _build_agent_tool_hook_bridge(
         dispatch_context=dispatch_context,
         config=config,
         runtime_paths=runtime_paths,
+        agno_managed_approval=(
+            dispatch_context is not None and dispatch_context.execution_identity.channel == "matrix"
+        ),
     )
 
 
@@ -1283,6 +1286,26 @@ def _prune_openai_incompatible_tools(
     if toolkit.functions or toolkit.async_functions:
         return toolkit
     return None
+
+
+def _mark_toolkit_approval_functions(
+    toolkit: Toolkit,
+    *,
+    config: Config,
+    matrix_execution: bool,
+) -> Toolkit:
+    """Let Agno pause Matrix calls whose exact arguments may require approval."""
+    if not matrix_execution:
+        return toolkit
+
+    seen_functions: set[int] = set()
+    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+        if id(function) in seen_functions:
+            continue
+        seen_functions.add(id(function))
+        if tool_may_require_approval(config, function.name):
+            function.requires_confirmation = True
+    return toolkit
 
 
 def _prune_toolkit_functions(
@@ -1518,6 +1541,11 @@ def _assemble_agent_toolkits(
             if toolkit:
                 toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
             if toolkit:
+                toolkit = _mark_toolkit_approval_functions(
+                    toolkit,
+                    config=config,
+                    matrix_execution=execution_identity is not None and execution_identity.channel == "matrix",
+                )
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
                 target_names = (

@@ -132,6 +132,7 @@ class _ToolHookBridgeContext:
     config: Config | None
     runtime_paths: RuntimePaths | None
     dispatch_context: ToolDispatchContext | None
+    agno_managed_approval: bool
 
 
 def _correlation_id_for_runtime_context(runtime_context: ToolRuntimeContext | None) -> str:
@@ -671,6 +672,7 @@ async def _execute_bridge(
     has_before_hooks: bool,
     has_after_hooks: bool,
     workflow_origin: ToolCallWorkflowOrigin | None,
+    agno_managed_approval: bool,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     timing = _ToolBridgeTiming(started_at=started_at)
@@ -680,6 +682,7 @@ async def _execute_bridge(
         config=config,
         runtime_paths=runtime_paths,
         dispatch_context=effective_dispatch_context,
+        agno_managed_approval=agno_managed_approval,
     )
     resolved_context = _resolve_tool_context(
         bridge_context=bridge_context,
@@ -717,26 +720,27 @@ async def _execute_bridge(
             outcome="blocked_before_hooks",
         )
 
-    approval_started_at = time.perf_counter()
-    blocked_result = await _maybe_block_for_tool_approval(
-        resolved_context=resolved_context,
-        args=args,
-        tool_name=tool_name,
-        workflow_origin=workflow_origin,
-    )
-    timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
-    if blocked_result is not None:
-        return await _finish_blocked_tool_call(
-            timing=timing,
-            hook_registry=hook_registry,
+    if not bridge_context.agno_managed_approval:
+        approval_started_at = time.perf_counter()
+        blocked_result = await _maybe_block_for_tool_approval(
             resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
             args=args,
             tool_name=tool_name,
-            blocked_result=blocked_result,
-            has_after_hooks=has_after_hooks,
-            outcome="blocked_approval",
+            workflow_origin=workflow_origin,
         )
+        timing.approval_ms = elapsed_ms_since(approval_started_at, clock=time.perf_counter, ndigits=2)
+        if blocked_result is not None:
+            return await _finish_blocked_tool_call(
+                timing=timing,
+                hook_registry=hook_registry,
+                resolved_context=resolved_context,
+                hook_arguments=hook_arguments,
+                args=args,
+                tool_name=tool_name,
+                blocked_result=blocked_result,
+                has_after_hooks=has_after_hooks,
+                outcome="blocked_approval",
+            )
 
     result: _ToolHookResult = None
     error: BaseException | None = None
@@ -879,6 +883,7 @@ def build_tool_hook_bridge(
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
     workflow_origin: ToolCallWorkflowOrigin | None = None,
+    agno_managed_approval: bool = False,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -897,6 +902,7 @@ def build_tool_hook_bridge(
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
             workflow_origin=workflow_origin,
+            agno_managed_approval=agno_managed_approval,
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
@@ -914,6 +920,7 @@ def build_tool_hook_bridge(
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
                     workflow_origin=workflow_origin,
+                    agno_managed_approval=agno_managed_approval,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -929,6 +936,7 @@ def build_tool_hook_bridge(
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
                 workflow_origin=workflow_origin,
+                agno_managed_approval=agno_managed_approval,
             ),
         )
 

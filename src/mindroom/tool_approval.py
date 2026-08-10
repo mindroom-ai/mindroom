@@ -64,6 +64,7 @@ __all__ = [
     "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
+    "tool_may_require_approval",
     "tool_requires_approval_for_openai_compat",
 ]
 
@@ -183,11 +184,11 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
-def tool_requires_approval_for_openai_compat(
+def tool_may_require_approval(
     config: Config,
     tool_name: str,
 ) -> bool:
-    """Return whether one `/v1` tool must be hidden because approval may be required."""
+    """Return whether exact arguments could make one tool require approval."""
     approval_config = config.tool_approval
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
@@ -195,6 +196,14 @@ def tool_requires_approval_for_openai_compat(
     if rule.action is not None:
         return rule.action == "require_approval"
     return True
+
+
+def tool_requires_approval_for_openai_compat(
+    config: Config,
+    tool_name: str,
+) -> bool:
+    """Return whether one `/v1` tool must be hidden because approval may be required."""
+    return tool_may_require_approval(config, tool_name)
 
 
 def resolve_tool_approval_approver(
