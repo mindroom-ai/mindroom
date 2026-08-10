@@ -121,18 +121,21 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_top_p"),
+        ("model_id", "expected_top_p", "legacy_request_builder"),
         [
-            ("gpt-5.6-luna", None),
-            ("gpt-5.6-terra", None),
-            ("gpt-4", 0.8),
+            ("gpt-5.6-luna", None, False),
+            ("gpt-5.6-terra", None, False),
+            ("gpt-4", 0.8, False),
+            ("gpt-5.6-terra", None, True),
         ],
+        ids=["luna", "terra", "gpt-4", "terra-legacy-mem0"],
     )
     async def test_mem0_openai_top_p_support_is_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
         expected_top_p: float | None,
+        legacy_request_builder: bool,
     ) -> None:
         """Memory extraction must omit only sampling controls rejected by its model."""
         memory = MemoryConfig(
@@ -151,6 +154,9 @@ class TestMemoryConfig:
             ),
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+        create_completion = MagicMock(return_value=response)
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
 
         def fake_from_config(config_dict: dict) -> SimpleNamespace:
             return SimpleNamespace(
@@ -158,13 +164,28 @@ class TestMemoryConfig:
                 vector_store=object(),
             )
 
-        with patch.object(AsyncMemory, "from_config", side_effect=fake_from_config):
+        with (
+            patch.object(AsyncMemory, "from_config", side_effect=fake_from_config),
+            patch("mem0.llms.openai.OpenAI", return_value=fake_client),
+        ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
-        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
-        create_completion = MagicMock(return_value=response)
-        instance.llm.client.chat.completions.create = create_completion
-        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
+        messages = [{"role": "user", "content": "remember this"}]
+        if legacy_request_builder:
+
+            def legacy_generate_response(llm: OpenAILLM, request_messages: list[dict[str, str]]) -> object:
+                return llm.client.chat.completions.create(
+                    model=llm.config.model,
+                    messages=request_messages,
+                    temperature=llm.config.temperature,
+                    max_tokens=llm.config.max_tokens,
+                    top_p=llm.config.top_p,
+                )
+
+            with patch.object(OpenAILLM, "generate_response", legacy_generate_response):
+                instance.llm.generate_response(messages)
+        else:
+            instance.llm.generate_response(messages)
 
         request_params = create_completion.call_args.kwargs
         assert request_params["temperature"] == 0.1
