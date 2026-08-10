@@ -385,7 +385,7 @@ def _remove_paths(paths: list[Path]) -> int:
     removed = 0
     for path in paths:
         try:
-            path.unlink(missing_ok=True)
+            path.unlink()
         except OSError:
             continue
         removed += 1
@@ -434,7 +434,7 @@ def _prune_orphan_incoming_media(
         if media_mtime is None or media_mtime >= cutoff:
             continue
         try:
-            media_path.unlink(missing_ok=True)
+            media_path.unlink()
         except OSError:
             continue
         removed += 1

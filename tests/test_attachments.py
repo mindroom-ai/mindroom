@@ -594,14 +594,24 @@ def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> Non
     os.utime(stale_metadata_path, (stale_timestamp, stale_timestamp))
     os.utime(orphan_media_path, (stale_timestamp, stale_timestamp))
 
-    with patch("mindroom.attachments.logger.debug") as mock_debug:
+    original_unlink = Path.unlink
+
+    def unlink_after_concurrent_removal(path: Path, *, missing_ok: bool = False) -> None:
+        if path == stale_metadata_path and path.exists():
+            original_unlink(path)
+        original_unlink(path, missing_ok=missing_ok)
+
+    with (
+        patch.object(Path, "unlink", new=unlink_after_concurrent_removal),
+        patch("mindroom.attachments.logger.debug") as mock_debug,
+    ):
         attachments_module._cleanup_attachment_storage(tmp_path)
 
     cleanup_log = mock_debug.call_args.kwargs
     assert cleanup_log["metadata_files_scanned"] == 2
     assert cleanup_log["incoming_media_files_scanned"] == 1
     assert cleanup_log["files_scanned"] == 3
-    assert cleanup_log["files_deleted"] == 2
+    assert cleanup_log["files_deleted"] == 1
 
 
 def test_merge_attachment_ids_preserves_order() -> None:
