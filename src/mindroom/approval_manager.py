@@ -43,6 +43,7 @@ SendingDeviceProvider = Callable[[], str | None]
 # says the question could not be put, which is a different fact and must not be
 # mistaken for the first.
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
+ApprovalDecisionReady = Callable[[str], None]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -363,6 +364,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
+        decision_ready: ApprovalDecisionReady | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
@@ -372,6 +374,7 @@ class _ApprovalManager:
         self._transport_sender = transport_sender
         self._sending_device = sending_device
         self._locate_card = locate_card
+        self._decision_ready = decision_ready
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -384,7 +387,7 @@ class _ApprovalManager:
         self._detached_card_writes: set[_DetachedCardWrite] = set()
         self._shutdown_reason: str | None = None
 
-    async def request_approval(  # noqa: C901, PLR0911
+    async def request_approval(
         self,
         *,
         tool_name: str,
@@ -399,7 +402,82 @@ class _ApprovalManager:
         participant_id: str | None = None,
     ) -> ApprovalDecision:
         """Send one Matrix approval card and wait for the Matrix-backed resolution."""
-        # Keep the send/bind/wait flow linear so cancellation cleanup remains visible.
+        created = await self._create_bound_approval(
+            tool_name=tool_name,
+            arguments=arguments,
+            room_id=room_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            timeout_seconds=timeout_seconds,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            workflow_id=workflow_id,
+            participant_id=participant_id,
+        )
+        if isinstance(created, ApprovalDecision):
+            return created
+        waiter, expires_at = created
+        try:
+            return await self._await_waiter(waiter, expires_at=expires_at)
+        except asyncio.CancelledError:
+            await self._settle_bound_waiter_as_cancelled(waiter)
+            raise
+        finally:
+            with self._live_lock:
+                self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+    async def create_approval(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        room_id: str | None,
+        requester_id: str | None,
+        approver_user_id: str | None,
+        timeout_seconds: float,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+        workflow_id: str | None = None,
+        participant_id: str | None = None,
+    ) -> PendingApproval | ApprovalDecision:
+        """Send and durably bind one approval card without retaining a live waiter."""
+        created = await self._create_bound_approval(
+            tool_name=tool_name,
+            arguments=arguments,
+            room_id=room_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            timeout_seconds=timeout_seconds,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            workflow_id=workflow_id,
+            participant_id=participant_id,
+        )
+        if isinstance(created, ApprovalDecision):
+            return created
+        waiter, _expires_at = created
+        try:
+            return PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
+        finally:
+            with self._live_lock:
+                self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+    async def _create_bound_approval(  # noqa: C901, PLR0911
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        room_id: str | None,
+        requester_id: str | None,
+        approver_user_id: str | None,
+        timeout_seconds: float,
+        agent_name: str | None,
+        thread_id: str | None,
+        workflow_id: str | None,
+        participant_id: str | None,
+    ) -> tuple[_LiveApprovalWaiter, datetime] | ApprovalDecision:
+        """Create one answerable card and return its temporary bound identity."""
+        # Keep the send/bind flow linear so cancellation cleanup remains visible.
         if room_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
         if approver_user_id is None:
@@ -472,15 +550,7 @@ class _ApprovalManager:
             if shutdown_reason is not None:
                 return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-
-        try:
-            return await self._await_waiter(waiter, expires_at=expires_at)
-        except asyncio.CancelledError:
-            await self._settle_bound_waiter_as_cancelled(waiter)
-            raise
-        finally:
-            with self._live_lock:
-                self._pending_by_card_event.pop(waiter.card_event_id, None)
+        return waiter, expires_at
 
     async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
         """Settle every router-authored card this bot restarted holding.
@@ -640,6 +710,14 @@ class _ApprovalManager:
         if before_consume is not None:
             await before_consume()
         pending, transaction_id = recovered
+        if await self._has_continuation(pending.approval_id):
+            return await self._resolve_detached_response(
+                pending=pending,
+                transaction_id=transaction_id,
+                status=status,
+                reason=reason,
+                resolved_by=sender_id,
+            )
         return await self._discard_matrix_only_card(
             pending=pending,
             transaction_id=transaction_id,
@@ -717,6 +795,7 @@ class _ApprovalManager:
         transport_sender: TransportSenderProvider | None = None,
         sending_device: SendingDeviceProvider | None = None,
         locate_card: ApprovalCardLocator | None = None,
+        decision_ready: ApprovalDecisionReady | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
@@ -733,6 +812,58 @@ class _ApprovalManager:
             self._sending_device = sending_device
         if locate_card is not None:
             self._locate_card = locate_card
+        if decision_ready is not None:
+            self._decision_ready = decision_ready
+
+    async def _has_continuation(self, approval_id: str) -> bool:
+        if self._cards is None:
+            return False
+        return await self._cards.approval_continuation(approval_id) is not None
+
+    async def _resolve_detached_response(
+        self,
+        *,
+        pending: PendingApproval,
+        transaction_id: str,
+        status: _ResolutionStatus,
+        reason: str | None,
+        resolved_by: str,
+    ) -> ApprovalActionResult:
+        """Commit and announce one decision for a durable suspended call."""
+        resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
+            pending,
+            status=status,
+            reason=reason,
+        )
+        if self._cards is None or not await self._cards.resolve_approval_continuation(
+            pending.approval_id,
+            resolved_status,
+        ):
+            return ApprovalActionResult(
+                consumed=True,
+                resolved=False,
+                thread_id=pending.thread_id,
+                card_event_id=pending.card_event_id,
+            )
+        outcome = await self._emit_resolution(
+            pending,
+            transaction_id=transaction_id,
+            status=resolved_status,
+            reason=resolved_reason,
+            resolved_by=resolved_by,
+        )
+        if self._decision_ready is not None:
+            self._decision_ready(pending.approval_id)
+        delivered = outcome is _ResolutionOutcome.DELIVERED
+        with self._live_lock:
+            self._resolved_card_event_ids.add(pending.card_event_id)
+        return ApprovalActionResult(
+            consumed=True,
+            resolved=delivered,
+            error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
+            thread_id=pending.thread_id,
+            card_event_id=pending.card_event_id,
+        )
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -2119,6 +2250,7 @@ def initialize_approval_store(
     transport_sender: TransportSenderProvider | None = None,
     sending_device: SendingDeviceProvider | None = None,
     locate_card: ApprovalCardLocator | None = None,
+    decision_ready: ApprovalDecisionReady | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -2132,6 +2264,7 @@ def initialize_approval_store(
             transport_sender=transport_sender,
             sending_device=sending_device,
             locate_card=locate_card,
+            decision_ready=decision_ready,
         )
         return _MANAGER
 
@@ -2148,6 +2281,7 @@ def initialize_approval_store(
         transport_sender=transport_sender,
         sending_device=sending_device,
         locate_card=locate_card,
+        decision_ready=decision_ready,
     )
     return _MANAGER
 

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.event_journal import RecordedApprovalDecision, StoredApprovalCard
+from mindroom.event_journal import (
+    ApprovalContinuationState,
+    RecordedApprovalDecision,
+    StoredApprovalCard,
+    StoredApprovalContinuation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,6 +69,7 @@ class FakeApprovalCards:
 
     def __init__(self) -> None:
         self.rows: dict[str, _StoredRow] = {}
+        self.continuations: dict[str, StoredApprovalContinuation] = {}
         self.lookups: list[tuple[str, str]] = []
         # Transactions this instance wrote a row for, so a test can see
         # redundant writes, and the ones a send outcome later settled.
@@ -73,6 +79,33 @@ class FakeApprovalCards:
         # Stands in for the claim timestamp the real table records, which is
         # what orders the room scan and what a page cursor is built from.
         self._claims = 0
+
+    async def create_approval_continuation(self, continuation: StoredApprovalContinuation) -> bool:
+        """Persist one continuation without replacing an existing identity."""
+        if continuation.approval_id in self.continuations:
+            return False
+        self.continuations[continuation.approval_id] = continuation
+        return True
+
+    async def resolve_approval_continuation(
+        self,
+        approval_id: str,
+        decision: Literal["approved", "denied", "expired"],
+    ) -> bool:
+        """Commit the first decision for one fake continuation."""
+        continuation = self.continuations.get(approval_id)
+        if continuation is None or continuation.state is not ApprovalContinuationState.WAITING_FOR_DECISION:
+            return False
+        self.continuations[approval_id] = replace(
+            continuation,
+            decision=decision,
+            state=ApprovalContinuationState.READY,
+        )
+        return True
+
+    async def approval_continuation(self, approval_id: str) -> StoredApprovalContinuation | None:
+        """Return one fake continuation by approval identity."""
+        return self.continuations.get(approval_id)
 
     @property
     def resolutions(self) -> dict[str, dict[str, Any]]:

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from mindroom.approval_events import PendingApproval
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import ApprovalView
@@ -53,6 +54,7 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "ToolCallWorkflowOrigin",
+    "create_tool_approval_for_call",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
@@ -270,6 +272,46 @@ async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDeci
 
     origin = call.workflow_origin
     return await manager.request_approval(
+        tool_name=call.tool_name,
+        arguments=deepcopy(call.arguments),
+        agent_name=call.agent_name,
+        room_id=call.room_id,
+        thread_id=call.thread_id,
+        requester_id=call.requester_id,
+        workflow_id=origin.workflow_id if origin is not None else None,
+        participant_id=origin.participant_id if origin is not None else None,
+        approver_user_id=resolve_tool_approval_approver(
+            call.config,
+            call.runtime_paths,
+            call.requester_id,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def create_tool_approval_for_call(
+    call: ToolApprovalCall,
+) -> PendingApproval | ApprovalDecision | None:
+    """Create a detached approval card, or return the immediate policy outcome."""
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
+        call.config,
+        call.runtime_paths,
+        call.tool_name,
+        deepcopy(call.arguments),
+        call.agent_name,
+    )
+    if not requires_approval:
+        return None
+
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return _terminal_decision(
+            "expired",
+            "Tool approval is required but the approval store is not initialized.",
+        )
+
+    origin = call.workflow_origin
+    return await manager.create_approval(
         tool_name=call.tool_name,
         arguments=deepcopy(call.arguments),
         agent_name=call.agent_name,

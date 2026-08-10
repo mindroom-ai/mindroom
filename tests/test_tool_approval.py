@@ -39,6 +39,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.event_journal import StoredApprovalContinuation
 from mindroom.logging_config import get_logger
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -248,6 +249,107 @@ async def _live_pending_approval(
     if card_event_id is None:
         return None
     return store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+
+
+@pytest.mark.asyncio
+async def test_create_approval_returns_detached_pending_card_without_live_work(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.create_approval(
+        tool_name="write_file",
+        arguments={"path": "notes.txt", "contents": "hello"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert isinstance(result, PendingApproval)
+    assert result.approval_id
+    assert result.card_event_id == "$approval"
+    assert result.tool_name == "write_file"
+    assert result.arguments_preview == {"path": "notes.txt", "contents": "hello"}
+    assert store.has_live_work() is False
+    assert cards.stored_event_ids() == {"$approval"}
+
+
+@pytest.mark.asyncio
+async def test_detached_approval_decision_wakes_continuation_once(tmp_path: Path) -> None:
+    cards = FakeApprovalCards()
+    ready: list[str] = []
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=AsyncMock(return_value=True),
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        decision_ready=ready.append,
+    )
+    pending = await store.create_approval(
+        tool_name="write_file",
+        arguments={"path": "notes.txt", "contents": "hello"},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+    assert isinstance(pending, PendingApproval)
+    expires_at = parse_approval_datetime(pending.expires_at)
+    assert expires_at is not None
+    await cards.create_approval_continuation(
+        StoredApprovalContinuation(
+            approval_id=pending.approval_id,
+            card_transaction_id=_approval_transaction_id(pending.approval_id),
+            room_id=pending.room_id,
+            thread_id=pending.thread_id,
+            response_event_id="$response",
+            source_event_ids=("$source",),
+            entity_kind="agent",
+            entity_name="code",
+            session_id="session-1",
+            run_id="run-1",
+            tool_call_id="call-1",
+            tool_name=pending.tool_name,
+            arguments={"path": "notes.txt", "contents": "hello"},
+            requester_id=pending.requester_id,
+            execution_identity={"agent_name": "code"},
+            expires_at=expires_at,
+        ),
+    )
+
+    first = await store.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    duplicate = await store.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+
+    assert first.resolved is True
+    assert duplicate.resolved is False
+    assert ready == [pending.approval_id]
+    continuation = await cards.approval_continuation(pending.approval_id)
+    assert continuation is not None
+    assert continuation.decision == "approved"
 
 
 @pytest.mark.asyncio
