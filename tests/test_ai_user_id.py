@@ -1194,6 +1194,53 @@ class TestUserIdPassthrough:
         assert "turn paused before completion" in str(persisted_run.messages[-1].content)
 
     @pytest.mark.asyncio
+    async def test_ai_response_exposes_exact_confirmation_call_as_suspended(self, tmp_path: Path) -> None:
+        """Approval pauses should retain exact call identity without persisting interrupted replay."""
+        storage = _SessionStorage()
+        recorder = TurnRecorder(user_message="write the file")
+        mock_agent = MagicMock()
+        paused_run = RunOutput(
+            run_id="run-paused",
+            agent_id="general",
+            session_id="session1",
+            content="Approval required",
+            tools=[
+                ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="write_file",
+                    tool_args={"path": "notes.txt", "contents": "hello"},
+                    requires_confirmation=True,
+                ),
+            ],
+            status=RunStatus.paused,
+        )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=paused_run),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            response = await ai_response(
+                make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                prompt="Run the action",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                show_tool_calls=False,
+                turn_recorder=recorder,
+            )
+
+        assert response == "Approval required"
+        assert recorder.outcome == "waiting_for_approval"
+        assert recorder.run_id == "run-paused"
+        assert recorder.paused_tool_calls[0].tool_call_id == "call-1"
+        assert recorder.paused_tool_calls[0].arguments == {"path": "notes.txt", "contents": "hello"}
+        assert storage.session is None
+
+    @pytest.mark.asyncio
     async def test_ai_response_cancelled_run_uses_only_latest_assistant_partial_text(
         self,
         tmp_path: Path,

@@ -13,6 +13,7 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
@@ -21,10 +22,12 @@ from mindroom.response_turn import (
     EmptyRunDiscard,
     ExcludedAttempt,
     HandledAttempt,
+    PausedToolCall,
     ResponseTurnContext,
     StandaloneReplaySnapshot,
     StreamAttemptResolution,
     StreamingTurnAdapter,
+    SuspendedAttempt,
     TurnPartialSnapshot,
     TurnRunState,
     TurnSinks,
@@ -1166,6 +1169,46 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
 
     assert attempts == 2
     assert chunks == ["notice:final"]
+
+
+def test_blocking_suspended_attempt_records_waiting_without_interrupted_replay() -> None:
+    """A paused Agno call should become durable waiting work rather than an interrupted turn."""
+    log = _AdapterLog()
+    recorder = TurnRecorder(user_message="write the file")
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> SuspendedAttempt:
+        return SuspendedAttempt(
+            response_text="Approval required",
+            partial_text="I need approval.",
+            session_id="session-1",
+            run_id="run-1",
+            paused_tool_calls=(
+                PausedToolCall(
+                    tool_call_id="call-1",
+                    tool_name="write_file",
+                    arguments={"path": "notes.txt", "contents": "hello"},
+                ),
+            ),
+        )
+
+    response = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=recorder),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert response == "Approval required"
+    assert recorder.outcome == "waiting_for_approval"
+    assert recorder.paused_tool_calls == [
+        PausedToolCall("call-1", "write_file", {"path": "notes.txt", "contents": "hello"}),
+    ]
+    assert recorder.claim_interrupted_persistence() is False
 
 
 def test_streaming_attempt_without_sentinel_raises() -> None:

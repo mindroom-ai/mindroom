@@ -83,9 +83,11 @@ from mindroom.response_turn import (
     HandledAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    SuspendedAttempt,
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_tool_calls_from_executions,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -1599,6 +1601,17 @@ async def ai_response(  # noqa: C901
                 )
             elif response.status is RunStatus.paused:
                 response_text = _extract_response_content(response, show_tool_calls=show_tool_calls)
+                paused_tool_calls = paused_tool_calls_from_executions(response.tools)
+                if paused_tool_calls:
+                    return SuspendedAttempt(
+                        response_text=response_text,
+                        partial_text=partial_text,
+                        completed_tools=tuple(completed_tools),
+                        paused_tool_calls=paused_tool_calls,
+                        session_id=response.session_id,
+                        run_id=response.run_id or attempt.attempt_run_id,
+                        metadata_content=metadata_content,
+                    )
             return ExcludedAttempt(
                 original_status=response.status,
                 response_text=response_text,
@@ -1971,7 +1984,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2130,6 +2143,20 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     state.paused_run_event.run_id,
                     state.paused_run_event.session_id,
                 )
+                paused_tool_calls = paused_tool_calls_from_executions(state.paused_run_event.tools)
+                if paused_tool_calls:
+                    yield AttemptResolved(
+                        SuspendedAttempt(
+                            response_text=str(state.paused_run_event.content or ""),
+                            partial_text=state.assistant_text or str(state.paused_run_event.content or ""),
+                            completed_tools=tuple(state.completed_tools),
+                            paused_tool_calls=paused_tool_calls,
+                            session_id=state.paused_run_event.session_id,
+                            run_id=state.paused_run_event.run_id or attempt.attempt_run_id,
+                            metadata_content=paused_metadata,
+                        ),
+                    )
+                    return
                 yield AttemptResolved(
                     ExcludedAttempt(
                         original_status=RunStatus.paused,

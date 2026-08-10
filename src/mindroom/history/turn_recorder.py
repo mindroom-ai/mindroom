@@ -12,6 +12,7 @@ from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from mindroom.response_turn import PausedToolCall
     from mindroom.tool_system.events import ToolTraceEntry
 
 
@@ -27,6 +28,8 @@ class TurnRecorder:
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
+    paused_tool_calls: list[PausedToolCall] = field(default_factory=list)
+    session_id: str | None = None
     outcome: str = "pending"
     original_status: RunStatus | None = None
     interrupted_persisted: bool = False
@@ -101,6 +104,28 @@ class TurnRecorder:
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
         self.mark_interrupted(original_status)
+
+    def record_suspended(
+        self,
+        *,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+        paused_tool_calls: Sequence[PausedToolCall],
+        session_id: str | None,
+        run_id: str | None,
+    ) -> None:
+        """Record one top-level turn waiting on durable external approval."""
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
+        self.set_assistant_text(assistant_text)
+        self.set_completed_tools(list(completed_tools))
+        self.set_interrupted_tools([])
+        self.paused_tool_calls = list(paused_tool_calls)
+        self.session_id = session_id
+        self.set_run_id(run_id)
+        self.outcome = "waiting_for_approval"
+        self.original_status = RunStatus.paused
 
     def mark_completed(self) -> None:
         """Record successful completion."""

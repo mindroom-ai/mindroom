@@ -88,9 +88,11 @@ from mindroom.response_turn import (
     HandledAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    SuspendedAttempt,
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_tool_calls_from_executions,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -2190,6 +2192,21 @@ async def team_response(  # noqa: C901, PLR0915
                     response,
                     team_display_names=team_members.display_names,
                 )
+            paused_tool_calls = (
+                paused_tool_calls_from_executions(run_tool_executions)
+                if original_status is RunStatus.paused
+                else ()
+            )
+            if paused_tool_calls:
+                return SuspendedAttempt(
+                    response_text=response_text,
+                    partial_text=partial_text,
+                    completed_tools=tuple(completed_tools),
+                    paused_tool_calls=paused_tool_calls,
+                    session_id=response.session_id,
+                    run_id=response.run_id or attempt_run_id,
+                    metadata_content=metadata_content,
+                )
             return ExcludedAttempt(
                 original_status=original_status,
                 response_text=response_text,
@@ -2834,6 +2851,23 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
                     if event.status == RunStatus.paused:
                         completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                        paused_tool_calls = paused_tool_calls_from_executions(event_tool_executions)
+                        if paused_tool_calls:
+                            yield AttemptResolved(
+                                SuspendedAttempt(
+                                    response_text=_format_terminal_team_response(
+                                        event,
+                                        team_display_names=team_members.display_names,
+                                    ),
+                                    partial_text=_extract_interrupted_team_partial_text(event),
+                                    completed_tools=tuple(completed_tool_trace),
+                                    paused_tool_calls=paused_tool_calls,
+                                    session_id=event.session_id,
+                                    run_id=event.run_id or attempt_run_id,
+                                    metadata_content=event_metadata_content,
+                                ),
+                            )
+                            return
                         yield AttemptResolved(
                             ExcludedAttempt(
                                 original_status=RunStatus.paused,
@@ -2981,6 +3015,19 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if isinstance(event, TeamRunPausedEvent):
                     if event.team_id and event.team_id != bound_team_id:
                         continue
+                    paused_tool_calls = paused_tool_calls_from_executions(event.tools)
+                    if paused_tool_calls:
+                        yield AttemptResolved(
+                            SuspendedAttempt(
+                                response_text=str(event.content or ""),
+                                partial_text=_current_canonical_partial_text() or str(event.content or ""),
+                                completed_tools=tuple(completed_tools),
+                                paused_tool_calls=paused_tool_calls,
+                                session_id=event.session_id,
+                                run_id=event.run_id or attempt_run_id,
+                            ),
+                        )
+                        return
                     yield AttemptResolved(
                         ExcludedAttempt(
                             original_status=RunStatus.paused,

@@ -62,14 +62,17 @@ __all__ = [
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
+    "PausedToolCall",
     "ResponseTurnContext",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
     "StreamingTurnAdapter",
+    "SuspendedAttempt",
     "TurnPartialSnapshot",
     "TurnRunState",
     "TurnSinks",
     "build_matrix_run_metadata",
+    "paused_tool_calls_from_executions",
     "run_blocking_response_turn",
     "stream_response_turn",
 ]
@@ -294,12 +297,58 @@ class ExcludedAttempt:
 
 
 @dataclass(frozen=True)
+class PausedToolCall:
+    """Exact identity and arguments for one Agno-confirmation boundary."""
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+
+    def __post_init__(self) -> None:  # noqa: D105
+        object.__setattr__(self, "arguments", deepcopy(self.arguments))
+
+
+def paused_tool_calls_from_executions(
+    tools: list[ToolExecution] | tuple[ToolExecution, ...] | None,
+) -> tuple[PausedToolCall, ...]:
+    """Project strict executable identities from paused Agno tool records."""
+    paused: list[PausedToolCall] = []
+    for tool in tools or ():
+        if tool.requires_confirmation is not True or tool.confirmed is not None:
+            continue
+        if not tool.tool_call_id or not tool.tool_name or not isinstance(tool.tool_args, dict):
+            msg = "Paused approval tool is missing its call ID, name, or arguments."
+            raise ValueError(msg)
+        paused.append(
+            PausedToolCall(
+                tool_call_id=tool.tool_call_id,
+                tool_name=tool.tool_name,
+                arguments=tool.tool_args,
+            ),
+        )
+    return tuple(paused)
+
+
+@dataclass(frozen=True)
+class SuspendedAttempt:
+    """One paused provider run that can continue after durable approval."""
+
+    response_text: str = ""
+    partial_text: str = ""
+    completed_tools: tuple[ToolTraceEntry, ...] = ()
+    paused_tool_calls: tuple[PausedToolCall, ...] = ()
+    session_id: str | None = None
+    run_id: str | None = None
+    metadata_content: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | HandledAttempt
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | SuspendedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | SuspendedAttempt | HandledAttempt
 
 
 @dataclass(frozen=True)
@@ -661,6 +710,18 @@ def _settle_blocking_attempt(
         if resolution.original_status is RunStatus.cancelled:
             raise build_cancelled_error(resolution.reason)
         return resolution.response_text
+    if isinstance(resolution, SuspendedAttempt):
+        _publish_run_metadata(sinks, resolution.metadata_content)
+        if sinks.turn_recorder is not None:
+            sinks.turn_recorder.record_suspended(
+                run_metadata=_interrupted_run_metadata(ctx, sinks, run),
+                assistant_text=resolution.partial_text,
+                completed_tools=list(resolution.completed_tools),
+                paused_tool_calls=list(resolution.paused_tool_calls),
+                session_id=resolution.session_id or ctx.session_id,
+                run_id=resolution.run_id or ctx.run_id,
+            )
+        return resolution.response_text
     settle = _settle_completed_attempt(
         ctx,
         sinks,
@@ -847,6 +908,20 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             )
                         if resolution.original_status is RunStatus.cancelled:
                             raise build_cancelled_error(resolution.reason)
+                        if resolution.response_text:
+                            yield adapter.make_text_chunk(resolution.response_text)
+                        return
+                    if isinstance(resolution, SuspendedAttempt):
+                        _publish_run_metadata(sinks, resolution.metadata_content)
+                        if sinks.turn_recorder is not None:
+                            sinks.turn_recorder.record_suspended(
+                                run_metadata=_interrupted_run_metadata(ctx, sinks, run),
+                                assistant_text=resolution.partial_text,
+                                completed_tools=list(resolution.completed_tools),
+                                paused_tool_calls=list(resolution.paused_tool_calls),
+                                session_id=resolution.session_id or ctx.session_id,
+                                run_id=resolution.run_id or ctx.run_id,
+                            )
                         if resolution.response_text:
                             yield adapter.make_text_chunk(resolution.response_text)
                         return
