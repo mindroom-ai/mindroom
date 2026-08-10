@@ -70,6 +70,7 @@ _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
+# Process-lifetime pool: threads start lazily and ThreadPoolExecutor joins them at interpreter shutdown.
 _WORKER_PROXY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="mindroom-worker-proxy")
 
 

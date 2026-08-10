@@ -138,6 +138,7 @@ async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_co
         await default_blocker
         loop.set_default_executor(replacement_executor)
         default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
 
 
 def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
