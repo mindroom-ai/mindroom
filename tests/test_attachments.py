@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+import mindroom.attachments as attachments_module
 import mindroom.matrix.media as media_module
 from mindroom.attachment_ids import merge_attachment_ids, unique_attachment_ids
 from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
@@ -355,6 +357,116 @@ def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> Non
     assert first is not None
     assert second is not None
     mock_cleanup.assert_called_once_with(tmp_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_does_not_block_event_loop(tmp_path: Path) -> None:
+    """Cleanup metadata scans should yield event loop while a worker reads disk."""
+    slow_read_started = threading.Event()
+    release_slow_read = threading.Event()
+    slow_read_timed_out = threading.Event()
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def slow_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path.suffix == ".json" and path.parent.name == "attachments":
+            slow_read_started.set()
+            if not release_slow_read.wait(timeout=1):
+                slow_read_timed_out.set()
+        return original_read_text(path, *args, **kwargs)
+
+    async def heartbeat() -> None:
+        assert await asyncio.to_thread(slow_read_started.wait, 2)
+        release_slow_read.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    with patch.object(Path, "read_text", new=slow_read_text):
+        registered = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_responsive_cleanup",
+            room_id="!room:localhost",
+        )
+        await heartbeat_task
+        assert registered is not None
+        assert not slow_read_timed_out.is_set()
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: Path) -> None:
+    """Only one cleanup may run for a storage path while its scan is active."""
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_calls = 0
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    def blocking_cleanup(_storage_path: Path) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=1)
+
+    with (
+        patch("mindroom.attachments._last_cleanup_time_by_storage_path", {}),
+        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+    ):
+        first = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_first_cleanup_claim",
+            room_id="!room:localhost",
+        )
+        assert await asyncio.to_thread(cleanup_started.wait, 2)
+        second = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_second_cleanup_claim",
+            room_id="!room:localhost",
+        )
+        release_cleanup.set()
+        assert cleanup_calls == 1
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert first is not None
+    assert second is not None
+
+
+def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> None:
+    """Cleanup log should expose scan and successful deletion totals."""
+    active_media_path = tmp_path / "active.txt"
+    active_media_path.write_text("active", encoding="utf-8")
+    registered = register_local_attachment(
+        tmp_path,
+        active_media_path,
+        kind="file",
+        attachment_id="att_active_cleanup_metrics",
+        room_id="!room:localhost",
+    )
+    assert registered is not None
+
+    stale_metadata_path = tmp_path / "attachments" / "att_stale_cleanup_metrics.json"
+    stale_metadata_path.write_text("not json", encoding="utf-8")
+    orphan_media_path = tmp_path / "incoming_media" / "orphan.bin"
+    orphan_media_path.parent.mkdir(parents=True, exist_ok=True)
+    orphan_media_path.write_bytes(b"orphan")
+    stale_timestamp = (datetime.now(UTC) - timedelta(days=45)).timestamp()
+    os.utime(stale_metadata_path, (stale_timestamp, stale_timestamp))
+    os.utime(orphan_media_path, (stale_timestamp, stale_timestamp))
+
+    with patch("mindroom.attachments.logger.debug") as mock_debug:
+        attachments_module._cleanup_attachment_storage(tmp_path)
+
+    cleanup_log = mock_debug.call_args.kwargs
+    assert cleanup_log["metadata_files_scanned"] == 2
+    assert cleanup_log["incoming_media_files_scanned"] == 1
+    assert cleanup_log["files_scanned"] == 3
+    assert cleanup_log["files_deleted"] == 2
 
 
 def test_merge_attachment_ids_preserves_order() -> None:
