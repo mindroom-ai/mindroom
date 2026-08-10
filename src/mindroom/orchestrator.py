@@ -17,6 +17,7 @@ import uvicorn
 from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
+from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.authorization import is_authorized_sender
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -1953,6 +1954,7 @@ class _MultiAgentOrchestrator:
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
+        await wait_for_attachment_cleanup_tasks()
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         if self._open_journal is not None:
