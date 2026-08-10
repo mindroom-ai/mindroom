@@ -472,6 +472,7 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
         "Attachment cleanup completed",
         stale_records_removed=stale_records_removed,
         expired_records_removed=len(expired_records),
+        expired_records_deleted=expired_records_deleted,
         expired_media_removed=expired_media_removed,
         orphan_media_removed=orphan_media_removed,
         active_media_paths=len(active_media_paths),
@@ -582,19 +583,12 @@ def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
     schedule_token = _claim_attachment_cleanup_schedule(storage_path)
     if schedule_token is None:
         return
-    cleanup_coroutine = _run_scheduled_attachment_cleanup(storage_path, schedule_token)
-    try:
-        cleanup_task = create_background_task(
-            cleanup_coroutine,
-            name="attachment_cleanup",
-            owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
-            log_exceptions=False,
-        )
-    except Exception:
-        cleanup_coroutine.close()
-        _release_attachment_cleanup_schedule(storage_path, schedule_token)
-        logger.exception("Failed to schedule attachment storage cleanup")
-        return
+    cleanup_task = create_background_task(
+        _run_scheduled_attachment_cleanup(storage_path, schedule_token),
+        name="attachment_cleanup",
+        owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
+        log_exceptions=False,
+    )
     cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
     logger.debug(
         "Attachment cleanup scheduled",

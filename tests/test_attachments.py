@@ -611,6 +611,7 @@ def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> Non
     assert cleanup_log["metadata_files_scanned"] == 2
     assert cleanup_log["incoming_media_files_scanned"] == 1
     assert cleanup_log["files_scanned"] == 3
+    assert cleanup_log["expired_records_deleted"] == 0
     assert cleanup_log["files_deleted"] == 1
 
 
