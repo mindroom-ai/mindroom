@@ -52,6 +52,13 @@ POSTGRES_DIALECT = _Dialect(
 
 _TABLES = (
     """
+    CREATE TABLE IF NOT EXISTS matrix_sync_consumers (
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        consumer_generation TEXT NOT NULL,
+        stream_id TEXT UNIQUE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_events (
         receipt_order {receipt_order_column},
         principal_id TEXT NOT NULL,

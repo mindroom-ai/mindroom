@@ -8,6 +8,17 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from uuid import UUID
+
+
+class IngestionConsumerBindingError(RuntimeError):
+    """The durable consumer identity disagrees with a requested binding."""
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionConsumer:  # noqa: D101
+    generation: UUID
+    stream_id: UUID | None
 
 
 class EventClass(StrEnum):

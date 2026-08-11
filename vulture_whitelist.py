@@ -300,6 +300,8 @@ ThreadExportTarget  # plugin-facing API class (src/mindroom/thread_export/models
 export_threads_to_targets_once  # plugin-facing API function (src/mindroom/thread_export/service.py)
 _._naive_execute_at_is_utc  # unused method (src/mindroom/scheduling.py)
 _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix_rtc/transcript.py)
+_.load_or_create_ingestion_consumer  # inactive checkpoint contract (src/mindroom/event_journal/store.py)
+_.bind_ingestion_stream  # inactive checkpoint contract (src/mindroom/event_journal/store.py)
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)

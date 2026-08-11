@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -22,7 +23,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
-from .models import DeliveryAcknowledgement
+from .models import DeliveryAcknowledgement, IngestionConsumer, IngestionConsumerBindingError
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
@@ -59,12 +60,43 @@ _DEFAULT_ROOM_CARD_LIMIT = 256
 _HYDRATION_INSTALL_CHUNK_SIZE = 256
 
 
+def _consumer(transaction: Transaction, principal_id: str, generation: UUID, stream_id: UUID | None) -> IngestionConsumer:  # fmt: skip
+    if stream_id is None:
+        transaction.execute("INSERT INTO matrix_sync_consumers (principal_id, consumer_generation, stream_id) VALUES (?, ?, NULL) ON CONFLICT (principal_id) DO NOTHING", (principal_id, str(generation)))  # fmt: skip
+    else:
+        transaction.execute("UPDATE matrix_sync_consumers SET stream_id = ? WHERE principal_id = ? AND consumer_generation = ? AND (stream_id IS NULL OR stream_id = ?) AND NOT EXISTS (SELECT 1 FROM matrix_sync_consumers WHERE stream_id = ?)", (str(stream_id), principal_id, str(generation), str(stream_id), str(stream_id)))  # fmt: skip
+    row = transaction.fetchone("SELECT * FROM matrix_sync_consumers WHERE principal_id = ?", (principal_id,))
+    if row is None:
+        raise IngestionConsumerBindingError
+    try:
+        consumer = IngestionConsumer(UUID(str(row["consumer_generation"])), None if row["stream_id"] is None else UUID(str(row["stream_id"])))  # fmt: skip
+    except (KeyError, TypeError, ValueError) as error:
+        raise IngestionConsumerBindingError from error
+    if stream_id is not None and consumer != IngestionConsumer(generation, stream_id):
+        raise IngestionConsumerBindingError
+    return consumer
+
+
 @dataclass(frozen=True, slots=True)
 class PrincipalStore:
     """Everything one bot may durably do, scoped to that bot."""
 
     _backend: Backend
     _principal_id: str
+
+    async def load_or_create_ingestion_consumer(self, *, new_generation: UUID) -> IngestionConsumer:  # noqa: D102
+        return await self._backend.write(lambda tx: _consumer(tx, self._principal_id, new_generation, None))
+
+    async def bind_ingestion_stream(self, *, generation: UUID, stream_id: UUID) -> IngestionConsumer:  # noqa: D102
+        try:
+            return await self._backend.write(lambda tx: _consumer(tx, self._principal_id, generation, stream_id))
+        except Exception as error:
+            if getattr(error, "sqlite_errorname", None) != "SQLITE_CONSTRAINT_UNIQUE" and getattr(error, "sqlstate", None) != "23505":  # fmt: skip
+                raise
+            owner = await self._backend.read(lambda tx: tx.fetchone("SELECT principal_id FROM matrix_sync_consumers WHERE stream_id = ?", (str(stream_id),)))  # fmt: skip
+            if owner is not None and owner["principal_id"] != self._principal_id:
+                raise IngestionConsumerBindingError from error
+            raise
 
     async def admit(
         self,

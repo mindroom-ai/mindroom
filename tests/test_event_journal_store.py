@@ -43,6 +43,8 @@ from mindroom.event_journal import (
     EventKind,
     HistoryRecoveryOutcome,
     InboundEvent,
+    IngestionConsumer,
+    IngestionConsumerBindingError,
     ProjectedEvent,
     TerminalTurnWrite,
     delivery_transaction_id,
@@ -488,6 +490,185 @@ class TestPrincipalIsolation:
 
         assert await first.is_pending("$shared-id")
         assert not await second.is_pending("$shared-id")
+
+
+class TestIngestionConsumer:
+    """The inactive per-principal nio handshake survives every retry."""
+
+    _GENERATION = uuid.UUID("77fb92ef-7c57-4054-b68c-162fe5bc44d1")
+    _OTHER_GENERATION = uuid.UUID("794a25bb-d15b-407e-af09-47f12e9f7670")
+    _STREAM = uuid.UUID("3a5dc4d3-d2c4-4b42-a0d6-256515114839")
+    _OTHER_STREAM = uuid.UUID("00fea0f9-4f00-4d48-b820-38521918b87b")
+
+    async def test_create_is_inactive_and_a_retry_keeps_the_established_generation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A later candidate must not replace the identity already stored."""
+        created = await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        retried = await alice.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+
+        assert created == IngestionConsumer(generation=self._GENERATION, stream_id=None)
+        assert retried == created
+
+    async def test_consumers_are_scoped_per_principal(self, journal_store: EventJournalStore) -> None:
+        """Each principal owns an independent generation and inactive state."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+
+        assert await alice.load_or_create_ingestion_consumer(
+            new_generation=self._GENERATION,
+        ) == IngestionConsumer(self._GENERATION, None)
+        assert await bob.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._OTHER_GENERATION, None)
+
+    async def test_exact_bind_and_replay_are_idempotent(self, alice: PrincipalStore) -> None:
+        """The established generation may bind one stream and replay it exactly."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+
+        first = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+        replay = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        assert first == IngestionConsumer(self._GENERATION, self._STREAM)
+        assert replay == first
+
+    @pytest.mark.parametrize(
+        ("generation", "stream_id"),
+        [
+            (_OTHER_GENERATION, _STREAM),
+            (_GENERATION, _OTHER_STREAM),
+        ],
+        ids=("wrong-generation", "wrong-stream"),
+    )
+    async def test_disagreeing_bind_is_rejected_without_changing_the_row(
+        self,
+        alice: PrincipalStore,
+        generation: uuid.UUID,
+        stream_id: uuid.UUID,
+    ) -> None:
+        """Neither ownership predicate may overwrite an established binding."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        established = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=generation, stream_id=stream_id)
+
+        assert await alice.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION) == established
+
+    async def test_missing_consumer_cannot_be_bound(self, alice: PrincipalStore) -> None:
+        """Binding never creates the consumer row as a side effect."""
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+    @pytest.mark.parametrize(
+        ("column", "malformed"),
+        [("consumer_generation", "not-a-uuid"), ("stream_id", "not-a-uuid")],
+    )
+    async def test_malformed_stored_uuid_is_rejected_without_repair(
+        self,
+        alice: PrincipalStore,
+        column: str,
+        malformed: str,
+    ) -> None:
+        """Corrupt durable identity must fail closed rather than be rewritten."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                f"UPDATE matrix_sync_consumers SET {column} = ? WHERE principal_id = ?",  # noqa: S608
+                (malformed, alice._principal_id),
+            ),
+        )
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                f"SELECT {column} FROM matrix_sync_consumers WHERE principal_id = ?",  # noqa: S608
+                (alice._principal_id,),
+            ),
+        )
+        assert row is not None
+        assert row[column] == malformed
+
+    async def test_binding_survives_reopen(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A new store instance reads the exact durable consumer identity."""
+        first = journal_database().principal("agent@alice")
+        await first.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await first.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        reopened = journal_database().principal("agent@alice")
+        assert await reopened.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._GENERATION, self._STREAM)
+
+    async def test_competing_different_streams_have_one_winner(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """The SQL ownership predicate admits exactly one concurrent stream."""
+        first = journal_database().principal("agent@alice")
+        second = journal_database().principal("agent@alice")
+        await first.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+
+        outcomes = await asyncio.gather(
+            first.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM),
+            second.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._OTHER_STREAM),
+            return_exceptions=True,
+        )
+
+        winners = [result for result in outcomes if isinstance(result, IngestionConsumer)]
+        losers = [result for result in outcomes if isinstance(result, IngestionConsumerBindingError)]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        assert winners[0].stream_id in {self._STREAM, self._OTHER_STREAM}
+
+    async def test_a_stream_owned_by_another_principal_fails_with_the_binding_error(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The shared stream uniqueness constraint has one backend-neutral failure."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+        await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await bob.bind_ingestion_stream(generation=self._OTHER_GENERATION, stream_id=self._STREAM)
+
+        assert await bob.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._OTHER_GENERATION, None)
+
+    async def test_independent_backends_racing_for_one_stream_return_one_focused_error(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A database-level UNIQUE race never escapes as a backend exception."""
+        alice = journal_database().principal("agent@alice")
+        bob = journal_database().principal("agent@bob")
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+
+        outcomes = await asyncio.gather(
+            alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM),
+            bob.bind_ingestion_stream(generation=self._OTHER_GENERATION, stream_id=self._STREAM),
+            return_exceptions=True,
+        )
+
+        assert sum(isinstance(value, IngestionConsumer) for value in outcomes) == 1
+        assert sum(isinstance(value, IngestionConsumerBindingError) for value in outcomes) == 1
+        consumers = await asyncio.gather(
+            alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION),
+            bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION),
+        )
+        assert sum(value.stream_id == self._STREAM for value in consumers) == 1
+        assert sum(value.stream_id is None for value in consumers) == 1
 
 
 class TestAdmission:
