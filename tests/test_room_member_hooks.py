@@ -237,8 +237,12 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path) -> None:
+async def test_router_emits_room_member_left_for_human_self_leave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The router should expose an exact human join-to-leave self-transition."""
+    monkeypatch.setattr("mindroom.bot.journal_event_is_live", lambda _event_id: True)
     seen: list[RoomMemberLeftContext] = []
 
     @hook(EVENT_ROOM_MEMBER_LEFT)
@@ -269,6 +273,30 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
     assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_recovered_room_member_self_leave(tmp_path: Path) -> None:
+    """Recovered membership history must not trigger live leave side effects."""
+    seen: list[RoomMemberLeftContext] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx)
+
+    bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+
+    await bot._on_room_member(
+        _room("!personal:localhost"),
+        _room_member_event(
+            event_id="$recovered-leave",
+            membership="leave",
+            prev_membership="join",
+        ),
+    )
+
+    assert seen == []
 
 
 @pytest.mark.asyncio

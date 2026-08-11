@@ -2365,7 +2365,7 @@ class AgentBot:
         """Expose live human room joins and self-leaves to router-owned hooks."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        if self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
+        if self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_LEFT) and journal_event_is_live(event.event_id):
             leave = room_member_left_from_event(
                 room,
                 event,
