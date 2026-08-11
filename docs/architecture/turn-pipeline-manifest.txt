@@ -29,9 +29,7 @@ src/mindroom/user_stop_reconciliation.py
 src/mindroom/visible_response_reconciliation.py
 src/mindroom/turn_store.py
 src/mindroom/handled_turns.py
-src/mindroom/redacted_turn_cleanup.py
 src/mindroom/sync_restart_retry.py
-src/mindroom/turn_settlement_retry.py
 src/mindroom/delivery_gateway.py
 src/mindroom/final_delivery.py
 src/mindroom/streaming.py
@@ -40,7 +38,10 @@ src/mindroom/message_target.py
 src/mindroom/prompt_ingress_reservation.py
 src/mindroom/dispatch_callback_outcome.py
 # group: adjacent-recovery
-src/mindroom/dispatch_obligations/__init__.py
-src/mindroom/dispatch_obligations/events.py
-src/mindroom/dispatch_obligations/runner.py
-src/mindroom/dispatch_obligations/storage.py
+src/mindroom/journal_dispatch.py
+src/mindroom/pending_event_worker.py
+src/mindroom/event_journal/models.py
+src/mindroom/event_journal/outbox.py
+src/mindroom/event_journal/store.py
+src/mindroom/event_journal/turn_records.py
+src/mindroom/event_journal/views.py

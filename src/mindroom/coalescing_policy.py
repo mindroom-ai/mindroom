@@ -64,7 +64,7 @@ def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
 
 
 def source_or_event_allows_room_scope_batching(
-    source_kind: str,
+    source_kind: str | None,
     event: DispatchEvent | None = None,
 ) -> bool:
     """Return whether a source kind or resolved event can batch at room scope."""

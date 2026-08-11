@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsClientConfig
+    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -55,7 +55,7 @@ _ROUTER_TARGET_UNAVAILABLE_TEXT = (
 class RouterRelayDeps:
     """Explicit collaborators for one router relay execution."""
 
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
     logger: BoundLogger
     agent_name: str
@@ -370,7 +370,7 @@ async def execute_router_relay(
     if tracked_handled_turn is None:
         return
     if recovered_response_event_id is not None:
-        deps.turn_store.record_responded_turn(
+        await deps.turn_store.record_responded_turn(
             canonicalize_turn_record(tracked_handled_turn, response_event_id=recovered_response_event_id),
         )
         return
@@ -389,7 +389,7 @@ async def execute_router_relay(
         if event_id:
             deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
             await deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
-            deps.turn_store.record_responded_turn(
+            await deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
             )
         else:

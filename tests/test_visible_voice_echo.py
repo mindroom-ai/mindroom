@@ -65,13 +65,13 @@ class _EchoTurnStore:
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
 
-    def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+    async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         self.visible_event_ids[source_event_id] = echo_event_id
 
     def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
         return None
 
-    def record_finalized_visible_echo(
+    async def record_finalized_visible_echo(
         self,
         source_event_id: str,  # noqa: ARG002
         echo_event_id: str,  # noqa: ARG002
@@ -136,8 +136,6 @@ def _echo_harness(
         runtime_paths=runtime_paths,
         enable_streaming=True,
         orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
     router_user_id = entity_identity_registry(config, runtime_paths).current_id(ROUTER_AGENT_NAME).full_id
     ingress = _RouterIngress(router_user_id)

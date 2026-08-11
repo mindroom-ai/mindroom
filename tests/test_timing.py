@@ -22,7 +22,6 @@ from mindroom.timing import (
     emit_timing_event,
     timed,
     timed_block,
-    timing_enabled,
     timing_scope,
 )
 
@@ -314,15 +313,6 @@ def test_emit_timing_event_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
-def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The public timing-enabled helper should mirror the environment switch."""
-    monkeypatch.delenv("MINDROOM_TIMING", raising=False)
-    assert timing_enabled() is False
-
-    monkeypatch.setenv("MINDROOM_TIMING", "1")
-    assert timing_enabled() is True
-
-
 def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:
     """Elapsed-millisecond conversion should use the shared one-decimal policy."""
     assert elapsed_ms_between(1.0, 1.23456) == 234.6
@@ -436,8 +426,6 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     timing.marks.update(
         {
             "message_received": 0.0,
-            "ingress_cache_append_start": 0.2,
-            "ingress_cache_append_ready": 0.7,
             "ingress_normalize_start": 0.9,
             "ingress_normalize_ready": 1.4,
             "gate_enter": 1.0,
@@ -495,7 +483,6 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["time_to_first_visible_reply_ms"] == 20000.0
     assert summary["time_to_first_substantive_reply_ms"] == 22000.0
     assert summary["total_pipeline_ms"] == 25000.0
-    assert summary["diag_ingress_cache_append_ms"] == 500.0
     assert summary["diag_ingress_normalize_ms"] == 500.0
     assert summary["diag_dispatch_prepare_ms"] == 2000.0
     assert summary["diag_dispatch_plan_ms"] == 1000.0

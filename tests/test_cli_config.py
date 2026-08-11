@@ -32,7 +32,6 @@ from mindroom.cli.config import _format_config_search_locations, activate_cli_ru
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
-from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
@@ -2267,7 +2266,6 @@ class TestVersionAndHelp:
         assert export_kwargs["output_dir"] == output_path
         assert export_kwargs["room_filter"] == "lob"
         assert export_kwargs["max_thread_roots"] == 11
-        assert export_kwargs["prefer_cache"] is False
         assert export_kwargs["include_invited_rooms"] is True
         assert export_kwargs["runtime_paths"].storage_root == storage_path.resolve()
 
@@ -2328,25 +2326,6 @@ class TestVersionAndHelp:
         assert result.exit_code == 0
         assert export_threads_once.await_args.kwargs["include_invited_rooms"] is False
 
-    def test_threads_export_forwards_prefer_cache_flag(self, tmp_path: Path) -> None:
-        """The --prefer-cache flag should reach the exporter."""
-        config_path = tmp_path / "config.yaml"
-        storage_path = tmp_path / "storage"
-        _write_minimal_runtime_config(config_path)
-
-        with patch(
-            "mindroom.thread_export.export_threads_once",
-            new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path / "exports")),
-        ) as export_threads_once:
-            result = _invoke_with_runtime(
-                ["threads", "export", "--prefer-cache"],
-                config_path,
-                storage_path=storage_path,
-            )
-
-        assert result.exit_code == 0
-        assert export_threads_once.await_args.kwargs["prefer_cache"] is True
-
     @pytest.mark.asyncio
     async def test_threads_export_watch_retries_runtime_errors(self, tmp_path: Path) -> None:
         """Watch mode should keep running after a transient exporter error."""
@@ -2383,7 +2362,6 @@ class TestVersionAndHelp:
                 watch=True,
                 interval=7,
                 max_thread_roots=11,
-                prefer_cache=False,
                 include_invited_rooms=True,
             )
 
@@ -2549,10 +2527,6 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            assert (
-                HandledTurnLedger("agent", base_path=runtime_storage.resolve() / "tracking").base_path
-                == runtime_storage.resolve() / "tracking"
-            )
             MatrixState().save(runtime_paths=runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 

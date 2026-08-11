@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 
 class _Client:
@@ -59,8 +61,8 @@ def _context(
         client=cast("Any", _Client()),
         config=_config(),
         runtime_paths=_runtime_paths(tmp_path, process_env),
-        event_cache=cast("Any", object()),
-        conversation_cache=cast("Any", object()),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
     )
 
 
@@ -158,8 +160,10 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
         payload = _payload(CallbackManagerTools().mint_callback("quote-safe callback"))
     script_path = Path(payload["script_path"])
     script_text = script_path.read_text(encoding="utf-8")
-    assert "python3" not in script_text
-    assert "jq" not in script_text
+    # Whole words only. The script embeds a minted callback token, and a random
+    # token containing the letters "jq" is not the script reaching for `jq`.
+    assert not re.search(r"\bpython3\b", script_text)
+    assert not re.search(r"\bjq\b", script_text)
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()

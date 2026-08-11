@@ -2,68 +2,47 @@
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
-import mindroom.matrix.cache as matrix_cache
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
-from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.event_journal import (
+    EventClass,
+    EventKind,
+    InboundEvent,
+    ProjectedEvent,
+    VisibleMessage,
+)
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-)
+from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.runtime_support import (
-    OwnedRuntimeSupport,
-    StartupThreadPrewarmRegistry,
-    close_owned_runtime_support,
-    sync_owned_runtime_support,
-)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    make_event_cache_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
-    from typing import Any
+    from collections.abc import AsyncGenerator, Sequence
 
-    from mindroom.matrix.cache import ThreadHistoryResult
-    from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap
-
-
-async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:
-    await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
@@ -78,12 +57,154 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
-def _message(*, event_id: str, body: str, sender: str = "@user:localhost") -> ResolvedVisibleMessage:
-    """Build one typed visible message for thread-history mocks."""
+def _message(
+    *,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+    thread_id: str | None = None,
+) -> ResolvedVisibleMessage:
+    """Build one typed visible message matching what a real read returns.
+
+    A message fetched as part of a thread carries that thread. The production
+    read path has always populated it (`EventInfo.from_event(...).thread_id`),
+    so a thread-history expectation that leaves it out asserts nothing about
+    it -- which is invisible while a mock returns the very objects the test
+    constructed.
+    """
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
         body=body,
         event_id=event_id,
+        thread_id=thread_id,
+    )
+
+
+async def seed_thread_history(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    messages: Sequence[ResolvedVisibleMessage],
+    hydrated: bool = True,
+) -> None:
+    """Put messages into the conversation projection a read will serve from.
+
+    Writes straight to the journal store, because the projection is now the
+    only thing a read serves from. Stubbing the reader instead would pin the
+    projection's absence -- the test would pass whether or not anything ever
+    reached it.
+
+    Pass ``hydrated=False`` to seed content the projection holds without
+    claiming it is all of it, which is what makes a dispatch read report
+    itself degraded.
+    """
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    for ordinal, message in enumerate(messages, start=1):
+        # `_message` builds expectations through `ResolvedVisibleMessage
+        # .synthetic`, which stamps every one with timestamp 0. Seeding them
+        # all at 0 makes the page order fall back to the event ID, which is
+        # alphabetical rather than the order the conversation happened in.
+        # Position in this list is that order, so it becomes the creation time
+        # -- on the expectation objects too, since callers pass the very list
+        # they then assert against.
+        message.timestamp = ordinal
+        # A thread root carries no `m.thread` relation of its own -- it becomes
+        # a root only when someone replies to it -- so the journal records it
+        # with no thread. Seeding it as a member of its own thread would make
+        # relation resolution promote a plain room message into a thread.
+        #
+        # Only the journal column. The projection's own root handling is a
+        # separate question, and page reads here still expect what they always
+        # got.
+        admitted_thread_id = None if message.event_id == thread_id else thread_id
+        await store.admit(
+            InboundEvent(
+                event_id=message.event_id,
+                room_id=room_id,
+                thread_id=admitted_thread_id,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender=message.sender,
+                origin_server_ts=ordinal,
+                source={"event_id": message.event_id, "content": dict(message.content)},
+            ),
+            ProjectedEvent(
+                event_id=message.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=message.sender,
+                origin_server_ts=ordinal,
+                content=dict(message.content),
+                replaces_event_id=None,
+                redacts_event_id=None,
+            ),
+        )
+        await store.settle(message.event_id)
+    if not hydrated:
+        return
+    # A strict read hydrates before it answers, and hydration talks to Matrix.
+    # A bot under test has a mocked client, so without the marker every strict
+    # read would try to fetch history from a mock and the turn would produce
+    # nothing at all. Seeding a conversation means it is known, not merely
+    # present.
+    await store.install_hydrated_conversation(
+        room_id=room_id,
+        thread_id=thread_id,
+        events=(),
+        complete=True,
+        expected_membership_epoch=await store.membership_epoch(room_id),
+    )
+
+
+async def seed_hydrated_conversation(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    thread_id: str | None = None,
+) -> None:
+    """Record that a walk already ran for this conversation and reached the start of it.
+
+    The counterpart of ``seed_unhydrated_room_event``. A dispatch-safe read can
+    only call a conversation complete when hydration proves it, so a test whose
+    subject is something else -- ingress ordering, command targeting -- has to
+    say which conversations the bot already knows. Leaving the journal empty
+    instead makes the read report itself degraded, which is honest but is not
+    what those tests are about.
+    """
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    await store.install_hydrated_conversation(
+        room_id=room_id,
+        thread_id=thread_id,
+        events=(),
+        complete=True,
+        expected_membership_epoch=await store.membership_epoch(room_id),
+    )
+
+
+async def seed_unhydrated_room_event(
+    bot: AgentBot,
+    *,
+    room_id: str,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+    thread_id: str | None = None,
+) -> None:
+    """Admit one known room event without claiming its conversation is complete."""
+    store = bot._journal_store.principal(bot._journal_principal_id)
+    await store.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender=sender,
+            origin_server_ts=1,
+            source={"event_id": event_id, "content": {"body": body, "msgtype": "m.text"}},
+        ),
+        None,
     )
 
 
@@ -129,6 +250,48 @@ def _matrix_room(
     return room
 
 
+def _formatted_event_source(
+    *,
+    msgtype: str,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str,
+    thread_id: str | None,
+    replacement_of: str | None,
+    new_body: str | None,
+    new_thread_id: str | None,
+    extra_content: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return one `m.room.message` source for a msgtype that carries a body."""
+    content: dict[str, object] = {
+        "body": body,
+        "msgtype": msgtype,
+        **(extra_content or {}),
+    }
+    if replacement_of is not None:
+        new_content: dict[str, object] = {
+            "body": new_body or body.removeprefix("* ").strip() or body,
+            "msgtype": msgtype,
+            **(extra_content or {}),
+        }
+        if new_thread_id is not None:
+            new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": new_thread_id}
+        content["m.new_content"] = new_content
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replacement_of}
+    elif thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    return {
+        "content": content,
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": server_timestamp,
+        "room_id": room_id,
+        "type": "m.room.message",
+    }
+
+
 def _text_event(
     *,
     event_id: str,
@@ -142,34 +305,104 @@ def _text_event(
     new_thread_id: str | None = None,
 ) -> nio.RoomMessageText:
     """Build one Matrix text event with optional thread or edit relations."""
-    content: dict[str, object] = {
-        "body": body,
-        "msgtype": "m.text",
-    }
-    if replacement_of is not None:
-        new_content: dict[str, object] = {
-            "body": new_body or body.removeprefix("* ").strip() or body,
-            "msgtype": "m.text",
-        }
-        if new_thread_id is not None:
-            new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": new_thread_id}
-        content["m.new_content"] = new_content
-        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replacement_of}
-    elif thread_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     return cast(
         "nio.RoomMessageText",
         nio.RoomMessageText.from_dict(
-            {
-                "content": content,
-                "event_id": event_id,
-                "sender": sender,
-                "origin_server_ts": server_timestamp,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
+            _formatted_event_source(
+                msgtype="m.text",
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=server_timestamp,
+                room_id=room_id,
+                thread_id=thread_id,
+                replacement_of=replacement_of,
+                new_body=new_body,
+                new_thread_id=new_thread_id,
+            ),
         ),
     )
+
+
+def _emote_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+    replacement_of: str | None = None,
+    new_body: str | None = None,
+    new_thread_id: str | None = None,
+) -> nio.RoomMessageEmote:
+    """Build the same event as `_text_event`, sent as `/me`.
+
+    Identical in every way a reader looks at except its msgtype, which is the
+    point: the two are siblings under `RoomMessageFormatted` and every rule
+    about visible messages has to treat them alike.
+    """
+    return cast(
+        "nio.RoomMessageEmote",
+        nio.RoomMessageEmote.from_dict(
+            _formatted_event_source(
+                msgtype="m.emote",
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=server_timestamp,
+                room_id=room_id,
+                thread_id=thread_id,
+                replacement_of=replacement_of,
+                new_body=new_body,
+                new_thread_id=new_thread_id,
+            ),
+        ),
+    )
+
+
+_TEST_PICTURE: dict[str, object] = {
+    "url": "mxc://localhost/picture",
+    "info": {"mimetype": "image/png", "w": 8, "h": 8},
+}
+
+
+def _image_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str,
+    server_timestamp: int,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+    replacement_of: str | None = None,
+    new_body: str | None = None,
+    new_thread_id: str | None = None,
+) -> nio.RoomMessageImage:
+    """Build the same event as `_text_event`, sent as a captioned picture.
+
+    Parsed through nio's own msgtype dispatch rather than a named class, so a
+    fixture cannot claim a parse the production reader would not get -- an
+    `m.image` without a top-level `url` is a `BadEvent` to nio, and that is a
+    real property of media replacements rather than a detail to fixture away.
+    """
+    event = nio.RoomMessage.parse_event(
+        _formatted_event_source(
+            msgtype="m.image",
+            event_id=event_id,
+            body=body,
+            sender=sender,
+            server_timestamp=server_timestamp,
+            room_id=room_id,
+            thread_id=thread_id,
+            replacement_of=replacement_of,
+            new_body=new_body,
+            new_thread_id=new_thread_id,
+            extra_content=dict(_TEST_PICTURE),
+        ),
+    )
+    assert isinstance(event, nio.RoomMessageImage)
+    return event
 
 
 async def _event_iter(events: Sequence[nio.Event]) -> AsyncGenerator[nio.Event, None]:
@@ -233,38 +466,6 @@ def _relations_client(
     return client
 
 
-def _runtime_event_cache() -> AsyncMock:
-    """Return a cache-shaped async mock for runtime-state tests."""
-    return make_event_cache_mock()
-
-
-def _runtime_write_coordinator() -> EventCacheWriteCoordinator:
-    """Return one real coordinator for runtime-state tests."""
-    return EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=object(),
-    )
-
-
-def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, MagicMock]:
-    """Return concrete thread cache ops backed by one async-mock event cache."""
-    logger = MagicMock()
-    event_cache = MagicMock()
-    event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.APPENDED)
-    event_cache.disable = Mock()
-    event_cache.invalidate_room_threads = AsyncMock()
-    event_cache.invalidate_thread = AsyncMock()
-    event_cache.mark_room_threads_gap = AsyncMock()
-    event_cache.mark_thread_gap = AsyncMock()
-    event_cache.redact_event = AsyncMock(return_value=True)
-    runtime = MagicMock()
-    runtime.event_cache = event_cache
-    runtime.event_cache_write_coordinator = _runtime_write_coordinator()
-    runtime.runtime_started_at = 1234567890.0
-    return ThreadMutationCacheOps(logger_getter=lambda: logger, runtime=runtime), logger, event_cache
-
-
 def _message_mutation_event_info(*, original_event_id: str = "$target:localhost") -> EventInfo:
     """Return one thread-affecting event info for direct mutation-helper tests."""
     return EventInfo.from_event(
@@ -280,62 +481,23 @@ def _message_mutation_event_info(*, original_event_id: str = "$target:localhost"
     )
 
 
-def _outbound_streaming_edit_content(
-    *,
-    body: str,
-    original_event_id: str = "$stream-original:localhost",
-    thread_id: str = "$thread:localhost",
-    stream_status: str = STREAM_STATUS_STREAMING,
-) -> dict[str, object]:
-    """Return one outbound streaming edit content payload."""
-    return {
-        "body": f"* {body}",
-        "msgtype": "m.text",
-        "m.new_content": {
-            "body": body,
-            "msgtype": "m.text",
-            STREAM_STATUS_KEY: stream_status,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-    }
+class EmptyProjection:
+    """A projection holding nothing, for tests that never point-look-up an event.
+
+    Point lookups fall through to the homeserver on a projection miss, so a
+    store that always misses gives these tests the client-only behavior they
+    were written against. A test that means to prove something about the
+    projection seeds a real store instead.
+    """
+
+    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
+        """Return nothing, so every point lookup reaches the homeserver."""
+        del room_id, logical_event_id
+        return None
 
 
-def _outbound_plain_edit_content(
-    *,
-    body: str,
-    original_event_id: str = "$plain-original:localhost",
-    thread_id: str = "$thread:localhost",
-) -> dict[str, object]:
-    """Return one outbound non-streaming edit content payload."""
-    return {
-        "body": f"* {body}",
-        "msgtype": "m.text",
-        "m.new_content": {
-            "body": body,
-            "msgtype": "m.text",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-    }
-
-
-async def _reopen_event_cache(event_cache: SqliteEventCache) -> SqliteEventCache:
-    """Close and reopen one SQLite cache against the same database file."""
-    db_path = event_cache.db_path
-    await event_cache.close()
-    reopened_cache = SqliteEventCache(db_path)
-    await reopened_cache.initialize()
-    return reopened_cache
-
-
-def _conversation_runtime(
-    *,
-    client: nio.AsyncClient | None = None,
-    event_cache: SqliteEventCache | None = None,
-    coordinator: EventCacheWriteCoordinator | None = None,
-) -> BotRuntimeState:
-    """Build one minimal live runtime state for conversation-cache tests."""
+def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntimeState:
+    """Build one minimal live runtime state for conversation-read tests."""
     config = _conversation_runtime_config()
     return BotRuntimeState(
         client=client,
@@ -343,13 +505,11 @@ def _conversation_runtime(
         runtime_paths=runtime_paths_for(config),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=event_cache or _runtime_event_cache(),
-        event_cache_write_coordinator=coordinator or _runtime_write_coordinator(),
     )
 
 
 def _conversation_runtime_config() -> Config:
-    """Return one runtime-bound config for conversation-cache tests."""
+    """Return one runtime-bound config for conversation-read tests."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp(prefix="mindroom-threading-runtime-")))
     return bind_runtime_paths(
         Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
@@ -357,186 +517,20 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-async def _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(  # noqa: PLR0915
-    tmp_path: Path,
-    *,
-    read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],
-    force_refetch_reason: str,
-    expected_full_history: bool,
-) -> None:
-    """Assert a gap raised mid-fetch survives the replacement that fetch installs.
-
-    An UNKNOWN live mutation arriving while a thread fetch is in flight marks a room-scoped gap the
-    fetch cannot have seen. The read still returns its homeserver history, but the replacement must
-    not clear that gap, so the *next* read refetches. This is the detect-and-refetch half of the
-    gap-marker contract: correctness comes from the surviving marker, not from retrying in-read.
-    """
-    room_id = "!test:localhost"
-    thread_id = "$thread:localhost"
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    root_event = _text_event(
-        event_id=thread_id,
-        body="Root",
-        sender="@user:localhost",
-        server_timestamp=1000,
-        room_id=room_id,
-    )
-    old_reply = _text_event(
-        event_id="$reply-old:localhost",
-        body="Old reply",
-        sender="@agent:localhost",
-        server_timestamp=2000,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    coordinator = _runtime_write_coordinator()
-    client = _relations_client(
-        root_event=root_event,
-        thread_events=[old_reply],
-        next_batch="s_initial",
-    )
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [root_event.source, old_reply.source],
-    )
-    await event_cache.mark_thread_gap(room_id, thread_id, reason=force_refetch_reason)
-    room_messages_response = client.room_messages.return_value
-    fetch_started = asyncio.Event()
-    release_fetch = asyncio.Event()
-    room_invalidation_finished = asyncio.Event()
-    thread_result: ThreadHistoryResult | None = None
-    thread_gap: ThreadCacheGap | None = None
-    live_task: asyncio.Task[None] | None = None
-
-    async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-        fetch_started.set()
-        await release_fetch.wait()
-        return room_messages_response
-
-    client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-    access = MatrixConversationCache(
-        logger=MagicMock(),
-        runtime=_conversation_runtime(
-            client=client,
-            event_cache=event_cache,
-            coordinator=coordinator,
-        ),
-    )
-    real_mark_room_threads_gap = event_cache.mark_room_threads_gap
-
-    async def mark_room_threads_gap(room_id_arg: str, *, reason: str) -> None:
-        assert room_id_arg == room_id
-        assert reason == "live_thread_lookup_unavailable"
-        await real_mark_room_threads_gap(room_id_arg, reason=reason)
-        room_invalidation_finished.set()
-
-    async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
-        return MutationThreadImpact.unknown()
-
-    event_cache.mark_room_threads_gap = AsyncMock(side_effect=mark_room_threads_gap)
-    access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
-    unknown_event = _text_event(
-        event_id="$unknown-edit:localhost",
-        body="* Updated",
-        sender="@agent:localhost",
-        server_timestamp=3000,
-        room_id=room_id,
-        replacement_of="$missing:localhost",
-        new_body="Updated",
-    )
-    read_task = asyncio.create_task(read_thread(access, room_id, thread_id))
-
-    try:
-        await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-        live_task = asyncio.create_task(
-            access.append_live_event(
-                room_id,
-                unknown_event,
-                event_info=EventInfo.from_event(unknown_event.source),
-            ),
-        )
-        await asyncio.wait_for(room_invalidation_finished.wait(), timeout=1.0)
-
-        release_fetch.set()
-        thread_result = await asyncio.wait_for(read_task, timeout=1.0)
-        await asyncio.wait_for(live_task, timeout=1.0)
-        await _wait_for_room_cache_idle(coordinator)
-        thread_gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
-    finally:
-        release_fetch.set()
-        await asyncio.wait_for(
-            asyncio.gather(
-                read_task,
-                *(task for task in [live_task] if task is not None),
-                return_exceptions=True,
-            ),
-            timeout=1.0,
-        )
-        await _wait_for_room_cache_idle(coordinator)
-        await event_cache.close()
-
-    assert thread_result is not None
-    assert thread_result.is_full_history is expected_full_history
-    assert thread_result.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-    assert [message.body for message in thread_result] == ["Root", "Old reply"]
-    # The racing gap was raised after the fetch started, so the replacement that fetch installed
-    # does not cover it. The marker survives and the next read refetches.
-    assert thread_gap is not None
-    assert thread_gap.gap_reason == "live_thread_lookup_unavailable"
-    assert matrix_cache.thread_cache_rejection_reason(thread_gap) == "live_thread_lookup_unavailable"
-    # One fetch, not two: the read no longer retries in-place to re-establish trust.
-    assert client.room_messages.await_count == 1
-
-
-def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:
-    """Attach one explicit runtime write coordinator to a bot test double."""
-    coordinator = EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=bot._runtime_view,
-    )
-    bot.event_cache_write_coordinator = coordinator
-    return coordinator
-
-
-async def _bind_owned_runtime_support(
-    bot: AgentBot,
-    *,
-    db_path: Path | None = None,
-) -> OwnedRuntimeSupport:
-    """Build one real injected runtime-support bundle for a bot test."""
-    support = await sync_owned_runtime_support(
-        None,
-        db_path=bot.config.cache.resolve_db_path(bot.runtime_paths) if db_path is None else db_path,
-        logger=bot.logger,
-        background_task_owner=bot._runtime_view,
-        init_failure_reason_prefix="test_runtime_init_failed",
-        log_db_path_change=False,
-    )
-    bot.event_cache = support.event_cache
-    bot.event_cache_write_coordinator = support.event_cache_write_coordinator
-    bot.startup_thread_prewarm_registry = support.startup_thread_prewarm_registry
-    bot._runtime_view.mark_runtime_started()
-    return support
-
-
-async def _close_bound_runtime_support(bot: AgentBot, support: OwnedRuntimeSupport) -> None:
-    """Close one test-owned runtime-support bundle."""
-    await close_owned_runtime_support(support, logger=bot.logger)
-
-
 def _save_certified_sync_token(
     bot: AgentBot,
     token: str,
 ) -> None:
-    """Persist one cache-bound certified sync token for bot lifecycle tests."""
+    """Persist one certified sync token for bot lifecycle tests.
+
+    Certified by the event journal: the token has to name the store that
+    consumed the events it covers.
+    """
     save_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        cache_generation=bot.event_cache.cache_generation,
+        store_generation=bot._sync_checkpoint_trust.store_generation,
     )
 
 
@@ -583,9 +577,10 @@ class ThreadingBehaviorTestBase:
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
-        bot.event_cache = _runtime_event_cache()
-        bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+        # Sync checkpoints are certified by the event journal. Pinned so a test
+        # that saves one and restarts exercises the token logic rather than the
+        # first-open mint, which would rightly reject it.
+        bot._sync_checkpoint_trust.store_generation = "test-store-generation"
 
         # Initialize components that depend on client
 
@@ -633,7 +628,6 @@ class ThreadingBehaviorTestBase:
         )
         with (
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch.object(bot, "_maybe_start_startup_thread_prewarm"),
             patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
             bot_ready_context,
         ):

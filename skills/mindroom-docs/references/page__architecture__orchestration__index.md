@@ -136,7 +136,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 1. Skip own messages (except voice transcriptions from router)
 2. Check sender authorization and handle edits
-3. Check if already responded (`ResponseTracker`)
+3. Check if already responded (`TurnStore.is_handled`)
 4. Router handles commands exclusively
 5. Extract message context (mentions, thread history, non-agent mention detection)
 6. Skip messages from other agents (unless mentioned)
@@ -146,7 +146,7 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
-Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
+Edits from other agents are ignored, and the feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio).
 Downloads and decrypts media data, then processes it through the selected responder.
@@ -167,7 +167,7 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
-- `ResponseTracker` prevents duplicate replies
+- `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
 
 ### Graceful Shutdown

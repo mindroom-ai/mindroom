@@ -14,7 +14,6 @@ from pydantic import ValidationError
 
 import mindroom.constants as constants_mod
 from mindroom.config.main import Config, load_config
-from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
 from tests.conftest import TEST_PASSWORD, load_config_yaml
@@ -1067,20 +1066,16 @@ class TestRuntimeContextConsumers:
             config_path=first_config,
             storage_path=first_storage,
         )
-        tracker_a = HandledTurnLedger("general", base_path=first_storage / "tracking")
         MatrixState().save(runtime_paths=first_runtime_paths)
-        assert tracker_a.base_path == first_storage / "tracking"
-        assert tracker_a._responses_file == first_storage / "tracking" / "general_responded.json"
+        assert constants_mod.tracking_dir(first_runtime_paths) == first_storage / "tracking"
         assert constants_mod.matrix_state_file(runtime_paths=first_runtime_paths) == first_storage / "matrix_state.yaml"
 
         second_runtime_paths = constants_mod.resolve_primary_runtime_paths(
             config_path=second_config,
             storage_path=second_storage,
         )
-        tracker_b = HandledTurnLedger("general", base_path=second_storage / "tracking")
         MatrixState().save(runtime_paths=second_runtime_paths)
-        assert tracker_b.base_path == second_storage / "tracking"
-        assert tracker_b._responses_file == second_storage / "tracking" / "general_responded.json"
+        assert constants_mod.tracking_dir(second_runtime_paths) == second_storage / "tracking"
         assert (
             constants_mod.matrix_state_file(runtime_paths=second_runtime_paths) == second_storage / "matrix_state.yaml"
         )

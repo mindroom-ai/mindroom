@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -29,8 +28,7 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
-    from mindroom.matrix.cache import ConversationEventCache
-    from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
@@ -52,11 +50,10 @@ class CommandTurnExecutorDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     normalizer: InboundTurnNormalizer
-    conversation_cache: MatrixConversationCache
+    conversation_reader: ConversationReader
     turn_policy: TurnPolicy
     turn_store: TurnStore
     visible_responses: VisibleResponseReconciler
-    event_cache: Callable[[], ConversationEventCache]
     recover_config_confirmation_setup: Callable[[str, str], Awaitable[bool]]
 
 
@@ -132,8 +129,8 @@ class CommandTurnExecutor:
                 command_result_text=response_text,
             )
 
-        def record_command_turn(outcome: TurnRecord) -> None:
-            self.deps.turn_store.record_responded_turn(
+        async def record_command_turn(outcome: TurnRecord) -> None:
+            await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(active_command_turn, response_event_id=outcome.response_event_id),
             )
 
@@ -146,8 +143,7 @@ class CommandTurnExecutor:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
-            conversation_cache=self.deps.conversation_cache,
-            event_cache=self.deps.event_cache(),
+            conversation_reader=self.deps.conversation_reader,
             matrix_admin=self._matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,
@@ -191,7 +187,7 @@ class CommandTurnExecutor:
             response_event_id,
         ):
             return False
-        self.deps.turn_store.record_responded_turn(
+        await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
         return True
@@ -203,8 +199,7 @@ class CommandTurnExecutor:
         command_execution_started: bool | None = None,
         command_result_text: str | None = None,
     ) -> TurnRecord:
-        persisted_turn = await asyncio.to_thread(
-            self.deps.turn_store.record_pending_turn,
+        persisted_turn = await self.deps.turn_store.record_pending_turn(
             canonicalize_turn_record(
                 command_turn,
                 command_execution_started=(
@@ -232,10 +227,15 @@ class CommandTurnExecutor:
             command_turn,
             target=target,
             response_text=response_text,
+            # The same turn as the live send above, deliberately. A resumed
+            # command reaches the room through whichever of the two paths runs
+            # first, so both must key the same outbox row: whichever loses the
+            # race finds the answer already acknowledged instead of sending it
+            # a second time.
             recovered_response_event_id=recovered_response_event_id,
             skip_mentions=True,
         )
-        self.deps.turn_store.record_responded_turn(
+        await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
         )
 

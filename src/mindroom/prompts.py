@@ -337,10 +337,11 @@ Your job is to produce one merged handoff summary as plain text.
 Return only the summary text.
 
 Rules:
-- Preserve all still-relevant information from <previous_summary>.
-- Add only the new information from <new_conversation>.
-- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
-- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
+- Retain the information from <previous_summary> needed to continue the current work.
+- Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
+- Incorporate relevant new information from <new_conversation>.
+- Keep retained wording stable when practical, but condense it when needed.
+- Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
 - Do not invent facts.
 - If a section has no content, write `None.`

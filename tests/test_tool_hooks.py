@@ -67,8 +67,8 @@ from mindroom.tools import approved_egress as _approved_egress
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
-    make_event_cache_mock,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -180,6 +180,7 @@ def _initialize_router_approval_store(
     bot.agent_name = "router"
     bot.running = True
     bot.client = client
+    bot.approval_room_ids = frozenset({"!room:localhost"})
     bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
 
@@ -238,8 +239,8 @@ def _tool_runtime_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -315,7 +316,7 @@ async def _wait_for_sent_pending(
                 pending = (
                     None
                     if card_event_id is None
-                    else await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+                    else store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
                 )
                 if pending is not None:
                     return pending
@@ -1192,7 +1193,6 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    bot.event_cache = MagicMock()
     bot.client.homeserver = "http://agent.local:8008"
     bot.client.room_resolve_alias.return_value = nio.RoomResolveAliasError(
         "not found",
@@ -1321,7 +1321,6 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
-    bot.event_cache = MagicMock()
     bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
     bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
     router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
@@ -1488,6 +1487,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         content: dict[str, object],
         *,
         ignore_unverified_devices: bool = False,
+        tx_id: str | None = None,
     ) -> nio.RoomSendResponse:
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
@@ -1497,6 +1497,9 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         assert message_type == "io.mindroom.tool_approval"
         assert ignore_unverified_devices is True
         assert content["status"] == "pending"
+        # The card is claimed under this transaction before it is sent, so a
+        # repeat after a crash collapses onto whatever this call produced.
+        assert tx_id is not None
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
     client, _ = _initialize_router_approval_store(runtime_paths, room_send=AsyncMock(side_effect=mock_room_send))
@@ -2833,7 +2836,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
     config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
     bot = _agent_bot(tmp_path, config=config)
-    bot.event_cache = MagicMock()
     bot.hook_registry = HookRegistry.from_plugins(plugins)
     bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 

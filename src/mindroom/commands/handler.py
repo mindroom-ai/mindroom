@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
@@ -68,8 +68,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=room,
-        conversation_cache=context.conversation_cache,
-        event_cache=context.event_cache,
+        conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
     )
 
@@ -103,10 +102,9 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    conversation_cache: ConversationCacheProtocol
-    event_cache: ConversationEventCache
+    conversation_reader: ConversationReader
     stable_target: MessageTarget
-    record_handled_turn: Callable[[TurnRecord], None]
+    record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: Callable[[str], Awaitable[None]]
     send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
@@ -434,7 +432,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     requester=resolved_requester_user_id,
                 )
 
-                context.record_handled_turn(handled_turn)
+                await context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
@@ -484,7 +482,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             skip_mentions=True,
         )
         response_event_id = _require_response_event_id(raw_response_event_id)
-        context.record_handled_turn(
+        await context.record_handled_turn(
             TurnRecord.create(
                 [event.event_id],
                 response_event_id=response_event_id,

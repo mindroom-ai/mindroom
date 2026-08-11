@@ -9,8 +9,8 @@ def test_manifest_groups_match_plan_boundary() -> None:
     """The manifest keeps the plan's core and adjacent-recovery groups."""
     groups = read_manifest()
     assert [group.name for group in groups] == ["core", "adjacent-recovery"]
-    assert len(groups[0].files) == 35
-    assert len(groups[1].files) == 4
+    assert len(groups[0].files) == 33
+    assert len(groups[1].files) == 7
 
 
 def test_manifest_files_exist_under_src_mindroom() -> None:

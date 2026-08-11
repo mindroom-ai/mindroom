@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import nio
+import pytest
 
 from mindroom.coalescing_batch import (
     CoalescedBatch,
@@ -35,10 +36,8 @@ from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.dispatch_handoff import build_dispatch_handoff
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.handled_turns import (
-    HandledTurnLedger,
     TurnRecord,
     TurnRecordCodec,
-    _reset_handled_turn_ledger_runtime,
 )
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -46,7 +45,7 @@ from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import make_pending_event
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from mindroom.event_journal import EventJournalStore
 
 _REQUESTER = "@user:localhost"
 _ROOM_ID = "!room:localhost"
@@ -103,25 +102,26 @@ def _live_prompt_for_batch(batch: CoalescedBatch) -> str:
     return live_prompt
 
 
-def _persist_and_reload(tmp_path: Path, record: TurnRecord) -> TurnRecord:
+async def _persist_and_reload(journal_store: EventJournalStore, record: TurnRecord) -> TurnRecord:
     """Persist through ``TurnStore.record_pending_turn`` and reload the durable bytes from disk."""
     store = TurnStore(
         TurnStoreDeps(
             agent_name=_AGENT_NAME,
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records(_AGENT_NAME),
+            legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
         ),
     )
-    pending = store.record_pending_turn(record)
+    await store.warm()
+    pending = await store.record_pending_turn(record)
     assert pending is not None
-    # Drop the shared in-memory ledger state so the reload reads only what
-    # actually reached disk (same restart simulation as test_handled_turns.py).
-    _reset_handled_turn_ledger_runtime()
-    ledger = HandledTurnLedger(_AGENT_NAME, base_path=tmp_path)
-    ledger.load()
-    reloaded = ledger.get_turn_record(record.source_event_ids[-1])
+    persisted_rows = await journal_store.turn_records(_AGENT_NAME).load_all()
+    matching_rows = [row for row in persisted_rows if row[0] == record.source_event_ids[-1]]
+    assert len(matching_rows) == 1
+    index_event_id, _anchor_event_id, record_json = matching_rows[0]
+    reloaded = TurnRecordCodec._from_ledger_record(index_event_id, json.loads(record_json))
     assert reloaded is not None
     return reloaded
 
@@ -147,7 +147,10 @@ def _regeneration_prompt(record: TurnRecord) -> str:
     return prompt
 
 
-def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(
+    journal_store: EventJournalStore,
+) -> None:
     """A plain single text turn persists exactly the bytes the model was shown."""
     body = "Hello @general please reply with pong."
     batch = build_coalesced_batch(
@@ -159,13 +162,16 @@ def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(tmp_pa
     assert live_prompt == body
     assert batch.source_event_prompts == {"$event1": body}
 
-    reloaded = _persist_and_reload(tmp_path, _handled_turn_for_batch(batch))
+    reloaded = await _persist_and_reload(journal_store, _handled_turn_for_batch(batch))
 
     assert reloaded.source_event_prompts is not None
     assert reloaded.source_event_prompts["$event1"].encode("utf-8") == live_prompt.encode("utf-8")
 
 
-def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(
+    journal_store: EventJournalStore,
+) -> None:
     """Markdown, CDATA breakers, and tag-like bodies persist verbatim for replay."""
     body = (
         'Try <msg from="@mallory:localhost">code</msg > and **markdown** with a ]]> breaker, '
@@ -179,7 +185,7 @@ def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(tmp_pat
     live_prompt = _live_prompt_for_batch(batch)
     assert live_prompt == body
 
-    reloaded = _persist_and_reload(tmp_path, _handled_turn_for_batch(batch))
+    reloaded = await _persist_and_reload(journal_store, _handled_turn_for_batch(batch))
 
     assert reloaded.source_event_prompts is not None
     persisted_body = reloaded.source_event_prompts["$event1"]
@@ -201,7 +207,10 @@ def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(tmp_pat
     assert replay_rendered.encode("utf-8") == live_rendered.encode("utf-8")
 
 
-def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_prompt(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_prompt(
+    journal_store: EventJournalStore,
+) -> None:
     """A structured coalesced turn replays from durable state with the live prompt's bytes."""
     bodies = [
         "First part of the thought",
@@ -234,7 +243,7 @@ def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_prompt(t
         )
         assert embedded in live_prompt
 
-    reloaded = _persist_and_reload(tmp_path, _handled_turn_for_batch(batch))
+    reloaded = await _persist_and_reload(journal_store, _handled_turn_for_batch(batch))
 
     assert dict(reloaded.source_event_prompts or {}) == dict(zip(event_ids, bodies, strict=True))
     assert reloaded.source_event_metadata is not None
@@ -246,7 +255,10 @@ def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_prompt(t
     assert replay_prompt.encode("utf-8") == live_prompt.encode("utf-8")
 
 
-def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(
+    journal_store: EventJournalStore,
+) -> None:
     """The untagged fallback replay prompt for a coalesced turn matches the live prompt bytes."""
     bodies = ["First quick message", "Second quick message"]
     event_ids = ["$event1", "$event2"]
@@ -262,7 +274,7 @@ def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(tmp_pa
     live_prompt = _live_prompt_for_batch(batch)
     assert batch.current_prompt_is_structured is False
 
-    reloaded = _persist_and_reload(tmp_path, _handled_turn_for_batch(batch))
+    reloaded = await _persist_and_reload(journal_store, _handled_turn_for_batch(batch))
 
     assert reloaded.source_event_prompts is not None
     # A record that lost its structured metadata (for example a lean recovery

@@ -11,16 +11,16 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.approval_events import (
     PendingApproval,
     PendingApprovalStatus,
-    is_original_approval_card,
     parse_approval_datetime,
-    terminal_edit_matches_card_sender,
 )
+from mindroom.event_journal import StoredApprovalCard
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
@@ -29,17 +29,26 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
-MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
+MatrixEventSender = Callable[[str, str | None, dict[str, Any], str], Awaitable["SentApprovalEvent | None"]]
 MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
+SendingDeviceProvider = Callable[[], str | None]
+# Read the room for the card one approval became: (room_id, card_sender,
+# approval_id). None is the room's own answer that no such card exists; raising
+# says the question could not be put, which is a different fact and must not be
+# mistaken for the first.
+ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
 
-_STARTUP_DISCARD_SCAN_LIMIT = 10_000
-_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_STARTUP_DISCARD_SCAN_PAGE = 256
+# How long shutdown waits on work it does not own. Every such wait is on a
+# Matrix round trip, which is the thing most likely to never come back while
+# the runtime is tearing down around it.
+_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
@@ -51,6 +60,7 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
+_DEFAULT_UNRECORDABLE_CARD_REASON = "Tool approval request could not be recorded durably, so it cannot be answered."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
     "exactly what would run. Retry with a smaller payload — for example save large content to a "
@@ -67,8 +77,26 @@ _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
 
 
+class _ResolutionOutcome(Enum):
+    """How far one decision got between being committed and being shown."""
+
+    # Nothing was written down. The card is still unanswered by every reader of
+    # it, so a later click or a startup expiry remains the correct outcome.
+    UNRECORDED = "unrecorded"
+    # Committed, but the room has not been told. Startup redelivers it; the
+    # decision itself is settled and cannot be replaced.
+    RECORDED = "recorded"
+    # Committed and shown. The card is finished and has been dropped.
+    DELIVERED = "delivered"
+
+
 class ToolApprovalTransportError(RuntimeError):
-    """One actionable approval transport limitation."""
+    """One actionable reason an approval card cannot be made answerable.
+
+    Either the room cannot carry the card, or nothing durable can hold it.
+    Both leave a request nobody could answer, and both are reported to the
+    caller as the reason its approval was refused.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -99,6 +127,29 @@ class _BoundedCardEventIds:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _approval_transaction_id(approval_id: str) -> str:
+    """Return the Matrix transaction one approval card is sent under.
+
+    Derived from the approval rather than generated per attempt, and stored
+    with the card, so a send repeated after a crash presents the transaction
+    the homeserver may already have accepted and collapses back onto the same
+    event instead of posting a second card.
+    """
+    return f"mindroom-approval-{approval_id}"
+
+
+def _sent_card_body(claimed_card: dict[str, Any], sent_event: SentApprovalEvent) -> dict[str, Any]:
+    """Return the claimed card as the room now holds it.
+
+    The transport is allowed to send something other than what it was given --
+    oversized arguments become a sidecar reference -- and from here on every
+    reader compares the stored card against the room, so what was actually sent
+    is what has to be kept.
+    """
+    content = sent_event.sent_content if sent_event.sent_content is not None else claimed_card["content"]
+    return {**claimed_card, "event_id": sent_event.event_id, "content": content}
 
 
 def _compact_preview_text(value: object) -> str:
@@ -209,6 +260,37 @@ class SentApprovalEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalStartupSweep:
+    """What one startup approval sweep settled, and what it still owes.
+
+    A card the sweep could not settle stays clickable in the room with nothing
+    live behind it, so the failure count is what the caller schedules its next
+    attempt on. Reporting only the settled count would make a pass that
+    finished nothing look exactly like a pass with nothing to do.
+    """
+
+    discarded: int
+    failed: int
+
+    @property
+    def complete(self) -> bool:
+        """Return whether nothing is left for a later sweep to retry."""
+        return self.failed == 0
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentifiedCard:
+    """One recovered row's card, or why this pass could not name its event."""
+
+    card: StoredApprovalCard | None
+    # Whether a missing card is finished with rather than owed. A row proven to
+    # have put nothing in the room is dropped on purpose and must not keep the
+    # sweep coming back; a repeat or a room lookup whose outcome is unknown
+    # must.
+    settled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalActionResult:
     """One approval-action outcome parsed from a Matrix control event."""
 
@@ -222,6 +304,7 @@ class ApprovalActionResult:
 @dataclass(slots=True)
 class _LiveApprovalWaiter:
     approval_id: str
+    transaction_id: str
     card_event_id: str
     room_id: str
     card_event: dict[str, Any]
@@ -233,6 +316,21 @@ class _PostCancelCleanupTask:
     cleanup_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     send_task: asyncio.Future[SentApprovalEvent | None]
+    # The row this send belongs to, for the same reason the active send carries
+    # it. Cancelling the requester ends the request, not the send: the send is
+    # shielded and still open, and this task is what will bind a waiter to
+    # whatever it returns. Until then this is the only thing that says the row
+    # is spoken for.
+    transaction_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DetachedCardWrite:
+    """One cancelled request's recovery, owned by its originating loop."""
+
+    done_future: Future[None]
+    owner_loop: asyncio.AbstractEventLoop
+    recovery_task: asyncio.Task[None]
 
 
 @dataclass(slots=True, eq=False)
@@ -240,12 +338,17 @@ class _ActiveApprovalSend:
     done_future: Future[None]
     owner_loop: asyncio.AbstractEventLoop
     send_task: asyncio.Future[SentApprovalEvent | None]
+    # The row this send belongs to. The claim is durable before the send
+    # starts and the live waiter is built out of what the send returns, so for
+    # the length of the send this is the only thing that says the row is
+    # spoken for.
+    transaction_id: str
 
 
 class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
-    Cached approval cards support terminal cleanup only; they never make an
+    Recovered approval cards support terminal cleanup only; they never make an
     approval actionable after its live waiter is gone.
     """
 
@@ -255,16 +358,20 @@ class _ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
+        cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
+        sending_device: SendingDeviceProvider | None = None,
+        locate_card: ApprovalCardLocator | None = None,
     ) -> None:
         self._runtime_storage_root = runtime_paths.storage_root
         self._send_event = sender
         self._edit_event = editor
-        self._event_cache = event_cache
+        self._cards = cards
         self._approval_room_ids = approval_room_ids
         self._transport_sender = transport_sender
+        self._sending_device = sending_device
+        self._locate_card = locate_card
         self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
@@ -272,6 +379,9 @@ class _ApprovalManager:
         self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
+        # Recovery that outlived the request that started it, held so it is
+        # not garbage collected mid-flight.
+        self._detached_card_writes: set[_DetachedCardWrite] = set()
         self._shutdown_reason: str | None = None
 
     async def request_approval(  # noqa: C901, PLR0911
@@ -324,20 +434,36 @@ class _ApprovalManager:
             status="pending",
         )
 
+        transaction_id = _approval_transaction_id(approval_id)
+        claimed_card = self._claimed_card_body(content=content, requested_at=requested_at)
+        # Before the send, so the window a crash can land in holds a row for a
+        # card that may not exist rather than a card that no row explains. The
+        # first is settled by presenting the transaction again; the second used
+        # to be settled by nothing at all.
+        if not await self._claim_card(room_id=room_id, transaction_id=transaction_id, card=claimed_card):
+            return self._new_decision(status="expired", reason=_DEFAULT_UNRECORDABLE_CARD_REASON, resolved_by=None)
+
         try:
             waiter = await self._send_and_bind_waiter(
                 room_id=room_id,
                 thread_id=thread_id,
                 content=content,
-                requested_at=requested_at,
+                claimed_card=claimed_card,
+                transaction_id=transaction_id,
                 approval_id=approval_id,
             )
         except ToolApprovalTransportError as exc:
-            logger.info("Approval Matrix transport unavailable", room_id=room_id, reason=exc.reason)
+            # Raised by the transport's own preconditions, so the card never
+            # reached the homeserver and the claim can be taken back.
+            await self._forget_card(transaction_id)
+            logger.info("Approval card could not be made answerable", room_id=room_id, reason=exc.reason)
             return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Deliberately keeps the claim. An exception out of the send says
+            # the outcome is unknown, not that nothing was sent, and abandoning
+            # the row would strand whatever did reach the room.
             logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
@@ -356,34 +482,130 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def discard_pending_on_startup(self) -> int:
-        """Expire cached, router-authored approval cards after startup."""
+    async def discard_pending_on_startup(self) -> ApprovalStartupSweep:
+        """Settle every router-authored card this bot restarted holding.
+
+        A card whose decision was already recorded is redelivered rather than
+        expired: the previous process committed to it, its tool may already
+        have run, and the room may already show it. Only a card nobody ever
+        answered is expired, because its requester is gone with the process
+        that asked.
+
+        Every card is walked, not one page of them, and what could not be
+        settled is counted rather than swallowed. Both matter for the same
+        reason: a card left behind here is one the user can still click, whose
+        answer no live waiter and no later pass would otherwise come back for.
+        The count is what the caller schedules that later pass on.
+        """
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
-            return 0
+            return ApprovalStartupSweep(discarded=0, failed=0)
 
         discarded = 0
+        failed = 0
         for room_id in self._configured_approval_room_ids():
-            for card_event in await self._scan_cached_room_cards(
-                room_id,
-                since_ts_ms=0,
-                limit=_STARTUP_DISCARD_SCAN_LIMIT,
-            ):
-                pending = await self._trusted_pending_from_card_event(
-                    card_event,
-                    room_id=room_id,
-                    transport_sender=transport_sender,
-                )
-                if pending is None:
-                    continue
-                result = await self._discard_matrix_only_card(
-                    pending=pending,
-                    reason=_STARTUP_DISCARD_REASON,
-                    resolved_by=transport_sender,
-                )
-                if result.resolved:
-                    discarded += 1
-        return discarded
+            # A card whose settlement failed keeps its row deliberately, so it
+            # stays inside the scan's window. Skipping it in memory is not
+            # enough -- a whole page of failures would be read again on every
+            # turn of this loop and everything behind it would never be seen.
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self._recoverable_room_cards(room_id, after=cursor)
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+                for claimed in page:
+                    settled = await self._settle_recovered_card(
+                        room_id=room_id,
+                        claimed=claimed,
+                        transport_sender=transport_sender,
+                    )
+                    if settled is None:
+                        continue
+                    if settled:
+                        discarded += 1
+                    else:
+                        failed += 1
+        return ApprovalStartupSweep(discarded=discarded, failed=failed)
+
+    async def _settle_recovered_card(
+        self,
+        *,
+        room_id: str,
+        claimed: StoredApprovalCard,
+        transport_sender: str,
+    ) -> bool | None:
+        """Settle one recovered card, or report that a later pass should try again.
+
+        None is neither: the row is finished with as far as this pass is
+        concerned and retrying would reach the same answer, so counting it as
+        owed would keep the sweep asking forever.
+        """
+        if self._send_is_in_flight(claimed.transaction_id):
+            # A row whose send has not come back is indistinguishable, from
+            # here, from one a dead process abandoned: claimed, no event id,
+            # and claimed by a device this process can still present from. The
+            # live waiter that would say otherwise is built out of the send's
+            # own return value, so it does not exist yet.
+            #
+            # Acting on it presents the transaction a second time -- which is
+            # a second card in the room whenever the homeserver has not yet
+            # seen the first, exactly the case a send still in flight
+            # describes -- and then expires the answer its caller is waiting
+            # for. Nothing is owed here, so this is not a failure either;
+            # counting it would have the sweep return for a card that is
+            # already in hand.
+            logger.debug(
+                "approval_startup_card_skipped_send_in_flight",
+                room_id=room_id,
+                transaction_id=claimed.transaction_id,
+            )
+            return None
+        identified = await self._identified_card(room_id, claimed)
+        if identified.card is None:
+            return None if identified.settled else False
+        pending = self._trusted_pending_from_card_event(
+            identified.card.card,
+            room_id=room_id,
+            transport_sender=transport_sender,
+        )
+        if pending is None:
+            # The stored body is not one this bot may act on -- it does not
+            # parse as a card, or it names a sender this transport is not. No
+            # later pass reads it differently, so it is logged rather than
+            # retried; the row stays as the only remaining trace of it.
+            logger.warning(
+                "approval_startup_card_unusable",
+                room_id=room_id,
+                transaction_id=identified.card.transaction_id,
+                card_event_id=identified.card.card_event_id,
+            )
+            return None
+        if identified.card.resolution is not None:
+            return await self._redeliver_recorded_resolution(pending, identified.card)
+        result = await self._discard_matrix_only_card(
+            pending=pending,
+            transaction_id=identified.card.transaction_id,
+            reason=_STARTUP_DISCARD_REASON,
+            resolved_by=transport_sender,
+        )
+        return result.resolved
+
+    async def _redeliver_recorded_resolution(self, pending: PendingApproval, stored: StoredApprovalCard) -> bool:
+        """Show a decision a previous process committed to but may not have shown.
+
+        Editing the card to the same terminal content it may already carry is
+        a no-op in the room, so this converges whether or not the first attempt
+        landed.
+        """
+        if not self._claim_matrix_cleanup(pending.card_event_id):
+            return False
+        with self._claimed_resolution(pending.card_event_id):
+            delivered = await self._deliver_resolution(pending, stored.resolution or {}, stored.transaction_id)
+            if delivered:
+                with self._live_lock:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
+            return delivered
 
     async def handle_card_response(
         self,
@@ -412,16 +634,15 @@ class _ApprovalManager:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
 
-        pending = await self._cached_trusted_pending_approval_for_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
-        )
-        if pending is None or pending.approver_user_id != sender_id:
+        recovered = await self._recovered_pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+        if recovered is None or recovered[0].approver_user_id != sender_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()
+        pending, transaction_id = recovered
         return await self._discard_matrix_only_card(
             pending=pending,
+            transaction_id=transaction_id,
             reason=_DETACHED_REQUEST_REASON,
             resolved_by=sender_id,
         )
@@ -464,7 +685,7 @@ class _ApprovalManager:
     ) -> ApprovalActionResult:
         if live_waiter.room_id != room_id:
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
-        pending = await self._pending_approval_for_card(
+        pending = self._pending_approval_for_card(
             room_id=live_waiter.room_id,
             card_event_id=live_waiter.card_event_id,
         )
@@ -491,21 +712,27 @@ class _ApprovalManager:
         *,
         sender: MatrixEventSender | None = None,
         editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
+        cards: ApprovalView | None = None,
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
+        sending_device: SendingDeviceProvider | None = None,
+        locate_card: ApprovalCardLocator | None = None,
     ) -> None:
         """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
             self._send_event = sender
         if editor is not None:
             self._edit_event = editor
-        if event_cache is not None:
-            self._event_cache = event_cache
+        if cards is not None:
+            self._cards = cards
         if approval_room_ids is not None:
             self._approval_room_ids = approval_room_ids
         if transport_sender is not None:
             self._transport_sender = transport_sender
+        if sending_device is not None:
+            self._sending_device = sending_device
+        if locate_card is not None:
+            self._locate_card = locate_card
 
     def _current_shutdown_reason(self) -> str | None:
         with self._live_lock:
@@ -517,17 +744,26 @@ class _ApprovalManager:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
-        requested_at: datetime,
+        claimed_card: dict[str, Any],
+        transaction_id: str,
         approval_id: str,
     ) -> _LiveApprovalWaiter | None:
         if self._send_event is None:
             return None
 
-        send_task = asyncio.ensure_future(self._send_event(room_id, thread_id, content))
+        send_task = asyncio.ensure_future(
+            self._mark_attempted_then_send(
+                room_id=room_id,
+                thread_id=thread_id,
+                content=content,
+                transaction_id=transaction_id,
+            ),
+        )
         active_send = _ActiveApprovalSend(
             done_future=Future(),
             owner_loop=asyncio.get_running_loop(),
             send_task=send_task,
+            transaction_id=transaction_id,
         )
         with self._live_lock:
             self._active_approval_sends.add(active_send)
@@ -539,8 +775,8 @@ class _ApprovalManager:
                     self._cleanup_cancelled_send_when_event_arrives(
                         send_task=send_task,
                         room_id=room_id,
-                        content=content,
-                        requested_at=requested_at,
+                        claimed_card=claimed_card,
+                        transaction_id=transaction_id,
                         approval_id=approval_id,
                     ),
                     active_send.owner_loop,
@@ -549,26 +785,51 @@ class _ApprovalManager:
                     cleanup_future=cleanup_future,
                     owner_loop=active_send.owner_loop,
                     send_task=send_task,
+                    transaction_id=transaction_id,
                 )
+                # Registered before the raise, so the ``finally`` below hands
+                # the row over rather than dropping it: there is no instant at
+                # which neither owner claims this transaction.
                 with self._live_lock:
                     self._post_cancel_cleanup_tasks.add(cleanup_task)
                 cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
                 raise
 
             if sent_event is None:
+                # Either the transport reports a send it knows did not happen,
+                # or the attempt could not be committed before one was made.
+                # Both say the claim describes a card that will never exist,
+                # and it would only be resurrected by a later recovery send.
+                await self._forget_card(transaction_id)
                 return None
             waiter = self._bind_live_waiter(
                 room_id=room_id,
-                content=content,
-                requested_at=requested_at,
+                claimed_card=claimed_card,
+                transaction_id=transaction_id,
                 approval_id=approval_id,
                 sent_event=sent_event,
             )
+            try:
+                await self._acknowledge_card(waiter)
+            except asyncio.CancelledError:
+                # The card is in the room and the caller is going away, so the
+                # expiry edit still has to happen and must not inherit the
+                # cancellation. Detached rather than shielded: shielding lets
+                # the write finish but delivers the cancellation first, so the
+                # expiry would run against a waiter nobody settles.
+                self._schedule_bound_waiter_cancellation(waiter)
+                raise
             shutdown_reason = self._current_shutdown_reason()
             if shutdown_reason is not None:
                 await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
             return waiter
         finally:
+            # Retires the request's hold on the send, not the send. On the
+            # cancelled path the send is still open and now belongs to the
+            # cleanup task registered above, which is what keeps its row
+            # spoken for; ``done_future`` has to be released either way, or the
+            # shutdown drain would wait on a request that has already left and
+            # then cancel a send its new owner is still shielding.
             with self._live_lock:
                 self._active_approval_sends.discard(active_send)
             with suppress(InvalidStateError):
@@ -579,8 +840,8 @@ class _ApprovalManager:
         *,
         send_task: asyncio.Future[SentApprovalEvent | None],
         room_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
+        claimed_card: dict[str, Any],
+        transaction_id: str,
         approval_id: str,
     ) -> None:
         try:
@@ -591,40 +852,66 @@ class _ApprovalManager:
             logger.warning("Cancelled approval send failed before returning an event id", exc_info=True)
             return
         if sent_event is None:
+            await self._forget_card(transaction_id)
             return
 
         waiter = self._bind_live_waiter(
             room_id=room_id,
-            content=content,
-            requested_at=requested_at,
+            claimed_card=claimed_card,
+            transaction_id=transaction_id,
             approval_id=approval_id,
             sent_event=sent_event,
         )
+        await self._acknowledge_card(waiter)
         try:
             await self._settle_bound_waiter_as_cancelled(waiter)
         finally:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
+    def _schedule_bound_waiter_cancellation(self, waiter: _LiveApprovalWaiter) -> None:
+        """Expire one already-sent card after its caller was cancelled.
+
+        Runs detached, for the same reason the cancelled-send cleanup does: the
+        work outlives the request that started it, and it must not inherit that
+        request's cancellation.
+        """
+        done_future: Future[None] = Future()
+        owner_loop = asyncio.get_running_loop()
+
+        async def recover() -> None:
+            try:
+                await self._acknowledge_card(waiter)
+                await self._settle_bound_waiter_as_cancelled(waiter)
+            finally:
+                with self._live_lock:
+                    self._pending_by_card_event.pop(waiter.card_event_id, None)
+
+        recovery_task = asyncio.create_task(recover())
+        detached_write = _DetachedCardWrite(
+            done_future=done_future,
+            owner_loop=owner_loop,
+            recovery_task=recovery_task,
+        )
+        with self._live_lock:
+            self._detached_card_writes.add(detached_write)
+        recovery_task.add_done_callback(lambda _future: self._discard_detached_card_write(detached_write))
+
     def _bind_live_waiter(
         self,
         *,
         room_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
+        claimed_card: dict[str, Any],
+        transaction_id: str,
         approval_id: str,
         sent_event: SentApprovalEvent,
     ) -> _LiveApprovalWaiter:
-        card_event = self._card_event_from_content(
-            event_id=sent_event.event_id,
-            content=sent_event.sent_content if sent_event.sent_content is not None else content,
-            requested_at=requested_at,
-        )
         waiter = _LiveApprovalWaiter(
             approval_id=approval_id,
+            transaction_id=transaction_id,
             card_event_id=sent_event.event_id,
             room_id=room_id,
-            card_event=card_event,
+            card_event=_sent_card_body(claimed_card, sent_event),
             future=Future(),
         )
         with self._live_lock:
@@ -662,6 +949,7 @@ class _ApprovalManager:
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
             await self._emit_resolution(
                 pending,
+                transaction_id=waiter.transaction_id,
                 status=decision.status,
                 reason=decision.reason,
                 resolved_by=decision.resolved_by,
@@ -758,6 +1046,7 @@ class _ApprovalManager:
         self,
         *,
         pending: PendingApproval,
+        transaction_id: str,
         reason: str,
         resolved_by: str | None,
     ) -> ApprovalActionResult:
@@ -769,12 +1058,14 @@ class _ApprovalManager:
                 card_event_id=pending.card_event_id,
             )
         with self._claimed_resolution(pending.card_event_id):
-            delivered = await self._emit_resolution(
+            outcome = await self._emit_resolution(
                 pending,
+                transaction_id=transaction_id,
                 status="expired",
                 reason=reason,
                 resolved_by=resolved_by,
             )
+            delivered = outcome is _ResolutionOutcome.DELIVERED
             with self._live_lock:
                 if delivered:
                     self._resolved_card_event_ids.add(pending.card_event_id)
@@ -791,47 +1082,74 @@ class _ApprovalManager:
         decision: ApprovalDecision,
     ) -> bool:
         pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-        delivered = await self._emit_resolution(
+        outcome = await self._emit_resolution(
             pending,
+            transaction_id=waiter.transaction_id,
             status=decision.status,
             reason=decision.reason,
             resolved_by=decision.resolved_by,
         )
-        if delivered:
-            self._complete_waiter(waiter.card_event_id, decision)
-            return True
-        fail_closed_decision = decision
-        if decision.status == "approved":
-            fail_closed_decision = self._new_decision(
-                status="denied",
-                reason=_DEFAULT_SEND_FAILURE_REASON,
-                resolved_by=decision.resolved_by,
+        if outcome is _ResolutionOutcome.UNRECORDED:
+            # Nothing was committed, so the card is still genuinely unanswered:
+            # it stays clickable, and a later startup may expire it. Releasing
+            # the tool on the strength of a decision no durable record agrees
+            # with is the one outcome that cannot be walked back.
+            self._complete_waiter(
+                waiter.card_event_id,
+                self._new_decision(
+                    status="expired",
+                    reason=_DEFAULT_SEND_FAILURE_REASON,
+                    resolved_by=decision.resolved_by,
+                ),
             )
-        self._complete_waiter(waiter.card_event_id, fail_closed_decision)
-        return False
+            return False
+        # Committed. The waiter gets exactly what was written down, whether or
+        # not the room has been told yet -- a decision that ran the tool while
+        # the record says otherwise is a card with two meanings, and startup
+        # would go on to make the room show the one that did not happen.
+        self._complete_waiter(waiter.card_event_id, decision)
+        return outcome is _ResolutionOutcome.DELIVERED
 
     async def _emit_resolution(
         self,
         pending: PendingApproval,
         *,
+        transaction_id: str,
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
+    ) -> _ResolutionOutcome:
+        if self._edit_event is None:
+            return _ResolutionOutcome.UNRECORDED
+        resolution = self._resolved_event_content(
+            pending,
+            status=status,
+            reason=reason,
+            resolved_by=resolved_by,
+            resolved_at=_utcnow(),
+        )
+        # Written before the edit is attempted. A crash in between then leaves
+        # a card that is answered but perhaps not shown, which startup can
+        # redeliver; recording it afterwards would leave one that looks
+        # unanswered, and startup would expire a decision the room already
+        # shows -- possibly an approval whose tool has already run.
+        if not await self._record_resolution(pending.card_event_id, resolution):
+            return _ResolutionOutcome.UNRECORDED
+        if await self._deliver_resolution(pending, resolution, transaction_id):
+            return _ResolutionOutcome.DELIVERED
+        return _ResolutionOutcome.RECORDED
+
+    async def _deliver_resolution(
+        self,
+        pending: PendingApproval,
+        resolution: dict[str, Any],
+        transaction_id: str,
     ) -> bool:
+        """Show one already-recorded decision, dropping the card once it lands."""
         if self._edit_event is None:
             return False
         try:
-            return await self._edit_event(
-                pending.room_id,
-                pending.card_event_id,
-                self._resolved_event_content(
-                    pending,
-                    status=status,
-                    reason=reason,
-                    resolved_by=resolved_by,
-                    resolved_at=_utcnow(),
-                ),
-            )
+            delivered = await self._edit_event(pending.room_id, pending.card_event_id, resolution)
         except Exception:
             logger.warning(
                 "Failed to edit approval Matrix event",
@@ -841,42 +1159,100 @@ class _ApprovalManager:
                 exc_info=True,
             )
             return False
+        # Dropped only once the room shows the decision. An edit that never
+        # landed leaves a card the user can still click, and the row is the
+        # only thing that brings the next startup back to it.
+        if delivered:
+            await self._forget_card(transaction_id)
+        return delivered
 
-    async def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
+    async def _record_resolution(self, card_event_id: str, resolution: dict[str, Any]) -> bool:
+        """Commit one decision, reporting whether the durable record now agrees.
+
+        A store that was never configured remembers no card, so it owes no
+        decision either and there is nothing left disagreeing. A configured
+        store that failed is the dangerous case: its row exists and still reads
+        as unanswered, so showing the decision anyway would let the next
+        startup expire a card whose tool has already run.
+
+        Failing is not only raising. The write is a guarded update that can
+        match no row and say nothing about it, so what the store reports the
+        row now carries -- not the absence of an exception -- is what decides
+        whether this decision was recorded.
+        """
+        if self._cards is None:
+            return True
+        try:
+            recorded = await self._cards.resolve_approval_card(card_event_id=card_event_id, resolution=resolution)
+        except Exception:
+            logger.warning(
+                "Failed to record an approval decision before showing it",
+                event_id=card_event_id,
+                exc_info=True,
+            )
+            return False
+        if recorded.recorded:
+            return True
+        # Nothing was written. Either no row exists, so no later process can
+        # ever account for this decision, or the row already carries an
+        # earlier one that stands. Both mean the durable record disagrees with
+        # the decision offered here, and a tool released on it would be
+        # released on nothing.
+        logger.warning(
+            "An approval decision was not recorded",
+            event_id=card_event_id,
+            cause="no_stored_card" if recorded.resolution is None else "already_decided",
+            stored_status=None if recorded.resolution is None else recorded.resolution.get("status"),
+        )
+        return False
+
+    def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
+        """Return the live waiter's own view of one card.
+
+        Deliberately does not consult the durable store. A live waiter is the
+        in-process authority on a card this process is still waiting on, and a
+        card store write that silently failed would otherwise turn a real
+        pending approval into a click that does nothing.
+        """
         live_waiter = self._live_waiter_for_card(card_event_id)
         if live_waiter is None or live_waiter.room_id != room_id:
             return None
         try:
-            pending = PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
+            return PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
         except (TypeError, ValueError):
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
 
-    async def _cached_trusted_pending_approval_for_card(
+    async def _recovered_pending_approval_for_card(
         self,
         *,
         room_id: str,
         card_event_id: str,
-    ) -> PendingApproval | None:
-        if self._event_cache is None:
+    ) -> tuple[PendingApproval, str] | None:
+        """Return one clicked card and the row key that will retire it.
+
+        The transaction comes back with the card because that is what the row
+        is keyed on, and the caller's next move is to drop it.
+        """
+        if self._cards is None:
             return None
-        card_event = await self._event_cache.get_event(room_id, card_event_id)
-        if card_event is None or not is_original_approval_card(card_event):
+        stored = await self._cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        # A recorded decision means this card is answered; only its delivery is
+        # in doubt. Treating a click on it as a fresh resolution would overwrite
+        # a decision whose tool may already have run.
+        if stored is None or stored.resolution is not None:
             return None
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return None
-        return await self._trusted_pending_from_card_event(
-            card_event,
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
             room_id=room_id,
             transport_sender=transport_sender,
             expected_card_event_id=card_event_id,
         )
+        return None if pending is None else (pending, stored.transaction_id)
 
-    async def _trusted_pending_from_card_event(
+    def _trusted_pending_from_card_event(
         self,
         card_event: dict[str, Any],
         *,
@@ -895,54 +1271,360 @@ class _ApprovalManager:
             expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
         ) or pending.card_sender_id != transport_sender:
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
+        # A stored card is written pending and dropped when its decision lands,
+        # so its own body should never say otherwise. Checked anyway, because
+        # believing a terminal card is pending would resolve it a second time.
+        return pending if pending.latest_status(None) == "pending" else None
 
-    async def _latest_edit(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        sender: str | None = None,
-    ) -> dict[str, Any] | None:
-        if self._event_cache is None:
-            return None
-        return await self._event_cache.get_latest_edit(room_id, card_event_id, sender=sender)
+    async def _claim_card(self, *, room_id: str, transaction_id: str, card: dict[str, Any]) -> bool:
+        """Make one card recoverable before anyone can see it.
 
-    async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
-        latest_edit = await self._latest_edit(
-            room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
-        )
-        if terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
-            return latest_edit
-        return None
-
-    async def _scan_cached_room_cards(
-        self,
-        room_id: str,
-        *,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        if self._event_cache is None:
-            return []
-        events = await self._event_cache.get_recent_room_events(
-            room_id,
-            event_type="io.mindroom.tool_approval",
-            since_ts_ms=since_ts_ms,
-            limit=limit,
-        )
-        if len(events) >= limit:
-            logger.warning(
-                "approval_startup_scan_truncated",
+        Returns whether the claim holds, because the card must not be sent
+        otherwise: a card in the room that nothing accounts for is exactly the
+        state this ordering exists to make impossible, and refusing the
+        approval outright costs only a tool call that fails closed.
+        """
+        if self._cards is None:
+            return True
+        try:
+            await self._cards.claim_approval_card(
                 room_id=room_id,
-                scan_limit=limit,
+                transaction_id=transaction_id,
+                card=card,
             )
-        return [event for event in events if is_original_approval_card(event)]
+        except Exception:
+            logger.warning(
+                "Failed to claim an approval card before sending it",
+                room_id=room_id,
+                transaction_id=transaction_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _mark_card_attempted(self, transaction_id: str) -> bool:
+        """Record that this device is about to use one card's frozen transaction.
+
+        Returns whether the send may go ahead. Refusing on a failed write is
+        the only safe answer: an unmarked row reads as "nothing ever left this
+        process", and recovery drops such a row without looking at the room --
+        so sending under one would strand the card it created. A refused
+        approval costs a tool call that fails closed.
+        """
+        if self._cards is None:
+            return True
+        try:
+            return await self._cards.mark_approval_card_attempted(
+                transaction_id=transaction_id,
+                sending_device_id=self._sending_device_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record an approval card send before making it",
+                transaction_id=transaction_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _mark_attempted_then_send(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        content: dict[str, Any],
+        transaction_id: str,
+    ) -> SentApprovalEvent | None:
+        """Commit the attempt, then make it.
+
+        One task rather than two awaited steps, because the caller registers
+        this send as in flight straight after creating it and nothing may run
+        in between. A bare ``await`` on the marking would open a window in
+        which the startup sweep sees a row no live send is registered against
+        and acts on it, which is the duplicate card that registration exists
+        to prevent.
+
+        Nothing means the attempt could not be committed, which is the same
+        answer the transport gives for a send it knows did not happen, and the
+        caller retires the claim on either.
+        """
+        if not await self._mark_card_attempted(transaction_id):
+            return None
+        if self._send_event is None:
+            return None
+        return await self._send_event(room_id, thread_id, content, transaction_id)
+
+    async def _acknowledge_card(self, waiter: _LiveApprovalWaiter) -> None:
+        """Point one claimed row at the Matrix event the send produced.
+
+        Best effort on purpose, and the reason it can be is the claim: the row
+        already exists, so a failure here leaves a card whose event id is
+        merely unknown rather than one nothing accounts for. The next startup
+        presents the same transaction, gets the same event back, and expires
+        it. Until then the card fails closed, because every decision is
+        recorded against the event id this write was meant to store.
+        """
+        if self._cards is None:
+            return
+        try:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=waiter.transaction_id,
+                card_event_id=waiter.card_event_id,
+                card=waiter.card_event,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record the Matrix event an approval card became",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+                exc_info=True,
+            )
+
+    async def _forget_card(self, transaction_id: str) -> None:
+        """Drop one card that is finished, whether it was shown or never sent."""
+        if self._cards is None:
+            return
+        try:
+            await self._cards.forget_approval_card(transaction_id=transaction_id)
+        except Exception:
+            logger.warning("Failed to drop an approval card", transaction_id=transaction_id, exc_info=True)
+
+    async def _recoverable_room_cards(
+        self,
+        room_id: str,
+        *,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[StoredApprovalCard, ...]:
+        """Return one page of the cards this room may still owe a decision on.
+
+        One source, because there is only one: a card is claimed before it is
+        sent, so nothing can be in the room without a row here. Reading the
+        room itself to look for strays would be looking for a state the claim
+        ordering does not produce.
+
+        A page rather than the room, because the caller walks all of them. The
+        bound exists so one enormous room cannot hold the whole sweep in
+        memory, not to decide how much of that room gets recovered.
+        """
+        if self._cards is None:
+            return ()
+        return await self._cards.pending_approval_cards(
+            room_id=room_id,
+            limit=_STARTUP_DISCARD_SCAN_PAGE,
+            after=after,
+        )
+
+    def _repeat_would_deduplicate(self, stored: StoredApprovalCard) -> bool:
+        """Return whether presenting this row's transaction again is safe.
+
+        A Matrix transaction ID is scoped to the device that used it, so the
+        homeserver only collapses a repeat onto the original event when the
+        same device asks. From any other device the repeat is simply a new
+        event, which for a card means a second one in the room.
+
+        An unrecorded device on either side is not "unchanged", it is a device
+        nobody can name, and a repeat cannot be proven safe against a device
+        that cannot be named. Only attempted rows are asked, so a null device
+        here means the sending process could not name its own.
+        """
+        current = self._sending_device_id()
+        if stored.sending_device_id is None or current is None:
+            return False
+        return stored.sending_device_id == current
+
+    async def _identified_card(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+        """Establish which Matrix event one claimed card became, by whichever means is sound.
+
+        A row with no event id is the crash window claiming turns from
+        unrecoverable into merely unknown, and the attempt marker is what
+        narrows "unknown" down. An unattempted row is proof: the send was never
+        reached, so the room holds nothing and the claim can simply go, with no
+        homeserver asked and no card resent.
+
+        An attempted row really may be clickable somewhere, and there are two
+        ways to find out which event it is. Presenting the frozen transaction
+        again is the cheap one, and it works because the homeserver collapses a
+        repeat onto the event it already accepted -- but only for the device
+        that used the transaction. From any other device the "repeat" is a
+        second card, so that route is closed by a re-login and the room has to
+        be read instead, the way the response outbox reads it.
+
+        Where this parts company with the outbox is what happens with what it
+        finds. A lost answer is unacceptable, so the outbox reconciles and then
+        sends anyway. A card is a prompt for a human decision: two of them ask
+        a question that has one answer, and answering the copy resolves
+        nothing. So a card found in the room is adopted and expired where it
+        stands, and never resent.
+
+        Only after that does a row become safe to forget. Forgetting one whose
+        card is still in the room retires the only thing that could expire it
+        or honour a click on it, and nothing comes back for it -- which is why
+        an absence has to be established rather than assumed, and why a lookup
+        that could not run leaves the row owed for the next sweep.
+
+        A repeat that fails leaves the row alone for the same reason. Hence the
+        two empty answers here are not the same answer: a row proven to have no
+        card is finished with, while one whose outcome is still unestablished
+        is owed.
+        """
+        if stored.card_event_id is not None:
+            return _IdentifiedCard(card=stored)
+        if not stored.attempted:
+            logger.info(
+                "approval_startup_card_dropped_never_attempted",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+            )
+            await self._forget_card(stored.transaction_id)
+            return _IdentifiedCard(card=None, settled=True)
+        if not self._repeat_would_deduplicate(stored):
+            return await self._card_a_previous_device_left(room_id, stored)
+        return await self._card_the_frozen_transaction_recovers(room_id, stored)
+
+    async def _card_the_frozen_transaction_recovers(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+    ) -> _IdentifiedCard:
+        """Present one attempted card's transaction again, from the device that used it.
+
+        The homeserver collapses the repeat onto the event it already accepted,
+        or accepts the card now if the first attempt never landed, so this ends
+        up holding an event either way without reading the room. A repeat that
+        does not come back leaves the row owed, because the outcome is still
+        unknown and dropping the claim would abandon whatever did arrive.
+        """
+        cards = self._cards
+        content = stored.card.get("content")
+        if cards is None or self._send_event is None or not isinstance(content, dict):
+            # No transport to ask with, or a body that is not a card. Neither
+            # is something a later sweep resolves differently.
+            return _IdentifiedCard(card=None, settled=True)
+        try:
+            sent_event = await self._send_event(room_id, content.get("thread_id"), content, stored.transaction_id)
+        except Exception:
+            logger.warning("approval_startup_resend_failed", room_id=room_id, exc_info=True)
+            return _IdentifiedCard(card=None)
+        if sent_event is None:
+            return _IdentifiedCard(card=None)
+        card = _sent_card_body(stored.card, sent_event)
+        await cards.acknowledge_approval_card(
+            transaction_id=stored.transaction_id,
+            card_event_id=sent_event.event_id,
+            card=card,
+        )
+        return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=sent_event.event_id, card=card))
+
+    async def _card_a_previous_device_left(self, room_id: str, stored: StoredApprovalCard) -> _IdentifiedCard:
+        """Read the room for one attempted card whose transaction can no longer be repeated.
+
+        Located by the approval id rather than the transaction: the transaction
+        belongs to the device that used it, which is the whole reason this
+        lookup is happening. The approval id is a per-request ``uuid4`` frozen
+        into the card body before the send, so at most one original card in the
+        room carries it.
+
+        Three outcomes, and they are three because a missing card and an
+        unanswered question are not the same thing. Found is adopted, so the
+        caller expires it where it stands. Established as absent retires the
+        row. Anything else -- no way to ask, or an ask that failed -- keeps the
+        row and reports it owed, because dropping it on a guess is precisely
+        how a clickable card ends up with nothing behind it.
+        """
+        approval_id = self._stored_card_approval_id(stored)
+        card_sender = stored.card.get("sender")
+        locate_card = self._locate_card
+        if approval_id is None or not isinstance(card_sender, str) or not card_sender:
+            # A body naming neither an approval nor a sender describes nothing
+            # this pass could look for, and no later sweep reads it
+            # differently, so it is retired rather than retried.
+            logger.warning(
+                "approval_startup_card_unidentifiable",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            await self._forget_card(stored.transaction_id)
+            return _IdentifiedCard(card=None, settled=True)
+        if locate_card is None:
+            # The question is answerable, just not by this process yet. Owed,
+            # never guessed: a wrong absence here retires a clickable card's
+            # only owner.
+            logger.warning(
+                "approval_startup_card_lookup_unavailable",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            return _IdentifiedCard(card=None)
+        try:
+            card_event_id = await locate_card(room_id, card_sender, approval_id)
+        except Exception:
+            logger.warning(
+                "approval_startup_card_lookup_failed",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                exc_info=True,
+            )
+            return _IdentifiedCard(card=None)
+        if card_event_id is None:
+            logger.info(
+                "approval_startup_card_absent_after_device_change",
+                room_id=room_id,
+                transaction_id=stored.transaction_id,
+                claimed_by_device=stored.sending_device_id,
+                sending_device=self._sending_device_id(),
+            )
+            await self._forget_card(stored.transaction_id)
+            return _IdentifiedCard(card=None, settled=True)
+        logger.info(
+            "approval_startup_card_adopted_after_device_change",
+            room_id=room_id,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            claimed_by_device=stored.sending_device_id,
+            sending_device=self._sending_device_id(),
+        )
+        # The claimed body is the best this pass has: the transport may have
+        # diverged from it when it sent, but nothing here can read the room's
+        # copy, and an expiry needs only the event id and the approval it
+        # names.
+        card = {**stored.card, "event_id": card_event_id}
+        if self._cards is not None:
+            await self._cards.acknowledge_approval_card(
+                transaction_id=stored.transaction_id,
+                card_event_id=card_event_id,
+                card=card,
+            )
+        return _IdentifiedCard(card=self._adopted_card(stored, card_event_id=card_event_id, card=card))
+
+    @staticmethod
+    def _stored_card_approval_id(stored: StoredApprovalCard) -> str | None:
+        """Return the per-request id frozen into one stored card's body."""
+        content = stored.card.get("content")
+        if not isinstance(content, dict):
+            return None
+        approval_id = content.get("approval_id")
+        return approval_id if isinstance(approval_id, str) and approval_id else None
+
+    @staticmethod
+    def _adopted_card(
+        stored: StoredApprovalCard,
+        *,
+        card_event_id: str,
+        card: dict[str, Any],
+    ) -> StoredApprovalCard:
+        """Return one recovered row as it now stands, with its event established."""
+        return StoredApprovalCard(
+            card=card,
+            resolution=stored.resolution,
+            transaction_id=stored.transaction_id,
+            card_event_id=card_event_id,
+            attempted=stored.attempted,
+            sending_device_id=stored.sending_device_id,
+            created_at_ns=stored.created_at_ns,
+        )
 
     async def shutdown(self, *, reason: str) -> None:
         """Expire pending approvals and drain approval cleanup tasks."""
@@ -953,8 +1635,7 @@ class _ApprovalManager:
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
             claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
             if claimed_waiter is None:
-                with suppress(Exception):
-                    await self._wait_for_competing_terminal_decision(waiter)
+                await self._stand_down_for_the_claim_holder(waiter)
                 continue
             with self._claimed_resolution(claimed_waiter.card_event_id):
                 await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
@@ -962,6 +1643,43 @@ class _ApprovalManager:
                     self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
+        await self._drain_detached_card_writes()
+
+    async def _stand_down_for_the_claim_holder(self, waiter: _LiveApprovalWaiter) -> None:
+        """Leave one card to whoever already claimed it, for as long as shutdown can afford.
+
+        Waiting is right and racing would be wrong: the holder is partway
+        through committing a decision, and publishing a second one for the same
+        card is the outcome that cannot be walked back -- a tool released on an
+        answer the record disagrees with.
+
+        What the holder is waiting on is a Matrix round trip, which is the one
+        thing here that may simply never come back while the runtime tears down
+        around it. That is why the drains below this loop are bounded, and this
+        wait, which every one of them is queued behind, was not.
+
+        Bounded and reported, never bounded and quiet. Standing down leaves a
+        clickable card and the row that accounts for it, which is work the next
+        startup sweep is owed -- not work that disappeared.
+        """
+        try:
+            await asyncio.wait_for(
+                self._wait_for_competing_terminal_decision(waiter),
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out waiting for an approval decision claimed elsewhere during shutdown",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+            )
+        except Exception:
+            logger.warning(
+                "An approval decision claimed elsewhere failed during shutdown",
+                room_id=waiter.room_id,
+                event_id=waiter.card_event_id,
+                exc_info=True,
+            )
 
     async def _drain_active_approval_sends(self) -> None:
         while True:
@@ -973,7 +1691,7 @@ class _ApprovalManager:
             wrapped_by_done = {asyncio.wrap_future(active.done_future): active for active in active_sends}
             done, pending = await asyncio.wait(
                 wrapped_by_done,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
             )
             for done_future in done:
                 with suppress(asyncio.CancelledError, Exception):
@@ -994,6 +1712,60 @@ class _ApprovalManager:
                 )
                 return
 
+    async def _drain_detached_card_writes(self) -> None:
+        """Give detached recovery a bounded chance before runtime teardown.
+
+        These record a card and then expire it, and both halves need the
+        journal store and the Matrix client that bot shutdown is about to
+        close. Once the bound expires, cancellation is safe because the card
+        row precedes its send and the terminal decision precedes its edit; the
+        next startup sweep resumes whichever durable half was reached.
+        """
+        while True:
+            with self._live_lock:
+                pending = tuple(self._detached_card_writes)
+            if not pending:
+                return
+            wrapped_by_write = {
+                asyncio.wrap_future(detached_write.done_future): detached_write for detached_write in pending
+            }
+            done, unfinished = await asyncio.wait(
+                wrapped_by_write,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+            )
+            for done_future in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    done_future.result()
+            if unfinished:
+                unfinished_writes = [wrapped_by_write[wrapped] for wrapped in unfinished]
+                for detached_write in unfinished_writes:
+                    if not detached_write.recovery_task.done() and not detached_write.owner_loop.is_closed():
+                        detached_write.owner_loop.call_soon_threadsafe(detached_write.recovery_task.cancel)
+                cancelled, still_running = await asyncio.wait(
+                    unfinished,
+                    timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+                )
+                for cancelled_future in cancelled:
+                    with suppress(asyncio.CancelledError, Exception):
+                        cancelled_future.result()
+                with self._live_lock:
+                    self._detached_card_writes.difference_update(unfinished_writes)
+                logger.warning(
+                    "Timed out waiting for detached approval card recovery during shutdown",
+                    pending_card_writes=len(unfinished_writes),
+                    cancellation_incomplete=len(still_running),
+                )
+                return
+
+    def _discard_detached_card_write(self, detached_write: _DetachedCardWrite) -> None:
+        """Drop one finished recovery from the set shutdown drains."""
+        with suppress(asyncio.CancelledError, Exception):
+            detached_write.recovery_task.result()
+        with self._live_lock:
+            self._detached_card_writes.discard(detached_write)
+        with suppress(InvalidStateError):
+            detached_write.done_future.set_result(None)
+
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
         while True:
             with self._live_lock:
@@ -1004,7 +1776,7 @@ class _ApprovalManager:
             wrapped_by_cleanup = {asyncio.wrap_future(cleanup.cleanup_future): cleanup for cleanup in futures}
             done, pending = await asyncio.wait(
                 wrapped_by_cleanup,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
             )
             for done_future in done:
                 with suppress(asyncio.CancelledError, Exception):
@@ -1040,6 +1812,22 @@ class _ApprovalManager:
             has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
         return has_waiters or has_active_sends or has_cleanup_tasks
+
+    def _send_is_in_flight(self, transaction_id: str) -> bool:
+        """Return whether this row is still owned by a send that has not come back.
+
+        Both owners count, because both end the same way: whoever holds the
+        send binds a waiter to what it returns and settles the card exactly
+        once. A cancelled requester changes which owner that is -- the send is
+        shielded and outlives the request -- and nothing else about the row.
+        Answering on the request alone would call a handed-over send finished
+        and let the sweep present its transaction a second time. This is the
+        same pair ``has_live_work`` already counts as live.
+        """
+        with self._live_lock:
+            return any(send.transaction_id == transaction_id for send in self._active_approval_sends) or any(
+                cleanup.transaction_id == transaction_id for cleanup in self._post_cancel_cleanup_tasks
+            )
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:
@@ -1146,16 +1934,21 @@ class _ApprovalManager:
             return None
         return self._transport_sender()
 
-    def _card_event_from_content(
-        self,
-        *,
-        event_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
-    ) -> dict[str, Any]:
+    def _sending_device_id(self) -> str | None:
+        if self._sending_device is None:
+            return None
+        return self._sending_device()
+
+    def _claimed_card_body(self, *, content: dict[str, Any], requested_at: datetime) -> dict[str, Any]:
+        """Return the card as it is recorded before the homeserver has seen it.
+
+        Carries no event id, because none exists yet and inventing a
+        placeholder would let a reader mistake an unsent card for a sent one.
+        The event id lives in its own column until the send comes back, and
+        ``_sent_card_body`` is what folds it in.
+        """
         sender = self._transport_sender_id() or content.get("approver_user_id")
         return {
-            "event_id": event_id,
             "sender": sender,
             "type": "io.mindroom.tool_approval",
             "origin_server_ts": int(requested_at.timestamp() * 1000),
@@ -1321,9 +2114,11 @@ def initialize_approval_store(
     *,
     sender: MatrixEventSender | None = None,
     editor: MatrixEventEditor | None = None,
-    event_cache: ConversationEventCache | None = None,
+    cards: ApprovalView | None = None,
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
+    sending_device: SendingDeviceProvider | None = None,
+    locate_card: ApprovalCardLocator | None = None,
 ) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
@@ -1332,9 +2127,11 @@ def initialize_approval_store(
         _MANAGER.configure_transport(
             sender=sender,
             editor=editor,
-            event_cache=event_cache,
+            cards=cards,
             approval_room_ids=approval_room_ids,
             transport_sender=transport_sender,
+            sending_device=sending_device,
+            locate_card=locate_card,
         )
         return _MANAGER
 
@@ -1346,9 +2143,11 @@ def initialize_approval_store(
         runtime_paths,
         sender=sender,
         editor=editor,
-        event_cache=event_cache,
+        cards=cards,
         approval_room_ids=approval_room_ids,
         transport_sender=transport_sender,
+        sending_device=sending_device,
+        locate_card=locate_card,
     )
     return _MANAGER
 

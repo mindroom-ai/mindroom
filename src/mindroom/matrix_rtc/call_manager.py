@@ -25,6 +25,7 @@ from mindroom.config.voice import normalize_speech_base_url
 from mindroom.credentials_sync import get_api_key_for_service
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, required_device_id
@@ -760,21 +761,23 @@ class CallManager:
     async def _send_call_failure_notice(self, room_id: str, message: str) -> None:
         """Post a cross-client Matrix notice explaining a silent call failure."""
         try:
-            response = await self._client.room_send(
+            response = await send_room_event_result(
+                self._client,
                 room_id,
-                message_type="m.room.message",
-                content={
+                "m.room.message",
+                {
                     "msgtype": "m.notice",
                     "body": message,
                     "chat.mindroom.call_failure": {"version": 1},
                 },
-                ignore_unverified_devices=True,
+                operation="send_call_failure_notice",
             )
         except _MATRIX_NETWORK_ERRORS as error:
             logger.warning("call_failure_notice_send_failed", room_id=room_id, error=str(error))
             return
-        if isinstance(response, nio.RoomSendError):
-            logger.warning("call_failure_notice_send_failed", room_id=room_id, error=response.message)
+        if not isinstance(response, nio.RoomSendResponse):
+            error = response.message if isinstance(response, nio.RoomSendError) else "no Matrix response"
+            logger.warning("call_failure_notice_send_failed", room_id=room_id, error=error)
             return
         logger.info("call_failure_notice_sent", room_id=room_id)
 

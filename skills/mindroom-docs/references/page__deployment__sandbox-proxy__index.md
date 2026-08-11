@@ -232,7 +232,9 @@ Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom m
 Use plain `uvx mindroom run` only after the version you want is published on PyPI.
 When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
 MindRoom checks the worker protocol exposed by `/healthz` and rejects stale or otherwise incompatible images before routing tools to them.
-If the compatibility check fails, rebuild the worker image from the active MindRoom checkout or select the matching published image tag.
+On the first protocol mismatch, MindRoom pulls the configured image, recreates the worker container, and checks readiness once more.
+If the pull fails, the error includes both the original compatibility guidance and the Docker pull failure.
+If the replacement is still incompatible, MindRoom stops after that retry, so rebuild the worker image from the active MindRoom checkout or select the matching published image tag.
 
 ```bash
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
@@ -542,6 +544,14 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 | POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
 
 Credential leases are single-use: once consumed by an `/execute` call, the lease cannot be replayed.
+
+## Agent prompt visibility
+
+MindRoom automatically adds a concise **Tool Execution Environment** section to each agent system prompt when runtime capabilities are enabled.
+It is generated from the successfully loaded toolkits and lists which tools execute locally versus through a worker.
+When worker routing is active, the section explains the backend, the runtime reuse and isolation boundary, and the lifetime of persisted worker state in plain language.
+When no tool uses a worker, the section omits irrelevant backend and scope configuration.
+Execution location is intentionally per tool: an agent can use both primary-runtime and worker-routed tools, so `worker_scope` does not imply that the whole agent is sandboxed.
 
 ## Per-agent configuration
 

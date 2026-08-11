@@ -13,6 +13,7 @@ import nio
 import pytest
 
 from mindroom.constants import (
+    CLASSIC_SYNC_TIMELINE_LIMIT,
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
@@ -20,6 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix import client_session
 from mindroom.matrix.client_session import (
+    MatrixSyncStorage,
     PermanentMatrixStartupError,
     _MindRoomAsyncClient,
     login_flows,
@@ -141,6 +143,32 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is True
     assert config.store_sync_tokens is True
+
+
+def test_matrix_client_config_backfills_far_past_the_sync_window() -> None:
+    """A room busy enough to truncate its sync window must still be recoverable.
+
+    nio's default event cap cannot hold even one requested sync window, which a
+    single burst of streaming agent edits can already exceed.
+    """
+    config = matrix_client_config()
+
+    assert config.backfill_max_events >= 20 * CLASSIC_SYNC_TIMELINE_LIMIT
+    assert config.backfill_max_events > nio.AsyncClientConfig().backfill_max_events
+
+
+def test_matrix_client_config_supports_application_owned_classic_sync() -> None:
+    """Classic ingress can disable nio's durable cursor and recovery journal."""
+    config = matrix_client_config(
+        sync_storage=MatrixSyncStorage(
+            store_tokens=False,
+            persist_recovery=False,
+        ),
+    )
+
+    assert config.backfill_limited_timelines is True
+    assert config.backfill_persist_recovery is False
+    assert config.store_sync_tokens is False
 
 
 @pytest.mark.asyncio

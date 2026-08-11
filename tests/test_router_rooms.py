@@ -19,7 +19,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
@@ -213,8 +213,7 @@ async def test_router_joins_rooms_on_start(
         _room_id: str,
         _config: Config,
         _runtime_paths: object,
-        _event_cache: object,
-        _conversation_cache: object,
+        _conversation_reader: object,
     ) -> int:
         return 0
 
@@ -251,7 +250,7 @@ async def test_router_joins_rooms_on_start(
     mock_client = AsyncMock()
     assert router_bot is not None
     router_bot.client = mock_client
-    install_runtime_cache_support(router_bot)
+    install_runtime_journal_support(router_bot)
 
     # Test that the router joins all configured rooms
     await router_bot.join_configured_rooms()

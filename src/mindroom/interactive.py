@@ -18,6 +18,7 @@ import nio
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -906,11 +907,12 @@ async def add_reaction_buttons(
     """
     for opt in options:
         emoji_char = opt.get("emoji", "❓")
-        reaction_response = await client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=build_reaction_content(event_id, emoji_char),
-            ignore_unverified_devices=True,
+        reaction_response = await send_room_event_result(
+            client,
+            room_id,
+            "m.reaction",
+            build_reaction_content(event_id, emoji_char),
+            operation="add_interactive_reaction",
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))

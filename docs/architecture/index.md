@@ -42,6 +42,8 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
+- [Matrix Event-Journal Contracts](../dev/matrix-event-journal-contracts.md) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Key Internal Modules
 
@@ -60,8 +62,10 @@ MindRoom's architecture consists of several key components working together.
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
-| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -95,7 +99,7 @@ MindRoom's architecture consists of several key components working together.
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and `bot.py` hands it through `dispatch_obligations/` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates

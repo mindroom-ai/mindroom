@@ -17,6 +17,9 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - thread-reply: Same threading behavior as `reply`, kept as a separate action name for agent convenience.
 - react: React to `target` with `message` as the emoji, defaulting to thumbs-up when `message` is empty.
 - read: Read recent messages from the current thread when one is active, otherwise from the room timeline.
+  An edited message is reported once, at its newest revision, with `event_id` naming the original and `latest_event_id` naming the revision on screen.
+  A room-timeline read still asks the homeserver for `limit` raw events, so a heavily edited stretch of the room returns fewer than `limit` messages.
+  A room-timeline read whose window holds a revision but not the message it revises cannot tell where that message lives, and reports `thread_id_unknown` instead of a thread.
 - room-threads: List thread roots in a room with pagination support via `page_token`.
 - thread-list: List messages in a thread and include edit options keyed by event ID.
   It uses the current thread when one is active, otherwise you must pass `thread_id`.

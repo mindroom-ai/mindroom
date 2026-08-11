@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,14 +42,6 @@ def _tool_context(
     attachment_ids: tuple[str, ...] = (),
     process_env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
-    async def _latest_thread_event_id(
-        _room_id: str,
-        thread_id: str | None,
-        *_args: object,
-        **_kwargs: object,
-    ) -> str | None:
-        return thread_id
-
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
     runtime_paths = resolve_runtime_paths(
@@ -64,8 +56,8 @@ def _tool_context(
         ),
         runtime_paths,
     )
-    conversation_cache = AsyncMock()
-    conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
+    conversation_reader = AsyncMock()
+    conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     return ToolRuntimeContext(
         agent_name="openclaw",
         target=MessageTarget.resolve(
@@ -77,8 +69,8 @@ def _tool_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=conversation_cache,
+        relations=make_relation_lookup(),
+        conversation_reader=conversation_reader,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )
@@ -659,7 +651,6 @@ async def test_send_context_attachments_reuses_ephemeral_encrypted_media(tmp_pat
         attachment,
         thread_id=context.resolved_thread_id,
         latest_thread_event_id=context.resolved_thread_id,
-        conversation_cache=context.conversation_cache,
     )
     send_file.assert_not_awaited()
     assert not (tmp_path / "attachments").exists()
@@ -743,10 +734,8 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     assert first_attachment is not None
     assert second_attachment is not None
 
-    event_cache = MagicMock()
     context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
-    context = dataclasses.replace(context, event_cache=event_cache)
-    context.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
+    context.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
     with patch(
         "mindroom.custom_tools.attachments.send_file_message",
@@ -761,17 +750,15 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     assert send_error is None
     assert result is not None
     assert result.attachment_event_ids == ["$file_evt_1", "$file_evt_2"]
-    context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        context.room_id,
-        context.thread_id,
-        caller_label="attachment_tool_send",
+    context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id=context.room_id,
+        thread_id=context.thread_id,
+        known_latest_thread_event_id=None,
     )
     first_call = mock_send.await_args_list[0]
     second_call = mock_send.await_args_list[1]
     assert first_call.kwargs["latest_thread_event_id"] == "$latest:localhost"
     assert second_call.kwargs["latest_thread_event_id"] == "$file_evt_1"
-    assert "event_cache" not in first_call.kwargs
-    assert "event_cache" not in second_call.kwargs
 
 
 @pytest.mark.asyncio
@@ -943,10 +930,10 @@ async def test_send_context_attachments_inherits_resolved_thread_scope(tmp_path:
     assert send_error is None
     assert result is not None
     assert result.thread_id == "$thread-root:localhost"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        "$thread-root:localhost",
-        caller_label="attachment_tool_send",
+    ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id=ctx.room_id,
+        thread_id="$thread-root:localhost",
+        known_latest_thread_event_id=None,
     )
     assert mocked.await_args.kwargs["thread_id"] == "$thread-root:localhost"
 

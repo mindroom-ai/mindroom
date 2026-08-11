@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import nio
 
@@ -62,6 +64,28 @@ class _BoundHookMatrixAdmin:
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
         return await invite_to_room(self.client, room_id, user_id)
+
+    async def force_join_user(self, room_id: str, user_id: str) -> bool:
+        """Join one local user through the Synapse-compatible admin API."""
+        if not self.client.access_token:
+            return False
+        # Tuwunel's Synapse-compatible endpoint performs the join on the
+        # user's behalf, but still enforces the room's join rules.  Restore an
+        # invite first so a user who left an invite-only room can rejoin.
+        await invite_to_room(self.client, room_id, user_id)
+        path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
+        response = await self.client.send(
+            "POST",
+            path,
+            data=json.dumps({"user_id": user_id}),
+            headers={
+                "Authorization": f"Bearer {self.client.access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        succeeded = 200 <= response.status < 300
+        response.release()
+        return succeeded
 
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""

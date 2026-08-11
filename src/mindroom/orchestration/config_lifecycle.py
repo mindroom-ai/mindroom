@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import partial_source_files
+from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
@@ -107,6 +108,8 @@ class ConfigReloadLifecycle:
     _requested_at: float | None = field(default=None, init=False)
     # Source files of the last reload attempt that failed to load, so the
     # config watcher can cover include files the last good config never saw.
+    # Owned by ``_update_config``, which is the only place that knows whether
+    # an attempt was adopted.
     failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
 
     def request_reload(self) -> None:
@@ -140,7 +143,19 @@ class ConfigReloadLifecycle:
             new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
             current_config = self.current_config()
             if current_config is None:
+                self.failed_reload_source_files = None
                 return await self.load_initial_config(new_config)
+            self.failed_reload_source_files = None
+            if pending_event_journal_restart(new_config, self.runtime_paths):
+                # Adopted, not refused: the store was opened once at startup and
+                # every bot borrows that one, so no reload can move it and the
+                # planner has no journal case to act on. The reload is inert in
+                # exactly this one field, and the operator hears so here.
+                logger.warning(
+                    "config_reload_event_journal_pending_restart",
+                    reason="the event journal in force was opened at startup and cannot change until restart",
+                    requested=describe_event_journal(new_config.event_journal, self.runtime_paths),
+                )
 
             agent_bots = self.agent_bots()
             plugin_changes = plugin_change_paths(current_config, new_config)
@@ -290,7 +305,6 @@ class ConfigReloadLifecycle:
             if failed_files is not None:
                 self.failed_reload_source_files = failed_files
             return
-        self.failed_reload_source_files = None
         if updated:
             logger.info("Configuration update applied to affected agents")
         else:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from itertools import chain
 from threading import Lock
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
@@ -30,6 +31,20 @@ _ROOM_MEMBER_JOIN_LOCKS_LOCK = Lock()
 @dataclass(frozen=True, slots=True)
 class RoomMemberJoin:
     """One live human member join that should be exposed to hooks."""
+
+    room_id: str
+    event_id: str
+    user_id: str
+    sender_id: str
+    display_name: str | None
+    avatar_url: str | None
+    membership: str
+    prev_membership: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RoomMemberLeave:
+    """One live human self-leave that should be exposed to hooks."""
 
     room_id: str
     event_id: str
@@ -139,6 +154,16 @@ def _human_join_user_id(
     if event.membership != "join":
         return None
 
+    return _human_room_member_user_id(event, config=config, runtime_paths=runtime_paths)
+
+
+def _human_room_member_user_id(
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the affected human user ID for one membership event, or None."""
     user_id = event.state_key
     if (
         entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
@@ -147,6 +172,38 @@ def _human_join_user_id(
     ):
         return None
     return user_id
+
+
+def room_member_left_from_event(
+    room: nio.MatrixRoom,
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> RoomMemberLeave | None:
+    """Return hook payload data for one live human self-leave, or None."""
+    if event.membership != "leave" or event.prev_membership != "join":
+        return None
+    if event.sender != event.state_key:
+        return None
+    prev_content = event.prev_content
+    if prev_content is None:
+        return None
+
+    user_id = _human_room_member_user_id(event, config=config, runtime_paths=runtime_paths)
+    if user_id is None:
+        return None
+
+    return RoomMemberLeave(
+        room_id=room.room_id,
+        event_id=event.event_id,
+        user_id=user_id,
+        sender_id=event.sender,
+        display_name=_optional_string(prev_content, "displayname"),
+        avatar_url=_optional_string(prev_content, "avatar_url"),
+        membership=event.membership,
+        prev_membership=event.prev_membership,
+    )
 
 
 def record_room_member_joins_seen_from_events(
@@ -287,6 +344,8 @@ def room_member_sync_state_plan(
     config: Config,
     runtime_paths: RuntimePaths,
     record_only: bool = False,
+    include_timeline_baseline: bool = False,
+    dispatch_snapshot_joins: bool = False,
 ) -> _RoomMemberSyncPlan:
     """Classify state events into durable hook dispatches and baseline markers."""
     dispatch_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
@@ -294,8 +353,29 @@ def room_member_sync_state_plan(
     limited_room_ids = frozenset(
         room_id for room_id, join_info in response.rooms.join.items() if join_info.timeline.limited
     )
-    for room, event in _room_member_events_from_sync_state(response, rooms=rooms):
-        if record_only or room.room_id in limited_room_ids:
+    events = _room_member_events_from_sync_state(response, rooms=rooms)
+    if include_timeline_baseline:
+        events = chain(
+            events,
+            _room_member_events_from_sync_timeline(response, rooms=rooms),
+        )
+    for room, event in events:
+        if record_only:
+            record_events.append((room, event))
+            continue
+        if dispatch_snapshot_joins and (
+            _room_member_join_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                require_previous_membership=False,
+            )
+            is not None
+        ):
+            dispatch_events.append((room, event))
+            continue
+        if room.room_id in limited_room_ids:
             record_events.append((room, event))
             continue
         if (

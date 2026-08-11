@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -54,11 +55,13 @@ def build_mindroom_workflow() -> dict[str, Any]:
 
 def _run_bash(script: str, env: dict[str, str], tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Run a workflow ``run:`` script with a stubbed ``gh`` on PATH."""
+    bash = shutil.which("bash")
+    assert bash is not None, "release workflow tests require bash"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     stub = bin_dir / "gh"
     stub.write_text(
-        """#!/usr/bin/env bash
+        f"""#!{bash}
 echo "$@" >>"$GH_CALLS"
 case "$*" in
   *git/ref/tags/*) echo "$STUB_TAG_OBJECT" ;;
@@ -80,7 +83,7 @@ esac
     outputs = tmp_path / "github-output.txt"
     outputs.write_text("", encoding="utf-8")
     return subprocess.run(
-        ["bash", "-e", "-c", script],
+        [bash, "-e", "-c", script],
         env={
             "PATH": f"{bin_dir}:/usr/bin:/bin",
             "GH_CALLS": str(calls),

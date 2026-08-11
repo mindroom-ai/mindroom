@@ -20,8 +20,8 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
@@ -36,7 +36,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     make_matrix_client_mock,
     replace_turn_controller_deps,
@@ -107,10 +107,10 @@ def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
 
 def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -172,16 +172,12 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     return bot
@@ -492,7 +488,7 @@ class TestBotTaskRestoration:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            install_runtime_cache_support(bot)
+            install_runtime_journal_support(bot)
 
             # Mock the necessary methods
             with (
@@ -503,6 +499,7 @@ class TestBotTaskRestoration:
                 mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
@@ -546,7 +543,7 @@ class TestBotTaskRestoration:
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            install_runtime_cache_support(bot)
+            install_runtime_journal_support(bot)
 
             with (
                 patch("mindroom.matrix.users.login") as mock_login,
@@ -557,6 +554,7 @@ class TestBotTaskRestoration:
                 mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
@@ -679,13 +677,7 @@ class TestCommandHandling:
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
-            bot._conversation_cache.get_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -745,13 +737,7 @@ class TestCommandHandling:
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
             bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
-            bot._conversation_cache.get_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -1308,7 +1294,7 @@ class TestCommandHandling:
                 },
             )
 
-            result = bot._turn_controller._precheck_dispatch_event(room, event)
+            result = await bot._turn_controller._precheck_dispatch_event(room, event)
 
         assert result is not None
         assert result.requester_user_id == "@mindroom_router:localhost"
@@ -1659,9 +1645,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
 
@@ -1689,9 +1674,8 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_skips_shared_ingress_work_for_agent_owned_thread_follow_up(self) -> None:
@@ -1726,9 +1710,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result(
                 [
                     _message(sender="@mindroom_general:localhost", body="I can help with that."),
@@ -1762,12 +1745,10 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
             "$thread_root",
-            caller_label="router_pre_ingress_skip",
         )
-        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio

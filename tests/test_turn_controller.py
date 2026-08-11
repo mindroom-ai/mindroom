@@ -20,7 +20,7 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.ingress_lanes import ReceiptLaneKey
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
@@ -408,7 +408,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
     )
-    bot._turn_controller.deps.turn_store.record_turn = MagicMock()
+    bot._turn_controller.deps.turn_store.record_turn = AsyncMock()
     generate_response_mock = AsyncMock(return_value=None)
     install_generate_response_mock(bot, generate_response_mock)
 

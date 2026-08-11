@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
@@ -10,11 +11,14 @@ import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import normalize_nio_event_for_cache
-from mindroom.matrix.client_delivery import can_send_to_encrypted_room
+from mindroom.matrix.client_delivery import (
+    can_send_to_encrypted_room,
+    resolve_room_encryption_for_delivery,
+    send_room_event_result,
+)
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
-from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
+from mindroom.matrix.room_history_reads import find_approval_card_event_id_via_room_messages
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
@@ -28,25 +32,34 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalView
 
 logger = get_logger(__name__)
 
 _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
+
+# How long a startup approval sweep that could not finish waits before asking
+# again. Nothing else will trigger it: the gates that arm the sweep are startup
+# events that have already happened, so a pass that gave up on a transient
+# failure would leave answered cards clickable until the next restart.
+_STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
+_STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 
 
 class _ApprovalTransportBot(Protocol):
     agent_name: str
     running: bool
     client: nio.AsyncClient | None
-    event_cache: ConversationEventCache
+
+    @property
+    def approval_room_ids(self) -> frozenset[str]:
+        """Return rooms this bot durably owns for approval transport."""
+        ...
 
     async def latest_thread_event_id_if_needed(
         self,
         room_id: str,
         thread_id: str,
-        *,
-        caller_label: str = "agent_bot_latest_thread_event_lookup",
     ) -> str | None:
         """Return the latest event id for one Matrix thread when known."""
         ...
@@ -72,8 +85,20 @@ async def _offload_oversized_full_arguments(
         return send_content
 
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
-    room_encrypted = room_id in client.rooms and client.rooms[room_id].encrypted
-    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments)
+    room_encrypted = await resolve_room_encryption_for_delivery(
+        client,
+        room_id,
+        operation="offload_approval_full_arguments",
+    )
+    if room_encrypted is None:
+        offloaded["approvable"] = False
+        return offloaded
+    mxc_uri, file_info = await upload_json_sidecar(
+        client,
+        room_id,
+        full_arguments,
+        room_encrypted=room_encrypted,
+    )
     if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
         logger.warning(
             "approval_full_arguments_sidecar_unavailable",
@@ -97,13 +122,18 @@ class ApprovalMatrixTransport:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
-    event_cache_provider: Callable[[], ConversationEventCache]
+    cards_provider: Callable[[], ApprovalView | None]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _startup_cleanup_retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _startup_cleanup_retry_delay: float = field(
+        default=_STARTUP_CLEANUP_INITIAL_RETRY_SECONDS,
+        init=False,
+        repr=False,
+    )
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -121,9 +151,11 @@ class ApprovalMatrixTransport:
             self.runtime_paths,
             sender=self.send_approval_event,
             editor=self.edit_approval_event,
-            event_cache=self.event_cache_provider(),
+            cards=self.cards_provider(),
             approval_room_ids=self.configured_approval_room_ids,
             transport_sender=self.transport_sender_id,
+            sending_device=self.transport_device_id,
+            locate_card=self.locate_approval_card,
         )
 
     async def _run_on_runtime_loop(
@@ -165,11 +197,7 @@ class ApprovalMatrixTransport:
         bot = self.bot_provider(agent_name)
         latest_thread_event_id = thread_id
         if bot is not None:
-            resolved_latest_event_id = await bot.latest_thread_event_id_if_needed(
-                room_id,
-                thread_id,
-                caller_label="approval_transport_thread_relation",
-            )
+            resolved_latest_event_id = await bot.latest_thread_event_id_if_needed(room_id, thread_id)
             if resolved_latest_event_id is not None:
                 latest_thread_event_id = resolved_latest_event_id
         return build_thread_relation(
@@ -182,10 +210,11 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
         """Send one custom approval event into the active Matrix thread."""
         return await self._run_on_runtime_loop(
-            lambda: self.send_approval_event_now(room_id, thread_id, content),
+            lambda: self.send_approval_event_now(room_id, thread_id, content, transaction_id),
         )
 
     async def send_approval_event_now(
@@ -193,8 +222,14 @@ class ApprovalMatrixTransport:
         room_id: str,
         thread_id: str | None,
         content: dict[str, Any],
+        transaction_id: str,
     ) -> SentApprovalEvent | None:
-        """Send one custom approval event on the current loop."""
+        """Send one custom approval event on the current loop.
+
+        The transaction is the caller's, not a fresh one per attempt, so a send
+        repeated after a crash collapses onto the event the homeserver already
+        accepted instead of putting a second card in the room.
+        """
         bot = self.bot_provider(ROUTER_AGENT_NAME)
         if bot is None or not bot.running or bot.client is None:
             return None
@@ -210,11 +245,13 @@ class ApprovalMatrixTransport:
                 _approval_relation_agent_name(send_content, fallback=bot.agent_name),
             )
         send_content = await _offload_oversized_full_arguments(bot.client, room_id, send_content)
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=send_content,
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "io.mindroom.tool_approval",
+            send_content,
+            transaction_id=transaction_id,
+            operation="send_approval_event",
         )
         if isinstance(response, nio.RoomSendResponse):
             sender_user_id = bot.client.user_id
@@ -225,7 +262,6 @@ class ApprovalMatrixTransport:
                     thread_id=thread_id,
                     agent_name=bot.agent_name,
                 )
-            self.track_cache_write(bot, room_id, str(response.event_id))
             return SentApprovalEvent(event_id=str(response.event_id), sent_content=send_content)
         logger.warning(
             "Failed to send approval Matrix event",
@@ -235,6 +271,43 @@ class ApprovalMatrixTransport:
             response=str(response),
         )
         return None
+
+    async def locate_approval_card(
+        self,
+        room_id: str,
+        card_sender: str,
+        approval_id: str,
+    ) -> str | None:
+        """Find the Matrix event one unacknowledged approval card became."""
+        return await self._run_on_runtime_loop(
+            lambda: self.locate_approval_card_now(room_id, card_sender, approval_id),
+        )
+
+    async def locate_approval_card_now(
+        self,
+        room_id: str,
+        card_sender: str,
+        approval_id: str,
+    ) -> str | None:
+        """Read the room for one approval card on the current loop.
+
+        Raising and returning None mean different things to the caller: None is
+        the room's answer that no such card exists, and an exception says the
+        question could not be put. So a transport that cannot read the room
+        raises rather than reporting an absence it did not establish -- a
+        wrong absence there retires the row, and the card it belongs to stays
+        clickable with nothing behind it forever.
+        """
+        bot = self.transport_bot(room_id)
+        if bot is None or bot.client is None:
+            msg = f"Router approval transport cannot read {room_id} to locate a card"
+            raise ToolApprovalTransportError(msg)
+        return await find_approval_card_event_id_via_room_messages(
+            bot.client,
+            room_id,
+            card_sender=card_sender,
+            approval_id=approval_id,
+        )
 
     async def edit_approval_event(
         self,
@@ -257,9 +330,7 @@ class ApprovalMatrixTransport:
         room_id: str,
     ) -> bool:
         """Return whether one bot can safely post into an approval room."""
-        if bot.client is None:
-            return False
-        return room_id in tuple(bot.client.rooms)
+        return bot.client is not None and room_id in bot.approval_room_ids
 
     def transport_bot(
         self,
@@ -281,13 +352,22 @@ class ApprovalMatrixTransport:
         user_id = bot.client.user_id
         return user_id if isinstance(user_id, str) and user_id else None
 
+    def transport_device_id(self) -> str | None:
+        """Return the Matrix device that sends approval cards for this runtime.
+
+        The transaction IDs the recovery pass relies on belong to this device,
+        so a card claimed under a different one cannot be presented again.
+        """
+        bot = self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is None or bot.client is None:
+            return None
+        device_id = bot.client.device_id
+        return device_id if isinstance(device_id, str) and device_id else None
+
     def configured_approval_room_ids(self) -> set[str]:
         """Return rooms currently served by the router approval transport."""
         bot = self.bot_provider(ROUTER_AGENT_NAME)
-        room_ids: set[str] = set()
-        if bot is not None and bot.client is not None:
-            room_ids.update(bot.client.rooms)
-        return room_ids
+        return set() if bot is None or bot.client is None else set(bot.approval_room_ids)
 
     async def edit_approval_event_now(
         self,
@@ -303,11 +383,12 @@ class ApprovalMatrixTransport:
             return False
 
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=build_matrix_edit_content(event_id, replacement_content),
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "io.mindroom.tool_approval",
+            build_matrix_edit_content(event_id, replacement_content),
+            operation="edit_approval_event",
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -318,56 +399,7 @@ class ApprovalMatrixTransport:
                 response=str(response),
             )
             return False
-        await self.cache_approval_event_now(bot, room_id, str(response.event_id))
         return True
-
-    def track_cache_write(self, bot: _ApprovalTransportBot, room_id: str, event_id: str) -> None:
-        """Cache an outbound approval event in the background."""
-        task = asyncio.create_task(
-            self.cache_approval_event_now(bot, room_id, event_id),
-            name=f"approval_cache_write_{event_id}",
-        )
-        self._cache_write_tasks.add(task)
-        task.add_done_callback(self._finish_cache_write)
-
-    def _finish_cache_write(self, task: asyncio.Task[None]) -> None:
-        self._cache_write_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except Exception as exc:
-            logger.warning("approval_cache_write_failed", error=str(exc))
-
-    async def cache_approval_event_now(
-        self,
-        bot: _ApprovalTransportBot,
-        room_id: str,
-        event_id: str,
-    ) -> None:
-        """Store a freshly sent approval event after Matrix assigns canonical event fields."""
-        if bot.client is None:
-            return
-        try:
-            membership_epoch = await bot.event_cache.room_membership_epoch(room_id)
-            if membership_epoch is None:
-                membership_epoch = UNCERTIFIED_MEMBERSHIP_EPOCH
-            response = await bot.client.room_get_event(room_id, event_id)
-            if not isinstance(response, nio.RoomGetEventResponse):
-                return
-            await bot.event_cache.store_event(
-                event_id,
-                room_id,
-                normalize_nio_event_for_cache(response.event, event_id=event_id),
-                expected_membership_epoch=membership_epoch,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to cache outbound approval event",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
 
     async def send_notice(
         self,
@@ -395,11 +427,12 @@ class ApprovalMatrixTransport:
             reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            bot.client,
+            room_id,
+            "m.room.message",
+            content,
+            operation="send_approval_notice",
         )
         if isinstance(response, nio.RoomSendResponse):
             return True
@@ -418,6 +451,25 @@ class ApprovalMatrixTransport:
         self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
+        self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is not None:
+            retry.cancel()
+
+    async def cancel_startup_cleanup_retry(self) -> None:
+        """Await the cancellation of a sweep still waiting to try again.
+
+        A retry sleeps for up to half a minute, which is long enough to outlive
+        an orderly shutdown and be torn down as a pending task instead.
+        """
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is None or retry.done():
+            return
+        retry.cancel()
+        with suppress(asyncio.CancelledError):
+            await retry
 
     async def mark_startup_runtime_support_ready(self) -> None:
         """Record that approval runtime support can now perform startup cleanup."""
@@ -432,6 +484,14 @@ class ApprovalMatrixTransport:
         await self._run_startup_cleanup_if_ready()
 
     async def _run_startup_cleanup_if_ready(self) -> None:
+        """Run the startup approval sweep once it can run, and until it finishes.
+
+        Marked done only by a sweep that settled everything it found. A card it
+        could not settle is still in the room and still clickable, with nothing
+        live behind it to answer the click -- and the gates that arm this sweep
+        are startup events that will not happen a second time. So a pass that
+        came up short arranges the next one itself.
+        """
         if (
             self._startup_cleanup_done
             or not self._startup_router_ready_for_cleanup
@@ -445,15 +505,58 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
-            await self._discard_orphaned_approval_cards_on_startup()
+            if not await self._discard_orphaned_approval_cards_on_startup():
+                self._schedule_startup_cleanup_retry()
+                return
             self._startup_cleanup_done = True
+            self._retire_startup_cleanup_retry()
 
-    async def _discard_orphaned_approval_cards_on_startup(self) -> None:
-        """Discard orphaned approval cards once startup approval gates are ready."""
+    async def _discard_orphaned_approval_cards_on_startup(self) -> bool:
+        """Discard orphaned approval cards, reporting whether any are still owed."""
         try:
-            discarded_count = await expire_orphaned_approval_cards_on_startup()
+            sweep = await expire_orphaned_approval_cards_on_startup()
         except Exception as exc:
             logger.warning("tool_approval_startup_discard_failed", error=str(exc))
+            return False
+        if sweep.discarded > 0:
+            logger.info("approval.startup_discard", discarded_count=sweep.discarded)
+        if not sweep.complete:
+            logger.warning("tool_approval_startup_discard_incomplete", owed_count=sweep.failed)
+        return sweep.complete
+
+    def _schedule_startup_cleanup_retry(self) -> None:
+        """Arrange one later sweep, since no startup gate will fire again.
+
+        The guard is there so two different callers cannot each arm a task. It
+        deliberately does not count the caller's own retry: a retry runs the
+        sweep itself, so the pass that discovers another attempt is owed is
+        always running inside the very task a plain "is one live?" check would
+        find. Counting it would let a retry block its own successor, and the
+        whole backoff would collapse into one extra attempt -- which is the
+        failure this retry exists to prevent, arriving one round later.
+        """
+        pending = self._startup_cleanup_retry
+        if pending is not None and not pending.done() and pending is not asyncio.current_task():
             return
-        if discarded_count > 0:
-            logger.info("approval.startup_discard", discarded_count=discarded_count)
+        self._startup_cleanup_retry = asyncio.create_task(
+            self._run_startup_cleanup_after_delay(),
+            name="approval_startup_cleanup_retry",
+        )
+
+    def _retire_startup_cleanup_retry(self) -> None:
+        """Drop a waiting retry the finished sweep has made pointless.
+
+        Cancelled rather than merely forgotten, because a forgotten task is one
+        no shutdown can reach. The caller's own task is exempt: it is finishing
+        anyway, and cancelling it here would cancel the sweep reporting success.
+        """
+        retry = self._startup_cleanup_retry
+        self._startup_cleanup_retry = None
+        if retry is not None and not retry.done() and retry is not asyncio.current_task():
+            retry.cancel()
+
+    async def _run_startup_cleanup_after_delay(self) -> None:
+        delay = self._startup_cleanup_retry_delay
+        self._startup_cleanup_retry_delay = min(delay * 2, _STARTUP_CLEANUP_MAX_RETRY_SECONDS)
+        await asyncio.sleep(delay)
+        await self._run_startup_cleanup_if_ready()

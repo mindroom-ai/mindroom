@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,8 +38,10 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
+    _DockerLaunchConfig,
     _load_docker_client_and_errors,
     _worker_health_compatibility_error,
+    _WorkerImageIncompatibleError,
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
@@ -202,11 +206,22 @@ class _FakeImage:
 class _FakeImagesApi:
     def __init__(self) -> None:
         self.by_name: dict[str, _FakeImage] = {}
+        self.pulls: list[str] = []
+        self.pull_image_id: str | None = None
 
     def get(self, name: str) -> _FakeImage:
         image = self.by_name.get(name)
         if image is None:
             raise _FakeNotFoundError(name)
+        return image
+
+    def pull(self, name: str) -> _FakeImage:
+        self.pulls.append(name)
+        if self.pull_image_id is None:
+            msg = f"pull failed: {name}"
+            raise _FakeDockerError(msg)
+        image = _FakeImage(self.pull_image_id)
+        self.by_name[name] = image
         return image
 
 
@@ -217,6 +232,51 @@ class _FakeDockerClient:
             images=self.images,
             auto_pull_missing_image=auto_pull_missing_image,
         )
+
+
+class _WorkerThreadContext(threading.local):
+    worker_key: str | None = None
+
+
+class _ConcurrentTagUpdate:
+    def __init__(
+        self,
+        backend: DockerWorkerBackend,
+        *,
+        recovering_key: str,
+        stale_reader_key: str,
+    ) -> None:
+        self.backend = backend
+        self.recovering_key = recovering_key
+        self.stale_reader_key = stale_reader_key
+        self.recovering_container_name = backend._container_name_for_worker(recovering_key)
+        self.stale_reader_container_name = backend._container_name_for_worker(stale_reader_key)
+        self.original_resolve_launch_config = backend._resolve_launch_config
+        self.stale_launch_config = self.original_resolve_launch_config()
+        self.thread_context = _WorkerThreadContext()
+        self.stale_launch_resolved = threading.Event()
+        self.recovering_worker_ready = threading.Event()
+
+    def resolve_launch_config(self) -> _DockerLaunchConfig:
+        launch_config = self.original_resolve_launch_config()
+        if self.thread_context.worker_key == self.stale_reader_key:
+            self.stale_launch_resolved.set()
+            assert self.recovering_worker_ready.wait(timeout=5.0)
+            return self.stale_launch_config
+        return launch_config
+
+    def wait_for_ready(self, container: _FakeContainer) -> str:
+        if container.attrs["Image"] == "sha256:image-v1":
+            message = "stale worker image"
+            raise _WorkerImageIncompatibleError(message)
+        if self.thread_context.worker_key == self.recovering_key:
+            self.recovering_worker_ready.set()
+        host_port = self.backend._container_host_port(container)
+        return f"http://127.0.0.1:{host_port}/api/sandbox-runner/execute"
+
+    def ensure_worker(self, worker_key: str) -> None:
+        self.thread_context.worker_key = worker_key
+        self.backend.ensure_worker(WorkerSpec(worker_key), now=0.0)
 
 
 def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
@@ -620,6 +680,69 @@ def _backend(
         lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
     return backend, fake_client, sync_calls
+
+
+def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWorkerBackend) -> None:
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        DockerWorkerBackend._wait_for_ready.__get__(backend),
+    )
+
+
+def _install_health_by_image(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_client: _FakeDockerClient,
+) -> None:
+    class _HealthByImage:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _HealthByImage:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            port = url.split(":")[2].split("/", maxsplit=1)[0]
+            container = next(
+                (
+                    item
+                    for item in fake_client.containers.by_name.values()
+                    if item.status == "running"
+                    and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
+                ),
+                None,
+            )
+            assert container is not None, f"no running fake container publishes host port {port}"
+            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthByImage)
+
+
+def _install_stale_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _StaleHealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _StaleHealthClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0},
+            )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
@@ -2048,6 +2171,181 @@ def test_docker_worker_readiness_rejects_incompatible_image(
 
     with pytest.raises(WorkerBackendError, match="expected worker protocol"):
         DockerWorkerBackend._wait_for_ready(backend, container)
+
+
+def test_docker_worker_stale_image_pulls_and_relaunches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale-image protocol mismatch pulls the configured image and relaunches once."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    _use_real_wait_for_ready(monkeypatch, backend)
+
+    _install_health_by_image(monkeypatch, fake_client)
+
+    progress_events: list[WorkerReadyProgress] = []
+
+    handle = backend.ensure_worker(
+        WorkerSpec(_TEST_UNSCOPED_WORKER_KEY),
+        now=0.0,
+        progress_sink=progress_events.append,
+    )
+
+    assert fake_client.images.pulls == [backend.config.image]
+    assert handle.status == "ready"
+    assert handle.startup_count == 2
+    assert handle.last_started_at == 0.0
+    assert [event.phase for event in progress_events] == ["cold_start", "ready"]
+    created = fake_client.containers.created_containers
+    assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
+    assert created[0].removed == 1
+
+
+def test_docker_worker_stale_image_recovery_updates_reused_worker_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Replacing a previously ready stale worker records a new startup attempt."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    assert first_handle.startup_count == 1
+
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    _use_real_wait_for_ready(monkeypatch, backend)
+    _install_health_by_image(monkeypatch, fake_client)
+    progress_events: list[WorkerReadyProgress] = []
+
+    recovered_handle = backend.ensure_worker(
+        WorkerSpec(_TEST_UNSCOPED_WORKER_KEY),
+        now=20.0,
+        progress_sink=progress_events.append,
+    )
+
+    assert recovered_handle.startup_count == 2
+    assert recovered_handle.last_started_at == 20.0
+    assert [event.phase for event in progress_events] == ["cold_start", "ready"]
+    created = fake_client.containers.created_containers
+    assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
+    assert created[0].removed == 1
+
+
+def test_docker_worker_stale_image_failed_pull_keeps_compatibility_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When the pull fails, the original compatibility guidance still surfaces."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    _use_real_wait_for_ready(monkeypatch, backend)
+    _install_stale_health(monkeypatch)
+
+    with pytest.raises(WorkerBackendError, match="expected worker protocol") as exc_info:
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+
+    assert str(exc_info.value).endswith(
+        f"Pulling '{backend.config.image}' failed: pull failed: {backend.config.image}",
+    )
+    assert fake_client.images.pulls == [backend.config.image]
+
+
+def test_docker_worker_stale_replacement_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement with the same protocol mismatch fails after one pull."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    _use_real_wait_for_ready(monkeypatch, backend)
+    _install_stale_health(monkeypatch)
+
+    with pytest.raises(WorkerBackendError, match="expected worker protocol"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+
+    assert fake_client.images.pulls == [backend.config.image]
+    assert len(fake_client.containers.created_containers) == 2
+
+
+def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed replacement should be restarted without recreating the pulled image container."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    readiness_calls = 0
+
+    def _wait_for_ready(container: _FakeContainer) -> str:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        if container.attrs["Image"] == "sha256:image-v1":
+            message = "stale worker image"
+            raise _WorkerImageIncompatibleError(message)
+        if readiness_calls == 2:
+            message = "replacement failed"
+            raise WorkerBackendError(message)
+        host_port = backend._container_host_port(container)
+        return f"http://127.0.0.1:{host_port}/api/sandbox-runner/execute"
+
+    monkeypatch.setattr(backend, "_wait_for_ready", _wait_for_ready)
+
+    with pytest.raises(WorkerBackendError, match="replacement failed"):
+        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+
+    replacement = fake_client.containers.created_containers[-1]
+    replacement_hash = replacement.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"]
+    failed_metadata = backend._load_metadata(backend._state_paths(_TEST_UNSCOPED_WORKER_KEY))
+    assert failed_metadata is not None
+    assert failed_metadata.launch_config_hash == replacement_hash
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=1.0)
+
+    assert fake_client.containers.by_name[replacement.name] is replacement
+    assert replacement.started == 1
+    assert replacement.removed == 0
+    assert len(fake_client.containers.created_containers) == 2
+
+
+def test_docker_worker_concurrent_tag_update_keeps_request_local_launch_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent ensures should converge on the pulled image without sharing launch identity."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    recovering_key = _TEST_UNSCOPED_WORKER_KEY
+    stale_reader_key = "v1:default:unscoped:research"
+    fake_client.images.pull_image_id = "sha256:image-v2"
+    race = _ConcurrentTagUpdate(
+        backend,
+        recovering_key=recovering_key,
+        stale_reader_key=stale_reader_key,
+    )
+    monkeypatch.setattr(backend, "_resolve_launch_config", race.resolve_launch_config)
+    monkeypatch.setattr(backend, "_wait_for_ready", race.wait_for_ready)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stale_reader = executor.submit(race.ensure_worker, stale_reader_key)
+        assert race.stale_launch_resolved.wait(timeout=5.0)
+        recovering_worker = executor.submit(race.ensure_worker, recovering_key)
+        recovering_worker.result(timeout=5.0)
+        stale_reader.result(timeout=5.0)
+
+    replacement = fake_client.containers.by_name[race.recovering_container_name]
+    replacement_labels = replacement.attrs["Config"]["Labels"]
+    stale_reader_container = fake_client.containers.by_name[race.stale_reader_container_name]
+    stale_reader_labels = stale_reader_container.attrs["Config"]["Labels"]
+    recovering_metadata = backend._load_metadata(backend._state_paths(recovering_key))
+    stale_reader_metadata = backend._load_metadata(backend._state_paths(stale_reader_key))
+    assert recovering_metadata is not None
+    assert stale_reader_metadata is not None
+    assert replacement.attrs["Image"] == "sha256:image-v2"
+    assert recovering_metadata.launch_config_hash == replacement_labels["mindroom.ai/launch-config-hash"]
+    assert stale_reader_container.attrs["Image"] == "sha256:image-v2"
+    assert stale_reader_metadata.launch_config_hash == stale_reader_labels["mindroom.ai/launch-config-hash"]
+
+    created_count = len(fake_client.containers.created_containers)
+    backend.ensure_worker(WorkerSpec(recovering_key), now=1.0)
+    backend.ensure_worker(WorkerSpec(stale_reader_key), now=1.0)
+    assert len(fake_client.containers.created_containers) == created_count
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(

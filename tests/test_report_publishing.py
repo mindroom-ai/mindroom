@@ -21,7 +21,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -113,8 +119,8 @@ def _make_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        conversation_cache=AsyncMock(),
-        event_cache=make_event_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
     )

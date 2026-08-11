@@ -14,6 +14,8 @@ from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_
 from mindroom.logging_config import get_logger
 from mindroom.matrix import appservice, provisioning
 from mindroom.matrix.client_session import (
+    DEFAULT_MATRIX_SYNC_STORAGE,
+    MatrixSyncStorage,
     login,
     matrix_client,
     matrix_startup_error,
@@ -1001,6 +1003,7 @@ async def _login_agent_with_configured_auth(
     expected_user_id: str,
     auth: appservice.ManagedAccountAuth,
     runtime_paths: RuntimePaths,
+    sync_storage: MatrixSyncStorage,
 ) -> tuple[nio.AsyncClient, str]:
     if auth.mode == "appservice":
         assert auth.appservice_token is not None
@@ -1009,6 +1012,7 @@ async def _login_agent_with_configured_auth(
             user_id=expected_user_id,
             token=auth.appservice_token,
             runtime_paths=runtime_paths,
+            sync_storage=sync_storage,
         )
         return client, "Matrix application-service login"
 
@@ -1020,6 +1024,7 @@ async def _login_agent_with_configured_auth(
         expected_user_id,
         agent_user.password,
         runtime_paths=runtime_paths,
+        sync_storage=sync_storage,
     )
     return client, "Matrix password login"
 
@@ -1028,13 +1033,15 @@ async def login_agent_user(
     homeserver: str,
     agent_user: AgentMatrixUser,
     runtime_paths: RuntimePaths,
+    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Login an agent user and return the authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
         agent_user: The agent user to login
-        runtime_paths: Optional explicit runtime context for env and SSL resolution
+        runtime_paths: Explicit runtime context for environment and SSL resolution
+        sync_storage: Selects which sync state nio persists for this client
 
     Returns:
         Authenticated AsyncClient instance
@@ -1070,6 +1077,7 @@ async def login_agent_user(
                 agent_user.device_id,
                 agent_user.access_token,
                 runtime_paths=runtime_paths,
+                sync_storage=sync_storage,
             )
         except ValueError:
             logger.warning(
@@ -1111,6 +1119,7 @@ async def login_agent_user(
         expected_user_id,
         auth,
         runtime_paths,
+        sync_storage,
     )
     try:
         matrix_id = _validated_authenticated_agent_matrix_id(

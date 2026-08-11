@@ -36,7 +36,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
@@ -51,7 +51,10 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
-    make_event_cache_mock,
+    ignore_final_delivery_handoff,
+    make_conversation_reader_mock,
+    make_outbox_mock,
+    make_relation_lookup,
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -340,12 +343,8 @@ def _build_response_runner(
         return_value=thread_history_result([], is_full_history=True),
     )
     bot._conversation_resolver.deps = SimpleNamespace(
-        conversation_cache=SimpleNamespace(
-            get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
-            notify_outbound_message=MagicMock(),
-            notify_outbound_event=MagicMock(),
-            notify_outbound_redaction=MagicMock(),
-        ),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(
@@ -395,7 +394,6 @@ def _build_response_runner(
         config=config,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
-        event_cache=make_event_cache_mock(),
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
     )
@@ -419,6 +417,8 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     _set_gateway_method(
@@ -451,7 +451,7 @@ def _build_response_runner(
         logger=bot.logger,
         runtime_paths=runtime_paths,
         delivery_gateway=delivery_gateway,
-        conversation_cache=bot._conversation_resolver.deps.conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
@@ -540,6 +540,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             logger=support.logger,
             runtime_paths=support.runtime_paths,
             delivery_gateway=support.delivery_gateway,
-            conversation_cache=support.conversation_cache,
+            conversation_reader=support.conversation_reader,
         ),
     )

@@ -28,7 +28,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     message_origin,
     patch_response_runner_module,
     runtime_paths_for,
@@ -96,7 +96,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client.user_id = agent_user.user_id
     bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
     bot.orchestrator = MagicMock(config=config)
-    return install_runtime_cache_support(bot)
+    return install_runtime_journal_support(bot)
 
 
 def _team_agents(bot: AgentBot) -> list[MatrixID]:

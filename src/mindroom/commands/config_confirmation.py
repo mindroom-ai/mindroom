@@ -14,8 +14,9 @@ import nio
 from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -392,12 +393,13 @@ async def _add_confirmation_reactions(
                 f"{event_id}\0{reaction_key}".encode(),
             ).hexdigest()
         )
-        response = await client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content=build_reaction_content(event_id, reaction_key),
-            tx_id=transaction_id,
-            ignore_unverified_devices=True,
+        response = await send_room_event_result(
+            client,
+            room_id,
+            "m.reaction",
+            build_reaction_content(event_id, reaction_key),
+            transaction_id=transaction_id,
+            operation="add_config_confirmation_reaction",
         )
         if isinstance(response, nio.RoomSendError) and response.status_code == "M_DUPLICATE_ANNOTATION":
             continue

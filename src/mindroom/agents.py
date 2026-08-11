@@ -53,6 +53,7 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
@@ -61,6 +62,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_owned_path,
     shared_storage_root,
 )
+from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -145,6 +147,8 @@ class _AgentToolAssembly:
     # server-side tool-search path (Anthropic and OpenAI Responses); empty on
     # the homegrown dynamic-tools path.
     deferred_wire_tool_names: frozenset[str]
+    local_tool_names: tuple[str, ...]
+    worker_routed_tool_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -874,6 +878,80 @@ def resolve_runtime_worker_tools(
     return default_worker_routed_tools(runtime_tool_names)
 
 
+def _render_tool_execution_environment(
+    *,
+    runtime_paths: constants.RuntimePaths,
+    local_tool_names: tuple[str, ...],
+    worker_routed_tool_names: tuple[str, ...],
+    worker_scope: WorkerScope | None,
+) -> str:
+    """Describe effective per-tool execution routing to the model."""
+
+    def tool_list(names: tuple[str, ...]) -> str:
+        return ", ".join(f"`{name}`" for name in names) if names else "none"
+
+    if not worker_routed_tool_names:
+        if not local_tool_names:
+            return "## Tool Execution Environment\n- No tools are available in this runtime."
+        return (
+            "## Tool Execution Environment\n"
+            f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.\n"
+            "- No tools use a worker runtime."
+        )
+
+    backend = primary_worker_backend_name(runtime_paths)
+    lines = [
+        "## Tool Execution Environment",
+        f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
+        f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
+        f"- Worker backend: `{backend}`.",
+    ]
+    if backend == "static_runner":
+        lines.append(
+            "- Worker reuse: requests use the configured static runner; no per-user or per-agent "
+            "worker state boundary is selected.",
+        )
+    else:
+        scope_description = {
+            None: "one runtime for this agent within the current tenant or account",
+            "shared": "one runtime for this agent, shared by all users",
+            "user": "one runtime for this user, shared across this user's agents",
+            "user_agent": "one runtime used only by this user-agent pair",
+        }[worker_scope]
+        idle_behavior = {
+            "docker": "the container stops",
+            "kubernetes": "the deployment scales to zero",
+        }[backend]
+        lines.extend(
+            (
+                f"- Worker reuse: {scope_description}.",
+                f"- Worker state is reused across turns for that scope. After the configured idle timeout, "
+                f"{idle_behavior}; persisted files and caches remain until an operator deletes that worker state.",
+            ),
+        )
+    lines.append("- Execution location is determined per tool; this agent is not sandboxed as a whole.")
+    return "\n".join(lines)
+
+
+def _registry_tool_routes_through_worker(
+    tool_name: str,
+    *,
+    runtime_paths: constants.RuntimePaths,
+    worker_tools: list[str],
+) -> bool:
+    """Return whether one successfully built registry toolkit uses worker routing."""
+    metadata = TOOL_METADATA.get(tool_name)
+    return (
+        metadata is not None
+        and metadata.factory is not None
+        and sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=worker_tools,
+        )
+    )
+
+
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
     """Check if learning is enabled for an agent, falling back to defaults."""
     learning = agent_config.learning if agent_config.learning is not None else defaults.learning
@@ -1408,6 +1486,8 @@ def _assemble_agent_toolkits(
         )
     entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
+    local_tool_names: list[str] = []
+    worker_routed_tool_names: list[str] = []
     deferred_tool_names: list[str] = []
     deferred_wire_tool_names: set[str] = set()
     for tool_name, tool_entry in resolved_tool_configs.items():
@@ -1440,6 +1520,16 @@ def _assemble_agent_toolkits(
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
                 tools.append(toolkit)
+                target_names = (
+                    worker_routed_tool_names
+                    if _registry_tool_routes_through_worker(
+                        tool_name,
+                        runtime_paths=runtime_paths,
+                        worker_tools=worker_tools,
+                    )
+                    else local_tool_names
+                )
+                target_names.append(tool_name)
                 # initial deferred tools were always loaded, so they stay in
                 # the rendered prompt prefix as plain non-deferred tools.
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
@@ -1461,6 +1551,8 @@ def _assemble_agent_toolkits(
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
         deferred_tool_names=tuple(dict.fromkeys(deferred_tool_names)),
         deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
+        local_tool_names=tuple(local_tool_names),
+        worker_routed_tool_names=tuple(worker_routed_tool_names),
     )
 
 
@@ -1495,6 +1587,8 @@ def _build_agent_role_context(
     active_model_name: str | None,
     include_openai_compat_guidance: bool,
     disable_runtime_capabilities: bool,
+    local_tool_names: tuple[str, ...],
+    worker_routed_tool_names: tuple[str, ...],
 ) -> _AgentRoleContext:
     """Resolve the model name and render identity, datetime, and preload context into the role."""
     # Get model config for identity context
@@ -1529,6 +1623,12 @@ def _build_agent_role_context(
     full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
+        full_context += "\n\n" + _render_tool_execution_environment(
+            runtime_paths=runtime_paths,
+            local_tool_names=local_tool_names,
+            worker_routed_tool_names=worker_routed_tool_names,
+            worker_scope=agent_runtime.execution.execution_scope,
+        )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,
@@ -1822,6 +1922,8 @@ def create_agent(
         active_model_name=active_model_name,
         include_openai_compat_guidance=include_openai_compat_guidance,
         disable_runtime_capabilities=disable_runtime_capabilities,
+        local_tool_names=tool_assembly.local_tool_names,
+        worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
     )
 
     # Create agent with defaults applied

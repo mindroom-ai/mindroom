@@ -18,6 +18,7 @@ from starlette.requests import Request
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.config.main import Config
+from mindroom.event_journal_open import record_opened_event_journal
 
 VALID_CONFIG: dict[str, Any] = {
     "models": {"default": {"provider": "ollama", "id": "test-model"}},
@@ -363,6 +364,70 @@ class TestExternalWriterPublishing:
         assert after.config_data["agents"]["test_agent"]["role"] == "Updated by an external writer"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk == after.config_data
+
+
+class TestCommitRevision:
+    """Every publication gets a commit identity, including ones the generation ignores."""
+
+    def test_a_write_pinned_before_a_republication_is_rejected(self, loaded_app: FastAPI) -> None:
+        """Generation is a consumer identity and deliberately stands still sometimes.
+
+        A byte-identical reload republishes the snapshot without advancing the
+        generation, because nothing a consumer binds to changed. A writer that
+        used the generation as its own compare-and-swap identity would be blind
+        to exactly those publications, and would commit a payload built against
+        a snapshot that is no longer the current one. The separate revision is
+        what a writer checks.
+        """
+        before = _snapshot(loaded_app)
+        request = _request_for(loaded_app)
+        pinned = config_lifecycle.bind_current_request_snapshot(request)
+
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        republished = _snapshot(loaded_app)
+        assert republished.generation == pinned.generation, "this test only bites while the generation stands still"
+        assert republished.revision > pinned.revision
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.write_committed_config(
+                request,
+                lambda config: config["defaults"].__setitem__("markdown", False),
+                error_prefix="test write",
+            )
+
+        assert exc_info.value.status_code == 409
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert on_disk["defaults"]["markdown"] is True, "a write pinned before the republication still committed"
+
+
+class TestEventJournalPendingRestart:
+    """The saved event_journal is not always the one in force, and the API says which."""
+
+    def test_no_pending_restart_when_the_saved_journal_is_the_open_one(self, loaded_app: FastAPI) -> None:
+        """A flag is only meaningful if it is quiet by default."""
+        snapshot = _snapshot(loaded_app)
+        assert snapshot.runtime_config is not None
+        record_opened_event_journal(snapshot.runtime_config.event_journal, runtime_paths=snapshot.runtime_paths)
+
+        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is False
+
+    def test_a_saved_journal_move_is_reported_as_pending_a_restart(self, loaded_app: FastAPI) -> None:
+        """The dashboard shows the saved value, so it has to be told the value is not live yet."""
+        before = _snapshot(loaded_app)
+        assert before.runtime_config is not None
+        record_opened_event_journal(before.runtime_config.event_journal, runtime_paths=before.runtime_paths)
+
+        moved = copy.deepcopy(VALID_CONFIG)
+        moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://journal.invalid/moved"}
+        config_lifecycle.replace_committed_config(
+            _request_for(loaded_app),
+            moved,
+            error_prefix="test replace",
+        )
+
+        on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
+        assert on_disk["event_journal"]["backend"] == "postgres", "the write was rejected instead of saved"
+        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is True
 
 
 class TestConcurrencySmoke:

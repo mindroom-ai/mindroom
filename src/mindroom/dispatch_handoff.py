@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
+
+import nio
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
@@ -30,8 +32,6 @@ from mindroom.matrix.media import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    import nio
-
     from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
     from mindroom.handled_turns import SourceEventMetadata
     from mindroom.message_target import ResponseLifecycleKey
@@ -40,7 +40,10 @@ if TYPE_CHECKING:
 # Voice messages are normalized into PreparedIngress before coalescing, so
 # this contract only includes routed image/file/video events.
 type MediaDispatchEvent = MatrixMediaDispatchEvent
-type DispatchEvent = PreparedIngress | MediaDispatchEvent
+# Raw formatted messages exist only before normalization. Once ingress reaches
+# the coalescing boundary, every text-like value is PreparedIngress.
+type _TextDispatchEvent = nio.RoomMessageFormatted | PreparedIngress
+type DispatchEvent = _TextDispatchEvent | MediaDispatchEvent
 
 
 class _PendingEventLike(Protocol):
@@ -73,7 +76,6 @@ class PreparedIngress:
     message_received_depth: int = 0
     trust_internal_payload_metadata: bool = False
     discovery_event_id: str | None = None
-    callback_source_kind: str | None = None
     turn_dispatch_recovery: bool = False
     raw_event: MediaDispatchEvent | None = None
 
@@ -145,6 +147,19 @@ def is_media_dispatch_event(event: DispatchEvent) -> bool:
     if isinstance(event, PreparedIngress):
         return event.raw_event is not None
     return is_matrix_media_dispatch_event(event)
+
+
+def is_text_dispatch_event(event: DispatchEvent) -> TypeGuard[_TextDispatchEvent]:
+    """Return whether one dispatch event is a text-like utterance.
+
+    The runtime companion to ``_TextDispatchEvent``, which cannot be used with
+    ``isinstance`` directly. Every caller asking this question used to spell the
+    class list out, and each copy had to be widened separately -- which is how
+    `m.emote` came to be text in one place and media-ish in another.
+    """
+    return isinstance(event, nio.RoomMessageFormatted) or (
+        isinstance(event, PreparedIngress) and event.raw_event is None
+    )
 
 
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:

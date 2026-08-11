@@ -22,12 +22,15 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+# Raise the per-room Classic Sync timeline limit above the homeserver default
+# (~10) so a room has to flood much harder before the server truncates its
+# timeline and forces a limited-sync gap backfill.
+CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
 DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
-_MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
@@ -847,17 +850,6 @@ def runtime_env_flag(
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def runtime_dispatch_thread_read_timeout_seconds(runtime_paths: RuntimePaths) -> float:
-    """Return the dispatch-safe thread read wall-clock budget."""
-    raw_value = runtime_paths.env_value("MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS")
-    if raw_value is None:
-        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
-    try:
-        return max(0.001, float(raw_value))
-    except ValueError:
-        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
 
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.event_journal import DeliveryStage
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -131,8 +131,7 @@ class VisibleResponseReconciler:
 
     async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
         """Durably bind one visible response to its incomplete turn before generation."""
-        await asyncio.to_thread(
-            self.deps.turn_store.record_pending_turn,
+        await self.deps.turn_store.record_pending_turn(
             canonicalize_turn_record(handled_turn, response_event_id=response_event_id, completed=False),
         )
 
@@ -144,12 +143,57 @@ class VisibleResponseReconciler:
         response_text: str,
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
+        as_placeholder: bool = False,
     ) -> str | None:
-        """Send and durably bind one non-model reply unless recovery already found it."""
+        """Send and durably bind one non-model reply unless recovery already found it.
+
+        Every reply here has a turn behind it, so every one goes through the
+        same claim-before-send row a model answer uses. Two things follow from
+        that, and both are the point.
+
+        The journal sources this turn answers settle inside the enqueue, so the
+        answer becoming durably owed and the turn stopping being the journal's
+        work are one commit. On the direct path the terminal record would land
+        in the handled-turn ledger first and the journal would settle
+        afterwards, leaving a window where a pending row describes finished
+        work -- the window the degraded replay guard has to consult two records
+        to survive.
+
+        And a crashed send is recovered by resending the frozen row rather than
+        by scanning the room for what might already be there. The scan still
+        runs ahead of the send here, because a row from a previous membership
+        is gone and its answer is not, but it stops being the only thing
+        standing between a crash and a lost reply.
+
+        Only callers that send exactly once per ``(turn, stage)`` may use this.
+        The outbox freezes a row at its first attempt, so a second send under
+        the same pair would be refused and its text would never reach the room.
+        A caller that sends a placeholder and then an answer has two stages
+        available and should use them.
+
+        ``as_placeholder`` marks a send that a later answer edits rather than
+        replaces, and it is the caller's own word for what the message is --
+        the delivery stage it maps to is the outbox's business, not theirs.
+        Only an answer settles the journal sources, because only an answer
+        discharges a turn; a placeholder that settled would leave a crash
+        before the model finished with nothing pending to replay and
+        "Thinking..." in the room for good.
+
+        A send that genuinely is not a turn -- a voice echo, a reconciliation
+        notice -- has no identity a restart can resolve and does not belong
+        here at all; it builds its own ``SendTextRequest`` and the gateway
+        gives it the direct path.
+        """
         if recovered_response_event_id is not None:
             return recovered_response_event_id
         response_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(target=target, response_text=response_text, skip_mentions=skip_mentions),
+            SendTextRequest(
+                target=target,
+                response_text=response_text,
+                skip_mentions=skip_mentions,
+                delivery_turn_id=handled_turn.anchor_event_id,
+                delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,
+            ),
         )
         if response_event_id is not None:
             await self.record_pending_visible_response(handled_turn, response_event_id)
@@ -177,7 +221,7 @@ class VisibleResponseReconciler:
             history_scope=None,
             conversation_target=target,
         )
-        pending_turn = await asyncio.to_thread(self.deps.turn_store.record_pending_turn, tracked_turn)
+        pending_turn = await self.deps.turn_store.record_pending_turn(tracked_turn)
         if pending_turn is None or pending_turn.completed:
             return None, None
         if pending_turn.redacted_source_event_ids:

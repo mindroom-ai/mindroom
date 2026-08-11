@@ -380,10 +380,6 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
-{{- define "mindroom-runtime.eventCacheNamespace" -}}
-{{- default .Release.Namespace .Values.eventCache.namespace -}}
-{{- end -}}
-
 {{- define "mindroom-runtime.eventCacheDatabaseUrlSecretKey" -}}
 {{- default .Values.eventCache.databaseUrlEnv .Values.eventCache.databaseUrl.key -}}
 {{- end -}}
@@ -443,13 +439,10 @@ app.kubernetes.io/component: event-cache-postgres
 {{- define "mindroom-runtime.defaultConfig" -}}
 agents: {}
 models: {}
-cache:
+event_journal:
   backend: {{ .Values.eventCache.backend | quote }}
 {{- if eq .Values.eventCache.backend "postgres" }}
   database_url_env: {{ .Values.eventCache.databaseUrlEnv | quote }}
-  namespace: {{ include "mindroom-runtime.eventCacheNamespace" . | quote }}
-{{- else if .Values.eventCache.sqlite.dbPath }}
-  db_path: {{ .Values.eventCache.sqlite.dbPath | quote }}
 {{- end }}
 {{- end -}}
 
