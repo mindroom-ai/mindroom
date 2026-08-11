@@ -238,10 +238,6 @@ test-live-journal-gate *args:
 check-module-privacy:
     uv run privata --methods .
 
-# Report LOC for the checked turn-pipeline manifest
-pipeline-loc:
-    uv run python scripts/testing/turn_pipeline_loc.py
-
 #############################
 # Developer-friendly aliases
 #############################

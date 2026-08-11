@@ -27,7 +27,7 @@ The projection learns about a redaction through journal admission, so the Matrix
 
 ## Current Problems
 
-`TurnController` is the real turn owner now, but it is still too large; the method-ownership ledger in `docs/superpowers/plans/2026-08-02-turn-pipeline-method-ownership-ledger.md` maps what still leaves it.
+`TurnController` is the real turn owner now, but it is still too large.
 `TurnPolicy` is pure now, but `ResponseRunner` still owns too much execution detail.
 `IngressHookRunner` is a thin hook adapter with a vague name.
 `TurnStore` gives the runtime one durable turn boundary, but it still has to reconcile ledger state with persisted run metadata under the hood.
@@ -308,7 +308,6 @@ The router relay lives in `router_relay.py` behind `RouterRelayDeps`.
 
 ## Next Simplification Work
 
-The remaining composition-root extractions follow the method-ownership ledger in `docs/superpowers/plans/2026-08-02-turn-pipeline-method-ownership-ledger.md`.
 The router relay already lives in `router_relay.py`; the voice readiness cluster, interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
