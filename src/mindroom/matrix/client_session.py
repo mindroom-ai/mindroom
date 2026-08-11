@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 import nio
 
 from mindroom.constants import (
+    CLASSIC_SYNC_TIMELINE_LIMIT,
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
@@ -72,12 +73,12 @@ DEFAULT_MATRIX_SYNC_STORAGE = MatrixSyncStorage()
 # How many recovered history events nio may hold for one room while it closes a
 # limited-timeline gap; exceeding it abandons the gap and leaves the room
 # unrecovered. nio's 200 is far below what a MindRoom room produces: a
-# streaming turn emits an `m.replace` edit per progressive update, so a handful
-# of concurrent agent turns already overruns the 50-event sync window this
-# client requests, and a short stall accumulates hundreds of events. 2000 is
-# forty sync windows of catch-up, enough that only an outage rather than a busy
-# minute abandons history, while still bounding held parsed events per room.
-_BACKFILL_MAX_EVENTS = 2000
+# streaming turn emits an `m.replace` edit per progressive update, so concurrent
+# agent turns can overrun even the requested sync window, and a short stall
+# accumulates thousands of events. Twenty sync windows of catch-up ensure that
+# only an outage rather than a busy minute abandons history, while still
+# bounding held parsed events per room.
+_BACKFILL_MAX_EVENTS = 20 * CLASSIC_SYNC_TIMELINE_LIMIT
 
 
 @runtime_checkable

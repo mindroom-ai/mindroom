@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
-from mindroom.bot import _SYNC_TIMELINE_LIMIT
 from mindroom.constants import (
+    CLASSIC_SYNC_TIMELINE_LIMIT,
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
@@ -148,12 +148,12 @@ def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
 def test_matrix_client_config_backfills_far_past_the_sync_window() -> None:
     """A room busy enough to truncate its sync window must still be recoverable.
 
-    nio's default event cap abandons recovery after four sync windows of
-    catch-up, which a single burst of streaming agent edits already exceeds.
+    nio's default event cap cannot hold even one requested sync window, which a
+    single burst of streaming agent edits can already exceed.
     """
     config = matrix_client_config()
 
-    assert config.backfill_max_events >= 20 * _SYNC_TIMELINE_LIMIT
+    assert config.backfill_max_events >= 20 * CLASSIC_SYNC_TIMELINE_LIMIT
     assert config.backfill_max_events > nio.AsyncClientConfig().backfill_max_events
 
 

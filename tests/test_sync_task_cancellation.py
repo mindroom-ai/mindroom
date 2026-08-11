@@ -18,7 +18,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import _SYNC_TIMELINE_LIMIT, AgentBot, _classic_sync_rebuild_backoff_seconds
+from mindroom.bot import AgentBot, _classic_sync_rebuild_backoff_seconds
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
@@ -1514,7 +1514,9 @@ async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None
 
     await AgentBot.sync_forever(bot)
 
-    assert captured == [{"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}]
+    # Pin the external /sync request contract; deriving this expectation from
+    # production configuration would let an accidental limit change pass.
+    assert captured == [{"room": {"timeline": {"limit": 5000}}}]
 
 
 @pytest.mark.asyncio

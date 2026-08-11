@@ -185,13 +185,9 @@ _CLASSIC_SYNC_REBUILD_BACKOFF_INITIAL_SECONDS = 1.0
 _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS = 30.0
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
-# Raise the per-room timeline limit above the homeserver default (~10) so a
-# room has to flood much harder before the server truncates its timeline and
-# forces a limited-sync gap backfill. This only widens the timeline window; it
-# leaves every other section at server defaults so no event type is filtered
-# out.
-_SYNC_TIMELINE_LIMIT = 50
-_SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
+_SYNC_FILTER: dict[str, object] = {
+    "room": {"timeline": {"limit": constants.CLASSIC_SYNC_TIMELINE_LIMIT}},
+}
 
 
 def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
