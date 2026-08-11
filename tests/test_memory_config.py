@@ -27,7 +27,7 @@ from mindroom.memory.config import (
     _memory_collection_name,
     create_memory_instance,
 )
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENAI_GPT_LUNA, OPENAI_GPT_TERRA
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
@@ -123,10 +123,10 @@ class TestMemoryConfig:
     @pytest.mark.parametrize(
         ("model_id", "expected_top_p", "legacy_request_builder"),
         [
-            ("gpt-5.6-luna", None, False),
-            ("gpt-5.6-terra", None, False),
+            (OPENAI_GPT_LUNA, None, False),
+            (OPENAI_GPT_TERRA, None, False),
             ("gpt-4", 0.8, False),
-            ("gpt-5.6-terra", None, True),
+            (OPENAI_GPT_TERRA, None, True),
         ],
         ids=["luna", "terra", "gpt-4", "terra-legacy-mem0"],
     )
@@ -158,18 +158,17 @@ class TestMemoryConfig:
         create_completion = MagicMock(return_value=response)
         fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
 
-        def fake_from_config(config_dict: dict) -> SimpleNamespace:
-            return SimpleNamespace(
-                llm=OpenAILLM(config_dict["llm"]["config"]),
-                vector_store=object(),
-            )
+        with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
+            mem0_llm = OpenAILLM(memory.llm.config)
 
-        with (
-            patch.object(AsyncMemory, "from_config", side_effect=fake_from_config),
-            patch("mem0.llms.openai.OpenAI", return_value=fake_client),
+        with patch.object(
+            AsyncMemory,
+            "from_config",
+            return_value=SimpleNamespace(llm=mem0_llm, vector_store=object()),
         ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
+        assert instance.llm is mem0_llm
         messages = [{"role": "user", "content": "remember this"}]
         if legacy_request_builder:
 
