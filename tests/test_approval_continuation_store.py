@@ -17,6 +17,7 @@ from mindroom.approval_continuation import (
 )
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.constants import RuntimePaths
+from mindroom.event_journal import StoredApprovalCard
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,6 +83,48 @@ def test_continuation_store_recovers_pending_and_claimed_without_copying_argumen
     assert recovered[0].state == "claimed"
     assert recovered[0].calls[0].tool_call_id == "call-1"
     assert "arguments" not in recovered[0]._to_context()
+
+
+@pytest.mark.asyncio
+async def test_recovery_attaches_card_delivered_before_crash(tmp_path: Path) -> None:
+    """A crash after Matrix delivery but before attachment must not strand the continuation."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path,
+    )
+    cards = AsyncMock()
+    cards.pending_approval_cards.side_effect = [
+        (
+            StoredApprovalCard(
+                card={
+                    "content": {
+                        "continuation_id": "approval-1",
+                        "tool_call_id": "call-1",
+                    },
+                },
+                resolution=None,
+                transaction_id="mindroom-approval-approval-1-0",
+                card_event_id="$approval",
+                attempted=True,
+                sending_device_id="DEVICE",
+                created_at_ns=1,
+            ),
+        ),
+        (),
+    ]
+    transport = ApprovalMatrixTransport(
+        runtime_paths=runtime_paths,
+        bot_provider=lambda _name: None,
+        cards_provider=lambda: cards,
+    )
+    transport._continuations.create(_continuation())
+
+    recovered = await transport._attach_recovered_cards(_continuation())
+
+    assert recovered.calls[0].card_event_id == "$approval"
+    assert transport._continuations.get("approval-1") == recovered
 
 
 @pytest.mark.asyncio

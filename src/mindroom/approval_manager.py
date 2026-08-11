@@ -43,7 +43,10 @@ SendingDeviceProvider = Callable[[], str | None]
 # says the question could not be put, which is a different fact and must not be
 # mistaken for the first.
 ApprovalCardLocator = Callable[[str, str, str], Awaitable[str | None]]
-DetachedApprovalDecisionHandler = Callable[[str, str, _ApprovalStatus, str | None], Awaitable[None]]
+DetachedApprovalDecisionHandler = Callable[
+    [str, str, _ApprovalStatus, str | None],
+    Awaitable[tuple[_ApprovalStatus, str | None]],
+]
 
 _STARTUP_DISCARD_SCAN_PAGE = 256
 # How long shutdown waits on work it does not own. Every such wait is on a
@@ -733,7 +736,7 @@ class _ApprovalManager:
             )
             if self._detached_decision_handler is None:
                 return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
-            await self._detached_decision_handler(
+            committed_status, committed_reason = await self._detached_decision_handler(
                 continuation_id,
                 tool_call_id,
                 resolved_status,
@@ -745,9 +748,9 @@ class _ApprovalManager:
             outcome = await self._emit_resolution(
                 pending,
                 transaction_id=transaction_id,
-                status=resolved_status,
-                reason=resolved_reason,
-                resolved_by=sender_id,
+                status=committed_status,
+                reason=committed_reason,
+                resolved_by=sender_id if committed_status == resolved_status else None,
             )
             return ApprovalActionResult(
                 consumed=True,
@@ -781,7 +784,7 @@ class _ApprovalManager:
             or self._detached_decision_handler is None
         ):
             return False
-        await self._detached_decision_handler(
+        committed_status, committed_reason = await self._detached_decision_handler(
             continuation_id,
             tool_call_id,
             "expired",
@@ -790,8 +793,8 @@ class _ApprovalManager:
         outcome = await self._emit_resolution(
             pending,
             transaction_id=transaction_id,
-            status="expired",
-            reason=_DEFAULT_TIMEOUT_REASON,
+            status=committed_status,
+            reason=committed_reason,
             resolved_by=None,
         )
         return outcome is not _ResolutionOutcome.UNRECORDED

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 import nio
 
@@ -178,9 +178,9 @@ class ApprovalMatrixTransport:
         self,
         approval_id: str,
         tool_call_id: str,
-        status: str,
+        status: Literal["approved", "denied", "expired"],
         reason: str | None,
-    ) -> None:
+    ) -> tuple[Literal["approved", "denied", "expired"], str | None]:
         decision = ApprovalDecision(status)
         continuation = await asyncio.to_thread(
             self._continuations.resolve_call,
@@ -194,6 +194,12 @@ class ApprovalMatrixTransport:
             expiry.cancel()
         if continuation is not None and continuation.state == "ready":
             self._schedule_continuation(continuation)
+        if continuation is None:
+            return status, reason
+        call = next((call for call in continuation.calls if call.tool_call_id == tool_call_id), None)
+        if call is None or call.decision is None:
+            return status, reason
+        return call.decision.value, call.reason
 
     def _schedule_continuation(self, continuation: ApprovalContinuation) -> None:
         if any(
@@ -258,16 +264,59 @@ class ApprovalMatrixTransport:
     async def _recover_continuations(self) -> None:
         for continuation in await asyncio.to_thread(self._continuations.recoverable):
             if continuation.state == "pending":
-                self._schedule_expiry(continuation)
+                recovered = await self._attach_recovered_cards(continuation)
+                if any(call.decision is None and call.card_event_id is None for call in recovered.calls):
+                    await self._fail_recovered_continuation(
+                        recovered,
+                        "Tool approval card was not delivered before the restart.",
+                    )
+                    continue
+                self._schedule_expiry(recovered)
             elif continuation.state == "ready":
                 self._schedule_continuation(continuation)
             else:
-                reason = "Tool approval continuation was interrupted after it was claimed; it was not replayed."
-                bot = self.bot_provider(continuation.entity_name) or self.bot_provider(ROUTER_AGENT_NAME)
-                if bot is not None and bot.running:
-                    await bot.fail_approval_continuation(continuation, reason)
-                else:
-                    await asyncio.to_thread(self._continuations.fail, continuation.approval_id, reason)
+                await self._fail_recovered_continuation(
+                    continuation,
+                    "Tool approval continuation was interrupted after it was claimed; it was not replayed.",
+                )
+
+    async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
+        """Repair the crash window between durable card delivery and continuation attachment."""
+        missing_ids = {call.tool_call_id for call in continuation.calls if call.decision is None and call.card_event_id is None}
+        cards = self.cards_provider()
+        if not missing_ids or cards is None:
+            return continuation
+        cursor: tuple[int, str] | None = None
+        while missing_ids:
+            page = await cards.pending_approval_cards(room_id=continuation.room_id, limit=256, after=cursor)
+            if not page:
+                break
+            cursor = (page[-1].created_at_ns, page[-1].transaction_id)
+            for stored in page:
+                content = stored.card.get("content")
+                if not isinstance(content, dict) or content.get("continuation_id") != continuation.approval_id:
+                    continue
+                tool_call_id = content.get("tool_call_id")
+                if not isinstance(tool_call_id, str) or tool_call_id not in missing_ids or stored.card_event_id is None:
+                    continue
+                attached = await asyncio.to_thread(
+                    self._continuations.attach_card,
+                    continuation.approval_id,
+                    tool_call_id,
+                    stored.card_event_id,
+                )
+                if attached is not None:
+                    continuation = attached
+                    missing_ids.discard(tool_call_id)
+        return continuation
+
+    async def _fail_recovered_continuation(self, continuation: ApprovalContinuation, reason: str) -> None:
+        """Terminalize one continuation and edit its waiting response when possible."""
+        bot = self.bot_provider(continuation.entity_name) or self.bot_provider(ROUTER_AGENT_NAME)
+        if bot is not None and bot.running:
+            await bot.fail_approval_continuation(continuation, reason)
+        else:
+            await asyncio.to_thread(self._continuations.fail, continuation.approval_id, reason)
 
     async def _run_on_runtime_loop(
         self,
@@ -622,12 +671,12 @@ class ApprovalMatrixTransport:
                 or not self._startup_runtime_support_ready_for_cleanup
             ):
                 return
-            if not self._continuations_recovered:
-                await self._recover_continuations()
-                self._continuations_recovered = True
             if not await self._discard_orphaned_approval_cards_on_startup():
                 self._schedule_startup_cleanup_retry()
                 return
+            if not self._continuations_recovered:
+                await self._recover_continuations()
+                self._continuations_recovered = True
             self._startup_cleanup_done = True
             self._retire_startup_cleanup_retry()
 

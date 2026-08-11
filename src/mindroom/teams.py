@@ -1893,7 +1893,11 @@ async def continue_paused_team_run(
             raise RuntimeError(msg)
         for requirement in requirements:
             if requirement.tool_execution is not None:
-                requirement.confirmation = decisions[requirement.tool_execution.tool_call_id]
+                approved = decisions[requirement.tool_execution.tool_call_id]
+                if approved:
+                    requirement.confirm()
+                else:
+                    requirement.reject("Not approved by requester")
         continued = await cast(
             "Any",
             team.acontinue_run(

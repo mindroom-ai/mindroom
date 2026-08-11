@@ -299,7 +299,7 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
     cards = FakeApprovalCards()
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
-    decision_handler = AsyncMock(return_value=None)
+    decision_handler = AsyncMock(return_value=("approved", None))
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
         sender=sender,
@@ -339,10 +339,53 @@ async def test_detached_approval_card_resolves_without_live_waiter(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_detached_card_displays_the_durable_winning_decision(tmp_path: Path) -> None:
+    """A human click racing expiry must not overwrite the decision that released the continuation."""
+    cards = FakeApprovalCards()
+    editor = AsyncMock(return_value=True)
+    decision_handler = AsyncMock(return_value=("expired", "Tool approval request timed out."))
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=AsyncMock(return_value=SentApprovalEvent("$approval")),
+        editor=editor,
+        cards=cards,
+        transport_sender=lambda: "@mindroom_router:localhost",
+        sending_device=lambda: CLAIMING_DEVICE_ID,
+        detached_decision_handler=decision_handler,
+    )
+    await store.create_detached_approval(
+        approval_id="approval-1",
+        continuation_id="continuation-1",
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        arguments={},
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.resolved is True
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request timed out."
+    assert editor.await_args.args[2]["resolved_by"] is None
+
+
+@pytest.mark.asyncio
 async def test_detached_approval_expiry_resolves_continuation_without_waiter(tmp_path: Path) -> None:
     """Expiry must wake the durable continuation even though no response coroutine is waiting."""
     cards = FakeApprovalCards()
-    decision_handler = AsyncMock(return_value=None)
+    decision_handler = AsyncMock(return_value=("expired", "Tool approval request timed out."))
     editor = AsyncMock(return_value=True)
     store = initialize_approval_store(
         test_runtime_paths(tmp_path),
