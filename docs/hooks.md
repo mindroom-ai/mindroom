@@ -159,6 +159,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router bot after a human's self-authored `m.room.member` transition from `join` to `leave`, excluding configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -173,6 +174,8 @@ MindRoom does not sanitize attachments, media, tool calls, tool args, provider m
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 `room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
 A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+`room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
+Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 
 ### Default timeouts
 
@@ -187,6 +190,7 @@ A process interruption or marker-write failure after a handler side effect can r
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
 | `room:member_joined` | 3000 |
+| `room:member_left` | 3000 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
@@ -639,6 +643,18 @@ ResponseResult(
 )
 
 RoomMemberJoinedContext(
+    agent_name: str,
+    room_id: str,
+    event_id: str,
+    user_id: str,
+    sender_id: str,
+    display_name: str | None,
+    avatar_url: str | None,
+    membership: str,
+    prev_membership: str | None,
+)
+
+RoomMemberLeftContext(
     agent_name: str,
     room_id: str,
     event_id: str,
