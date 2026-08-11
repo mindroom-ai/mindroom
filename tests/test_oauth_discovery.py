@@ -162,12 +162,13 @@ async def test_cloudflare_style_resource_metadata_registers_public_client(
 
 
 @pytest.mark.asyncio
-async def test_auto_discovery_requires_an_absolute_resource(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resource", ["  ", "superset.example.test"])
+async def test_auto_discovery_requires_an_absolute_resource(tmp_path: Path, resource: str) -> None:
     """Auto discovery should fail clearly when no protected resource is configured."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
     with pytest.raises(OAuthProviderError, match="auto discovery requires a protected-resource URL"):
-        await _discover_metadata(OAuthDiscoveryConfig(resource="  "), runtime_paths)
+        await _discover_metadata(OAuthDiscoveryConfig(resource=resource), runtime_paths)
 
 
 @pytest.mark.asyncio
