@@ -339,12 +339,14 @@ class ApprovalMatrixTransport:
         bot = entity_bot if entity_bot is not None and entity_bot.running else router_bot
         if bot is None or not bot.running:
             return False
+        for call in continuation.calls:
+            if (
+                not call.decision_recorded
+                and call.card_event_id is not None
+                and not await expire_suspended_tool_approval(continuation.room_id, call.card_event_id)
+            ):
+                return False
         await bot.fail_approval_continuation(continuation, reason)
-        failed = await asyncio.to_thread(self._continuations.get, continuation.approval_id)
-        terminal = failed or continuation
-        for call in terminal.calls:
-            if not call.decision_recorded and call.card_event_id is not None:
-                await expire_suspended_tool_approval(terminal.room_id, call.card_event_id)
         return True
 
     async def _run_on_runtime_loop(
