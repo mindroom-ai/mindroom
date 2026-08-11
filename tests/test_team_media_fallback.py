@@ -19,10 +19,12 @@ from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
+from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
@@ -63,6 +65,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -2459,6 +2462,71 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
         if isinstance(chunk, TeamRunContentEvent)
     ]
     assert any("partial consensus" in chunk for chunk in streamed_text)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_suspends_for_confirmation_pause_event() -> None:
+    """A streamed team confirmation pause must escape to the lifecycle suspension handler."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+    tool = ToolExecution(
+        tool_call_id="call-team-stream-approval",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunPausedEvent(
+            run_id="run-paused",
+            session_id="session-team",
+            content="Approval required",
+            tools=[tool],
+            requirements=[RunRequirement(tool)],
+        )
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    with (
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
+        ),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            turn_recorder=TurnRecorder(user_message="Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-paused", session_id="session-team"),
+            mode=TeamMode.COORDINATE,
+        ):
+            pass
+
+    assert raised.value.paused.run_id == "run-paused"
+    assert raised.value.paused.tools == (tool,)
 
 
 @pytest.mark.asyncio

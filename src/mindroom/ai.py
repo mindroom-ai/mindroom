@@ -86,6 +86,7 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_attempt_from_event,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
@@ -1979,7 +1980,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2132,6 +2133,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 return
 
             if state.paused_run_event is not None:
+                paused_attempt = paused_attempt_from_event(
+                    state.paused_run_event,
+                    fallback_session_id=session_id,
+                    fallback_run_id=attempt.attempt_run_id,
+                )
+                if paused_attempt is not None:
+                    yield AttemptResolved(paused_attempt)
+                    return
                 paused_metadata = _build_interrupted_metadata(
                     state,
                     RunStatus.paused,

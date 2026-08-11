@@ -41,12 +41,13 @@ from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractContextManager
 
     from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutput
+    from agno.run.agent import RunOutput, RunPausedEvent
     from agno.run.requirement import RunRequirement
+    from agno.run.team import RunPausedEvent as TeamRunPausedEvent
     from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -76,6 +77,7 @@ __all__ = [
     "TurnRunState",
     "TurnSinks",
     "build_matrix_run_metadata",
+    "paused_attempt_from_event",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
     "stream_response_turn",
@@ -327,25 +329,52 @@ def paused_attempt_from_response(
     """Extract confirmation requirements from one persisted paused Agno run."""
     if response.status is not RunStatus.paused:
         return None
-    requirements = tuple(requirement for requirement in response.requirements or () if requirement.needs_confirmation)
-    tools = [tool for tool in response.tools or () if tool.requires_confirmation]
-    known_call_ids = {tool.tool_call_id for tool in tools}
-    for requirement in requirements:
+    return _paused_attempt(
+        tools=response.tools or (),
+        requirements=response.requirements or (),
+        session_id=response.session_id or fallback_session_id,
+        run_id=response.run_id or fallback_run_id,
+    )
+
+
+def paused_attempt_from_event(
+    event: RunPausedEvent | TeamRunPausedEvent,
+    *,
+    fallback_session_id: str | None,
+    fallback_run_id: str | None,
+) -> PausedAttempt | None:
+    """Extract confirmation requirements from one streamed Agno pause event."""
+    return _paused_attempt(
+        tools=event.tools or (),
+        requirements=event.requirements or (),
+        session_id=event.session_id or fallback_session_id,
+        run_id=event.run_id or fallback_run_id,
+    )
+
+
+def _paused_attempt(
+    *,
+    tools: Sequence[ToolExecution],
+    requirements: Sequence[RunRequirement],
+    session_id: str | None,
+    run_id: str | None,
+) -> PausedAttempt | None:
+    """Build one restartable pause from Agno's common pause fields."""
+    pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
+    pending_tools = [tool for tool in tools if tool.requires_confirmation]
+    known_call_ids = {tool.tool_call_id for tool in pending_tools}
+    for requirement in pending_requirements:
         tool = requirement.tool_execution
         if tool is not None and tool.tool_call_id not in known_call_ids:
-            tools.append(tool)
+            pending_tools.append(tool)
             known_call_ids.add(tool.tool_call_id)
-    if not tools:
-        return None
-    session_id = response.session_id or fallback_session_id
-    run_id = response.run_id or fallback_run_id
-    if session_id is None or run_id is None:
+    if not pending_tools or session_id is None or run_id is None:
         return None
     return PausedAttempt(
         session_id=session_id,
         run_id=run_id,
-        tools=tuple(tools),
-        requirements=requirements,
+        tools=tuple(pending_tools),
+        requirements=pending_requirements,
     )
 
 

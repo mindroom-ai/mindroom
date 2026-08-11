@@ -27,6 +27,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
@@ -3624,6 +3625,53 @@ class TestUserIdPassthrough:
         payload = cast("dict[str, object]", run_metadata[AI_RUN_METADATA_KEY])
         assert payload["run_id"] == "run-paused"
         assert payload["status"] == "paused"
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_suspends_for_confirmation_pause(self, tmp_path: Path) -> None:
+        """A streamed confirmation pause must escape to the lifecycle suspension handler."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        tool = ToolExecution(
+            tool_call_id="call-stream-approval",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunPausedEvent(
+                run_id="run-paused",
+                session_id="session1",
+                content="Approval required",
+                tools=[tool],
+                requirements=[RunRequirement(tool)],
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                async for _chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                    prompt="Run the action",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                ):
+                    pass
+
+        assert raised.value.paused.run_id == "run-paused"
+        assert raised.value.paused.tools == (tool,)
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:

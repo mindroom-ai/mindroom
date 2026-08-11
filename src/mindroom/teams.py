@@ -91,6 +91,7 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    paused_attempt_from_event,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
@@ -3086,6 +3087,14 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if isinstance(event, TeamRunPausedEvent):
                     if event.team_id and event.team_id != bound_team_id:
                         continue
+                    paused_attempt = paused_attempt_from_event(
+                        event,
+                        fallback_session_id=ctx.session_id,
+                        fallback_run_id=attempt_run_id,
+                    )
+                    if paused_attempt is not None:
+                        yield AttemptResolved(paused_attempt)
+                        return
                     yield AttemptResolved(
                         ExcludedAttempt(
                             original_status=RunStatus.paused,
