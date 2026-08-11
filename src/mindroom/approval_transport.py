@@ -291,7 +291,9 @@ class ApprovalMatrixTransport:
     async def _attach_recovered_cards(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Repair the crash window between durable card delivery and continuation attachment."""
         missing_ids = {
-            call.tool_call_id for call in continuation.calls if not call.decision_recorded and call.card_event_id is None
+            call.tool_call_id
+            for call in continuation.calls
+            if not call.decision_recorded and call.card_event_id is None
         }
         cards = self.cards_provider()
         if not missing_ids or cards is None:
