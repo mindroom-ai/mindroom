@@ -1514,6 +1514,8 @@ async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None
 
     await AgentBot.sync_forever(bot)
 
+    # Pin the external /sync request contract; deriving this expectation from
+    # production configuration would let an accidental limit change pass.
     assert captured == [{"room": {"timeline": {"limit": 5000}}}]
 
 
